@@ -59,6 +59,15 @@ pub struct Response {
     pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
     pub redirected_from: Vec<Url>,
+    /// The outbound header set of the final hop, lowercased like
+    /// `headers` (#97). Snapshot of what the engine itself put on the
+    /// request — the fully-built set on the plain transport, the
+    /// builder-level set on the wreq transport (the emulation's
+    /// transport defaults merge at send time inside wreq and are not
+    /// visible here). Synthesized responses (file://, data:, tracker
+    /// blocks, intercept fulfillments) carry an honest empty map: no
+    /// request went on any wire.
+    pub request_headers: HashMap<String, String>,
 }
 
 impl Response {
@@ -511,6 +520,7 @@ pub(crate) async fn fetch_file_url(url: &Url) -> Result<Response, NetError> {
         headers,
         body,
         redirected_from: Vec::new(),
+        request_headers: HashMap::new(),
     })
 }
 
@@ -1177,6 +1187,7 @@ impl HttpClient {
                         headers: HashMap::new(),
                         body: Vec::new(),
                         redirected_from: Vec::new(),
+                        request_headers: HashMap::new(),
                     });
                 }
             }
@@ -1301,20 +1312,33 @@ impl HttpClient {
                 }
             }
 
-            // Passive on_request observers (upstream #408): capture the
-            // fully-built header set (it is moved into the request below)
-            // and fire per hop just before the request goes out. Skipped
+            // POST bodies carry a default content-type (the fetch()/XHR
+            // callers pass their own through extra/req-local headers). It
+            // rides the HeaderMap like everything else so the #97 wire
+            // snapshot below sees the complete set.
+            if body.is_some() && method == Method::POST {
+                headers.insert(
+                    reqwest::header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/x-www-form-urlencoded"),
+                );
+            }
+
+            // #97: snapshot the fully-built outbound header set (it is
+            // moved into the request below) — lowercased like
+            // `Response.headers`. Computed unconditionally: the response
+            // carries it to the network-event faces even when no passive
+            // on_request observer listens.
+            let wire_headers: HashMap<String, String> = headers
+                .iter()
+                .map(|(k, v)| {
+                    (k.as_str().to_lowercase(), v.to_str().unwrap_or("").to_string())
+                })
+                .collect();
+            // Passive on_request observers (upstream #408): fire with the
+            // same snapshot just before the request goes out. Skipped
             // entirely when nobody listens.
-            let sent_headers = match callbacks {
-                Some(cbs) if cbs.has_request_callbacks().await => Some((
-                    cbs,
-                    headers
-                        .iter()
-                        .map(|(k, v)| {
-                            (k.as_str().to_lowercase(), v.to_str().unwrap_or("").to_string())
-                        })
-                        .collect::<HashMap<String, String>>(),
-                )),
+            let fire_request = match callbacks {
+                Some(cbs) if cbs.has_request_callbacks().await => Some(cbs),
                 _ => None,
             };
 
@@ -1322,20 +1346,14 @@ impl HttpClient {
                 .headers(headers);
 
             if let Some(b) = body {
-                if method == Method::POST {
-                    req_builder = req_builder.header(
-                        reqwest::header::CONTENT_TYPE,
-                        "application/x-www-form-urlencoded",
-                    );
-                }
                 req_builder = req_builder.body(b.to_vec());
             }
 
-            if let Some((cbs, sent_headers)) = sent_headers.as_ref() {
+            if let Some(cbs) = fire_request {
                 let info = RequestInfo {
                     url: current_url.clone(),
                     method: method.as_str().to_string(),
-                    headers: sent_headers.clone(),
+                    headers: wire_headers.clone(),
                     resource_type,
                 };
                 cbs.fire_request(&info).await;
@@ -1409,6 +1427,7 @@ impl HttpClient {
                 headers: response_headers,
                 body: body_bytes,
                 redirected_from: redirects,
+                request_headers: wire_headers,
             };
 
             // Passive on_response observers: fired with the completed final

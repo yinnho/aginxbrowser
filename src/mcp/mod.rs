@@ -903,7 +903,7 @@ naming the selector/predicate on expiry. Exactly one of selector/predicate.",
     }
 
     #[tool(
-        description = "Read the session's network request log. filter=\"media\" extracts playback/stream URLs (m3u8/HLS, mp4, dash, flv...) actually requested by the page's player at runtime - the reliable way to get a real video link, since links embedded in page HTML are often decoys. Media elements and player iframes the engine never fetches (video/audio/source/iframe src) are merged in as candidates: via=\"network\" entries are confirmed requests, via=\"dom\" entries are candidates carrying their tag (iframes = kind \"iframe\", navigate into them to sniff). Default returns every request as compact rows (method/url/status/type/size). Navigate to the video page first, let it load, then call this.",
+        description = "Read the session's network request log. filter=\"media\" extracts playback/stream URLs (m3u8/HLS, mp4, dash, flv...) actually requested by the page's player at runtime - the reliable way to get a real video link, since links embedded in page HTML are often decoys. Media elements and player iframes the engine never fetches (video/audio/source/iframe src) are merged in as candidates: via=\"network\" entries are confirmed requests, via=\"dom\" entries are candidates carrying their tag (iframes = kind \"iframe\", navigate into them to sniff). Default returns every request as compact rows (method/url/status/type/size); include_headers=true adds each request's outbound header set to its row (#97). Navigate to the video page first, let it load, then call this.",
         annotations(title = "Session Network Sniffer", read_only_hint = true)
     )]
     async fn session_network(
@@ -915,6 +915,7 @@ naming the selector/predicate on expiry. Exactly one of selector/predicate.",
             .send(&params.session_id, |reply| SessionCommand::Network {
                 media_only: params.filter.as_deref() == Some("media"),
                 include_bodies: params.include_bodies.unwrap_or(false),
+                include_headers: params.include_headers.unwrap_or(false),
                 url_contains: params.url_contains,
                 body_max_chars: params.body_max_chars.unwrap_or(4000),
                 reply,

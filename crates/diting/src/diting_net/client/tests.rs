@@ -1028,6 +1028,43 @@ async fn scripted_stealth_hop_err_on_closed_port() {
     }
 }
 
+/// #97: the response carries the request's own outbound header snapshot —
+/// the set this code built on the builder (defaults + extras + customs,
+/// lowercased like `Response.headers`), so the network faces can report
+/// what went out without a second round trip. The echo server is the
+/// ground truth: every snapshot entry must appear on the wire as-is.
+#[tokio::test]
+async fn response_carries_request_header_snapshot() {
+    let (url, server) = loopback_header_echo().await;
+    let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+    let mut extra = std::collections::HashMap::new();
+    extra.insert("x-agx-snap".to_string(), "probe-97".to_string());
+    client.set_extra_headers(extra).await;
+    let resp = client.fetch(&url).await.expect("echo must answer");
+    server.abort();
+    assert!(
+        resp.request_headers.contains_key("user-agent"),
+        "snapshot must carry the client's UA: {:?}",
+        resp.request_headers
+    );
+    assert_eq!(
+        resp.request_headers.get("x-agx-snap").map(String::as_str),
+        Some("probe-97"),
+        "context extras ride the snapshot: {:?}",
+        resp.request_headers
+    );
+    let echo = String::from_utf8_lossy(&resp.body).to_string();
+    for (k, v) in &resp.request_headers {
+        // The echo lowercases the whole line (keys AND values); the snapshot
+        // preserves value case — compare case-insensitively.
+        assert_eq!(
+            echoed(&echo, k),
+            vec![v.to_ascii_lowercase()],
+            "snapshot entry {k} must match the wire the origin saw, echo: {echo}"
+        );
+    }
+}
+
 /// wreq does not speak SOCKS — a SOCKS-proxy context answers `None` (the
 /// plain transport is the only option) instead of silently rewriting the
 /// scheme, mirroring `legacy_transport`.

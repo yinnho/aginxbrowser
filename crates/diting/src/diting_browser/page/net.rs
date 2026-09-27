@@ -13,6 +13,10 @@ impl Page {
         }
     }
 
+    // 8 args mirrors the CDP event shape (url/method/type/status/response
+    // set/#97 request set/size) — a params struct would split one record
+    // across two types for every caller.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn record_network_event(
         &mut self,
         url: &str,
@@ -20,6 +24,7 @@ impl Page {
         resource_type: &str,
         status: u16,
         response_headers: &std::collections::HashMap<String, String>,
+        request_headers: &std::collections::HashMap<String, String>,
         body_size: usize,
     ) -> String {
         self.network_event_counter += 1;
@@ -34,7 +39,7 @@ impl Page {
             method: method.to_string(),
             resource_type: resource_type.to_string(),
             status,
-            headers: std::collections::HashMap::new(),
+            headers: request_headers.clone(),
             response_headers: Arc::new(response_headers.clone()),
             body_size,
             timestamp,
@@ -46,6 +51,7 @@ impl Page {
     /// Record the event and retain the body for `get_response_body`. The
     /// text/base64 split follows the Chromium DevTools body policy (Chrome
     /// 152 verified, obscura #791).
+    #[allow(clippy::too_many_arguments)] // same record shape as above, body instead of size
     pub(super) fn record_network_event_with_body(
         &mut self,
         url: &str,
@@ -53,6 +59,7 @@ impl Page {
         resource_type: &str,
         status: u16,
         response_headers: &std::collections::HashMap<String, String>,
+        request_headers: &std::collections::HashMap<String, String>,
         body: &[u8],
     ) -> String {
         let request_id = self.record_network_event(
@@ -61,6 +68,7 @@ impl Page {
             resource_type,
             status,
             response_headers,
+            request_headers,
             body.len(),
         );
         self.store_response_body(
@@ -186,7 +194,7 @@ impl Page {
                 method: ev.method,
                 resource_type: "Fetch".to_string(),
                 status: ev.status,
-                headers: std::collections::HashMap::new(),
+                headers: ev.request_headers,
                 response_headers: Arc::new(ev.response_headers),
                 body_size: ev.body_size,
                 timestamp: ev.timestamp,

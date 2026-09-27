@@ -457,7 +457,7 @@ impl Page {
             let body_bytes = decode_data_uri(url_str).unwrap_or_default();
             let mut headers = std::collections::HashMap::new();
             headers.insert("content-type".to_string(), content_type);
-            Ok(crate::diting_net::Response { url: url.clone(), status: 200, headers, body: body_bytes, redirected_from: Vec::new() })
+            Ok(crate::diting_net::Response { url: url.clone(), status: 200, headers, body: body_bytes, redirected_from: Vec::new(), request_headers: std::collections::HashMap::new() })
         } else if method == "POST" {
             // The submitting document initiates the POST: it is both the
             // Referer (policy-trimmed per hop) and the Origin source.
@@ -478,6 +478,7 @@ impl Page {
             "Document",
             response.status,
             &response.headers,
+            &response.request_headers,
             &response.body,
         );
 
@@ -641,7 +642,7 @@ impl Page {
             // CSS bodies: honor the Content-Type charset; CSS @charset is
             // out of scope for the current scrape-focused pipeline.
             let css = crate::diting_net::decode_non_html(&resp.body, resp.content_type());
-            self.record_network_event_with_body(&url_str, "GET", "Stylesheet", resp.status, &resp.headers, &resp.body);
+            self.record_network_event_with_body(&url_str, "GET", "Stylesheet", resp.status, &resp.headers, &resp.request_headers, &resp.body);
             css_timings.push(crate::diting_js::ops::ResourceTimingRecord {
                 name: url_str.clone(),
                 initiator: "link",

@@ -947,6 +947,22 @@ ms.addEventListener('sourceopen', function(){ \
         assert!(kinds.contains(&"Document"), "kinds: {kinds:?}");
         assert!(kinds.contains(&"Stylesheet"), "kinds: {kinds:?}");
         assert!(kinds.contains(&"Script"), "kinds: {kinds:?}");
+        // #97: wire-fetched rows carry the transport's outbound header set —
+        // the UA/accept defaults the plain client puts on every request.
+        for e in p.network_events.iter() {
+            assert!(
+                e.headers.contains_key("user-agent"),
+                "{:?} row must carry its request headers: {:?}",
+                e.resource_type,
+                e.headers
+            );
+            assert!(
+                e.headers.contains_key("accept"),
+                "{:?} row must carry accept: {:?}",
+                e.resource_type,
+                e.headers
+            );
+        }
         // request_id is page-id scoped.
         assert!(p
             .network_events
@@ -1883,6 +1899,7 @@ ms.addEventListener('sourceopen', function(){ \
             "Document",
             200,
             &headers,
+            &std::collections::HashMap::new(),
             &gbk,
         );
         let stored = p.get_response_body(&rid).expect("gbk body stored");
@@ -1907,6 +1924,7 @@ ms.addEventListener('sourceopen', function(){ \
             "XHR",
             200,
             &headers,
+            &std::collections::HashMap::new(),
             &[0xFF],
         );
         let stored = p.get_response_body(&rid).expect("json body stored");
@@ -1924,6 +1942,7 @@ ms.addEventListener('sourceopen', function(){ \
             "Document",
             200,
             &headers,
+            &std::collections::HashMap::new(),
             &[b'a', 0xFF, b'b'],
         );
         let stored = p.get_response_body(&rid).expect("txt body stored");
@@ -1945,6 +1964,7 @@ ms.addEventListener('sourceopen', function(){ \
             "Document",
             200,
             &headers,
+            &std::collections::HashMap::new(),
             &bytes,
         );
         let stored = p.get_response_body(&rid).expect("plain body stored");
@@ -1956,6 +1976,7 @@ ms.addEventListener('sourceopen', function(){ \
             "GET",
             "Document",
             200,
+            &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
             &bytes,
         );
@@ -2039,6 +2060,19 @@ ms.addEventListener('sourceopen', function(){ \
             .expect("fetch network event after sync");
         assert_eq!(ev.resource_type, "Fetch");
         assert!(ev.request_id.starts_with("fetch-"), "{}", ev.request_id);
+        // #97: the Fetch row carries the walk's outbound header set — the
+        // browser defaults scripted requests send (sec-fetch-* the WAFs key
+        // on) plus any customs the page set.
+        assert!(
+            ev.headers.contains_key("accept"),
+            "fetch row request headers: {:?}",
+            ev.headers
+        );
+        assert!(
+            ev.headers.contains_key("sec-fetch-site"),
+            "fetch row request headers: {:?}",
+            ev.headers
+        );
         let stored = p.get_response_body(&ev.request_id).expect("fetch body");
         assert!(!stored.base64_encoded);
         assert_eq!(stored.body, "{\"v\": 7}");

@@ -678,6 +678,12 @@ pub(crate) struct SessionNetworkQuery {
     /// XHR traffic with retained bodies) alongside the request rows.
     #[serde(default)]
     include_bodies: Option<bool>,
+    /// Add each request's outbound header set to its row (`headers` on the
+    /// compact rows, `request_headers` on the `xhr` rows) — what the page's
+    /// JS actually sent, customs like `x-s` included (#97). Off by default:
+    /// headers can carry tokens.
+    #[serde(default)]
+    include_headers: Option<bool>,
     /// Narrow the `xhr` array to URLs containing this substring.
     #[serde(default)]
     url_contains: Option<String>,
@@ -688,7 +694,8 @@ pub(crate) struct SessionNetworkQuery {
 
 /// The session's network request log: `?filter=media` is the playback-link
 /// sniffer; the default returns compact rows for every request, plus an
-/// `xhr` array of background API responses when `include_bodies=true`.
+/// `xhr` array of background API responses when `include_bodies=true`, and
+/// each row's outbound request headers when `include_headers=true` (#97).
 pub(crate) async fn session_network_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     axum::extract::Query(q): axum::extract::Query<SessionNetworkQuery>,
@@ -698,6 +705,7 @@ pub(crate) async fn session_network_handler(
         .send(&id, |reply| session::SessionCommand::Network {
             media_only: q.filter.as_deref() == Some("media"),
             include_bodies: q.include_bodies.unwrap_or(false),
+            include_headers: q.include_headers.unwrap_or(false),
             url_contains: q.url_contains,
             body_max_chars: q.body_max_chars.unwrap_or(4000),
             reply,

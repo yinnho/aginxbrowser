@@ -272,6 +272,7 @@ impl Page {
                         headers,
                         body,
                         redirected_from: Vec::new(),
+                        request_headers: std::collections::HashMap::new(),
                     };
                     return Some((idx, url, resp, None));
                 }
@@ -492,7 +493,7 @@ impl Page {
             if script.src.is_some() {
                 if let Some((url, code, resp)) = fetched.remove(&i) {
                     tracing::info!("Executing script ({} bytes): {}", code.len(), url);
-                    self.record_network_event_with_body(&url, "GET", "Script", resp.status, &resp.headers, &resp.body);
+                    self.record_network_event_with_body(&url, "GET", "Script", resp.status, &resp.headers, &resp.request_headers, &resp.body);
                     if let Some(js) = &mut self.js {
                         // #120: classic sync scripts run at their parser
                         // position — later parser scripts are invisible.
@@ -630,7 +631,10 @@ impl Page {
                     match js.load_module(&full_url, module_eval_budget_ms()).await {
                         Ok(()) => {
                             tracing::info!("ES module loaded: {}", full_url);
-                            self.record_network_event(&full_url, "GET", "Script", 200, &std::collections::HashMap::new(), 0);
+                            // Module loads ride js.load_module's own fetches,
+                            // which surface as their own Fetch rows; this row
+                            // is just the success marker, no outbound set.
+                            self.record_network_event(&full_url, "GET", "Script", 200, &std::collections::HashMap::new(), &std::collections::HashMap::new(), 0);
                         }
                         Err(e) => {
                             tracing::warn!("ES module error ({}): {}", full_url, e);

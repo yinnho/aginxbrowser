@@ -542,6 +542,12 @@ pub struct SessionNetworkParams {
     /// API face is often the cleanest structured read of its data.
     #[serde(default)]
     pub include_bodies: Option<bool>,
+    /// Add each request's outbound header set to its row (`headers` on the
+    /// compact rows, `request_headers` on the `xhr` rows) — what the page's
+    /// JS actually sent, signed customs like x-s/x-s-common included. Off by
+    /// default: headers can carry tokens.
+    #[serde(default)]
+    pub include_headers: Option<bool>,
     /// Narrow the `xhr` array to URLs containing this substring.
     #[serde(default)]
     pub url_contains: Option<String>,

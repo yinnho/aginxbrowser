@@ -167,10 +167,13 @@ pub enum SessionCommand {
     /// otherwise `{"url","total","requests":[...]}` compact rows, plus an
     /// `xhr` array of background API responses when `include_bodies` is set
     /// (Scrapling's capture_xhr insight: the page's own API face is the
-    /// clean structured read).
+    /// clean structured read). `include_headers` adds each request's
+    /// outbound header set to the rows (#97) — off by default, headers can
+    /// carry tokens.
     Network {
         media_only: bool,
         include_bodies: bool,
+        include_headers: bool,
         url_contains: Option<String>,
         body_max_chars: usize,
         reply: oneshot::Sender<Result<String, String>>,

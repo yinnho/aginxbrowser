@@ -323,6 +323,11 @@ pub struct JsNetworkEvent {
     pub method: String,
     pub status: u16,
     pub response_headers: HashMap<String, String>,
+    /// The outbound header set of the final hop as the walk shaped it (#97):
+    /// script customs (x-s, x-s-common …) plus the browser-default set the
+    /// engine joined in. Lowercased. Failed rows leave it empty — a failure
+    /// is often blocked before any wire (SSRF/CORS-refused at preflight).
+    pub request_headers: HashMap<String, String>,
     pub body_size: usize,
     pub timestamp: f64,
     /// Why a `status: 0` entry never produced a servable response — SSRF
@@ -4069,6 +4074,7 @@ struct FetchNetworkEvent {
     method: String,
     status: u16,
     response_headers: std::collections::HashMap<String, String>,
+    request_headers: std::collections::HashMap<String, String>,
     body_size: usize,
     stored_text: Option<String>,
     resp_body_base64: String,
@@ -4270,6 +4276,7 @@ fn record_fetch_network_event(state: &OpState, ev: &FetchNetworkEvent) -> String
         method: ev.method.clone(),
         status: ev.status,
         response_headers: ev.response_headers.clone(),
+        request_headers: ev.request_headers.clone(),
         body_size: ev.body_size,
         timestamp,
         error: None,
@@ -4941,6 +4948,13 @@ async fn fetch_url_walk(
     // request (Ok or Err), plain's own legacy fallback stays off: a request
     // never burns more than two transports.
     let mut stealth_fired = false;
+    // #97: the header set of the hop that produced the final response —
+    // rebuilt every iteration alongside `hop_headers` (assigned before any
+    // hop can break or continue), so after the loop it holds the LAST hop's
+    // outbound set (redirects re-shape headers: credentials stripped on
+    // cross-origin jumps, body headers dropped on method downgrades).
+    // Surfaced on every network face.
+    let mut final_hop_headers: HashMap<String, String>;
 
     // Passive on_request observers (upstream #408): fire with the request as
     // the script shaped it, once, before the first hop goes out.
@@ -5136,6 +5150,7 @@ async fn fetch_url_walk(
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
             .map(|(_, v)| v.clone());
+        final_hop_headers = hop_headers.clone();
 
         if !current_body.is_empty() {
             req = req.body(current_body.clone());
@@ -5534,6 +5549,7 @@ async fn fetch_url_walk(
         method: method.clone(),
         status,
         response_headers: resp_headers.clone(),
+        request_headers: final_hop_headers.clone(),
         body_size: resp_bytes.len(),
         stored_text: stored_text.clone(),
         resp_body_base64: resp_body_base64.clone(),
@@ -5555,6 +5571,7 @@ async fn fetch_url_walk(
                 headers: resp_headers.clone(),
                 body: resp_bytes.to_vec(),
                 redirected_from: Vec::new(),
+                request_headers: final_hop_headers.clone(),
             };
             cbs.fire_response(&info, &net_resp).await;
         }
@@ -5623,6 +5640,7 @@ fn record_failed_fetch(
         method: method.to_string(),
         status: 0,
         response_headers: HashMap::new(),
+        request_headers: HashMap::new(),
         body_size: 0,
         timestamp,
         error: Some(error),

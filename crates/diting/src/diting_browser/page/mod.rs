@@ -165,6 +165,10 @@ pub struct NetworkEvent {
     pub method: String,
     pub resource_type: String,
     pub status: u16,
+    /// The REQUEST's outbound header set, lowercased (#97) — what the
+    /// CDP `Network.requestWillBeSent` params and the HAR `request.headers`
+    /// read. Populated from the transport's wire snapshot (document and
+    /// subresource rows) or the fetch walk's hop set (script rows).
     pub headers: std::collections::HashMap<String, String>,
     pub response_headers: Arc<std::collections::HashMap<String, String>>,
     pub body_size: usize,
@@ -560,6 +564,7 @@ impl Page {
                             headers,
                             body,
                             redirected_from: Vec::new(),
+                            request_headers: std::collections::HashMap::new(),
                         });
                     }
                     Ok(Ok(crate::diting_js::ops::InterceptResolution::Fail { reason })) => {

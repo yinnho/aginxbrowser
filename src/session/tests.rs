@@ -3245,6 +3245,7 @@
                 .send(&sid, |reply| SessionCommand::Network {
                     media_only: false,
                     include_bodies: false,
+                    include_headers: false,
                     url_contains: None,
                     body_max_chars: 0,
                     reply,
@@ -3301,6 +3302,7 @@
             .send(&sid, |reply| SessionCommand::Network {
                 media_only: false,
                 include_bodies: false,
+                include_headers: false,
                 url_contains: None,
                 body_max_chars: 0,
                 reply,
@@ -3371,6 +3373,7 @@
             .send(&sid, |reply| SessionCommand::Network {
                 media_only: true,
                 include_bodies: false,
+                include_headers: false,
                 url_contains: None,
                 body_max_chars: 0,
                 reply,
@@ -3414,6 +3417,7 @@
             .send(&sid, |reply| SessionCommand::Network {
                 media_only: false,
                 include_bodies: false,
+                include_headers: false,
                 url_contains: None,
                 body_max_chars: 0,
                 reply,
@@ -3436,6 +3440,7 @@
             .send(&sid, |reply| SessionCommand::Network {
                 media_only: false,
                 include_bodies: true,
+                include_headers: false,
                 url_contains: Some("/v/".to_string()),
                 body_max_chars: 100,
                 reply,

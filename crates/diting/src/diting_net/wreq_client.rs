@@ -439,6 +439,7 @@ impl StealthHttpClient {
                         headers: HashMap::new(),
                         body: Vec::new(),
                         redirected_from: Vec::new(),
+                        request_headers: HashMap::new(),
                     });
                 }
             }
@@ -541,6 +542,27 @@ impl StealthHttpClient {
                 req = req.body(b.to_vec());
             }
 
+            // #97: snapshot the request's header set right before it goes
+            // out — everything this code set on the builder (identity,
+            // cookies, extra/request-local headers, content-type). The
+            // emulation's own transport defaults merge inside wreq's
+            // config layer at send time, so they are not part of the
+            // snapshot; lowercased like `Response.headers`. try_clone
+            // clones the buffered body too — the Vec is cheap next to the
+            // request it rides.
+            let wire_headers: HashMap<String, String> = req
+                .try_clone()
+                .and_then(|b| b.build().ok())
+                .map(|r| {
+                    r.headers()
+                        .iter()
+                        .map(|(k, v)| {
+                            (k.as_str().to_lowercase(), v.to_str().unwrap_or("").to_string())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
             // GET/HEAD are idempotent, so the connection-reset retry applies;
             // any other method sends exactly once (a reset after the request
             // went out may already have applied server-side).
@@ -626,6 +648,7 @@ impl StealthHttpClient {
                 headers: response_headers,
                 body,
                 redirected_from: redirects,
+                request_headers: wire_headers,
             });
         }
 

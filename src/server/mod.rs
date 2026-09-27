@@ -684,9 +684,16 @@ pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
             let xhr = if let Some(filters) = req.capture_xhr.as_ref() {
                 page.inner.sync_js_network_events();
                 let body_cap = req.max_chars.min(8_000);
-                crate::har::xhr_bodies(&page.inner.network_events, filters, body_cap, &|rid| {
-                    page.inner.get_response_body(rid)
-                })
+                // #97: the capture_xhr surface exists to read what the page's
+                // JS put on its API calls — the signed/custom outbound headers
+                // (x-s class) are half of that story, so rows carry them.
+                crate::har::xhr_bodies(
+                    &page.inner.network_events,
+                    filters,
+                    body_cap,
+                    true,
+                    &|rid| page.inner.get_response_body(rid),
+                )
             } else {
                 Vec::new()
             };

@@ -693,12 +693,19 @@ fn finish_event(gs: &mut super::ops::JsState, id: u32, ev: WsInbound) -> String 
         if let Some(sock) = gs.ws_registry.sockets.get(&id) {
             let mut headers = HashMap::new();
             headers.insert("upgrade".to_string(), "websocket".to_string());
+            // #97: the RFC 6455 handshake line every WS open provably sent
+            // — the one request-header fact the wire exchange guarantees.
+            let request_headers = HashMap::from([
+                ("upgrade".to_string(), "websocket".to_string()),
+                ("connection".to_string(), "Upgrade".to_string()),
+            ]);
             gs.js_network_events.push(super::ops::JsNetworkEvent {
                 request_id: format!("ws-{id}"),
                 url: sock.url.clone(),
                 method: "GET".to_string(),
                 status: 101,
                 response_headers: headers,
+                request_headers,
                 body_size: 0,
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

@@ -184,8 +184,11 @@ pub fn challenge_rows(
 
 /// Compact one-line-per-request view for agents: method/url/status/type/size.
 /// `status: 0` rows carry the reason they never produced a servable response
-/// (SSRF block, CORS refusal, transport failure) in `error`.
-pub fn compact_events(events: &[NetworkEvent]) -> Vec<Value> {
+/// (SSRF block, CORS refusal, transport failure) in `error`. With
+/// `include_headers` the row also carries the request's outbound header set
+/// (#97) — page-JS customs like `x-s`/`x-s-common` ride here; off by default
+/// because headers can hold tokens the caller did not ask to see.
+pub fn compact_events(events: &[NetworkEvent], include_headers: bool) -> Vec<Value> {
     events
         .iter()
         .map(|e| {
@@ -196,6 +199,9 @@ pub fn compact_events(events: &[NetworkEvent]) -> Vec<Value> {
                 "type": e.resource_type,
                 "size": e.body_size,
             });
+            if include_headers {
+                row["headers"] = json!(e.headers);
+            }
             if let Some(error) = &e.error {
                 row["error"] = json!(error);
             }
@@ -215,10 +221,14 @@ pub fn compact_events(events: &[NetworkEvent]) -> Vec<Value> {
 /// the DevTools retention policy keeps replacement-free text as strings,
 /// and base64 rows are binary assets an agent can't read as JSON anyway.
 /// Capped: bodies are big, and 20 is more APIs than any one page has.
+/// With `include_headers` each row carries the request's outbound header
+/// set (#97) — the surface exists to read what the page's JS put on its
+/// API calls, and the signed/custom headers are half of that story.
 pub fn xhr_bodies(
     events: &[NetworkEvent],
     url_substrings: &[String],
     body_max_chars: usize,
+    include_headers: bool,
     body_of: &dyn Fn(&str) -> Option<StoredResponseBody>,
 ) -> Vec<Value> {
     const MAX_ENTRIES: usize = 20;
@@ -267,6 +277,9 @@ pub fn xhr_bodies(
             "body": body_text,
             "body_truncated": body_truncated,
         });
+        if include_headers {
+            row["request_headers"] = json!(e.headers);
+        }
         // Risk-control JSON answers 200 like any other API row — the tag is
         // the only thing separating it from a successful response.
         if let Some(kind) = body_challenge(&body.body) {
@@ -556,11 +569,34 @@ mod tests {
         let mut failed = event("https://h5api.example.com/rest", "Fetch", 0, 1.0);
         failed.error = Some("CORS error: Origin 'https://shop.example' not in Access-Control-Allow-Origin ''".into());
         let ok = event("https://shop.example/", "Document", 200, 2.0);
-        let rows = compact_events(&[failed, ok]);
+        let rows = compact_events(&[failed, ok], false);
         assert!(rows[0].get("error").is_some(), "status-0 row must carry its reason");
         assert!(
             rows[1].get("error").is_none(),
             "successful rows stay lean — no null error field"
+        );
+        assert!(
+            rows.iter().all(|r| r.get("headers").is_none()),
+            "default rows carry no header set — shape unchanged (#97 opt-in)"
+        );
+    }
+
+    #[test]
+    fn compact_events_optin_carries_request_headers() {
+        // #97: include_headers=true puts the request's outbound set on the
+        // row — the surface that reads what the page's JS actually sent.
+        let mut ev = event("https://edith.example.com/api/sns/web/v1/feed", "Fetch", 200, 1.0);
+        ev.headers.insert("x-s".to_string(), "0a1b2c".to_string());
+        ev.headers.insert("x-s-common".to_string(), "si=abc".to_string());
+        let rows = compact_events(&[ev], true);
+        let hdrs = rows[0]
+            .get("headers")
+            .and_then(|h| h.as_object())
+            .expect("row carries the request header set");
+        assert_eq!(hdrs.get("x-s").and_then(|v| v.as_str()), Some("0a1b2c"));
+        assert_eq!(
+            hdrs.get("x-s-common").and_then(|v| v.as_str()),
+            Some("si=abc")
         );
     }
 
@@ -582,7 +618,7 @@ mod tests {
             200,
             2.0,
         );
-        let rows = compact_events(&[punished, api]);
+        let rows = compact_events(&[punished, api], false);
         assert_eq!(rows[0].get("challenge"), Some(&json!("punish")));
         assert!(
             rows[1].get("challenge").is_none(),
@@ -679,7 +715,7 @@ mod tests {
         );
 
         // The same body-level tag rides the xhr_bodies rows.
-        let xhr = xhr_bodies(&[swallowed, clean], &[], 0, &|rid| bodies.get(rid).cloned());
+        let xhr = xhr_bodies(&[swallowed, clean], &[], 0, false, &|rid| bodies.get(rid).cloned());
         assert_eq!(xhr[0].get("challenge"), Some(&json!("punish")));
         assert!(
             xhr[1].get("challenge").is_none(),
@@ -707,7 +743,7 @@ mod tests {
 
         // Empty filter list = every script-initiated response; document rows,
         // failed requests and unretained bodies are dropped.
-        let out = xhr_bodies(&[doc, api.clone(), failed], &[], 0, &|rid| bodies.get(rid).cloned());
+        let out = xhr_bodies(&[doc, api.clone(), failed], &[], 0, false, &|rid| bodies.get(rid).cloned());
         assert_eq!(out.len(), 1, "only the retained XHR body: {out:?}");
         assert_eq!(out[0]["url"], "https://api.example/items?all=1");
         assert_eq!(out[0]["status"], 200);
@@ -726,7 +762,7 @@ mod tests {
             (api.request_id.clone(), bodies.get(&api.request_id).unwrap().clone()),
             (miss.request_id.clone(), long),
         ]);
-        let out = xhr_bodies(&[api, miss], &["/items".to_string()], 4, &|rid| bodies2.get(rid).cloned());
+        let out = xhr_bodies(&[api, miss], &["/items".to_string()], 4, false, &|rid| bodies2.get(rid).cloned());
         assert_eq!(out.len(), 1, "filter keeps only /items: {out:?}");
         assert_eq!(out[0]["body"], "{\"it");
         assert_eq!(out[0]["body_truncated"], true);
@@ -734,13 +770,38 @@ mod tests {
         // Binary (base64-retained) bodies never join the agent-facing array.
         let mut bin = event("https://cdn.example/pic.png", "XHR", 200, 5.0);
         bin.request_id = "bin".into();
-        let out = xhr_bodies(&[bin], &[], 0, &|rid| {
+        let out = xhr_bodies(&[bin], &[], 0, false, &|rid| {
             (rid == "bin").then(|| StoredResponseBody {
                 body: "iVBORw0KGgo=".into(),
                 base64_encoded: true,
             })
         });
         assert!(out.is_empty(), "base64 bodies are skipped: {out:?}");
+    }
+
+    #[test]
+    fn xhr_bodies_optin_carries_request_headers() {
+        // #97: the capture_xhr face (server/mod.rs) always passes true — the
+        // signed outbound headers are half the API-call story.
+        let mut api = event("https://edith.example.com/api/sns/web/v1/feed", "Fetch", 200, 1.0);
+        api.response_headers = std::sync::Arc::new(HashMap::from([(
+            "content-type".to_string(),
+            "application/json".to_string(),
+        )]));
+        api.headers.insert("x-s".to_string(), "0a1b2c".to_string());
+        let bodies = HashMap::from([(
+            api.request_id.clone(),
+            StoredResponseBody {
+                body: "{\"items\":[]}".into(),
+                base64_encoded: false,
+            },
+        )]);
+        let out = xhr_bodies(&[api], &[], 0, true, &|rid| bodies.get(rid).cloned());
+        let hdrs = out[0]
+            .get("request_headers")
+            .and_then(|h| h.as_object())
+            .expect("row carries the outbound header set");
+        assert_eq!(hdrs.get("x-s").and_then(|v| v.as_str()), Some("0a1b2c"));
     }
 
     #[test]
@@ -862,7 +923,7 @@ mod tests {
     #[test]
     fn compact_events_are_token_shaped() {
         let events = vec![event("https://e.example/a.js", "Script", 200, 1.0)];
-        let rows = compact_events(&events);
+        let rows = compact_events(&events, false);
         assert_eq!(rows[0]["url"], "https://e.example/a.js");
         assert_eq!(rows[0]["type"], "Script");
         assert!(rows[0].get("mime").is_none());

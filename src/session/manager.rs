@@ -1144,7 +1144,7 @@ fn session_thread(
                             let _ = reply.send(Ok(jsonl));
                         }
 
-                        SessionCommand::Network { media_only, include_bodies, url_contains, body_max_chars, reply } => {
+                        SessionCommand::Network { media_only, include_bodies, include_headers, url_contains, body_max_chars, reply } => {
                             page.inner.sync_js_network_events();
                             let payload = if media_only {
                                 // Media elements and player iframes are never
@@ -1172,7 +1172,7 @@ fn session_thread(
                                 let mut payload = serde_json::json!({
                                     "url": page.url(),
                                     "total": events.len(),
-                                    "requests": crate::har::compact_events(events),
+                                    "requests": crate::har::compact_events(events, include_headers),
                                 });
                                 // #116: hung script-initiated fetches are
                                 // invisible in the request log (entries land
@@ -1214,7 +1214,7 @@ fn session_thread(
                                         .map(|s| vec![s.to_string()])
                                         .unwrap_or_default();
                                     payload["xhr"] = json!(crate::har::xhr_bodies(
-                                        events, &filters, body_max_chars, &body_of
+                                        events, &filters, body_max_chars, include_headers, &body_of
                                     ));
                                 }
                                 payload
