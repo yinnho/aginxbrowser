@@ -3324,6 +3324,59 @@
             .position(|w| w == needle)
     }
 
+    /// #121: HTMLStyleElement.sheet. CKEditor's appendStyleText returns
+    /// `styleEl.sheet` and its wysiwyg editable setup reads `.ownerNode`
+    /// off that sheet — an undefined sheet killed the whole editor mount
+    /// at setMode('wysiwyg'). Chrome semantics pinned here: a connected
+    /// <style> owns a sheet (rules parsed, ownerNode = the element, stable
+    /// identity), a detached one reads null, a <link rel=stylesheet> is
+    /// null until its fetch lands, and the element's sheet is the same
+    /// object document.styleSheets lists.
+    #[tokio::test(flavor = "current_thread")]
+    async fn style_element_sheet_reflects_owner_node_and_rules() {
+        let mut rt = setup_runtime("<html><head></head><body></body></html>");
+        let out = rt
+            .evaluate(
+                r#"(() => {
+                    const style = document.createElement('style');
+                    style.textContent = '.a { color: rgb(1, 2, 3); } .b { margin: 0; }';
+                    document.head.appendChild(style);
+                    const s1 = style.sheet;
+                    const link = document.createElement('link');
+                    link.rel = 'stylesheet';
+                    link.href = '/not-yet-loaded.css';
+                    document.head.appendChild(link);
+                    const detached = document.createElement('style');
+                    return {
+                        hasSheet: s1 != null,
+                        ownerIsEl: !!s1 && s1.ownerNode === style,
+                        rules: s1 ? String(s1.cssRules.length) : 'none',
+                        stableIdentity: s1 === style.sheet,
+                        linkPendingNull: link.sheet == null,
+                        detachedNull: detached.sheet == null,
+                        inDocSheets: Array.from(document.styleSheets).includes(s1),
+                        probeTagNull: document.body.sheet == null,
+                    };
+                })()"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            out,
+            serde_json::json!({
+                "hasSheet": true,
+                "ownerIsEl": true,
+                "rules": "2",
+                "stableIdentity": true,
+                "linkPendingNull": true,
+                "detachedNull": true,
+                "inDocSheets": true,
+                "probeTagNull": true,
+            })
+        );
+    }
+
+
     /// A dynamically inserted `<link rel=stylesheet>` must fetch its sheet,
     /// expose it through document.styleSheets, and fire the element's `load`
     /// event. The event is the load-bearing part: webpack's mini-css chunk
@@ -11431,6 +11484,70 @@
         assert_eq!(result.value.unwrap(), serde_json::json!([1, 0, true]));
     }
 
+    /// #121: the dynamic-script load path used to call `script.onload(...)`
+    /// manually *and* then dispatchEvent — but element dispatch generically
+    /// routes the `on<type>` property handler, so the property handler ran
+    /// twice (addEventListener listeners once). CKEditor's scriptLoader
+    /// deletes its pending-callback map on the first completion, so the
+    /// second run threw `Cannot read properties of undefined (reading
+    /// 'length')` and killed the tmall source-import editor mount. A real
+    /// browser fires onload/onerror exactly once; the property handler and
+    /// listener must both see exactly one event.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_dynamic_script_load_and_error_fire_onload_exactly_once() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for (status, body) in [
+                ("200 OK", b"window.__ok = 1;".as_slice()),
+                ("404 Not Found", b"window.__leak = 1;".as_slice()),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: text/javascript\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.write_all(body).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        let script = format!(r#"async () => {{
+            const tally = {{ load_prop: 0, load_listen: 0, err_prop: 0, err_listen: 0 }};
+            const s1 = document.createElement('script');
+            s1.setAttribute('src', 'http://127.0.0.1:{port}/ok.js');
+            s1.onload = () => tally.load_prop++;
+            s1.addEventListener('load', () => tally.load_listen++);
+            document.body.appendChild(s1);
+            const s2 = document.createElement('script');
+            s2.setAttribute('src', 'http://127.0.0.1:{port}/missing.js');
+            s2.onerror = () => tally.err_prop++;
+            s2.addEventListener('error', () => tally.err_listen++);
+            document.body.appendChild(s2);
+            await new Promise(r => setTimeout(r, 50));
+            return tally;
+        }}"#);
+        let result = rt.call_function_on_for_cdp(&script, None, &[], true, true).await.unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        // Exactly one fire per handler, per side — [2, 1] on either row is
+        // the double-fire signature the old code produced.
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!({"load_prop": 1, "load_listen": 1, "err_prop": 1, "err_listen": 1})
+        );
+    }
+
     /// Upstream a6bb741: a dynamic external script slower than the settle
     /// loop's 500ms fast-path deadline must still be visible as pending while
     /// in flight (so the loop keeps pumping) and must land once its fetch
@@ -12701,6 +12818,60 @@
             result.value.unwrap(),
             serde_json::json!(["property", "listener"])
         );
+    }
+
+    /// #121: an iframe that enters the document with its src already set as
+    /// an ATTRIBUTE (how React and most framework DOM writers build one)
+    /// must start its navigation at insertion — the IDL `iframe.src = …`
+    /// setter was the only load path, so the tmall sucai-selector iframe
+    /// sat registered (window[N]) with its document never fetched: a
+    /// 900x600 frame with an empty body.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_iframe_with_src_attribute_loads_on_insertion() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let frame_body = "<html><body>frame-MARKER-42</body></html>";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                frame_body.len(),
+                frame_body
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        let script = format!(r#"async () => {{
+            const f = document.createElement('iframe');
+            // Attribute only — never touches the src property, exactly like
+            // a framework DOM writer.
+            f.setAttribute('src', 'http://127.0.0.1:{port}/frame.html');
+            let loaded = 'no';
+            f.addEventListener('load', () => {{ loaded = 'yes'; }}, {{ once: true }});
+            document.body.appendChild(f);
+            await new Promise(r => setTimeout(r, 100));
+            const doc = f.contentDocument;
+            return {{
+                loaded,
+                bodyText: doc && doc.body ? (doc.body.textContent || '').trim() : 'no-doc',
+            }};
+        }}"#);
+        let result = rt.call_function_on_for_cdp(&script, None, &[], true, true).await.unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let v = result.value.unwrap();
+        assert_eq!(v["loaded"], serde_json::json!("yes"), "frame load event must fire: {v}");
+        assert_eq!(v["bodyText"], serde_json::json!("frame-MARKER-42"), "frame document must be fetched and parsed: {v}");
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -1371,15 +1371,18 @@ function __prepareInsertedScript(script) {
             finally { globalThis.__currentScriptNid = prevNid || 0; }
           }
         }
-        if (typeof script.onload === 'function') try { script.onload(new Event('load')); } catch(e) {}
-          try { script.dispatchEvent(new Event('load')); } catch(e) {}
+        // dispatchEvent alone routes the on* property handler (element
+        // dispatch resolves `on` + type generically) — calling it manually
+        // first made onload fire twice. CKEditor's scriptLoader deletes its
+        // pending-callback map on the first completion, so the second run
+        // threw "Cannot read properties of undefined (reading 'length')"
+        // and killed the source-import editor mount (#121).
+        try { script.dispatchEvent(new Event('load')); } catch(e) {}
       } catch(e) {
         console.error('Dynamic script fetch error (' + fullUrl + '):', e.message);
-        // Mirror the load path: both the onerror property and registered
-        // listeners fire (a listener-only consumer must still see failures).
-        const ev = new Event('error');
-        if (typeof script.onerror === 'function') try { script.onerror(ev); } catch(ex) {}
-          try { script.dispatchEvent(ev); } catch(ex) {}
+        // dispatchEvent fires both the onerror property handler and
+        // registered listeners (a listener-only consumer still sees failures).
+        try { script.dispatchEvent(new Event('error')); } catch(ex) {}
       }
     })();
   } else {
@@ -2034,9 +2037,10 @@ function __linkIsStylesheet(el) {
   return (el.getAttribute('rel') || '').toLowerCase().split(/\s+/).indexOf('stylesheet') >= 0;
 }
 function __fireLinkLoadEvent(link, type) {
-  const ev = new Event(type);
-  if (typeof link['on' + type] === 'function') { try { link['on' + type](ev); } catch (e) {} }
-  try { link.dispatchEvent(ev); } catch (e) {}
+  // dispatchEvent alone routes the on* property handler too; a manual
+  // property call ahead of it double-fires (same disease as the
+  // dynamic-script load path, #121).
+  try { link.dispatchEvent(new Event(type)); } catch (e) {}
 }
 function __prepareInsertedStylesheetLinksIn(root) {
   if (!root || !root.isConnected) return;
@@ -2050,8 +2054,9 @@ function __prepareInsertedStylesheetLinksIn(root) {
     if (link) { links.push(link); seen.add(+nid); }
   }
   // Re-insertion restarts a sheet's load in a browser (usually from cache),
-  // so the per-element URL guard resets on the insertion path.
-  for (const link of links) { delete link._sheetLoadUrl; __prepareInsertedStylesheetLink(link); }
+  // so the per-element URL guard resets on the insertion path; the cached
+  // sheet object from the previous load dies with it.
+  for (const link of links) { delete link._sheetLoadUrl; delete link._sheetObj; __prepareInsertedStylesheetLink(link); }
 }
 function __prepareInsertedStylesheetLink(link) {
   if (!__linkIsStylesheet(link)) return;
@@ -3058,6 +3063,17 @@ class Element extends Node {
     if ((n === "href" || n === "rel") &&
         (this.tagName || '').toUpperCase() === 'LINK' && this.isConnected) {
       __prepareInsertedStylesheetLink(this);
+    }
+    // An iframe's src changing while connected starts a navigation in a
+    // browser. Framework DOM writers (React et al.) only touch the
+    // attribute, never the IDL property — the tmall sucai-selector iframe
+    // sat registered-but-never-fetched this way (#121). The IDL
+    // `iframe.src = …` setter funnels through here as well; the loading
+    // flag inside _loadIframeSrc collapses the repeat.
+    if (n === "src" &&
+        (this.tagName || '').toUpperCase() === 'IFRAME' && this.isConnected) {
+      const s = String(v);
+      if (s && s !== 'about:blank') this._loadIframeSrc(s);
     }
     if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('attributes', this._nid, [], [], n);
     // class/style writes can start or stop a CSS animation on this element,
@@ -5915,23 +5931,12 @@ class Document extends Node {
     // whose navigation-time fetch succeeded (Chrome only lists loaded
     // sheets). Rule content is parsed engine-side by the same parser the
     // cascade uses, so cssRules and getComputedStyle can never disagree
-    // about what a sheet says.
+    // about what a sheet says. One truth with the per-element `sheet`
+    // property (_elementSheet), so both faces can't drift apart.
     const out = [];
     for (const el of this.querySelectorAll("style, link")) {
-      const tag = (el.tagName || "").toLowerCase();
-      if (tag === "style") {
-        out.push(_sheetFromCssText(el, null, el.textContent || ""));
-      } else if (tag === "link") {
-        const rel = (el.getAttribute("rel") || "").toLowerCase();
-        if (!rel.split(/\s+/).includes("stylesheet")) continue;
-        const raw = el.getAttribute("href");
-        if (!raw) continue;
-        let abs;
-        try { abs = new URL(raw, globalThis.location.href).href; } catch (e) { continue; }
-        const body = _extSheetBodies()[abs];
-        if (body == null) continue;
-        out.push(_sheetFromCssText(el, abs, body));
-      }
+      const sheet = _elementSheet(el);
+      if (sheet) out.push(sheet);
     }
     return _sheetList(out);
   }
@@ -6347,7 +6352,17 @@ function _registerIframesIn(node) {
   const frames = node.nodeType === 1 && node.tagName === 'IFRAME'
     ? [node, ...node.querySelectorAll('iframe')]
     : [...node.querySelectorAll('iframe')];
-  for (const f of frames) _registerIframe(f);
+  for (const f of frames) {
+    _registerIframe(f);
+    // Insertion doesn't just create the browsing context — an iframe that
+    // already carries a src attribute starts navigating too. The src
+    // property setter only sees JS assignment; framework writers attach
+    // the attribute before insertion, so the load has to start here
+    // (#121's sucai-selector iframe). _loadIframeSrc's flag collapses the
+    // repeat against the post-navigation scan and the write-path scan.
+    const s = f.getAttribute('src');
+    if (s && s !== 'about:blank') f._loadIframeSrc(s);
+  }
 }
 function _nodeInDocument(node) {
   let cur = node;
@@ -9527,6 +9542,48 @@ function _sheetFromCssText(ownerNode, href, cssText) {
   };
   return sheet;
 }
+// #121: HTMLStyleElement.sheet / HTMLLinkElement.sheet. CKEditor's
+// appendStyleText returns `styleEl.sheet` and its wysiwyg editable setup
+// reads `.ownerNode` off that sheet — returning undefined there killed the
+// whole editor mount inside setMode('wysiwyg'). Chrome returns the
+// element's CSSStyleSheet: <style> sheets parse from the text content,
+// <link> sheets exist only once their fetch has landed (null before).
+// Sheet identity is stable while the content is (el.sheet === el.sheet).
+function _elementSheet(el) {
+  if (!el || el.nodeType !== 1) return null;
+  const tag = (el.tagName || '').toLowerCase();
+  if (tag === 'style') {
+    // Chrome: a <style> block owns a sheet only while it is connected to
+    // the document; detached elements read sheet as null.
+    if (!el.isConnected) return null;
+    const type = (el.getAttribute('type') || '').trim().toLowerCase();
+    if (type && type !== 'text/css') return null;
+    const css = el.textContent || '';
+    const key = ' style ' + css;
+    if (!el._sheetObj || el._sheetObj._key !== key) {
+      el._sheetObj = _sheetFromCssText(el, null, css);
+      el._sheetObj._key = key;
+    }
+    return el._sheetObj;
+  }
+  if (tag === 'link') {
+    const rel = (el.getAttribute('rel') || '').toLowerCase();
+    if (!rel.split(/\s+/).includes('stylesheet')) return null;
+    const raw = el.getAttribute('href');
+    if (!raw) return null;
+    let abs;
+    try { abs = new URL(raw, globalThis.location.href).href; } catch (e) { return null; }
+    const body = _extSheetBodies()[abs];
+    if (body == null) return null;
+    const key = ' link ' + abs + ' ' + body.length;
+    if (!el._sheetObj || el._sheetObj._key !== key) {
+      el._sheetObj = _sheetFromCssText(el, abs, body);
+      el._sheetObj._key = key;
+    }
+    return el._sheetObj;
+  }
+  return null;
+}
 function _sheetList(sheets) {
   const out = {
     length: sheets.length,
@@ -12156,6 +12213,14 @@ Object.defineProperty(Element.prototype, 'control', {
   get() { return this.tagName === 'LABEL' ? _labeledControl(this) : undefined; },
   configurable: true,
 });
+// HTMLStyleElement.sheet / HTMLLinkElement.sheet (tag-gated, the same
+// approximation the control getter uses for LABEL). #121: CKEditor's
+// appendStyleText hands `styleEl.sheet` back to page code that reads
+// `.ownerNode` on it.
+Object.defineProperty(Element.prototype, 'sheet', {
+  get() { return _elementSheet(this); },
+  configurable: true,
+});
 globalThis.HTMLTableElement = _htmlInterface('HTMLTableElement', ['table'], [
   'align', 'border', 'frame', 'rules', 'summary', 'width',
   { name: 'bgColor', nullEmpty: true },
@@ -12283,7 +12348,8 @@ globalThis.HTMLDialogElement = _htmlInterface('HTMLDialogElement', ['dialog']);
     HTMLTableElement: ['caption', 'rows', 'tBodies', 'tFoot', 'tHead'],
     HTMLTableRowElement: ['cells', 'rowIndex', 'sectionRowIndex'],
     HTMLTableCellElement: ['cellIndex'],
-    HTMLLinkElement: ['rel', 'relList', 'sizes', 'disabled'],
+    HTMLLinkElement: ['rel', 'relList', 'sizes', 'disabled', 'sheet'],
+    HTMLStyleElement: ['sheet'],
     HTMLMetaElement: ['content'],
     HTMLLabelElement: ['htmlFor', 'form'],
     HTMLIFrameElement: ['sandbox', 'contentDocument', 'contentWindow', 'src'],
