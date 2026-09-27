@@ -2803,6 +2803,8 @@ pub enum CssLength {
     Percent(f32),
     Vw(f32),
     Vh(f32),
+    Ch(f32),
+    Ex(f32),
 }
 
 /// `line-height` computed value. Inherited as-is: the number form keeps its
@@ -2876,6 +2878,14 @@ fn resolve_len(l: CssLength, fonts: &FontCtx) -> Length {
         CssLength::Px(x) => Length::Px(x),
         CssLength::Em(n) => Length::Px(n * fonts.own),
         CssLength::Rem(n) => Length::Px(n * fonts.root),
+        // ch/ex (#138): the spec's mandated fallback when the '0'/'x'
+        // advance can't be determined — 0.5em. Font selection happens per
+        // text run in layout, so the element's actual font isn't known at
+        // cascade fold time; measuring real advances is a layout-metrics
+        // follow-up. Before this arm `4ch` failed the parse and the whole
+        // declaration was dropped — worse than any approximation.
+        CssLength::Ch(n) => Length::Px(n * 0.5 * fonts.own),
+        CssLength::Ex(n) => Length::Px(n * 0.5 * fonts.own),
         CssLength::Percent(p) => Length::Percent(p),
         CssLength::Vw(n) => Length::Px(n * fonts.viewport_w / 100.0),
         CssLength::Vh(n) => Length::Px(n * fonts.viewport_h / 100.0),
@@ -2902,6 +2912,14 @@ fn parse_css_length(v: &str) -> Option<CssLength> {
     }
     if let Some(n) = v.strip_suffix("vh") {
         return n.css_f32().map(CssLength::Vh);
+    }
+    // ch/ex (#138): no suffix overlap with the other units (nothing else
+    // ends in ch/ex), so they slot anywhere after the % arm.
+    if let Some(n) = v.strip_suffix("ch") {
+        return n.css_f32().map(CssLength::Ch);
+    }
+    if let Some(n) = v.strip_suffix("ex") {
+        return n.css_f32().map(CssLength::Ex);
     }
     if let Some(e) = v.strip_suffix("em") {
         return e.css_f32().map(CssLength::Em);
@@ -4298,6 +4316,10 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                     LineHeightRaw::Len(CssLength::Percent(p)) => LineHeightSpec::Number(p / 100.0),
                     LineHeightRaw::Len(CssLength::Vw(n)) => LineHeightSpec::Px(n * fonts.viewport_w / 100.0),
                     LineHeightRaw::Len(CssLength::Vh(n)) => LineHeightSpec::Px(n * fonts.viewport_h / 100.0),
+                    // ch/ex fold at the same 0.5em fallback as resolve_len.
+                    LineHeightRaw::Len(CssLength::Ch(n)) | LineHeightRaw::Len(CssLength::Ex(n)) => {
+                        LineHeightSpec::Px(n * 0.5 * fonts.own)
+                    }
                 })
             })
             .is_some(),
@@ -5298,6 +5320,9 @@ fn font_size_px(l: CssLength, parent_fs: f32, root_fs: f32, viewport: (f32, f32)
         CssLength::Percent(p) => p / 100.0 * parent_fs,
         CssLength::Vw(n) => n * viewport.0 / 100.0,
         CssLength::Vh(n) => n * viewport.1 / 100.0,
+        // font-size in ch/ex is self-referential; the 0.5em fallback basis
+        // is the parent font-size, same as Em here.
+        CssLength::Ch(n) | CssLength::Ex(n) => n * 0.5 * parent_fs,
     }
 }
 
@@ -5427,6 +5452,10 @@ fn parse_font_shorthand(v: &str, fonts: &FontCtx) -> Option<FontShorthand> {
         LineHeightRaw::Len(CssLength::Percent(p)) => LineHeightSpec::Number(p / 100.0),
         LineHeightRaw::Len(CssLength::Vw(n)) => LineHeightSpec::Px(n * fonts.viewport_w / 100.0),
         LineHeightRaw::Len(CssLength::Vh(n)) => LineHeightSpec::Px(n * fonts.viewport_h / 100.0),
+        // ch/ex fold at the 0.5em fallback, basis = the shorthand's new size.
+        LineHeightRaw::Len(CssLength::Ch(n)) | LineHeightRaw::Len(CssLength::Ex(n)) => {
+            LineHeightSpec::Px(n * 0.5 * size)
+        }
     });
     // Mandatory family: the verbatim remainder (quoted names included).
     if idx >= toks.len() {

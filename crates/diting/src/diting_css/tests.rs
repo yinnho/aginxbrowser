@@ -1446,6 +1446,40 @@ fn vw_vh_resolve_against_viewport() {
 }
 
 #[test]
+fn ch_ex_units_fold_at_the_spec_half_em_fallback() {
+    // #138: ch/ex can't measure the real '0'/'x' advance at cascade fold
+    // time (font selection happens per text run in layout), so they fold at
+    // CSS Values §5.1's mandated fallback: 0.5em. Before this arm `4ch`
+    // failed the parse and the whole declaration was dropped.
+    let f = FontCtx { own: 16.0, root: 16.0, viewport_w: 800.0, viewport_h: 600.0 };
+    let mut s = ComputedStyle::default();
+    assert!(apply_declarations_with(&mut s, "width: 4ch; height: 2ex", &f));
+    assert_eq!(s.width, Some(Length::Px(32.0)), "4ch = 4 * 0.5 * 16");
+    assert_eq!(s.height, Some(Length::Px(16.0)), "2ex = 2 * 0.5 * 16");
+
+    // Half the own font, not the root or the viewport.
+    let small = FontCtx { own: 10.0, root: 32.0, viewport_w: 800.0, viewport_h: 600.0 };
+    let mut s2 = ComputedStyle::default();
+    assert!(apply_declarations_with(&mut s2, "width: 3ch", &small));
+    assert_eq!(s2.width, Some(Length::Px(15.0)), "3ch tracks own, not root/viewport");
+
+    // calc() inherits the same fold through parse_css_length.
+    let mut s3 = ComputedStyle::default();
+    assert!(apply_declarations_with(&mut s3, "width: calc(2ch + 1em)", &f));
+    assert_eq!(s3.width, Some(Length::Px(32.0)), "2ch(=16) + 1em(=16)");
+
+    // line-height and font-size folds carry the same fallback: 2ch = 16px
+    // line-height; font-size: 3ch folds against the parent like em does.
+    let mut s4 = ComputedStyle::default();
+    assert!(apply_declarations_with(&mut s4, "line-height: 2ch", &f));
+    assert_eq!(s4.line_height, Some(LineHeightSpec::Px(16.0)));
+    let tree = diting_dom::tree_sink::parse_html(r#"<div style="font-size: 3ch">x</div>"#);
+    let d = tree.query_selector("div").unwrap().unwrap();
+    let at = crate::diting_layout::compute_styles(&tree, &[], (800.0, 600.0));
+    assert_eq!(at[&d].font_size, Some(24.0), "3ch = 3 * 0.5 * parent 16");
+}
+
+#[test]
 fn vw_inside_calc_resolves_per_viewport() {
     let wide = FontCtx { own: 16.0, root: 16.0, viewport_w: 800.0, viewport_h: 600.0 };
     let mut s = ComputedStyle::default();
