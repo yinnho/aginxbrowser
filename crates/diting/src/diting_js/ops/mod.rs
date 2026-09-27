@@ -2965,6 +2965,7 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "text-align",
     "line-height",
     "word-spacing",
+    "text-transform",
     "font-variant-caps",
     "font-variant",
     "container-type",
@@ -3295,6 +3296,17 @@ fn computed_style_value(
                 _ => "normal".into(),
             },
         ),
+        // Declared-only (`color` posture): unset returns None so the JS
+        // caller's default chain serves the initial — and the innerText walk
+        // can tell a declared `none` (resets inheritance) from unset (keeps
+        // the ancestor's transform). Same divergence-from-Chrome posture as
+        // the other inherited props here (white-space).
+        "text-transform" => s.text_transform.map(|t| match t {
+            TextTransform::Uppercase => "uppercase".into(),
+            TextTransform::Lowercase => "lowercase".into(),
+            TextTransform::Capitalize => "capitalize".into(),
+            TextTransform::None => "none".into(),
+        }),
         "font-variant" => Some(
             match s.font_variant_caps {
                 Some(true) => "small-caps".into(),
@@ -6401,6 +6413,75 @@ fn op_url_encode_query(#[string] query: &str, #[string] label: &str, special: bo
     crate::diting_net::url_encode_query(query, label, special).unwrap_or_else(|| query.to_string())
 }
 
+/// 批240 / obscura#1100: SVGGeometryElement.getTotalLength() backing. Chrome
+/// measures through SkPathMeasure (circle r=25 → 156.0674, not 2πr), so these
+/// numbers line up with Chrome (conic chord measure for ovals, analytic for
+/// explicit d beziers). Non-geometry nodes / missing geometry read 0.
+/// Anti-panic boundary: the path data comes from the page, and a parser panic
+/// must degrade to 0 (the op_dom posture) rather than unwind through the FFI
+/// frame. Measurement lives in the layout crate, so the no-screenshot build
+/// reads 0 — geometry measurement without the layout engine is meaningless
+/// anyway.
+#[cfg(feature = "screenshot")]
+#[op2(fast)]
+fn op_svg_path_len(state: &OpState, #[smi] nid: u32) -> f64 {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        svg_measure(state, nid).map(|m| m.total() as f64).unwrap_or(0.0)
+    }))
+    .unwrap_or(0.0)
+}
+
+#[cfg(not(feature = "screenshot"))]
+#[op2(fast)]
+fn op_svg_path_len(_: &OpState, #[smi] _: u32) -> f64 {
+    0.0
+}
+
+/// getPointAtLength backing — "x\0y" (cheap unambiguous pair; the bootstrap
+/// side splits and wraps it in an SVGPoint). Negative/overlong targets
+/// clamp to the endpoints, Chrome's contract.
+#[cfg(feature = "screenshot")]
+#[op2]
+#[string]
+fn op_svg_path_point(state: &OpState, #[smi] nid: u32, target: f64) -> String {
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        svg_measure(state, nid).map(|m| m.point_at(target as f32))
+    }))
+    .unwrap_or(None);
+    match r {
+        Some((x, y)) if x.is_finite() && y.is_finite() => format!("{x}\0{y}"),
+        _ => "0\u{0}0".to_string(),
+    }
+}
+
+#[cfg(not(feature = "screenshot"))]
+#[op2]
+#[string]
+fn op_svg_path_point(_: &OpState, #[smi] _: u32, _: f64) -> String {
+    "0\u{0}0".to_string()
+}
+
+#[cfg(feature = "screenshot")]
+fn svg_measure(
+    state: &OpState,
+    nid: u32,
+) -> Option<crate::diting_layout::svg::PathMeasure> {
+    let gs = state.borrow::<SharedState>().clone();
+    let gs = gs.borrow();
+    let dom = match &gs.dom {
+        Some(d) => d,
+        None => return None,
+    };
+    let node = dom.get_node(NodeId::new(nid))?;
+    let tag = match &node.data {
+        crate::diting_dom::NodeData::Element { name, .. } => name.local.as_ref(),
+        _ => return None,
+    };
+    crate::diting_layout::svg::build_path_measure(tag, &|a| {
+        node.get_attribute(a).map(|s| s.to_string())
+    })
+}
+
 /// (#78) Sub-ms wall clock for performance.now(). Chrome coarsens the timer
 /// to 100µs (non-crossOriginIsolated) and reports floats; an integral
 /// Date.now()-based value is a timing-entropy tell on the jsvmp environment
@@ -6422,6 +6503,8 @@ pub fn build_extension() -> Extension {
         ops: std::borrow::Cow::Owned(vec![
             op_dom(),
             op_clock_ms(),
+            op_svg_path_len(),
+            op_svg_path_point(),
             op_shadow_attach(),
             op_console_msg(),
             op_dialog(),

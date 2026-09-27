@@ -3098,3 +3098,24 @@ fn nonfinite_numbers_drop_declarations() {
     assert!(!apply_declarations(&mut s, "left: NaNpx"));
     assert_eq!(s.left, None);
 }
+
+/// 批240 / blitz#924: `text-transform` parses the four keywords (and
+/// nothing else), landing in its own declared-only slot like white-space.
+#[test]
+fn text_transform_parses_keyword_family() {
+    let mut s = ComputedStyle::default();
+    apply_declarations(&mut s, "text-transform: uppercase");
+    assert_eq!(s.text_transform, Some(TextTransform::Uppercase));
+    apply_declarations(&mut s, "text-transform: capitalize");
+    assert_eq!(s.text_transform, Some(TextTransform::Capitalize));
+    apply_declarations(&mut s, "text-transform: lowercase");
+    assert_eq!(s.text_transform, Some(TextTransform::Lowercase));
+    apply_declarations(&mut s, "text-transform: none");
+    assert_eq!(s.text_transform, Some(TextTransform::None));
+    // Unparsable values drop without touching the slot.
+    apply_declarations(&mut s, "text-transform: small-caps");
+    assert_eq!(s.text_transform, Some(TextTransform::None), "last valid value stays");
+    let mut s = ComputedStyle::default();
+    assert!(!apply_declarations(&mut s, "text-transform: full-width"));
+    assert_eq!(s.text_transform, None);
+}

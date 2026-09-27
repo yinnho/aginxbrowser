@@ -554,3 +554,33 @@ fn variation_selectors_ride_the_base_and_measure_zero() {
     let lead = book.advance_width("\u{FE0F}\u{E000}", 20.0, false, false, None);
     assert!((lead - base).abs() < 0.01, "leading VS16 dropped ({lead} vs {base})");
 }
+
+/// 批240 / blitz#924: `text-transform` case mapping, Chrome-grounded via a
+/// headless probe table (2026-09-28). Uppercase/lowercase ride the full
+/// Unicode str mappings; capitalize is UAX#29 word starts — only the FIRST
+/// char of each word is uppercased, digits own the word start (`2abc`
+/// never caps), hyphens and Han ideographs/kana break, apostrophes and
+/// underscores join.
+#[test]
+fn text_transform_case_table_matches_chrome() {
+    use crate::diting_css::TextTransform as T;
+    let up = |s: &str| apply_text_transform(s, T::Uppercase);
+    let cap = |s: &str| apply_text_transform(s, T::Capitalize);
+    assert_eq!(up("hello wörld"), "HELLO WÖRLD");
+    assert_eq!(up("straße"), "STRASSE", "multi-char expansion");
+    assert_eq!(
+        apply_text_transform("İstanbul", T::Lowercase),
+        "i̇stanbul",
+        "dotted capital İ lowers to i + combining dot"
+    );
+    // Capitalize: word starts only, Chrome's own probe strings.
+    assert_eq!(cap("don't stop"), "Don't Stop", "apostrophe joins the word");
+    assert_eq!(cap("_world"), "_world", "underscore joins — no word start after it");
+    assert_eq!(cap("2abc"), "2abc", "the digit owns the word start, so abc never caps");
+    assert_eq!(cap("foo-bar"), "Foo-Bar", "hyphen breaks words");
+    assert_eq!(cap("中文abc"), "中文Abc", "ideographs are their own words");
+    assert_eq!(cap("hello WORLD"), "Hello WORLD", "already-cased starts pass through");
+    assert_eq!(cap("çé ño"), "Çé Ño", "non-ASCII lowercase caps");
+    // none is the identity.
+    assert_eq!(apply_text_transform("MiXeD", T::None), "MiXeD");
+}

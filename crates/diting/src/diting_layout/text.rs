@@ -988,6 +988,73 @@ mod wrap;
 pub use wrap::{greedy_wrap, tokens_of, Token, WrapLine};
 pub(crate) use wrap::{caps_case_runs, truncate_tokens, SMALL_CAPS_RATIO};
 
+/// 批240 / blitz#924: `text-transform` case mapping, Chrome-grounded via a
+/// headless probe table (2026-09-28). Uppercase/lowercase use the full
+/// Unicode `str` mappings — context rules ride along (final sigma; dotted
+/// capital İ lowers to `i` + combining dot). Capitalize is UAX#29 word
+/// starts: only the FIRST character of each word is uppercased, so `2abc`
+/// never capitalizes (the digit owns the word start); hyphens and Han
+/// ideographs/kana break words (`Abc-Def`, `中文Abc`), while apostrophes,
+/// underscores, digits and Hangul join (`Don't Stop`, `_world`, `2abc`).
+/// Per text node — Chrome carries word state across element boundaries
+/// (`he<span>llo</span>` → `Hello`); that cross-node case is a documented
+/// v1 divergence.
+pub(crate) fn apply_text_transform(
+    text: &str,
+    tt: crate::diting_css::TextTransform,
+) -> String {
+    use crate::diting_css::TextTransform;
+    match tt {
+        TextTransform::None => text.to_string(),
+        TextTransform::Uppercase => text.to_uppercase(),
+        TextTransform::Lowercase => text.to_lowercase(),
+        TextTransform::Capitalize => {
+            let mut out = String::with_capacity(text.len());
+            let mut prev_joins = false; // previous char continues the word
+            for c in text.chars() {
+                if !prev_joins && c.is_lowercase() {
+                    // Word start: uppercase it (multi-char expansions like
+                    // ß→SS are legal; already-cased and uncased starts —
+                    // `2abc`, `中文` — pass through untouched).
+                    out.extend(c.to_uppercase());
+                } else {
+                    out.push(c);
+                }
+                prev_joins = text_transform_word_joiner(c);
+            }
+            out
+        }
+    }
+}
+
+/// UAX#29-lite: does this char CONTINUE the current word (blocking
+/// capitalization of the next letter)? Letters — minus ideographs/kana,
+/// which UAX#29 word-break rules split into their own words — plus digits
+/// and the mid-word joiners (`_`, `'`, `’`, `:`, `·`) all join; whitespace,
+/// hyphens and CJK break.
+fn text_transform_word_joiner(c: char) -> bool {
+    if c.is_ascii_digit()
+        || matches!(c, '_' | '\'' | '\u{2019}' | ':' | '\u{00B7}')
+    {
+        return true;
+    }
+    if c.is_alphabetic() && !text_transform_ideographic_ish(c) {
+        return true; // Hangul, Latin, Greek, … are ALetter
+    }
+    c.is_numeric() // non-ASCII Nd digits (２, ٣, …)
+}
+
+fn text_transform_ideographic_ish(c: char) -> bool {
+    matches!(c as u32,
+        0x3040..=0x30FF      // hiragana + katakana
+        | 0x31F0..=0x31FF    // katakana phonetic extensions
+        | 0x3400..=0x4DBF    // CJK extension A
+        | 0x4E00..=0x9FFF    // CJK unified ideographs
+        | 0xF900..=0xFAFF    // CJK compatibility ideographs
+        | 0x20000..=0x2A6DF  // CJK extension B
+    )
+}
+
 // The Han-unification slot model (#139): lang → slot, slot → face routing.
 mod han;
 

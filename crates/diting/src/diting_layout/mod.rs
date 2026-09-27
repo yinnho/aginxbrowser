@@ -32,7 +32,7 @@ use taffy::prelude::*;
 use crate::diting_css::{
     AlignMode, ComputedStyle, Display as CssDisplay, FlexDirection as CssFlexDirection,
     FlexWrapMode, GridTrack, JustifyMode, ObjectFit, ObjectPositionPart, Overflow, PositionMode,
-    TextAlign, TextDecorations, TextOverflow, TextShadow, WhiteSpace,
+    TextAlign, TextDecorations, TextOverflow, TextShadow, TextTransform, WhiteSpace,
 };
 use crate::diting_dom::tree::{DomTree, NodeId};
 
@@ -810,6 +810,25 @@ fn small_caps_context(
         current = tree.with_node(nid, |n| n.parent).flatten();
     }
     false
+}
+
+/// 批240: `text-transform` context (inherited, the `small_caps_context`
+/// precedent) — nearest styled ancestor's declared value. A declared
+/// `TextTransform::None` resets an inherited transform; no declaration
+/// anywhere falls through to no transform.
+fn text_transform_context(
+    tree: &DomTree,
+    id: NodeId,
+    styles: &HashMap<NodeId, ComputedStyle>,
+) -> TextTransform {
+    let mut current = Some(id);
+    while let Some(nid) = current {
+        if let Some(tt) = styles.get(&nid).and_then(|s| s.text_transform) {
+            return tt;
+        }
+        current = tree.with_node(nid, |n| n.parent).flatten();
+    }
+    TextTransform::None
 }
 
 /// #139 (Han unification): a text node's Han slot comes from its nearest
@@ -2141,6 +2160,16 @@ fn build_normal_sibling(
             let text = tree
                 .with_node(child, |n| n.text_content_of_text_node().unwrap_or("").to_string())
                 .unwrap_or_default();
+            // text-transform folds into the string here so measure and paint
+            // agree (批240); the DOM keeps the original text.
+            let text = {
+                let tt = text_transform_context(tree, child, styles);
+                if tt == TextTransform::None {
+                    text
+                } else {
+                    text::apply_text_transform(&text, tt)
+                }
+            };
             // Formatting-whitespace-only text generates no box (CSS white-
             // space processing — keeps adjoining block margins adjacent).
             if text.trim().is_empty() {
@@ -2654,6 +2683,14 @@ fn build_flow_column(
         }
         if is_text {
             let text = tree.with_node(child, |n| n.text_content_of_text_node().unwrap_or("").to_string()).unwrap_or_default();
+            // text-transform folds into the string before the run sees it
+            // (批240) — per segment is exact for upper/lower (stateless) and
+            // per-node for capitalize (cross-element words are a documented
+            // v1 divergence).
+            let text = {
+                let tt = text_transform_context(tree, child, styles);
+                if tt == TextTransform::None { text } else { text::apply_text_transform(&text, tt) }
+            };
             let (fs, b, lh) = font_context(tree, child, styles, fonts);
             let fs = if styles.get(&child).is_some() { fs } else { font_size };
             let lh = if styles.get(&child).is_some() { lh } else { lh_elem };
@@ -4682,6 +4719,12 @@ fn build_element_inner(
         }
         if is_text {
             let text = tree.with_node(child, |n| n.text_content_of_text_node().unwrap_or("").to_string()).unwrap_or_default();
+            // text-transform folds into the string before the run sees it
+            // (批240) — same per-segment posture as the other run builder.
+            let text = {
+                let tt = text_transform_context(tree, child, styles);
+                if tt == TextTransform::None { text } else { text::apply_text_transform(&text, tt) }
+            };
             let (fs, b, lh) = font_context(tree, child, styles, fonts);
             let fs = if styles.get(&child).is_some() { fs } else { font_size };
             let lh = if styles.get(&child).is_some() { lh } else { lh_elem };

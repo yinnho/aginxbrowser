@@ -2852,6 +2852,35 @@ const _itPushBreak = (out) => {
   }
   out.push({ s: '\n', pre: false });
 };
+// 批240 / blitz#924: innerText REFLECTS text-transform (Chrome: uppercase
+// renders "ABC DEF", innerText reads it back transformed while textContent
+// keeps the source). The computed-style layer is declared-only for this
+// inherited prop, so the walk threads `st.tt` — a DECLARED value (including
+// 'none', which resets) overrides, unset keeps the ancestor's.
+const _itWordJoiner = (c) => {
+  const cp = c.codePointAt(0);
+  if (cp >= 0x30 && cp <= 0x39) return true; // ASCII digits join (`2abc` stays lowercase)
+  if (c === '_' || c === "'" || c === '’' || c === ':' || c === '·') return true;
+  // Han ideographs + kana own their words — they break (`中文abc` caps the a).
+  if ((cp >= 0x3040 && cp <= 0x30FF) || (cp >= 0x31F0 && cp <= 0x31FF) ||
+      (cp >= 0x3400 && cp <= 0x4DBF) || (cp >= 0x4E00 && cp <= 0x9FFF) ||
+      (cp >= 0xF900 && cp <= 0xFAFF) || (cp >= 0x20000 && cp <= 0x2A6DF)) return false;
+  return /[\p{L}\p{Nd}]/u.test(c); // letters (Hangul/Latin/Greek/…) and Nd digits join
+};
+const _itCapitalize = (s) => {
+  let out = '', joins = false;
+  for (const c of s) {
+    out += !joins && /\p{Ll}/u.test(c) ? c.toUpperCase() : c;
+    joins = _itWordJoiner(c);
+  }
+  return out;
+};
+const _itApplyTransform = (s, tt) => {
+  if (tt === 'uppercase') return s.toUpperCase();
+  if (tt === 'lowercase') return s.toLowerCase();
+  if (tt === 'capitalize') return _itCapitalize(s);
+  return s;
+};
 const _innerTextCollect = (node, out, st) => {
   if (!node) return;
   const nt = node.nodeType;
@@ -2859,6 +2888,7 @@ const _innerTextCollect = (node, out, st) => {
     if (st.hidden) return;
     let s = String(node.data ?? '');
     if (!s) return;
+    s = _itApplyTransform(s, st.tt);
     if (st.pre) { out.push({ s, pre: true }); return; }
     s = s.replace(/[ \t\r\n\f]+/g, ' ');
     if (out.length && out[out.length - 1].s.endsWith('\n')) s = s.replace(/^ +/, '');
@@ -2881,16 +2911,23 @@ const _innerTextCollect = (node, out, st) => {
   let visibility = cs && cs.visibility != null ? String(cs.visibility) : null;
   if (visibility == null) visibility = (el.style && el.style.visibility) || 'visible';
   const ws = cs && typeof cs['white-space'] === 'string' ? cs['white-space'] : '';
+  // Cascade first (it already folds the inline style); the inline read only
+  // serves elements the style engine hasn't answered for yet.
+  let tt = cs && typeof cs['text-transform'] === 'string' ? cs['text-transform'] : null;
+  if (tt == null) tt = (el.style && el.style.textTransform) || null;
   const prevHidden = st.hidden;
   const prevPre = st.pre;
+  const prevTt = st.tt;
   if (visibility === 'hidden' || visibility === 'collapse') st.hidden = true;
   if (_IT_PRE_TAGS.has(tag) || ws.startsWith('pre')) st.pre = true;
+  if (tt) st.tt = tt;
   if (blockish) _itPushBreak(out);
   const kids = el.childNodes;
   for (let i = 0; i < kids.length; i++) _innerTextCollect(kids[i], out, st);
   if (blockish) _itPushBreak(out);
   st.hidden = prevHidden;
   st.pre = prevPre;
+  st.tt = prevTt;
 };
 
 class Element extends Node {
@@ -2987,18 +3024,34 @@ class Element extends Node {
   // <script>/<style>/<template>/<noscript> and display:none subtrees are not
   // rendered so contribute nothing; visibility:hidden suppresses text but not
   // overridable descendants; block-level boxes break lines; collapsible
-  // whitespace collapses as rendered. Known approximations: no list markers,
-  // no text-transform, no table-cell tabs. The cascade is read per element
-  // (stylesheet rules + inline style); when the style engine hasn't run, the
-  // inline style attribute and the UA-default tag table below stand in.
+  // whitespace collapses as rendered; text-transform reflects (批240).
+  // Known approximations: no list markers, no table-cell tabs. The cascade is
+  // read per element (stylesheet rules + inline style); when the style engine
+  // hasn't run, the inline style attribute and the UA-default tag table below
+  // stand in.
   get innerText() {
     try {
       const rootDisp = _innerTextDisplay(this);
       if (rootDisp === 'none') return '';
+      // Seed the walk's context from the element's OWN declarations (批240):
+      // reading innerText on the element carrying text-transform must reflect
+      // it — a children-only walk never saw the declaration on the very
+      // element innerText was read from. Deliberately NOT walking the
+      // element itself as a node: the WeChat fetch contract reads
+      // #js_content's innerText while the container is still
+      // visibility:hidden (SSR-pending), and the container's own hiddenness
+      // must not suppress that read (v0.3.1 P1-3).
+      const cs = _itCascade(this);
+      let tt0 = cs && typeof cs['text-transform'] === 'string' ? cs['text-transform'] : null;
+      if (tt0 == null) tt0 = (this.style && this.style.textTransform) || null;
+      const ws = cs && typeof cs['white-space'] === 'string' ? cs['white-space'] : '';
+      const st = { hidden: false, pre: false };
+      if (tt0) st.tt = tt0;
+      if (_IT_PRE_TAGS.has(this.localName) || ws.startsWith('pre')) st.pre = true;
       const out = [];
       const kids = this.childNodes;
       for (let i = 0; i < kids.length; i++) {
-        _innerTextCollect(kids[i], out, { hidden: false, pre: false });
+        _innerTextCollect(kids[i], out, st);
       }
       if (!out.length) return '';
       let s = '';
@@ -9371,7 +9424,7 @@ globalThis.getComputedStyle = (el, pseudoElt) => {
     'border-radius': '0px',
     'z-index': 'auto', 'pointer-events': 'auto',
     'box-sizing': 'content-box', cursor: 'auto',
-    'white-space': 'normal', 'text-align': 'start',
+    'white-space': 'normal', 'text-align': 'start', 'text-transform': 'none',
     'flex-direction': 'row', 'flex-wrap': 'nowrap', 'align-items': 'normal',
     'justify-content': 'normal', gap: 'normal',
     'grid-template-columns': 'none', 'grid-template-rows': 'none',
@@ -12557,8 +12610,22 @@ globalThis.SVGGraphicsElement = class SVGGraphicsElement extends globalThis.SVGE
   getCTM() { return null; }
 };
 // Chrome sits geometry between graphics and the shapes (path instanceof
-// SVGGeometryElement).
-globalThis.SVGGeometryElement = class SVGGeometryElement extends globalThis.SVGGraphicsElement {};
+// SVGGeometryElement). 批240: getTotalLength/getPointAtLength measure the
+// shape in user units through the Rust-side PathMeasure — ovals as Skia's
+// exact conic chord measure, explicit d beziers analytically (Chrome's own
+// numbers, not the analytic perimeters).
+globalThis.SVGPoint = class SVGPoint {
+  constructor(x = 0, y = 0) { this.x = x; this.y = y; }
+  matrixTransform() { return this; }
+};
+globalThis.SVGGeometryElement = class SVGGeometryElement extends globalThis.SVGGraphicsElement {
+  getTotalLength() { return _OPS.op_svg_path_len(this._nid | 0); }
+  getPointAtLength(len) {
+    const r = String(_OPS.op_svg_path_point(this._nid | 0, Number(len) || 0));
+    const z = r.indexOf("\0");
+    return new SVGPoint(z < 0 ? 0 : Number(r.slice(0, z)), z < 0 ? 0 : Number(r.slice(z + 1)));
+  }
+};
 globalThis.SVGSVGElement = class SVGSVGElement extends globalThis.SVGGraphicsElement {};
 globalThis.SVGTextContentElement = class SVGTextContentElement extends globalThis.SVGGraphicsElement {
   getExtentOfChar() { return { x: 0, y: 0, width: 0, height: 0 }; }

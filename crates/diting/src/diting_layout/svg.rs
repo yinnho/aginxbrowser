@@ -28,6 +28,16 @@ use crate::diting_dom::tree::{DomTree, NodeId};
 use super::paint::Canvas;
 use super::{FontBook, Rect};
 
+// The path-measure family (批240: getTotalLength/getPointAtLength, split from
+// this file so it rides back under the layering audit's god-file ratchet cap
+// — the text/wrap.rs precedent) lives in `svg/measure.rs`. The path-data
+// lexer moved along with it; `parse_path` here consumes it through the
+// re-export below.
+mod measure;
+
+use measure::{lex_path, Tok};
+pub(crate) use measure::{build_path_measure, PathMeasure};
+
 /// A compiled svg: the viewBox (None = user units map 1:1 from the element
 /// box origin) plus the flattened op list in user units. Group transforms
 /// are already baked into every coordinate at compile time, so paint is a
@@ -799,67 +809,6 @@ fn parse_points(v: &str) -> Vec<(f32, f32)> {
 struct Subpath {
     pts: Vec<(f32, f32)>,
     closed: bool,
-}
-
-enum Tok {
-    Cmd(char),
-    Num(f32),
-}
-
-/// Char-based lexer — path data routinely glues commands to numbers
-/// ("M0,0L100,0"), which whitespace/comma splitting mangles.
-fn lex_path(d: &str) -> Vec<Tok> {
-    let chars: Vec<char> = d.chars().collect();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        if c == ',' || c.is_whitespace() {
-            i += 1;
-            continue;
-        }
-        if c.is_ascii_alphabetic() {
-            out.push(Tok::Cmd(c));
-            i += 1;
-            continue;
-        }
-        let start = i;
-        if c == '-' || c == '+' {
-            i += 1;
-        }
-        let mut seen_dot = false;
-        while i < chars.len() {
-            match chars[i] {
-                '0'..='9' => i += 1,
-                '.' if !seen_dot => {
-                    seen_dot = true;
-                    i += 1;
-                }
-                'e' | 'E' => {
-                    let mut j = i + 1;
-                    if j < chars.len() && (chars[j] == '-' || chars[j] == '+') {
-                        j += 1;
-                    }
-                    if j < chars.len() && chars[j].is_ascii_digit() {
-                        i = j;
-                        while i < chars.len() && chars[i].is_ascii_digit() {
-                            i += 1;
-                        }
-                    }
-                    break;
-                }
-                _ => break,
-            }
-        }
-        let s: String = chars[start..i].iter().collect();
-        if let Ok(v) = s.parse::<f32>() {
-            out.push(Tok::Num(v));
-        }
-        if i == start {
-            i += 1; // unparseable junk: skip one char
-        }
-    }
-    out
 }
 
 /// Path data → flattened subpaths through the given transform (Q subdivides

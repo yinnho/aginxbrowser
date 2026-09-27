@@ -14261,6 +14261,131 @@
         );
     }
 
+    // 批240 / blitz#924: innerText REFLECTS text-transform while textContent
+    // keeps the source (Chrome reads back the rendered casing); a declared
+    // `none` on a descendant resets the inherited transform; getComputedStyle
+    // reports the declared value (and 'none' for elements with no
+    // declaration).
+    #[test]
+    fn inner_text_reflects_text_transform() {
+        let mut rt = setup_runtime(
+            r#"<html><body>
+              <div style="text-transform:uppercase" id="u"><span>hello</span> world</div>
+              <div style="text-transform:capitalize" id="cap">don't stop</div>
+              <div style="text-transform:uppercase"><span style="text-transform:none" id="n">quiet</span></div>
+              <div id="plain">plain</div>
+            </body></html>"#,
+        );
+        let v = rt
+            .evaluate(
+                r#"JSON.stringify((() => {
+                    const g = (el) => getComputedStyle(el).getPropertyValue('text-transform');
+                    return {
+                        inner: document.getElementById('u').innerText,
+                        text: document.getElementById('u').textContent,
+                        cap: document.getElementById('cap').innerText,
+                        nested: document.getElementById('n').innerText,
+                        gcsU: g(document.getElementById('u')),
+                        gcsN: g(document.getElementById('n')),
+                        gcsPlain: g(document.getElementById('plain')),
+                    };
+                })())"#,
+            )
+            .unwrap();
+        let d: serde_json::Value = serde_json::from_str(v.as_str().unwrap()).unwrap();
+        assert_eq!(d["inner"], serde_json::json!("HELLO WORLD"), "diag={d}");
+        assert_eq!(d["text"], serde_json::json!("hello world"), "textContent keeps the source");
+        assert_eq!(d["cap"], serde_json::json!("Don't Stop"), "capitalize at word starts; apostrophe joins");
+        assert_eq!(d["nested"], serde_json::json!("quiet"), "declared none resets the inherited transform");
+        assert_eq!(d["gcsU"], serde_json::json!("uppercase"), "diag={d}");
+        assert_eq!(d["gcsN"], serde_json::json!("none"));
+        assert_eq!(d["gcsPlain"], serde_json::json!("none"), "no declaration reads the initial value");
+    }
+
+    /// 批240 / obscura#1100: getTotalLength/getPointAtLength through the
+    /// bootstrap SVGGeometryElement — Chrome's own numbers (headless probe
+    /// 2026-09-28), the Rust-side PathMeasure (conic chord measure for
+    /// ovals, analytic for explicit d beziers). getPointAtLength returns an
+    /// SVGPoint and clamps out-of-range distances to the path's ends.
+    #[test]
+    fn svg_geometry_measures_chrome_numbers() {
+        let mut rt = setup_runtime(
+            r#"<body><svg><path id="p2" d="M0,0 C50,100 100,0 100,100"></path><circle id="c" r="25"></circle></svg></body>"#,
+        );
+        let v = rt
+            .evaluate(
+                r#"JSON.stringify((() => {
+                    const p2 = document.getElementById('p2');
+                    const c = document.getElementById('c');
+                    const mid = p2.getPointAtLength(p2.getTotalLength() / 2);
+                    const over = p2.getPointAtLength(1e6);
+                    const neg = p2.getPointAtLength(-1);
+                    return {
+                        p2Len: p2.getTotalLength(),
+                        cLen: c.getTotalLength(),
+                        midX: mid.x, midY: mid.y,
+                        overX: over.x, overY: over.y,
+                        negX: neg.x, negY: neg.y,
+                        ptName: mid.constructor.name,
+                        ptIs: mid instanceof SVGPoint,
+                    };
+                })())"#,
+            )
+            .unwrap();
+        let d: serde_json::Value = serde_json::from_str(v.as_str().unwrap()).unwrap();
+        let close = |k: &str, want: f64, tol: f64| {
+            let got = d[k].as_f64().unwrap();
+            assert!((got - want).abs() < tol, "{k}: got {got}, want {want} (diag={d})");
+        };
+        close("p2Len", 160.71572875976562, 0.05);
+        close("cLen", 156.0674285888672, 0.01);
+        close("midX", 58.0898, 0.2);
+        close("midY", 49.7112, 0.1);
+        close("overX", 100.0, 0.01);
+        close("overY", 100.0, 0.01);
+        close("negX", 0.0, 1e-3);
+        close("negY", 0.0, 1e-3);
+        assert_eq!(d["ptName"], serde_json::json!("SVGPoint"));
+        assert_eq!(d["ptIs"], serde_json::json!(true), "getPointAtLength returns an SVGPoint");
+    }
+
+    // text-transform rides the layout measure: an uppercased span is exactly
+    // as wide as its literal-uppercase twin (Chrome: uppercase glyphs, not
+    // the lowercase source, decide the box).
+    #[test]
+    #[cfg(feature = "screenshot")]
+    fn text_transform_uppercase_widens_layout() {
+        let mut rt = setup_runtime(
+            r#"<html><body style="margin:0">
+              <p style="margin:0"><span id="up" style="text-transform:uppercase">hello</span></p>
+              <p style="margin:0"><span id="lit">HELLO</span></p>
+              <p style="margin:0"><span id="low">hello</span></p>
+            </body></html>"#,
+        );
+        let v = rt
+            .evaluate(
+                r#"JSON.stringify((() => ({
+                    upW: document.getElementById('up').getBoundingClientRect().width,
+                    litW: document.getElementById('lit').getBoundingClientRect().width,
+                    lowW: document.getElementById('low').getBoundingClientRect().width,
+                }))())"#,
+            )
+            .unwrap();
+        let d: serde_json::Value = serde_json::from_str(v.as_str().unwrap()).unwrap();
+        let up = d["upW"].as_f64().unwrap();
+        let lit = d["litW"].as_f64().unwrap();
+        let low = d["lowW"].as_f64().unwrap();
+        assert!(up > 0.0, "transformed span must lay out (diag={d})");
+        assert!(
+            (up - lit).abs() < 0.51,
+            "uppercase transform width == literal uppercase width (up={up}, lit={lit})"
+        );
+        assert!(
+            up > low + 0.5,
+            "HELLO is wider than hello — the transform really rode the measure (up={up}, low={low})"
+        );
+    }
+
     // vertical-align authored lengths/percentages are baseline raises on the
     // line (CSS2 §10.8.1): positive lifts, negative drops, % of the element's
     // own line-height. Mixed shifts on one line keep the RELATIVE offsets —

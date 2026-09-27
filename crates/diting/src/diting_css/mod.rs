@@ -1127,6 +1127,12 @@ pub struct ComputedStyle {
     /// runs as uppercase glyphs at 70% of the font size (Blink's synthesis
     /// ratio); true capitals and caseless chars keep the full size.
     pub font_variant_caps: Option<bool>,
+    /// Inherited: `text-transform` case mapping applied to the rendered text
+    /// runs — measure and paint both consume the same transformed string,
+    /// while the DOM keeps the original (textContent is untouched, Chrome's
+    /// contract). `None` = unset (inherits as `none`); a declared `None`
+    /// variant resets an inherited transform.
+    pub text_transform: Option<TextTransform>,
     /// Queryable-container marker + name (css-conditional-5). Marker only —
     /// no containment behavior is modeled.
     pub container_type: ContainerType,
@@ -3360,6 +3366,18 @@ pub enum TextAlign {
     Right,
 }
 
+/// `text-transform` case mapping (CSS Text §6.1) — rendering-only; the DOM
+/// text is never rewritten. The layout-side context walker resolves
+/// inheritance (`small_caps_context` precedent), so the `None` variant
+/// carries "declared `none`", which resets an ancestor's transform.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextTransform {
+    None,
+    Uppercase,
+    Lowercase,
+    Capitalize,
+}
+
 /// UA defaults per tag — the tiny corner of the upstream ua_style() that our
 /// property subset can express: phrasing content is inline, everything else
 /// block; b/strong bold.
@@ -4522,6 +4540,16 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             style.font_variant_caps = match v {
                 "small-caps" => Some(true),
                 "normal" => Some(false),
+                _ => return false,
+            };
+            true
+        }
+        "text-transform" => {
+            style.text_transform = match v {
+                "none" => Some(TextTransform::None),
+                "uppercase" => Some(TextTransform::Uppercase),
+                "lowercase" => Some(TextTransform::Lowercase),
+                "capitalize" => Some(TextTransform::Capitalize),
                 _ => return false,
             };
             true
