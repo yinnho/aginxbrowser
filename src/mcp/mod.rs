@@ -1150,6 +1150,17 @@ it does not exist.",
     }
 
     #[tool(
+        description = "Install a third-party flow from DupHub into the server's workflow directory, making it runnable by name via flow_run. Pulls the template's manifest, verifies every file's sha256 against it (a package that fails anywhere is not installed), requires a valid flow.json with a steps array, and lands atomically under workflow/<name>/ — replacing any previous install, overriding a same-named built-in. The receipt lists files, total bytes, step count, and how many steps carry scripts (eval_steps) — third-party scripts run with this engine's privileges in session pages, so review before running. Source remote is env-configured (AGINXBROWSER_DUPHUB_URL), never a parameter.",
+        annotations(title = "Install Flow")
+    )]
+    async fn flow_install(&self, Parameters(params): Parameters<FlowInstallParams>) -> String {
+        match crate::flow::install::install(&params.name).await {
+            Ok(receipt) => receipt.to_string(),
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
         description = "Close a browser session and free its resources. For a persistent session this also drops the on-disk login snapshot - idle expiry keeps it, an explicit close does not.",
         annotations(title = "Session Close")
     )]

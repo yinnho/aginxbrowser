@@ -5,10 +5,10 @@
 
 use std::fs::File;
 
-// The runtime below is unix-family libc (ioctl/mmap/poll); the consts/structs
-// above (and the ioctl-encoding pin test) compile everywhere so the encoding
-// stays tested on every dev box. Windows libc has none of these symbols
-// (v0.5.4 msvc CI red).
+// The runtime below is unix-family libc (ioctl/mmap/poll). The module is
+// gated to screenshot+unix at its declaration (main.rs), same gate as the
+// consumer — so the ioctl-encoding pin test runs in every build that can
+// actually paint (tests run with --features screenshot).
 #[cfg(unix)]
 use std::fs::OpenOptions;
 #[cfg(unix)]

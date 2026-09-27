@@ -25,6 +25,10 @@ use std::path::PathBuf;
 
 use crate::session::{ScrollDirection, SessionCommand, SessionManager};
 
+/// flow_install — pull a flow package from a DupHub remote into the
+/// workflow directory (issue #143, the ecosystem's consumption side).
+pub mod install;
+
 // ---------------------------------------------------------------------------
 // Recording → flow.json
 // ---------------------------------------------------------------------------

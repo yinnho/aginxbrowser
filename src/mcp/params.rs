@@ -524,6 +524,13 @@ pub struct FlowRunParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct FlowInstallParams {
+    /// Workflow name — the DupHub template to pull and the directory it
+    /// lands in (workflow/<name>/). Lowercase/digits/dashes.
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SessionNetworkParams {
     /// Session ID
     pub session_id: String,

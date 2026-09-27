@@ -648,6 +648,27 @@ pub(crate) async fn flow_run_handler(Json(body): Json<FlowRunBody>) -> Result<im
 }
 
 #[derive(Deserialize)]
+pub(crate) struct FlowInstallBody {
+    /// Workflow name — the DupHub template to pull and the directory it
+    /// lands in (workflow/<name>/). Lowercase/digits/dashes.
+    pub name: String,
+}
+
+/// Install a third-party flow from DupHub into the workflow directory:
+/// manifest fetch → per-file sha256 verification → flow.json validation →
+/// atomic landing under workflow/<name>/. The receipt discloses file count,
+/// total bytes, steps, and eval_steps (how many steps carry scripts) —
+/// third-party scripts run with this engine's privileges on flow_run.
+pub(crate) async fn flow_install_handler(
+    Json(body): Json<FlowInstallBody>,
+) -> Result<impl IntoResponse, AppError> {
+    let receipt = flow::install::install(&body.name)
+        .await
+        .map_err(AppError::BadRequest)?;
+    Ok((StatusCode::OK, Json(receipt)))
+}
+
+#[derive(Deserialize)]
 pub(crate) struct SessionNetworkQuery {
     /// `media` extracts playback/stream links (m3u8, mp4, ...) from the
     /// requests the page actually issued; anything else lists all traffic.

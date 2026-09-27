@@ -31,6 +31,9 @@ mod har;
 mod mcp;
 mod page;
 mod panel;
+// Same gate as its only consumer (panel::on): without screenshot+unix the
+// whole DRM family is unreferenced and dead-code-warns on plain dev builds.
+#[cfg(all(feature = "screenshot", unix))]
 mod panel_drm;
 mod rate;
 // HTTP route handlers split by surface (ARCHITECTURE.md P2 batch 2):
@@ -102,7 +105,7 @@ use routers::acquisition::{
 use routers::outputs::{pdf_handler, screenshot_handler, video_handler};
 use routers::sessions::{
     account_delete_handler, account_login_handler, account_verify_handler, accounts_handler,
-    flow_run_handler, import_curl_handler, max_body_bytes, session_challenges_handler, session_click_handler,
+    flow_install_handler, flow_run_handler, import_curl_handler, max_body_bytes, session_challenges_handler, session_click_handler,
     session_click_xy_handler, session_clone_handler, session_close_handler,
     session_console_handler, session_cookies_handler, session_create_handler,
     session_dialog_handler, session_drag_handler, session_eval_handler, session_export_handler,
@@ -387,6 +390,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/scrape", post(firecrawl_compat::scrape_handler))
         .route("/session/create", post(session_create_handler))
         .route("/flow/run", post(flow_run_handler))
+        .route("/flow/install", post(flow_install_handler))
         .route("/session/:id/clone", post(session_clone_handler))
         .route("/import/curl", post(import_curl_handler))
         .route("/session/list", get(session_list_handler))

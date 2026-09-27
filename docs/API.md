@@ -1269,6 +1269,42 @@ One of `flow` / `name` is required.
 
 The repo ships three sample flows under `workflow/` (`xcom-profile`, `juejin-post`, `zhihu-answer`) — one runs green logged-out, one green, one fails on a 403 wall on purpose, each with a `flow.md` explaining itself. A workflow `name` is one path segment of lowercase/digits/dashes; anything else is rejected before it touches the filesystem. Drop a directory in to deploy — no rebuild.
 
+### POST /flow/install
+
+Install a third-party flow from a DupHub remote into the server's workflow directory, making it runnable by name via [`POST /flow/run`](#post-flowrun). The wire is the dup protocol's templates scope: `GET {base}/api/templates/{name}/dup/manifest` (`{files: {relative path → sha256}, hash}`) then `GET {base}/api/templates/{name}/dup/file/{path}` (raw bytes, anonymous). The base remote is env-configured (`AGINXBROWSER_DUPHUB_URL`, default `https://duphub.com`) — never a request parameter, so an install can't be aimed at an arbitrary URL.
+
+Install semantics, in order — every failure leaves the filesystem untouched:
+
+1. **name gate** — same as `flow_run`: lowercase/digits/dashes, one path segment
+2. **manifest validation** — non-empty, contains `flow.json`, every path relative with ordinary components only (`..`, leading `/`, backslashes die here), ≤ 64 files
+3. **fetch + verify** — each file's bytes must sha256-match the manifest's promise (≤ 4 MiB a file, ≤ 8 MiB total); a package that fails anywhere is not installed
+4. **flow.json validation** — must parse and carry a `steps` array, before anything is written
+5. **atomic landing** — everything stages in `workflow/.installing-<name>/`, then swaps into `workflow/<name>/`, replacing any previous install; a same-named built-in is overridden (on-disk beats baked-in, the same rule as a dropped directory)
+
+| Body | Type | Default | Notes |
+|---|---|---|---|
+| name | string | — | DupHub template name = the directory it lands in |
+
+**Response:**
+
+```json
+{
+  "name": "xhs-post",
+  "source": "https://duphub.com",
+  "manifest_hash": "…",
+  "files": ["flow.json", "templates/body.html"],
+  "bytes": 4211,
+  "steps": 9,
+  "eval_steps": 4,
+  "installed_at": "workflow/xhs-post",
+  "overrides_builtin": true,
+  "available_now": true,
+  "disclosure": "third-party flow: its scripts execute with this engine's privileges inside session pages on flow_run — review the steps before running"
+}
+```
+
+`eval_steps` counts steps carrying `args.script` — the disclosure line is the point: a third-party flow's scripts run with this engine's privileges in session pages, so review before `flow_run`. Uploading is the `dup` CLI's job (credentials stay there); this endpoint only ever reads.
+
 ### GET /session/{id}/network
 
 The session's network request log for the current page — every document, subresource and script-initiated `fetch()`/XHR the page actually issued, one compact row each. This is the sniffer surface.
@@ -1640,6 +1676,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `session_challenges` | One-call risk-control report: did this session hit an anti-bot wall? Taobao/tmall x5 answers 200 — a punish-page redirect or an MTop body with `FAIL_SYS_USER_VALIDATE`/`RGV587`/`x5secdata`. Returns `{total, events:[{url,method,status,kind,via}]}`, plus `account` and a human-`handoff` instruction when there are hits (detection only — the engine never auto-bypasses) |
 | `session_export` | Export the session's recorded actions: a runnable curl replay script (default), the raw action log (`format=jsonl`), or a flow.json document (`format=json` — cookies stripped, editable ops) that `flow_run` replays server-side |
 | `flow_run` | Run a flow to completion — zero model tokens: an inline flow document or a server-side `workflow/<name>/flow.json` asset, `{{var}}` substitution, `wait`/`expect` gates, `save` outputs; fails with a receipt (failing step, reason, URL, screenshot) and the session stays alive; `session_id` composes flows with imported login state |
+| `flow_install` | Install a third-party flow from DupHub into the workflow directory — manifest sha256 verification, flow.json validation, atomic landing under `workflow/<name>/`; the receipt discloses files, bytes, steps and `eval_steps` (review third-party scripts before running) |
 | `session_close` | Close the session (for a persistent one this drops the on-disk login snapshot — idle expiry keeps it, an explicit close does not) |
 
 #### `fetch` Tool Parameters
@@ -1801,7 +1838,8 @@ If AginxBrowser is deployed on a remote server, connect through an SSH tunnel:
 | `AGINXBROWSER_MCP_ALLOWED_HOSTS` | unset | Extra `Host` values accepted by `/mcp` (comma-separated) — the DNS-rebinding guard defaults to loopback; add your LAN IP / Docker hostname when other machines call the instance |
 | `AGINXBROWSER_DOWNLOAD_DIR` | `.` | Directory where `/download` saves files |
 | `AGINXBROWSER_MAX_BODY_BYTES` | `67108864` (64 MiB) | Max request body for `/eval`-family POST endpoints (`/session/{id}/eval`, `/screenshot`, `/video`, `/pdf`). Oversized bodies get a structured `413 EVAL_BODY_TOO_LARGE` naming the limit |
-| `AGINXBROWSER_WORKFLOW_DIR` | `./workflow` | Where `flow_run(name=…)` looks for on-disk `<name>/flow.json` overrides — the sample flows are baked into the binary, a file here beats the same-named built-in and new names add to the list; drop a directory in to deploy, no rebuild |
+| `AGINXBROWSER_WORKFLOW_DIR` | `./workflow` | Where `flow_run(name=…)` looks for on-disk `<name>/flow.json` overrides — the sample flows are baked into the binary, a file here beats the same-named built-in and new names add to the list; drop a directory in to deploy, no rebuild. `POST /flow/install` lands installed flows here too |
+| `AGINXBROWSER_DUPHUB_URL` | `https://duphub.com` | Base remote for `POST /flow/install` — a private DupHub instance replaces this. Env-only, never a request parameter |
 | `AGINXBROWSER_PROXY` | None | Proxy address (used when `use_proxy:true`, and applied automatically for browser/session/CDP navigations to known-blocked domains) |
 | `CAPTCHA_SOLVER_API_KEY` | None | 2captcha API key; enables automatic CAPTCHA solving when set |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | CAPTCHA solving service |

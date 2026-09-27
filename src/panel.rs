@@ -517,7 +517,11 @@ mod on {
 #[cfg(all(feature = "screenshot", unix))]
 pub use on::start;
 
-#[cfg(not(all(feature = "screenshot", unix)))]
+// The call site is itself cfg(screenshot); on the unix+real path above it
+// resolves to `on::start`. This stub covers Windows screenshot builds only
+// — without the feature the call site is gone too, and an uncalled stub
+// would dead-code-warn on plain dev builds.
+#[cfg(all(feature = "screenshot", not(unix)))]
 pub fn start() {
     tracing::warn!("panel: no paint path on this platform (unix + --features screenshot build required)");
 }
