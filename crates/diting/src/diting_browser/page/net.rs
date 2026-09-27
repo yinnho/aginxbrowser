@@ -292,6 +292,7 @@ impl Page {
             // override back on top of it.
             self.apply_viewport_override();
             self.apply_emulated_media();
+            self.apply_touch_override();
         }
         if let Some(lang) = lang.filter(|l| !l.is_empty()) {
             self.http_client.set_accept_language(lang).await;

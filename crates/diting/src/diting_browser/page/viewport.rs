@@ -41,6 +41,38 @@ impl Page {
         self.apply_emulated_media();
     }
 
+    /// Pin CDP `Emulation.setTouchEmulationEnabled` (#151): `enabled` swaps
+    /// the interaction-media answers (pointer:coarse / hover:none) and
+    /// reports `navigator.maxTouchPoints = points` — WITHOUT touching the
+    /// viewport, which is `setDeviceMetricsOverride`'s knob (Chrome's
+    /// touch emulation is orthogonal to device metrics). Disabling restores
+    /// the device class's own touch story (0 desktop, 5 under a mobile
+    /// viewport pin).
+    pub fn set_touch_emulation(&mut self, enabled: bool, points: u32) {
+        self.touch_override = enabled.then_some(points.max(1));
+        // Live change both ways: disabling has to actively restore the
+        // realm's answers (apply_* below is a no-op when the pin is None).
+        if let Some(js) = &mut self.js {
+            let _ = js.execute_script(
+                "<touch-emulation>",
+                &format!("__diting_setTouch({enabled}, {})", points.max(1)),
+            );
+        }
+    }
+
+    /// Replay the touch pin into the current realm (realm-rebuild path).
+    /// No-op when none is set, so navigation on a default session costs
+    /// one branch.
+    pub(super) fn apply_touch_override(&mut self) {
+        let Some(points) = self.touch_override else { return };
+        if let Some(js) = &mut self.js {
+            let _ = js.execute_script(
+                "<touch-emulation>",
+                &format!("__diting_setTouch(true, {points})"),
+            );
+        }
+    }
+
     /// Pin `Emulation.setTimezoneOverride`. `None` clears back to the
     /// language-derived zone. Replay happens from `init_js` because every
     /// navigation rebuilds the realm.

@@ -9097,16 +9097,26 @@ const _MQ_MOBILE_TABLE = {
   hover: { none: true, hover: false },
   'any-hover': { none: true, hover: false },
 };
-// Fold the mobile table and the emulated-media table (CDP
+// What touch emulation (CDP Emulation.setTouchEmulationEnabled) pins — a
+// NARROWER table than the mobile viewport: touch changes the pointer/hover
+// story only, never the prefers-* preferences or display-mode (#151).
+const _MQ_TOUCH_TABLE = {
+  pointer: { coarse: true, fine: false, none: false },
+  'any-pointer': { coarse: true, fine: false, none: false },
+  hover: { none: true, hover: false },
+  'any-hover': { none: true, hover: false },
+};
+// Fold the mobile table, the touch table, and the emulated-media table (CDP
 // Emulation.setEmulatedMedia / Playwright page.emulateMedia) into the one
-// truth table _mqExpr reads. Emulated entries replace the feature's whole
-// table — Chrome's rule that the emulated value is THE value — so
+// truth table _mqExpr reads. Later layers replace a feature's whole table —
+// Chrome's rule that the emulated value is THE value — so
 // prefers-reduced-motion: reduce survives even under a mobile override.
 globalThis.__diting_mqRecompute = function () {
-  const mobile = globalThis.__diting_mq_mobile, emu = globalThis.__diting_mq_emulated;
-  if (!mobile && !emu) { globalThis.__diting_mq_overrides = null; return; }
+  const mobile = globalThis.__diting_mq_mobile, touch = globalThis.__diting_mq_touch, emu = globalThis.__diting_mq_emulated;
+  if (!mobile && !touch && !emu) { globalThis.__diting_mq_overrides = null; return; }
   const t = {};
   if (mobile) for (const k in mobile) t[k] = mobile[k];
+  if (touch) for (const k in touch) t[k] = touch[k];
   if (emu) for (const k in emu) t[k] = emu[k];
   globalThis.__diting_mq_overrides = t;
 };
@@ -17213,7 +17223,9 @@ globalThis.__diting_setViewport = function(w, h, mobile, dpr) {
   globalThis.__diting_mqRecompute();
   // (#117) through the store: defineProperty on the hoisted instance would
   // materialize an OWN prop and break Object.keys(navigator) === [].
-  globalThis.__diting_navSet('maxTouchPoints', mobile ? 5 : 0);
+  // The touch pin outranks the device class (an explicit
+  // setTouchEmulationEnabled survives a viewport re-pin; #151).
+  globalThis.__diting_navSet('maxTouchPoints', __diting_touchMax() || (mobile ? 5 : 0));
   // Feed the Rust layout ICB so element rects and @media cascade see the
   // same width the scripts do.
   try { _domRaw("set_viewport", String(w), String(h)); } catch (e) {}
@@ -17224,15 +17236,34 @@ globalThis.__diting_setViewport = function(w, h, mobile, dpr) {
 };
 
 // Drop the override: persona viewport everywhere, desktop pointer answers.
-// Emulated media (setEmulatedMedia) is a separate Chrome knob and survives.
+// Emulated media (setEmulatedMedia) and touch emulation are separate Chrome
+// knobs and survive.
 globalThis.__diting_clearViewport = function() {
   globalThis.__diting_mq_mobile = null;
   globalThis.__diting_mqRecompute();
-  globalThis.__diting_navSet('maxTouchPoints', 0);
   __diting_setPersona();
+  globalThis.__diting_navSet('maxTouchPoints', __diting_touchMax());
   try { globalThis.dispatchEvent(new Event('resize')); } catch (e) {}
   // Media queries re-evaluated after the resize: subscribed MQLs that
   // crossed fire change (issue #25).
+  try { globalThis.__diting_mqFlush(); } catch (e) {}
+};
+
+// Touch emulation (CDP Emulation.setTouchEmulationEnabled, #151): swap the
+// interaction-media answers and maxTouchPoints WITHOUT touching the
+// viewport — device metrics are setDeviceMetricsOverride's knob, this is
+// only the touch capability face. The pin is the point count (> 0); null
+// restores the device class's own touch story (0 desktop, 5 mobile).
+function __diting_touchMax() {
+  const t = globalThis.__diting_touch_points;
+  return typeof t === 'number' && t > 0 ? t : 0;
+}
+globalThis.__diting_setTouch = function(enabled, maxPoints) {
+  globalThis.__diting_mq_touch = enabled ? _MQ_TOUCH_TABLE : null;
+  globalThis.__diting_touch_points = enabled ? (maxPoints > 0 ? maxPoints : 1) : null;
+  globalThis.__diting_mqRecompute();
+  globalThis.__diting_navSet('maxTouchPoints', enabled ? globalThis.__diting_touch_points
+    : (globalThis.__diting_mq_mobile ? 5 : 0));
   try { globalThis.__diting_mqFlush(); } catch (e) {}
 };
 

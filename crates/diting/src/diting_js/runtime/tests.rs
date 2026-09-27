@@ -5460,6 +5460,59 @@
     }
 
     #[test]
+    fn clicking_label_wrapping_range_input_terminates() {
+        // blitz#957: upstream's label default action re-dispatches a click
+        // to the wrapped control, whose activation bubbles back to the
+        // label's default action again — mutual recursion, stack overflow.
+        // Our _postClickActivation breaks the cycle structurally:
+        // activation runs at the click TARGET only, and a control's own
+        // click is self-interactive (never forwards through a wrapping
+        // label again), so the label forwards ONCE and the forwarded click
+        // is terminal. The test completing IS the probe; the counters pin
+        // the forwarding count.
+        let mut rt = setup_runtime(
+            r#"<html><body style="margin:0">
+            <label id="hue" style="display:block; width:180px; height:40px;">
+                Hue
+                <input id="range" type="range" min="0" max="1000" style="width:120px; height:20px;">
+            </label>
+        </body></html>"#,
+        );
+        let result = rt
+            .evaluate(
+                r#"
+            let rangeClicks = 0, labelClicks = 0;
+            const hue = document.getElementById('hue');
+            const range = document.getElementById('range');
+            hue.addEventListener('click', () => labelClicks++);
+            range.addEventListener('click', () => rangeClicks++);
+            hue.click();
+            range.click();
+            // Trusted-path arm: the CDP Input domain drives the same
+            // activation sequence through this entry point.
+            globalThis.__diting_dispatchTrustedClick(
+                hue, new MouseEvent('click', {bubbles: true, cancelable: true}), false);
+            return [labelClicks, rangeClicks];
+        "#,
+            )
+            .unwrap();
+        // Per-click accounting (Chrome): a label click fires the label's
+        // own listener, forwards one synthetic click to the range (which
+        // bubbles back through the label — listener count, no re-forward),
+        // and every click at/below the label bubbles to it. label: 2 (own
+        // + forwarded-bubble) + 1 (direct range click bubbling) + 2
+        // (trusted label click, same shape) = 5; range: 1 forwarded × 2 + 1
+        // direct = 3.
+        assert_eq!(
+            result,
+            serde_json::json!([
+                5,
+                3,
+            ])
+        );
+    }
+
+    #[test]
     fn test_click_activation_flips_checked_without_page_traps() {
         // React 16's `_valueTracker` installs an own-property `checked` trap
         // on controlled radios/checkboxes whose setter mirrors every JS

@@ -1778,6 +1778,75 @@ ms.addEventListener('sourceopen', function(){ \
         assert_eq!(p.evaluate("navigator.maxTouchPoints").as_f64(), Some(0.0));
     }
 
+    /// #151 (obscura#1101 absorption): touch emulation swaps the capability
+    /// face only — pointer/hover answers + maxTouchPoints — never the
+    /// viewport, and survives navigation + viewport re-pins.
+    #[tokio::test(flavor = "current_thread")]
+    async fn touch_emulation_swaps_capability_face_and_survives_realm_rebuilds() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![
+            ("/a", 200, "<html></html>".into()),
+            ("/b", 200, "<html></html>".into()),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/a"))
+            .await
+            .unwrap();
+
+        // Desktop baseline.
+        assert_eq!(p.evaluate("navigator.maxTouchPoints").as_f64(), Some(0.0));
+        assert_eq!(
+            p.evaluate("matchMedia('(pointer:coarse)').matches"),
+            serde_json::json!(false)
+        );
+
+        // Enable: interaction answers and touch points move; the viewport
+        // and the prefers-* preferences do NOT (narrower than the mobile
+        // table).
+        let before = p.evaluate("innerWidth + 'x' + innerHeight");
+        p.set_touch_emulation(true, 3);
+        assert_eq!(p.evaluate("navigator.maxTouchPoints").as_f64(), Some(3.0));
+        assert_eq!(
+            p.evaluate("matchMedia('(pointer:coarse) and (hover:none)').matches"),
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            p.evaluate("matchMedia('(prefers-color-scheme:dark)').matches"),
+            serde_json::json!(false)
+        );
+        assert_eq!(p.evaluate("innerWidth + 'x' + innerHeight"), before);
+
+        // The pin outranks the device class: a viewport re-pin (and its
+        // clear) must not reset the touch points, and disabling falls back
+        // to the class's own story — 0 desktop, 5 under a mobile pin.
+        p.set_viewport_override(375.0, 667.0, false, None);
+        assert_eq!(p.evaluate("navigator.maxTouchPoints").as_f64(), Some(3.0));
+        p.set_touch_emulation(false, 3);
+        assert_eq!(p.evaluate("navigator.maxTouchPoints").as_f64(), Some(0.0));
+        assert_eq!(
+            p.evaluate("matchMedia('(pointer:coarse)').matches"),
+            serde_json::json!(false)
+        );
+        p.set_viewport_override(375.0, 667.0, true, None);
+        p.set_touch_emulation(true, 1);
+        assert_eq!(p.evaluate("navigator.maxTouchPoints").as_f64(), Some(1.0));
+        p.set_touch_emulation(false, 1);
+        assert_eq!(p.evaluate("navigator.maxTouchPoints").as_f64(), Some(5.0));
+        p.clear_viewport_override();
+
+        // The pin survives navigation — the realm rebuild replays it, or
+        // the page silently flips back mid-session.
+        p.set_touch_emulation(true, 2);
+        p.navigate(&format!("http://127.0.0.1:{port}/b"))
+            .await
+            .unwrap();
+        assert_eq!(p.evaluate("navigator.maxTouchPoints").as_f64(), Some(2.0));
+        assert_eq!(
+            p.evaluate("matchMedia('(pointer:coarse)').matches"),
+            serde_json::json!(true)
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn off_request_detaches_observer() {
         let _g = net_test_guard();

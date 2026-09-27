@@ -294,6 +294,12 @@ pub struct Page {
     /// so the emulation has to be replayed or the page silently flips back
     /// to the persona defaults mid-session (#29).
     emulated_media: Option<EmulatedMedia>,
+    /// Touch emulation pin from CDP `Emulation.setTouchEmulationEnabled`
+    /// (#151): the emulated `navigator.maxTouchPoints` while set. Narrower
+    /// than the mobile viewport pin — pointer/hover answers and touch points
+    /// move, the viewport does not. Replayed after every realm rebuild for
+    /// the same reason as `viewport_override`.
+    touch_override: Option<u32>,
     /// CDP `Emulation.setTimezoneOverride`. Lives on the Page so a
     /// navigation, which rebuilds the realm, replays it. Empty means the
     /// bootstrap's language-derived zone.
@@ -500,6 +506,7 @@ impl Page {
             viewport_override: None,
             dpr_override: None,
             emulated_media: None,
+            touch_override: None,
             timezone_override: None,
             fp_seed: u64::from_be_bytes(
                 uuid::Uuid::new_v4().into_bytes()[..8].try_into().unwrap(),
@@ -722,6 +729,7 @@ impl Page {
         self.restore_session_storage();
         self.apply_viewport_override();
         self.apply_emulated_media();
+        self.apply_touch_override();
         self.apply_timezone_override();
     }
 

@@ -119,8 +119,38 @@ pub async fn handle(
             default_background_color(params)?;
             Ok(json!({}))
         }
-        // Touch emulation does not affect layout; ack for compatibility.
-        "setTouchEmulationEnabled" => Ok(json!({})),
+        // Touch emulation (#151, obscura#1101 absorption): swap the touch
+        // capability face only — matchMedia pointer/hover answers and
+        // navigator.maxTouchPoints — without touching the viewport (device
+        // metrics are setDeviceMetricsOverride's knob). Chrome's documented
+        // maxTouchPoints default is one; real devices top out at 10, so
+        // larger asks error rather than publish an automation tell.
+        "setTouchEmulationEnabled" => {
+            let enabled = params.get("enabled").and_then(Value::as_bool).ok_or(
+                "Emulation.setTouchEmulationEnabled requires boolean enabled",
+            )?;
+            let max_points = match params.get("maxTouchPoints") {
+                None => 1,
+                Some(v) => {
+                    let n = v.as_i64().ok_or(
+                        "Emulation.setTouchEmulationEnabled maxTouchPoints must be an integer",
+                    )?;
+                    if !(1..=10).contains(&n) {
+                        return Err(
+                            "Emulation.setTouchEmulationEnabled maxTouchPoints must be between 1 and 10"
+                                .to_string(),
+                        );
+                    }
+                    n as u32
+                }
+            };
+            if let Some(page) = ctx.get_session_page_mut(session_id) {
+                page.set_touch_emulation(enabled, max_points);
+            }
+            Ok(json!({}))
+        }
+        // Focus emulation is about dispatching synthetic focus/blur in
+        // headless Chrome; we already dispatch real events — ack only.
         "setFocusEmulationEnabled" => Ok(json!({})),
         // Media emulation (Playwright's page.emulateMedia / Puppeteer's
         // emulateMediaType): `features` replaces the prefers-* overrides,
