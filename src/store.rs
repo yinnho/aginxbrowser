@@ -932,6 +932,21 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
+    /// Every snapshot id, most recently saved first — startup restore (#88)
+    /// walks this list to bring the flushed fleet back under its own ids.
+    fn list_session_snapshot_ids(&self) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM session_snapshots ORDER BY updated_at DESC")
+            .map_err(|e| e.to_string())?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(ids)
+    }
+
     // Named login identities (account.rs). Keyed (owner, name) from day one —
     // hosted multi-caller deployments keep callers' accounts separate the
     // same way the cache rows are scoped. Records hold login cookies and live
@@ -1234,6 +1249,12 @@ pub fn delete_session_snapshot(id: &str) -> bool {
 
 pub fn purge_session_snapshots(max_age_secs: i64) {
     let _ = with_store(|st| st.purge_session_snapshots(max_age_secs));
+}
+
+/// Snapshot ids, most recently saved first; empty when the store is
+/// disabled (startup restore then revives nothing, the pre-#88 behavior).
+pub fn list_session_snapshot_ids() -> Vec<String> {
+    with_store(|st| st.list_session_snapshot_ids()).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------

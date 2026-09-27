@@ -463,6 +463,21 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".to_string())
     };
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+
+    // #88: sessions the previous process flushed at ITS shutdown revive
+    // here, under their own ids, before the listener opens — a binary swap
+    // costs no login state, and the first /sessions shows the fleet the
+    // operator left running. (Lazy revival remains the standing fallback:
+    // any snapshot id still revives on first touch.)
+    {
+        let restored = crate::session::SESSIONS.lock().await.restore_all();
+        if restored > 0 {
+            tracing::info!(
+                "restored {restored} session(s) from the previous run — same ids, login state intact"
+            );
+        }
+    }
+
     tracing::info!("aginxbrowser listening on {}", listener.local_addr()?);
     if let Some(port) = cdp_port {
         tracing::info!(
@@ -494,8 +509,45 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    axum::serve(listener, app.with_state(mcp::mcp_http_service())).await?;
+    axum::serve(listener, app.with_state(mcp::mcp_http_service()))
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
+}
+
+/// #88: upgrades must not cost live sessions. On SIGTERM/SIGINT the live
+/// fleet is flushed to the snapshot/account stores before the server stops
+/// accepting — the replacement binary's startup restores every flushed
+/// session under its own id (see the restore call before the listener
+/// opens). The flush is budgeted: a session stuck mid-command keeps its
+/// last per-command snapshot instead of holding the process past the
+/// supervisor's kill timeout.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("shutdown signal — flushing live sessions for restart");
+    let flushed = crate::session::SESSIONS.lock().await.flush_for_shutdown().await;
+    tracing::info!(
+        "shutdown flush complete: {flushed} session(s) persisted; a restart restores them under the same ids"
+    );
+    // The 60s shared-jar persist tick may never fire again — close its window.
+    server::persist_shared_cookies();
 }
 
 /// 调用方交 JSON 和模板名。浏览器用自己文件夹里的模板生成 HTML，并交给面板显示。

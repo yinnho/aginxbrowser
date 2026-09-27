@@ -1942,6 +1942,203 @@
         mgr.close_inner(&plain, true);
     }
 
+    /// #88: an upgrade must not cost live sessions. A keepalive
+    /// (non-persistent) session and a plain ttl one both flush to their
+    /// snapshots at shutdown; a brand-new manager over the same store
+    /// restores both under their own ids with the login cookie intact.
+    #[tokio::test]
+    async fn shutdown_flush_and_startup_restore_revive_every_live_session() {
+        let _net = crate::server::test_util::net_env_guard();
+        // Plain page: no script of its own, so the cookie can only come
+        // back through the flushed snapshot.
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /app",
+            "<html><body><p>app</p></body></html>",
+        )]);
+        let url = format!("http://127.0.0.1:{port}/app");
+        let shared: SharedSnapshots = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        let mut mgr = manager_on(shared.clone());
+        let hold = mgr.create(
+            Some(&url),
+            false,
+            vec!["hold=1".to_string()],
+            None,
+            None,
+            None,
+            /* keepalive */ true,
+            /* persistent */ false,
+            None,
+        );
+        let ttl = mgr.create(
+            Some(&url),
+            false,
+            vec!["sid=abc".to_string()],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+        for sid in [&hold, &ttl] {
+            mgr.send(sid, |reply| SessionCommand::Eval {
+                script: "1".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        }
+
+        // Shutdown flush: BOTH sessions land in the store — the keepalive
+        // one is #88's hole (non-persistent sessions never snapshotted).
+        assert_eq!(mgr.flush_for_shutdown().await, 2);
+        for sid in [&hold, &ttl] {
+            assert!(shared.lock().unwrap().contains_key(sid), "{sid} flushed");
+        }
+        // The snapshot says what the session was — a plain ttl session must
+        // not revive immortal.
+        let snap: Value = {
+            let m = shared.lock().unwrap();
+            serde_json::from_str(&m[&ttl].0).unwrap()
+        };
+        assert_eq!(snap["persistent"], serde_json::json!(false));
+
+        // "Restart": brand-new manager, eager restore before first use.
+        let mut mgr2 = manager_on(shared.clone());
+        assert_eq!(mgr2.restore_all(), 2);
+        let listed: Vec<SessionListEntry> = mgr2.list();
+        for sid in [&hold, &ttl] {
+            assert!(
+                listed.iter().any(|e| &e.session_id == sid),
+                "{sid} restored under its own id"
+            );
+        }
+        {
+            let s = mgr2.sessions.get(&hold).expect("restored");
+            assert!(s.keepalive && !s.persistent, "restored flags round-trip");
+        }
+
+        // Login state survived the restart for the keepalive session.
+        let cookies = mgr2
+            .send(&hold, |reply| SessionCommand::Cookies { reply })
+            .await
+            .unwrap();
+        let cookies: Value = serde_json::from_str(&cookies).unwrap();
+        assert!(
+            cookies["cookies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c.as_str().is_some_and(|s| s.starts_with("hold=1;"))),
+            "cookie must survive the restart: {cookies}"
+        );
+
+        // Session threads are real OS threads — both managers' copies close.
+        assert!(mgr2.close_and_wait(&hold).await);
+        assert!(mgr2.close_and_wait(&ttl).await);
+        assert!(mgr.close_and_wait(&hold).await);
+        assert!(mgr.close_and_wait(&ttl).await);
+    }
+
+    /// #88 companion: the shutdown flush is a restart bridge, not a request
+    /// for immortality. A restored non-persistent session that idle-expires
+    /// takes its snapshot with it — on access (send) and in the eviction
+    /// sweep — so touching the id later is NotFound, not a zombie revival
+    /// with stale login cookies.
+    #[tokio::test]
+    async fn restored_non_persistent_sessions_do_not_zombie_revive() {
+        let _net = crate::server::test_util::net_env_guard();
+        let shared: SharedSnapshots = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let mut mgr = manager_on(shared.clone());
+
+        let a = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+        let b = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+        for sid in [&a, &b] {
+            mgr.send(sid, |reply| SessionCommand::Eval {
+                script: "1".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(mgr.flush_for_shutdown().await, 2);
+
+        let mut mgr2 = manager_on(shared.clone());
+        assert_eq!(mgr2.restore_all(), 2);
+        // Both restored sessions idle-expire (ttl family, no keepalive).
+        for sid in [&a, &b] {
+            let s = mgr2.sessions.get_mut(sid).expect("restored");
+            s.last_active = Instant::now() - Duration::from_secs(481);
+        }
+
+        // On access: Expired, snapshot gone, and the next touch is NotFound.
+        let err = mgr2
+            .send(&a, |reply| SessionCommand::Eval {
+                script: "1".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "SESSION_EXPIRED");
+        assert!(
+            !shared.lock().unwrap().contains_key(&a),
+            "expiry drops the restart bridge"
+        );
+        let err = mgr2
+            .send(&a, |reply| SessionCommand::Eval {
+                script: "1".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "SESSION_NOT_FOUND", "no zombie revival");
+
+        // In the sweep: same contract.
+        mgr2.evict_expired();
+        assert!(
+            !shared.lock().unwrap().contains_key(&b),
+            "eviction drops the restart bridge"
+        );
+        assert!(!mgr2.sessions.contains_key(&b));
+        let err = mgr2
+            .send(&b, |reply| SessionCommand::Eval {
+                script: "1".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "SESSION_NOT_FOUND");
+
+        assert!(mgr.close_and_wait(&a).await);
+        assert!(mgr.close_and_wait(&b).await);
+    }
+
     /// An explicit close drops the snapshot (done means done); an idle
     /// eviction keeps it (that is the revive path).
     #[tokio::test]

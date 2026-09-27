@@ -19,8 +19,8 @@ use super::interact::{
 };
 use super::record::{RecordedAction, inject_storage_js};
 use super::state::{
-    BrowserSession, SessionError, SnapshotStore, SESSION_COUNTER, SNAPSHOT_MAX_AGE_SECS,
-    SESSION_TIMEOUT, drain_console,
+    BrowserSession, SessionError, SnapshotStore, SESSION_COUNTER, PER_SESSION_FLUSH_BUDGET,
+    SESSION_TIMEOUT, SHUTDOWN_FLUSH_BUDGET, SNAPSHOT_MAX_AGE_SECS, drain_console,
 };
 
 // Session manager
@@ -315,9 +315,12 @@ impl SessionManager {
             }
             // Idle-expired on access. A persistent session falls through to
             // snapshot revival below instead of erroring; the eviction must
-            // keep the snapshot that revival reads.
+            // keep the snapshot that revival reads. A non-persistent one
+            // only carries a snapshot as a #88 restart bridge — expiry ends
+            // the bridge too, so a later touch can't zombie-revive stale
+            // login cookies.
             let revive = session.persistent;
-            self.close_inner(session_id, false);
+            self.close_inner(session_id, !revive);
             if !revive {
                 return Err(SessionError::Expired(format!(
                     "session expired: {}",
@@ -436,16 +439,18 @@ impl SessionManager {
 
     /// Evict expired sessions. Persistent sessions keep their snapshot: the
     /// eviction is invisible to the agent, the next command revives the id.
-    /// Opportunistically ages out snapshots nobody revived.
+    /// A non-persistent session's snapshot (#88 restart bridge) goes with
+    /// it — no zombie revival of an expired session. Opportunistically ages
+    /// out snapshots nobody revived.
     pub fn evict_expired(&mut self) {
-        let expired: Vec<String> = self
+        let expired: Vec<(String, bool)> = self
             .sessions
             .iter()
             .filter(|(_, s)| s.is_expired())
-            .map(|(id, _)| id.clone())
+            .map(|(id, s)| (id.clone(), s.persistent))
             .collect();
-        for id in expired {
-            self.close_inner(&id, false);
+        for (id, persistent) in expired {
+            self.close_inner(&id, !persistent);
         }
         self.snapshots.purge(SNAPSHOT_MAX_AGE_SECS);
     }

@@ -31,6 +31,13 @@ const CONSOLE_RING_CAP: usize = 500;
 /// revival attempts and in the eviction sweep.
 pub(super) const SNAPSHOT_MAX_AGE_SECS: i64 = 24 * 3600;
 
+/// #88: budgets for the shutdown flush. Every live session is persisted
+/// before the process exits, but a session stuck mid-command (navigation
+/// deadline) must not hold the process past the supervisor's kill timeout —
+/// it keeps whatever its last per-command snapshot held.
+pub(super) const SHUTDOWN_FLUSH_BUDGET: Duration = Duration::from_secs(60);
+pub(super) const PER_SESSION_FLUSH_BUDGET: Duration = Duration::from_secs(10);
+
 /// Why a session command failed. An agent must be able to tell "the session
 /// is gone — recreate it" from "this step failed — retry it" without parsing
 /// prose, so every variant carries a machine-readable code when serialized.
@@ -267,6 +274,24 @@ impl SnapshotStore {
                 m.lock()
                     .expect("snapshot map poisoned")
                     .retain(|_, (_, at)| now - *at <= max_age_secs);
+            }
+        }
+    }
+
+    /// Every snapshot id in the store, most recently saved first — startup
+    /// restore (#88) enumerates the fleet the previous process flushed.
+    pub(super) fn ids(&self) -> Vec<String> {
+        match self {
+            SnapshotStore::Global => crate::store::list_session_snapshot_ids(),
+            SnapshotStore::Memory(m) => {
+                let mut ids: Vec<String> = m
+                    .lock()
+                    .expect("snapshot map poisoned")
+                    .keys()
+                    .cloned()
+                    .collect();
+                ids.sort();
+                ids
             }
         }
     }
