@@ -2,6 +2,7 @@
 //! P2 god-file ratchet).
 use super::*;
 use reqwest::dns::{Name, Resolve};
+use std::net::IpAddr;
 
 #[test]
 fn derive_client_hints_chrome_version() {
@@ -45,7 +46,7 @@ fn derive_client_hints_defaults_when_no_version() {
 // Env- and flag-sensitive (1f7486c pattern): the lock serializes tests
 // that touch the file-access switch; the drop-guard restores both halves
 // even on panic so the off-by-default contract can't leak across tests.
-use super::file_access_test::file_access_guard;
+use super::policy::file_access_test::file_access_guard;
 
 fn temp_file(name: &str, body: &[u8]) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join("agx-file-url-tests");

@@ -5,7 +5,7 @@ use std::net::{IpAddr, SocketAddr};
 
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
-use super::{env_allows_private_network, scoped_allow_network};
+use super::policy::{env_allows_private_network, scoped_allow_network};
 
 /// True when `ip` must never be the target of an outbound request from the
 /// engine, UNLESS a scoped allow-network entry (`--allow-network` /

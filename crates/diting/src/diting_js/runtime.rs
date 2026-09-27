@@ -15,7 +15,12 @@ use crate::diting_js::ops::{build_extension, JsState};
 // The V8 termination watchdog family (token, stack-dump sampler, spawn) —
 // split from the module root (god-file ratchet). Re-exported so the
 // historical `diting_js::runtime::spawn_watchdog` path keeps resolving.
+mod drop_serialized;
+mod heap_guard;
 mod watchdog;
+
+use drop_serialized::{ISOLATE_CONSTRUCT_LOCK, SerializedDropRuntime};
+use heap_guard::{HeapLimitState, install_heap_limit_guard};
 pub use watchdog::{spawn_watchdog, WatchdogToken};
 use watchdog::watchdog_terminate;
 
@@ -82,95 +87,6 @@ pub struct ExceptionInfo {
     pub col: Option<u32>,
 }
 
-static ISOLATE_CONSTRUCT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// #108: the inner runtime wrapped so its ISOLATE DISPOSAL serializes with
-/// isolate construction under `ISOLATE_CONSTRUCT_LOCK`. Construction was
-/// already serialized (upstream obscura #430 lineage); disposal is the one
-/// remaining seam where V8 15.0's process-wide JSDispatchTable sees alloc
-/// (another isolate's snapshot deserialization, under the lock) race free
-/// (this isolate's teardown, previously unlocked). The #108 failure shape —
-/// `typeof Date.now` healthy inside a timer callback while the CALL throws
-/// "not a function", dev-only, unreproducible on demand — is a call-path
-/// (dispatch-entry) failure with a healthy object, exactly what a torn
-/// table entry produces; the stress reproducers (tests: `date_now_timer_*`)
-/// could not trigger it in ~10k construct/drop cycles, so this is
-/// defense-in-depth closing the last uncovered cross-isolate touch point,
-/// not a demonstrated fix.
-///
-/// `ManuallyDrop` is the std drop-exactly-once idiom: `Drop::drop` runs
-/// with the lock held and destroys the inner runtime explicitly; the
-/// compiler's own field drop is suppressed, so teardown happens exactly
-/// once, inside the guard.
-struct SerializedDropRuntime(std::mem::ManuallyDrop<deno_core::JsRuntime>);
-
-impl std::ops::Deref for SerializedDropRuntime {
-    type Target = deno_core::JsRuntime;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for SerializedDropRuntime {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl Drop for SerializedDropRuntime {
-    fn drop(&mut self) {
-        let _guard = ISOLATE_CONSTRUCT_LOCK.lock().unwrap();
-        // SAFETY: `self` is being dropped and nothing touches the field
-        // afterwards; `ManuallyDrop` suppressed the automatic drop, so this
-        // read-then-drop runs the isolate teardown exactly once — here,
-        // under the construction lock rather than after it.
-        unsafe { std::mem::drop(std::ptr::read(&*self.0)) }
-    }
-}
-
-
-/// How much the near-heap-limit callback raises the limit so V8 can unwind
-/// the terminated script instead of aborting the process.
-const HEAP_LIMIT_RECOVERY_HEADROOM_BYTES: usize = 64 * 1024 * 1024;
-
-#[derive(Default)]
-struct HeapLimitState {
-    tripped: std::sync::atomic::AtomicBool,
-    restore_limit: std::sync::atomic::AtomicUsize,
-}
-
-/// V8's default response to hitting the heap limit is to abort the whole
-/// process — with many sessions in one server, one page's allocation loop
-/// would kill every session. The callback terminates the current script
-/// instead and lends the isolate just enough headroom to unwind.
-fn install_heap_limit_guard(
-    runtime: &mut deno_core::JsRuntime,
-    isolate_handle: IsolateHandle,
-    state: std::sync::Arc<HeapLimitState>,
-) {
-    runtime.add_near_heap_limit_callback(move |current_limit, _initial_limit| {
-        let _ = state.restore_limit.compare_exchange(
-            0,
-            current_limit,
-            std::sync::atomic::Ordering::SeqCst,
-            std::sync::atomic::Ordering::SeqCst,
-        );
-        state.tripped.store(true, std::sync::atomic::Ordering::SeqCst);
-        // #50 probe: the second captured repro showed tick_fn terminating
-        // with NO watchdog fire anywhere near it — this guard is the only
-        // other silent terminate_execution() call site. Make it visible.
-        let t_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        eprintln!(
-            "[heapguard] near-heap-limit tripped at {} bytes (initial {}) — terminating t={t_ms}",
-            current_limit, _initial_limit
-        );
-        isolate_handle.terminate_execution();
-        current_limit.saturating_add(HEAP_LIMIT_RECOVERY_HEADROOM_BYTES)
-    });
-}
 
 pub struct JsRuntime {
     runtime: SerializedDropRuntime,    state: Rc<RefCell<JsState>>,
@@ -446,31 +362,6 @@ impl JsRuntime {
         }
     }
 
-    /// If the heap-limit guard terminated the last script, recover the
-    /// isolate before new JS runs: cancel the termination and restore the
-    /// real heap limit (the callback had inflated it to let V8 unwind).
-    fn recover_heap_limit(&mut self) -> bool {
-        if !self
-            .heap_limit_state
-            .tripped
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
-        {
-            return false;
-        }
-        self.runtime.v8_isolate().cancel_terminate_execution();
-        let restore_limit = self
-            .heap_limit_state
-            .restore_limit
-            .swap(0, std::sync::atomic::Ordering::SeqCst);
-        self.runtime.remove_near_heap_limit_callback(restore_limit);
-        install_heap_limit_guard(
-            &mut self.runtime,
-            self.isolate_handle.clone(),
-            self.heap_limit_state.clone(),
-        );
-        tracing::warn!("V8 heap limit reached: terminated the current JavaScript task");
-        true
-    }
 
     pub fn evaluate(&mut self, expression: &str) -> Result<serde_json::Value, String> {
         self.recover_heap_limit();
