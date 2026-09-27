@@ -1355,6 +1355,38 @@ mod float_continuation_tests {
     }
 }
 
+/// blitz#941 immunity pin: giant-but-finite lengths (3e38px boxes,
+/// 3e37 line-heights — their one-attribute 100%-CPU hang) must resolve to
+/// FINITE geometry. Our greedy wrap is single-pass over tokens (no parley
+/// loop) and css_f32 gates NaN, so what's left to pin is that sums of
+/// giant values (height + margin, both 3e38) never overflow to inf.
+#[cfg(test)]
+mod finite_giant_values_tests {
+    use crate::diting_layout::*;
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    #[test]
+    fn giant_finite_lengths_resolve_to_finite_geometry() {
+        let html = r#"<html><body style="margin:0">
+            <p id="p1">a <span style="display:inline-block;height:3e38px;margin-top:3e38px">x</span> b</p>
+            <p id="p2" style="line-height:3e37">ab</p>
+            <div id="d3"><input id="i3" value="ab" style="line-height:3e37"></div>
+        </body></html>"#;
+        let tree = parse_html(html);
+        let rules = parse_stylesheet_for("", (800.0, 600.0), CssMediaType::Screen);
+        let styles = compute_styles(&tree, &rules, (800.0, 600.0));
+        let (rects, _, _, _, _, _) = layout_dom_with_paint_order_and_images(
+            &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
+        );
+        assert!(
+            rects.values().all(|r| r.width.is_finite() && r.height.is_finite()),
+            "sums of giant values must clamp, not overflow: {:?}",
+            rects.values().filter(|r| !r.height.is_finite()).collect::<Vec<_>>()
+        );
+    }
+}
+
 #[cfg(test)]
 mod anon_cell_stale_key_tests {
     // #119: an anonymous table cell whose members are all inline-level used

@@ -5232,12 +5232,23 @@ fn parse_aspect_ratio(v: &str) -> Option<f32> {
 /// way Chrome drops it — a stored NaN poisons the layout solve and collapses
 /// boxes (tmall's 选择视频 dialog, #129). Every numeric parse in this module
 /// funnels through this one gate.
+///
+/// Finite-but-giant values saturate at Chrome's LayoutUnit bound (#147,
+/// blitz#941): getComputedStyle of `height:3e38px` returns `3.35544e+07px`
+/// measured headless — Lengths clamp at 2^25 px. Without this, two 3e38px
+/// margins sum to inf in the taffy solve and line-height:3e37 × font-size
+/// overflows at the product, whose inf−inf paint centering collapses boxes
+/// to NaN geometry (the #129 class through a different door).
+const MAX_CSS_ABS: f32 = 33_554_432.0; // 2^25 = LayoutUnit saturation
 fn css_f32(s: &str) -> Option<f32> {
     // NB: this body must stay on `.parse()` directly — routing through the
     // trait method below is mutual recursion (the sed that rewrote the forty
     // old call sites also rewrote this line once; the test run stack-overflowed).
     let n = s.parse::<f32>().ok()?;
-    n.is_finite().then_some(n)
+    if !n.is_finite() {
+        return None;
+    }
+    Some(n.clamp(-MAX_CSS_ABS, MAX_CSS_ABS))
 }
 
 /// Method posture over [`css_f32`] so the mechanical rewrite of the old
