@@ -39,3 +39,26 @@ impl Drop for FileAccessGuard {
         drop(self.0.take());
     }
 }
+
+static WORKFLOW_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Points `AGINXBROWSER_WORKFLOW_DIR` at a scratch directory for the test's
+/// duration (flow tests: on-disk overrides and additions against the baked
+/// built-ins). Dropping removes the var, restoring cwd-relative resolution,
+/// even on panic.
+pub(crate) fn workflow_dir_env_guard() -> WorkflowDirGuard {
+    let guard = WORKFLOW_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // Held without a value until the test sets its own; the drop guard only
+    // has to undo whatever the test leaves behind.
+    std::env::remove_var("AGINXBROWSER_WORKFLOW_DIR");
+    WorkflowDirGuard(Some(guard))
+}
+
+pub(crate) struct WorkflowDirGuard(Option<std::sync::MutexGuard<'static, ()>>);
+
+impl Drop for WorkflowDirGuard {
+    fn drop(&mut self) {
+        std::env::remove_var("AGINXBROWSER_WORKFLOW_DIR");
+        drop(self.0.take());
+    }
+}

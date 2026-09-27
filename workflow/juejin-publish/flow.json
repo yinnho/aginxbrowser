@@ -1,0 +1,41 @@
+{
+  "args": [
+    "title",
+    "mark_content",
+    "brief_content",
+    "category_id",
+    "tag_ids"
+  ],
+  "vars": {
+    "args_json": "{\"title\": \"CHANGE_ME\", \"brief_content\": \"\", \"mark_content\": \"CHANGE_ME\", \"category_id\": \"6809637773935378440\", \"tag_ids\": [\"6809640625856577549\", \"6809640642101116936\"]}"
+  },
+  "create": {
+    "url": "https://juejin.cn/editor/drafts/new",
+    "use_proxy": false
+  },
+  "steps": [
+    {
+      "op": "navigate",
+      "args": {
+        "url": "https://juejin.cn/editor/drafts/new"
+      },
+      "note": "session_id reuse skips create; this lands the cookie jar on juejin.cn"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(async () => {\n  const r = await fetch('https://api.juejin.cn/user_api/v1/user/get', {credentials:'include'});\n  const t = await r.text();\n  let name = null, err = null;\n  try {\n    const j = JSON.parse(t);\n    err = j.err_no;\n    name = j.data && j.data.user_name || null;\n  } catch (e) {}\n  const href = location.href.split('?')[0];\n  if (err !== 0 || !name) {\n    return JSON.stringify({ok:false, href, err, name, head: t.slice(0, 120)});\n  }\n  return JSON.stringify({ok:true, href, name});\n})()",
+        "timeout_ms": 20000
+      },
+      "save": "who"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(async () => {\n  const ARGS = {{args_json}};\n  try {\n    if (!ARGS || !ARGS.title || String(ARGS.title).indexOf('CHANGE_ME') === 0) {\n      return JSON.stringify({ok:false, err:'refusing sample title'});\n    }\n    if (!ARGS.mark_content) return JSON.stringify({ok:false, err:'mark_content required'});\n    const body = {\n      category_id: String(ARGS.category_id || '6809637773935378440'),\n      tag_ids: ARGS.tag_ids || ['6809640625856577549', '6809640642101116936'],\n      link_url: '',\n      cover_image: '',\n      is_gfw: 0,\n      title: ARGS.title,\n      brief_content: ARGS.brief_content || ARGS.title,\n      is_english: 0,\n      is_original: 1,\n      edit_type: 10,\n      html_content: '',\n      mark_content: ARGS.mark_content,\n      theme_ids: [],\n      pics: []\n    };\n    const r = await fetch('/content_api/v1/article_draft/create', {\n      method: 'POST', credentials: 'include',\n      headers: {'content-type': 'application/json'},\n      body: JSON.stringify(body)\n    });\n    const t = await r.text();\n    let j = null; try { j = JSON.parse(t); } catch (e) {}\n    const draft = j && j.data && (j.data.draft_id || j.data.id);\n    if (!j || j.err_no !== 0 || !draft) {\n      return JSON.stringify({ok:false, step:'create', status:r.status, err:j && j.err_no, msg:j && j.err_msg, head:t.slice(0, 160)});\n    }\n    const p = await fetch('/content_api/v1/article/publish', {\n      method: 'POST', credentials: 'include',\n      headers: {'content-type': 'application/json'},\n      body: JSON.stringify({draft_id: String(draft)})\n    });\n    const pt = await p.text();\n    let pj = null; try { pj = JSON.parse(pt); } catch (e) {}\n    const aid = pj && pj.data && (pj.data.article_id || pj.data.id);\n    return JSON.stringify({\n      ok: !!(pj && pj.err_no === 0 && aid),\n      draft_id: String(draft),\n      article_id: aid ? String(aid) : null,\n      url: aid ? ('https://juejin.cn/post/' + aid) : null,\n      err: pj && pj.err_no,\n      msg: pj && pj.err_msg,\n      head: aid ? null : pt.slice(0, 180)\n    });\n  } catch (e) {\n    return JSON.stringify({ok:false, err: e.name + ': ' + e.message});\n  }\n})()",
+        "timeout_ms": 30000
+      },
+      "save": "post"
+    }
+  ]
+}

@@ -1,10 +1,13 @@
 # workflow/ — server-side flow assets
 
 Each subdirectory is one named flow: `<name>/flow.json` (plus optional docs).
-`flow_run` with `{"name": "<name>"}` picks it up from here — no rebuild, drop
-a directory to deploy. Override the location with `AGINXBROWSER_WORKFLOW_DIR`.
-A name is one path segment of lowercase/digits/dashes; anything else is
-rejected before it touches the filesystem.
+The samples here are baked into the binary at build (`BUILTIN_FLOWS` in
+`src/flow/mod.rs`), so every install — tarball, Docker, brew, a bare binary —
+carries them inside the exe. At runtime a `<name>/flow.json` on disk (this
+directory, or `AGINXBROWSER_WORKFLOW_DIR`) beats the same-named built-in and
+new names add to the list — drop a directory in to deploy, no rebuild. A name
+is one path segment of lowercase/digits/dashes; anything else is rejected
+before it touches the filesystem.
 
 ## Authoring loop
 

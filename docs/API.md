@@ -1215,7 +1215,7 @@ Run a flow — a recorded/edited JSON session script — to completion server-si
 | Field | Type | Default | Description |
 |------|------|------|------|
 | flow | object | — | Inline flow document (see below) |
-| name | string | — | Or run a server-side workflow asset: `workflow/<name>/flow.json` (override the directory with `AGINXBROWSER_WORKFLOW_DIR`). An unknown name errors back with the list of installed workflows — that error is the discovery call |
+| name | string | — | Or run a named server-side workflow: the samples ship baked into the binary, and a `workflow/<name>/flow.json` on disk (override the directory with `AGINXBROWSER_WORKFLOW_DIR`) replaces or adds one without a rebuild. An unknown name errors back with the list of installed workflows — that error is the discovery call |
 | vars | object | `{}` | Values for `{{placeholders}}`; wins over the flow's own `vars` defaults |
 | session_id | string | — | Reuse a live session (e.g. from `POST /import/curl`) instead of creating a fresh one — that's how login state and flows compose |
 
@@ -1801,7 +1801,7 @@ If AginxBrowser is deployed on a remote server, connect through an SSH tunnel:
 | `AGINXBROWSER_MCP_ALLOWED_HOSTS` | unset | Extra `Host` values accepted by `/mcp` (comma-separated) — the DNS-rebinding guard defaults to loopback; add your LAN IP / Docker hostname when other machines call the instance |
 | `AGINXBROWSER_DOWNLOAD_DIR` | `.` | Directory where `/download` saves files |
 | `AGINXBROWSER_MAX_BODY_BYTES` | `67108864` (64 MiB) | Max request body for `/eval`-family POST endpoints (`/session/{id}/eval`, `/screenshot`, `/video`, `/pdf`). Oversized bodies get a structured `413 EVAL_BODY_TOO_LARGE` naming the limit |
-| `AGINXBROWSER_WORKFLOW_DIR` | `./workflow` | Where `flow_run(name=…)` looks for `<name>/flow.json` assets (resolved from the server's working directory); drop a directory in to deploy, no rebuild |
+| `AGINXBROWSER_WORKFLOW_DIR` | `./workflow` | Where `flow_run(name=…)` looks for on-disk `<name>/flow.json` overrides — the sample flows are baked into the binary, a file here beats the same-named built-in and new names add to the list; drop a directory in to deploy, no rebuild |
 | `AGINXBROWSER_PROXY` | None | Proxy address (used when `use_proxy:true`, and applied automatically for browser/session/CDP navigations to known-blocked domains) |
 | `CAPTCHA_SOLVER_API_KEY` | None | 2captcha API key; enables automatic CAPTCHA solving when set |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | CAPTCHA solving service |
