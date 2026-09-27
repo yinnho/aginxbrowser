@@ -154,8 +154,11 @@ pub struct SessionCreateParams {
     pub cookies: Vec<String>,
     /// Web Storage to inject after the initial navigation lands:
     /// {"local_storage": {"k":"v"}, "session_storage": {"k":"v"}}. For login
-    /// states that live in localStorage rather than the cookie jar.
-    /// Round-trips with session_storage.
+    /// states that live in localStorage rather than the cookie jar. An
+    /// optional "origin": "https://site" key holds the injection until a
+    /// navigation lands on that origin (a session created without a
+    /// start_url sits on about:blank first). Round-trips with
+    /// session_storage.
     pub storage: Option<Value>,
     /// Idle time-to-live in seconds before the session is evicted
     /// (default: 480, clamped 60..3600). Raise it for long workflows.
@@ -188,7 +191,9 @@ pub struct SessionCreateParams {
     /// store after every action. Concurrent logins (`taobao-scraper` vs
     /// `taobao-publisher`) never clobber each other. The account record
     /// survives the session — a later create with the same name picks up
-    /// the warm jar. 1-64 chars of [a-zA-Z0-9_-].
+    /// the warm jar, plus the record's captured localStorage/sessionStorage
+    /// (replayed onto the captured origin; an explicit `storage` param
+    /// wins). 1-64 chars of [a-zA-Z0-9_-].
     #[serde(default)]
     pub account: Option<String>,
 }

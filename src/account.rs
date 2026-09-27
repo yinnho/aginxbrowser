@@ -118,6 +118,56 @@ pub fn load(owner: &str, name: &str) -> Option<(String, i64)> {
     crate::store::load_account(owner, name)
 }
 
+/// `https://host[:port]` for an http(s) URL — `location.origin` semantics
+/// (default ports fold away), `None` for anything else (about:blank,
+/// unparsable strings). The storage-replay gate in session_thread compares
+/// the live page's origin against the blob's captured origin through this.
+pub(crate) fn url_origin(url: &str) -> Option<String> {
+    let u = url::Url::parse(url).ok()?;
+    if u.scheme() != "http" && u.scheme() != "https" {
+        return None;
+    }
+    let host = u.host_str()?;
+    Some(match u.port() {
+        Some(p) => format!("{}://{host}:{p}", u.scheme()),
+        None => format!("{}://{host}", u.scheme()),
+    })
+}
+
+/// The record's captured web storage as a session-create seed blob:
+/// `{"local_storage": …, "session_storage": …, "origin": …}` (issue #141).
+/// Cookies alone can't carry a localStorage-token login — the jar replay
+/// leaves those sessions logged out after a restart. The origin rides the
+/// blob because storage only belongs to the site it was captured from: the
+/// session's pending-injection gate holds the blob until a navigation
+/// actually lands there (start_url-less sessions sit on about:blank first).
+/// `None` when there is nothing worth replaying: no record, both maps
+/// empty, or a capture taken off a real origin — never seed a blank page's
+/// keys onto a real site.
+pub(crate) fn record_storage(owner: &str, name: &str) -> Option<serde_json::Value> {
+    let (text, _) = load(owner, name)?;
+    let rec: serde_json::Value = serde_json::from_str(&text).ok()?;
+    storage_seed_from_record(&rec)
+}
+
+/// Pure half of [`record_storage`]: the seed blob from a record value, so
+/// the gating rules are testable without the store.
+fn storage_seed_from_record(rec: &serde_json::Value) -> Option<serde_json::Value> {
+    let ls = rec.get("local_storage")?;
+    let ss = rec.get("session_storage")?;
+    if ls.as_object().is_none_or(|m| m.is_empty())
+        && ss.as_object().is_none_or(|m| m.is_empty())
+    {
+        return None;
+    }
+    let origin = url_origin(rec.get("url").and_then(serde_json::Value::as_str)?)?;
+    Some(serde_json::json!({
+        "local_storage": ls,
+        "session_storage": ss,
+        "origin": origin,
+    }))
+}
+
 /// Delete an account: stored record AND live jar. Cookie values are
 /// credentials — delete means gone.
 pub fn delete(owner: &str, name: &str) -> bool {
@@ -677,6 +727,65 @@ fn json_truthy(v: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The seed blob (#141): captured storage replays only with the origin
+    /// it was captured from attached; nothing-empty, blank-origin and
+    /// url-less captures all stay `None`.
+    #[test]
+    fn storage_seed_is_origin_gated_from_the_record() {
+        let rec = serde_json::json!({
+            "url": "https://www.xinzao.com/dashboard?id=7",
+            "local_storage": {"token": "abc"},
+            "session_storage": {},
+        });
+        let seed = storage_seed_from_record(&rec).expect("storage present");
+        assert_eq!(seed["origin"], "https://www.xinzao.com");
+        assert_eq!(seed["local_storage"]["token"], "abc");
+        assert_eq!(seed["session_storage"], serde_json::json!({}));
+
+        // Both maps empty -> nothing worth replaying.
+        let empty = serde_json::json!({
+            "url": "https://www.xinzao.com/",
+            "local_storage": {},
+            "session_storage": {},
+        });
+        assert!(storage_seed_from_record(&empty).is_none());
+
+        // A capture taken on about:blank carries no real origin — never
+        // replay those keys onto a real site.
+        let blank = serde_json::json!({
+            "url": "about:blank",
+            "local_storage": {"token": "abc"},
+            "session_storage": {},
+        });
+        assert!(storage_seed_from_record(&blank).is_none());
+
+        // Storage without a captured url has no origin to gate on — stay
+        // conservative rather than fire unconditionally.
+        let nolink = serde_json::json!({"local_storage": {"token": "a"}});
+        assert!(storage_seed_from_record(&nolink).is_none());
+    }
+
+    /// `url_origin` mirrors `location.origin`: default ports fold away,
+    /// explicit ports stay, non-http(s) schemes are `None`.
+    #[test]
+    fn url_origin_matches_location_origin_semantics() {
+        assert_eq!(
+            url_origin("https://a.com/x/y?q=1"),
+            Some("https://a.com".to_string())
+        );
+        assert_eq!(
+            url_origin("http://a.com:8080/"),
+            Some("http://a.com:8080".to_string())
+        );
+        assert_eq!(
+            url_origin("https://a.com:443/"),
+            Some("https://a.com".to_string()),
+            "default port folds, like location.origin"
+        );
+        assert_eq!(url_origin("about:blank"), None);
+        assert_eq!(url_origin("not a url"), None);
+    }
 
     fn scrub() {
         // Name-spaced key so parallel tests can't collide.

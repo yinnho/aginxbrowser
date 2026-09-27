@@ -57,7 +57,9 @@ pub struct SessionCreateRequest {
     /// store after every action. `taobao-scraper` vs `taobao-publisher` —
     /// concurrent logins that never clobber each other. The account record
     /// survives the session; a later create with the same name picks up the
-    /// warm jar. 1-64 chars of [a-zA-Z0-9_-].
+    /// warm jar, plus the record's captured localStorage/sessionStorage
+    /// (replayed onto the captured origin; an explicit `storage` body field
+    /// wins). 1-64 chars of [a-zA-Z0-9_-].
     #[serde(default)]
     pub account: Option<String>,
 }

@@ -1344,7 +1344,7 @@ curl -sS http://127.0.0.1:8089/session/$SID/har -o page.har
 
 ### GET /session/{id}/storage
 
-Snapshot the session's `localStorage` + `sessionStorage` for the current origin — the half of login state that cookies can't carry (many sites keep the session token in web storage). Call it before the session idles out, then feed the snapshot back via `session/create`'s `storage` field to restore the logged-in state in a new session.
+Snapshot the session's `localStorage` + `sessionStorage` for the current origin — the half of login state that cookies can't carry (many sites keep the session token in web storage). Call it before the session idles out, then feed the snapshot back via `session/create`'s `storage` field to restore the logged-in state in a new session. Account sessions don't need the round-trip: the record's captured storage replays automatically onto the captured origin (an explicit `storage` param wins).
 
 **Response:**
 
@@ -1678,7 +1678,7 @@ The output is deterministic — same input, same bytes — and the receipt carri
 | url | string | | `null` | Initial URL |
 | use_proxy | bool | | `false` | Route through a proxy |
 | cookies | string[] \| object[] | | `[]` | Inject cookies (`"name=value",...` or CDP-style objects) so the session starts already logged in. Pair with `session_cookies` to reuse login state |
-| storage | object | | `null` | Web storage to inject after the initial navigation lands: `{"local_storage": {"k":"v"}, "session_storage": {"k":"v"}}`. Round-trips with `session_storage` |
+| storage | object | | `null` | Web storage to inject after the initial navigation lands: `{"local_storage": {"k":"v"}, "session_storage": {"k":"v"}}`. An optional `"origin": "https://site"` key holds the injection until a navigation lands on that origin (a session created without a `url` sits on about:blank first). Round-trips with `session_storage` |
 | ttl_secs | u64 | | `480` | Idle time-to-live in seconds before the session is evicted (clamped 60..3600). Raise it for long workflows |
 | keepalive | bool | | `false` | Exempt the session from the idle reaper: it lives until `session_close` or server exit — a workflow interrupted by long non-browser steps keeps its login state |
 | persistent | bool | | `false` | Persist the login state (cookies, `localStorage`/`sessionStorage`, viewport, dialog policy) to the server-side store after every action. If the session idles out — or the server restarts — the same `session_id` revives logged-in on the next call. `session_close` drops the snapshot; idle expiry keeps it (Playwright storageState semantics, but keyed by the session id you already hold) |
