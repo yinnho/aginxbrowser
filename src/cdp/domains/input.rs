@@ -8,7 +8,7 @@ use crate::cdp::dispatch::CdpContext;
 // downward (ARCHITECTURE.md §2 R1).
 use crate::session::interact::{
     modifier_flags, mouse_button_code, mouse_button_mask, mouse_down_js, mouse_move_js,
-    mouse_up_js, INPUT_HELPERS,
+    mouse_up_js, touch_event_js, INPUT_HELPERS,
 };
 
 // Insert `text` at the caret, replacing any non-collapsed selection the way a
@@ -391,7 +391,65 @@ pub async fn handle(
             }
             Ok(json!({}))
         }
-        "dispatchTouchEvent" => Ok(json!({})),
+        // obscura#1086 (#156): the touch face used to bare-ack — success
+        // without dispatching anything, so Playwright's touchscreen.tap()
+        // and mobile drivers silently no-oped. One command drives the
+        // pointer family per point (pointerType 'touch'), then the
+        // TouchEvent, and a tap ends with the compat mouse events +
+        // trusted click — all inside the shared helper (same layering as
+        // the mouse builders, issue #47).
+        "dispatchTouchEvent" => {
+            let event_type = params.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let points: Vec<Value> = params
+                .get("touchPoints")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .map(|p| {
+                            // Chrome's default touch id is 1 when absent.
+                            let id = p.get("id").and_then(|v| v.as_f64()).unwrap_or(1.0);
+                            let get = |k: &str| p.get(k).and_then(|v| v.as_f64());
+                            json!({
+                                "id": id,
+                                "x": get("x").unwrap_or(0.0),
+                                "y": get("y").unwrap_or(0.0),
+                                "rx": get("radiusX").unwrap_or(1.0),
+                                "ry": get("radiusY").unwrap_or(1.0),
+                                "rot": get("rotationAngle").unwrap_or(0.0),
+                                "f": get("force").unwrap_or(0.0),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if let Some(page) = ctx.get_session_page_mut(session_id) {
+                page.evaluate(INPUT_HELPERS);
+                page.evaluate(&touch_event_js(event_type, &points));
+                // A tap's synthesized click can queue a navigation (an
+                // <a> tap is the mobile click) — same inline contract as
+                // mouseReleased: nothing else reads the queue until the
+                // next evaluate, so a waitForNavigation would hang.
+                if event_type == "touchEnd" {
+                    let moved = page
+                        .process_pending_navigation()
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    if moved {
+                        let page_id = page.id.clone();
+                        let extra_network = ctx.other_network_sessions(session_id, &page_id);
+                        super::page::emit_navigation_for_page(
+                            ctx,
+                            session_id,
+                            &extra_network,
+                            &page_id,
+                        );
+                    }
+                }
+            }
+
+            Ok(json!({}))
+        }
         "setIgnoreInputEvents" => Ok(json!({})),
         _ => Err(format!("Unknown Input method: {}", method)),
     }

@@ -15274,6 +15274,39 @@ globalThis.PointerEvent = class PointerEvent extends MouseEvent {
   constructor(type, opts={}) { super(type, opts); this.pointerId = opts.pointerId || 0; this.width = opts.width || 1; this.height = opts.height || 1; this.pressure = opts.pressure || 0; this.pointerType = opts.pointerType !== undefined ? opts.pointerType : ''; this.isPrimary = !!opts.isPrimary; }
 }
 
+// Touch family (#156, CDP Input.dispatchTouchEvent): Chrome-exposed
+// constructors with the DOM's field set. Touch is a data handle the
+// dispatcher mints per point; TouchEvent carries the three read-only
+// lists (touches / targetTouches / changedTouches).
+globalThis.Touch = class Touch {
+  constructor(opts = {}) {
+    this.identifier = opts.identifier || 0;
+    this.target = opts.target || null;
+    this.clientX = opts.clientX || 0;
+    this.clientY = opts.clientY || 0;
+    this.screenX = opts.screenX !== undefined ? opts.screenX : this.clientX;
+    this.screenY = opts.screenY !== undefined ? opts.screenY : this.clientY;
+    this.pageX = opts.pageX !== undefined ? opts.pageX : this.clientX;
+    this.pageY = opts.pageY !== undefined ? opts.pageY : this.clientY;
+    this.radiusX = opts.radiusX || 1;
+    this.radiusY = opts.radiusY || 1;
+    this.rotationAngle = opts.rotationAngle || 0;
+    this.force = opts.force || 0;
+  }
+};
+globalThis.TouchEvent = class TouchEvent extends UIEvent {
+  constructor(type, opts = {}) {
+    super(type, opts);
+    this.touches = opts.touches || [];
+    this.targetTouches = opts.targetTouches || this.touches;
+    this.changedTouches = opts.changedTouches || [];
+    this.altKey = !!opts.altKey;
+    this.ctrlKey = !!opts.ctrlKey;
+    this.metaKey = !!opts.metaKey;
+    this.shiftKey = !!opts.shiftKey;
+  }
+};
+
 if (typeof navigator.credentials === 'undefined') {
   navigator.credentials = { get(){return Promise.resolve(null);}, create(){return Promise.resolve(null);}, store(){return Promise.resolve();}, preventSilentAccess(){return Promise.resolve();} };
 }

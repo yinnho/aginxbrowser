@@ -562,6 +562,83 @@ globalThis.__diting_pressActive = globalThis.__diting_pressActive || function(el
   globalThis.__diting_activeEl = el || null;
   if (globalThis.__diting_setActiveTree) globalThis.__diting_setActiveTree(prev, el || null);
 };
+// Touch synthesis (CDP Input.dispatchTouchEvent, #156): Chrome drives the
+// pointer family per point (pointerType 'touch', pointerId = the point's
+// CDP id, isPrimary on the smallest active id) and then ONE TouchEvent for
+// the whole command — touches = every active point (already without the
+// released ones on touchEnd), changedTouches = the listed points. A
+// single-finger tap that never left the touch slop radius ends with the
+// compatibility mouse events + trusted click, so tap handlers and click
+// handlers agree. State: __diting_touch.active maps id → {x, y, sx, sy, p};
+// multi latches once a gesture ever holds 2+ fingers and kills the tap
+// click (a pinch release must not click). All points share the first
+// listed point's hit target — per-point targets are future polish.
+globalThis.__diting_touchDispatch = globalThis.__diting_touchDispatch || function(kind, pts) {
+  if (!pts || !pts.length) return;
+  var S = globalThis.__diting_touch || (globalThis.__diting_touch = {active:{}, multi:false});
+  var ids = function() { return Object.keys(S.active).map(Number).sort(function(a,b){return a-b;}); };
+  // Merge the listed points first — touchEnd lists carry final coordinates.
+  for (var i = 0; i < pts.length; i++) {
+    var p = pts[i];
+    var st = S.active[p.id] || (S.active[p.id] = {sx:p.x, sy:p.y});
+    st.x = p.x; st.y = p.y; st.p = p;
+  }
+  var preIds = ids();
+  if (preIds.length > 1) S.multi = true;
+  var primaryId = preIds.length ? preIds[0] : null;
+  var listed = {};
+  for (var j = 0; j < pts.length; j++) listed[pts[j].id] = true;
+  var remaining = [], changed = [];
+  for (var k = 0; k < preIds.length; k++) {
+    (listed[preIds[k]] ? changed : remaining).push(S.active[preIds[k]]);
+  }
+  var isEnd = kind === 'touchEnd' || kind === 'touchCancel';
+  var tapEligible = false;
+  if (isEnd) {
+    tapEligible = remaining.length === 0 && changed.length === 1 && !S.multi;
+    for (var m = 0; m < changed.length; m++) delete S.active[changed[m].p.id];
+    if (!ids().length) S.multi = false;
+  }
+  var p0 = changed.length ? changed[0] : pts[0];
+  var hit = globalThis.__diting_hitTarget ? globalThis.__diting_hitTarget(p0.x, p0.y) : null;
+  var target = (hit && hit.el) || document.body;
+  if (!target) return;
+  var ptrName = kind === 'touchStart' ? 'pointerdown' : kind === 'touchMove' ? 'pointermove' : kind === 'touchEnd' ? 'pointerup' : 'pointercancel';
+  var tName = kind === 'touchStart' ? 'touchstart' : kind === 'touchMove' ? 'touchmove' : kind === 'touchEnd' ? 'touchend' : 'touchcancel';
+  if (kind === 'touchStart' && globalThis.__diting_pressActive) globalThis.__diting_pressActive(target);
+  globalThis.__diting_inFrameScope(globalThis.__diting_frameScopeOf(target), function(win) {
+    var mk = function(st) {
+      var p = st.p;
+      return new Touch({identifier: p.id, target: target, clientX: st.x, clientY: st.y,
+        radiusX: p.rx || 1, radiusY: p.ry || 1, rotationAngle: p.rot || 0, force: p.f || 0});
+    };
+    var all = isEnd ? remaining : remaining.concat(changed);
+    // Pointer family first — Chrome fires pointerdown before touchstart.
+    for (var n = 0; n < changed.length; n++) {
+      var st = changed[n];
+      target.dispatchEvent(globalThis.__diting_markTrusted(new PointerEvent(ptrName, {bubbles:true, cancelable:true, composed:true, view:win,
+        clientX:st.x, clientY:st.y, button:0, buttons:isEnd?0:1,
+        pointerId:st.p.id, pointerType:'touch', isPrimary:st.p.id === primaryId,
+        pressure:isEnd?0:(st.p.f || 0.5), width:(st.p.rx || 1)*2, height:(st.p.ry || 1)*2})));
+    }
+    target.dispatchEvent(globalThis.__diting_markTrusted(new TouchEvent(tName, {bubbles:true, cancelable:true, composed:true, view:win,
+      touches: all.map(mk), targetTouches: all.map(mk), changedTouches: changed.map(mk)})));
+    if (isEnd && globalThis.__diting_pressActive) globalThis.__diting_pressActive(null);
+    // Tap: one finger, never left the slop radius (kTouchSlop = 8), none
+    // remaining — Chrome's compat mouse events + click.
+    if (kind === 'touchEnd' && tapEligible) {
+      var g = changed[0];
+      var dx = g.x - g.sx, dy = g.y - g.sy;
+      if (dx*dx + dy*dy <= 64) {
+        globalThis.__diting_focusTextEntry(target);
+        target.dispatchEvent(globalThis.__diting_markTrusted(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:win, clientX:g.x, clientY:g.y, button:0, buttons:1, detail:1})));
+        target.dispatchEvent(globalThis.__diting_markTrusted(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:win, clientX:g.x, clientY:g.y, button:0, buttons:0, detail:1})));
+        var click = globalThis.__diting_markTrusted(new MouseEvent('click', {bubbles:true, cancelable:true, view:win, clientX:g.x, clientY:g.y, button:0, buttons:0, detail:1}));
+        globalThis.__diting_dispatchTrustedClick(target, click, false);
+      }
+    }
+  });
+};
 })();
 "#;
 
@@ -705,6 +782,21 @@ pub(super) fn eval_interaction(page: &mut Page, js: &str) {
     page.evaluate_with_timeout(js, crate::page::INTERACTION_EVAL_TIMEOUT);
 }
 
+/// Shared touch-event builder for CDP `Input.dispatchTouchEvent` (#156):
+/// one command's touch points serialized into the `__diting_touchDispatch`
+/// call. `kind` is the CDP `type` verbatim (`touchStart`/`touchMove`/
+/// `touchEnd`/`touchCancel`); each point is a `{x, y, id, radiusX,
+/// radiusY, rotationAngle, force}` map (x/y/id per the CDP schema, the
+/// rest optional — the helper defaults radii to 1 and force to 0).
+pub(crate) fn touch_event_js(kind: &str, points: &[serde_json::Value]) -> String {
+    let pts = serde_json::to_string(points).unwrap_or_else(|_| "[]".to_string());
+    format!(
+        "__diting_touchDispatch({}, {});",
+        serde_json::json!(kind),
+        pts
+    )
+}
+
 /// Click at viewport coordinates through the real mouse chain — same JS the
 /// CDP bridge dispatches, so pages can't tell the two apart.
 pub(super) async fn click_xy(page: &mut Page, x: f64, y: f64, button: &str, click_count: u32) {
@@ -723,6 +815,7 @@ pub(super) async fn click_xy(page: &mut Page, x: f64, y: f64, button: &str, clic
 /// path (default) feeds the moves through [`humanized_drag_plan`] so the
 /// trajectory reads as a real hand (anti-bot heuristics score linear
 /// constant-velocity glides as synthetic).
+#[allow(clippy::too_many_arguments)] // flat geometry + pacing knobs; a params struct here would be ceremony
 pub(super) async fn drag_xy(
     page: &mut Page,
     from_x: f64,

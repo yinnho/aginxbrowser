@@ -14,6 +14,8 @@ pub mod dispatch;
 mod timezone_tests;
 #[cfg(test)]
 mod locale_tests;
+#[cfg(test)]
+mod touch_tests;
 pub mod domains;
 pub mod http;
 pub mod types;
