@@ -872,3 +872,180 @@ async fn legacy_tls_never_retries_ssrf_gate_rejections() {
     );
     std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
 }
+
+/// Loopback twin of `header_echo_origin`: the response body is the
+/// received request head (lowercased `name: value` lines), so a test can
+/// assert exactly what went out on the wire. Binds 127.0.0.1 — callers
+/// need `allow_private_network: true` on the client, which every test
+/// below builds.
+async fn loopback_header_echo() -> (Url, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else { break };
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = Vec::new();
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    let mut chunk = [0u8; 2048];
+                    loop {
+                        let n = stream.read(&mut chunk).await?;
+                        buf.extend_from_slice(&chunk[..n]);
+                        let head_end = buf
+                            .windows(4)
+                            .position(|w| w == b"\r\n\r\n")
+                            .map(|p| p + 4);
+                        if let Some(end) = head_end {
+                            let head = String::from_utf8_lossy(&buf[..end]).to_string();
+                            let claimed: usize = head
+                                .lines()
+                                .find_map(|l| {
+                                    l.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .and_then(|v| v.trim().parse().ok())
+                                })
+                                .unwrap_or(0);
+                            if buf.len() >= end + claimed {
+                                break;
+                            }
+                        }
+                        if buf.len() > 64 * 1024 {
+                            break;
+                        }
+                    }
+                    Ok::<(), std::io::Error>(())
+                })
+                .await;
+                let head = String::from_utf8_lossy(&buf).to_string();
+                let echo: Vec<String> = head
+                    .lines()
+                    .skip(1)
+                    .take_while(|l| !l.is_empty())
+                    .map(|l| l.to_ascii_lowercase())
+                    .collect();
+                let body = echo.join("\n");
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (Url::parse(&format!("http://{addr}/hop")).unwrap(), handle)
+}
+
+/// #116: the flag is the gate. A plain (non-stealth) context never sets
+/// `scripted_rides_stealth`, so the hop answers `None` even against a
+/// reachable URL and the caller keeps plain reqwest exactly as before.
+#[cfg(feature = "stealth")]
+#[tokio::test]
+async fn scripted_stealth_hop_none_without_the_flag() {
+    let (url, server) = loopback_header_echo().await;
+    let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+    let hopped = client
+        .scripted_stealth_hop(&Method::GET, &url, None, None, None, true)
+        .await;
+    server.abort();
+    assert!(
+        hopped.is_none(),
+        "plain-context hop must stay on the plain transport, got: {hopped:?}"
+    );
+}
+
+/// #116: with the flag set (a stealth context), the scripted hop rides
+/// the wreq stack — and the request the server sees carries the client's
+/// own identity: the synced UA and the hop's scripted headers, not the
+/// transport's stock defaults.
+#[cfg(feature = "stealth")]
+#[tokio::test]
+async fn scripted_stealth_hop_routes_flagged_client_with_identity() {
+    let (url, server) = loopback_header_echo().await;
+    let mut client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+    client.scripted_rides_stealth = true;
+    let persona_ua =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
+    *client.user_agent.write().await = persona_ua.to_string();
+    let mut headers = std::collections::HashMap::new();
+    headers.insert("X-Agx-Probe".to_string(), "stealth-hop".to_string());
+    // The op path's hop set carries the fetch()-shaped Fetch-Metadata trio;
+    // the wire must carry THESE, not (or duplicated with) the transport's
+    // navigation-shaped defaults — sec-fetch-dest: empty on a scripted
+    // fetch is what a real browser sends.
+    headers.insert("sec-fetch-dest".to_string(), "empty".to_string());
+    headers.insert("sec-fetch-mode".to_string(), "cors".to_string());
+    headers.insert("sec-fetch-site".to_string(), "same-origin".to_string());
+    let hopped = client
+        .scripted_stealth_hop(&Method::GET, &url, None, None, Some(&headers), false)
+        .await;
+    server.abort();
+    let resp = hopped
+        .expect("flagged hop must produce an attempt")
+        .expect("live echo server must answer");
+    assert_eq!(resp.status, 200);
+    let echo = String::from_utf8_lossy(&resp.body).to_string();
+    assert!(
+        echoed(&echo, "user-agent").iter().any(|v| v.contains("windows nt 10.0")),
+        "the hop must carry the client's synced UA, echo: {echo}"
+    );
+    assert!(
+        echoed(&echo, "x-agx-probe").iter().any(|v| *v == "stealth-hop"),
+        "the hop must carry the scripted header, echo: {echo}"
+    );
+    assert_eq!(
+        echoed(&echo, "sec-fetch-dest"),
+        vec!["empty"],
+        "fetch-shaped sec-fetch-dest must reach the wire alone, echo: {echo}"
+    );
+    assert_eq!(
+        echoed(&echo, "sec-fetch-mode"),
+        vec!["cors"],
+        "fetch-shaped sec-fetch-mode must reach the wire alone, echo: {echo}"
+    );
+    assert_eq!(
+        echoed(&echo, "sec-fetch-site"),
+        vec!["same-origin"],
+        "fetch-shaped sec-fetch-site must reach the wire alone, echo: {echo}"
+    );
+}
+
+/// `Some(Err)` — not `None` — is the "tried and failed" answer: the walk
+/// uses it to gate plain's own legacy fallback (at most two transports).
+#[cfg(feature = "stealth")]
+#[tokio::test]
+async fn scripted_stealth_hop_err_on_closed_port() {
+    let mut client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+    client.scripted_rides_stealth = true;
+    let url = Url::parse("http://127.0.0.1:1/dead").unwrap();
+    match client
+        .scripted_stealth_hop(&Method::GET, &url, None, None, None, true)
+        .await
+    {
+        Some(Err(_)) => {}
+        other => panic!("closed port must be Some(Err), got: {other:?}"),
+    }
+}
+
+/// wreq does not speak SOCKS — a SOCKS-proxy context answers `None` (the
+/// plain transport is the only option) instead of silently rewriting the
+/// scheme, mirroring `legacy_transport`.
+#[cfg(feature = "stealth")]
+#[tokio::test]
+async fn scripted_stealth_hop_none_for_socks_proxy() {
+    let mut client = HttpClient::with_full_options(
+        Arc::new(CookieJar::new()),
+        Some("socks5://127.0.0.1:1080"),
+        true,
+    );
+    client.scripted_rides_stealth = true;
+    let url = Url::parse("http://127.0.0.1:1/dead").unwrap();
+    assert!(
+        client
+            .scripted_stealth_hop(&Method::GET, &url, None, None, None, true)
+            .await
+            .is_none(),
+        "SOCKS contexts must keep scripted hops on the plain transport"
+    );
+}

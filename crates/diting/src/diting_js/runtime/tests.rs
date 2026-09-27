@@ -4046,7 +4046,7 @@
     /// dependent (fillRect+fillText change it). The old stub returned a
     /// fixed-shape fake base64 that fails any server-side decode.
     #[tokio::test(flavor = "current_thread")]
-    async fn canvas_toDataURL_is_a_real_png() {
+    async fn canvas_to_data_url_is_a_real_png() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .call_function_on_for_cdp(

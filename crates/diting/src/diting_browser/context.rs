@@ -121,6 +121,13 @@ impl BrowserContext {
             // documented stealth default.
             client.block_trackers =
                 crate::diting_net::blocklist::block_trackers_from_env();
+            // #116: on a stealth page the JS fetch()/XHR hops must ride the
+            // wreq emulation stack too — one jar behind one JA3, matching
+            // the navigation's handshake. The fingerprint feeds the same
+            // transport the legacy-TLS escape hatch builds, so every stack
+            // this context can present agrees.
+            client.scripted_rides_stealth = true;
+            client.tls_fingerprint = tls_fingerprint.clone();
         }
         // Resolution chain: explicit per-context UA → AGINXBROWSER_UA → the
         // fingerprint pool's stable default (macOS Chrome 145; pin or rotate
@@ -191,6 +198,11 @@ impl BrowserContext {
         if self.stealth {
             client.block_trackers =
                 crate::diting_net::blocklist::block_trackers_from_env();
+            // #116: the copy keeps the template's scripted-transport posture
+            // (see `_new_with_jar`) so a CDP-isolated context presents the
+            // same handshake on both document and script hops.
+            client.scripted_rides_stealth = true;
+            client.tls_fingerprint = self.tls_fingerprint.clone();
         }
         if let Ok(mut guard) = client.user_agent.try_write() {
             *guard = self.user_agent.clone();

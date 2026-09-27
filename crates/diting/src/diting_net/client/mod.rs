@@ -540,6 +540,20 @@ pub struct HttpClient {
     /// through in addition to the `AGINXBROWSER_ALLOW_PRIVATE_NETWORK` env var.
     /// Set via `--allow-private-network` on the CLI (issue #33).
     pub allow_private_network: bool,
+    /// #116 transport-layer fix: on a stealth page the JS fetch()/XHR hops
+    /// ride the wreq emulation stack FIRST (same TLS fingerprint the
+    /// navigation above them presented) instead of plain rustls — one
+    /// cookie jar behind two JA3s is a bot tell (the bilibili 412 lesson:
+    /// the WAF holds the scripted request until xhr.timeout fires while
+    /// the document request sailed through on the stealth handshake).
+    /// Set by `BrowserContext` when `context.stealth`; plain builds and
+    /// plain contexts never set it and scripted hops stay on reqwest.
+    pub scripted_rides_stealth: bool,
+    /// The context's requested TLS fingerprint (`tls_fingerprint` param),
+    /// baked into the wreq transport so the scripted hop and the legacy
+    /// escape hatch present the same profile — and the same platform,
+    /// derived from the UA — as the page's own stealth client.
+    pub tls_fingerprint: Option<String>,
     /// Lazy legacy-TLS escape hatch (obscura#769 navigation layer): rustls
     /// carries no TLS 1.2 CBC cipher suites, so CBC-only servers die in the
     /// ClientHello while every browser connects. Built once on first
@@ -588,6 +602,8 @@ impl HttpClient {
             in_flight_list: Arc::new(std::sync::Mutex::new(Vec::new())),
             block_trackers: false,
             allow_private_network,
+            scripted_rides_stealth: false,
+            tls_fingerprint: None,
             #[cfg(feature = "stealth")]
             legacy_tls: tokio::sync::OnceCell::new(),
         }
@@ -1015,10 +1031,89 @@ impl HttpClient {
         .await
     }
 
+    /// #116 transport-layer fix: the stealth-first scripted hop. On a
+    /// stealth page the JS fetch()/XHR attempt rides the wreq emulation
+    /// stack — the same TLS fingerprint the navigation above it presented
+    /// — BEFORE plain rustls: one cookie jar behind one JA3, not two.
+    ///
+    /// Returns `None` when the stealth posture doesn't apply (non-stealth
+    /// build or context, or a SOCKS proxy wreq cannot speak) and the
+    /// caller keeps its plain reqwest path unchanged. `Some(Ok)` is a
+    /// complete response — redirects walked, cookies sent and stored,
+    /// every hop re-validated against SSRF inside the stealth walk — and
+    /// `Some(Err)` means the stealth stack was tried and failed, so the
+    /// caller falls through to plain with its own legacy fallback gated
+    /// off: a request never burns more than two transports.
+    #[cfg(feature = "stealth")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn scripted_stealth_hop(
+        &self,
+        method: &Method,
+        url: &Url,
+        body: Option<&[u8]>,
+        content_type: Option<&str>,
+        request_headers: Option<&HashMap<String, String>>,
+        include_cookies: bool,
+    ) -> Option<Result<Response, NetError>> {
+        if !self.scripted_rides_stealth {
+            return None;
+        }
+        if validate_url(url, self.allow_private_network).is_err() {
+            // A gate rejection is a policy answer, not a transport
+            // failure — hand the URL to the plain path so the existing
+            // gate error surfaces keep their shape (the same stance
+            // `retry_via_legacy_tls` takes).
+            return None;
+        }
+        let legacy = self.legacy_transport().await?;
+        legacy
+            .set_user_agent(&self.user_agent.read().await.clone())
+            .await;
+        legacy
+            .set_accept_language(&self.accept_language.read().await.clone())
+            .await;
+        legacy
+            .set_extra_headers(self.extra_headers.read().await.clone())
+            .await;
+        Some(
+            legacy
+                .fetch_with_body(
+                    url,
+                    None,
+                    method.as_str(),
+                    body,
+                    content_type,
+                    request_headers,
+                    include_cookies,
+                )
+                .await,
+        )
+    }
+
+    /// Non-stealth stub: the whole question is moot, scripted hops stay
+    /// on plain reqwest exactly as before.
+    #[cfg(not(feature = "stealth"))]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn scripted_stealth_hop(
+        &self,
+        _method: &Method,
+        _url: &Url,
+        _body: Option<&[u8]>,
+        _content_type: Option<&str>,
+        _request_headers: Option<&HashMap<String, String>>,
+        _include_cookies: bool,
+    ) -> Option<Result<Response, NetError>> {
+        None
+    }
+
     /// Build the legacy transport on first fallback need, mirroring this
     /// client's cookie jar, proxy and private-network posture. wreq does
     /// not speak SOCKS5 (the #160 shape), so a SOCKS proxy leaves the
     /// client rustls-only rather than silently rewriting the scheme.
+    /// The transport bakes the page's own handshake posture — the context
+    /// `tls_fingerprint` profile and the UA-derived platform — instead of
+    /// a stock Chrome145/Linux default, so the escape hatch never swaps
+    /// one JA3-mismatch tell for another (#116).
     #[cfg(feature = "stealth")]
     async fn legacy_transport(
         &self,
@@ -1032,9 +1127,19 @@ impl HttpClient {
                 {
                     return None;
                 }
-                let mut client = crate::diting_net::StealthHttpClient::with_proxy(
+                let profile = self
+                    .tls_fingerprint
+                    .as_deref()
+                    .and_then(crate::diting_net::parse_tls_fingerprint)
+                    .unwrap_or(wreq_util::Profile::Chrome145);
+                let os = crate::diting_net::emulation_os_for_ua(
+                    &self.user_agent.read().await.clone(),
+                );
+                let mut client = crate::diting_net::StealthHttpClient::with_proxy_and_emulation(
                     self.cookie_jar.clone(),
                     self.proxy_url.as_deref(),
+                    Some(os),
+                    profile,
                 );
                 client.allow_private_network = self.allow_private_network;
                 Some(Arc::new(client))

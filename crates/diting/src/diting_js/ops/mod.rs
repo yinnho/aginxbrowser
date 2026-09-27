@@ -4635,6 +4635,46 @@ pub(crate) fn fetch_referer(policy: &str, referrer_init: &str, document: &Url, t
     }
 }
 
+/// Case-insensitive header-name membership, shared by the hop-header merge
+/// (custom headers win over browser defaults).
+fn header_present(headers: &HashMap<String, String>, name: &str) -> bool {
+    headers.keys().any(|k| k.eq_ignore_ascii_case(name))
+}
+
+/// Convert a buffered `diting_net::Response` (stealth-hop or legacy-fallback
+/// shape) into the CORS preflight decision tuple: headers as a HeaderMap for
+/// the method/header list parsers below, the two CORS answer headers, the
+/// status. The conversion the legacy-fallback path used to do inline; the
+/// stealth-first preflight needs the identical one (#116).
+fn buffered_preflight_parts(
+    fr: &crate::diting_net::Response,
+) -> (
+    reqwest::header::HeaderMap,
+    String,
+    String,
+    u16,
+) {
+    let mut headers = reqwest::header::HeaderMap::new();
+    for (name, value) in &fr.headers {
+        if let (Ok(n), Ok(v)) = (
+            reqwest::header::HeaderName::try_from(name.as_str()),
+            reqwest::header::HeaderValue::try_from(value.as_str()),
+        ) {
+            headers.insert(n, v);
+        }
+    }
+    (
+        headers,
+        fr.header("access-control-allow-origin")
+            .unwrap_or("")
+            .to_string(),
+        fr.header("access-control-allow-credentials")
+            .unwrap_or("")
+            .to_string(),
+        fr.status,
+    )
+}
+
 /// The transport half of op_fetch_url, shared verbatim by the deferred async
 /// op and the sync-XHR op (obscura#908): client selection, CORS preflight,
 /// the manual SSRF-revalidated redirect walk, scripted per-hop headers, the
@@ -4700,87 +4740,108 @@ async fn fetch_url_walk(
                 unsafe_header_names.join(","),
             );
         }
-        // The preflight rides the same plain-reqwest primary transport as the
-        // main request, but for a while it was the one hop without the
-        // legacy-TLS escape hatch: on a CBC-only endpoint the OPTIONS died in
-        // the ClientHello and fetch failed before the main request — which
-        // does retry on connect-stage failure — ever ran. The retry replays
-        // the exact three preflight headers (no cookies: a CORS preflight is
-        // never credentialed) and, like every other caller of the escape
-        // hatch, a non-connect failure keeps the original error.
+        // The preflight's three headers (never cookies — a CORS preflight
+        // is never credentialed), as one map so both transports send the
+        // same request.
+        let mut preflight_headers: HashMap<String, String> = HashMap::new();
+        preflight_headers.insert("Origin".to_string(), page_origin.clone());
+        preflight_headers.insert(
+            "Access-Control-Request-Method".to_string(),
+            method.clone(),
+        );
+        if !unsafe_header_names.is_empty() {
+            preflight_headers.insert(
+                "Access-Control-Request-Headers".to_string(),
+                unsafe_header_names.join(","),
+            );
+        }
+        // #116: the preflight rides the same transport the main request
+        // will — stealth-first on a stealth page, before plain rustls.
+        // `Some(Err)` records that the stealth stack already fired so the
+        // plain attempt's own legacy fallback stays gated (at most two
+        // transports per request); `None` (non-stealth build/context,
+        // SOCKS) leaves the plain path exactly as it was.
+        let stealth_preflight = match http_client.as_ref() {
+            Some(hc) => match url::Url::parse(&url) {
+                Ok(u) => {
+                    hc.scripted_stealth_hop(
+                        &reqwest::Method::OPTIONS,
+                        &u,
+                        None,
+                        None,
+                        Some(&preflight_headers),
+                        false,
+                    )
+                    .await
+                }
+                Err(_) => None,
+            },
+            None => None,
+        };
+        let preflight_stealth_err = match &stealth_preflight {
+            Some(Err(se)) => Some(se.to_string()),
+            _ => None,
+        };
         let (pf_headers, allowed_origin, allow_credentials, preflight_status) =
-            match preflight_request.send().await {
-                Ok(p) => (
-                    p.headers().clone(),
-                    p.headers()
-                        .get("access-control-allow-origin")
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("")
-                        .to_string(),
-                    p.headers()
-                        .get("access-control-allow-credentials")
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("")
-                        .to_string(),
-                    p.status().as_u16(),
-                ),
-                Err(e) => {
-                    let mut preflight_headers: HashMap<String, String> = HashMap::new();
-                    preflight_headers.insert("Origin".to_string(), page_origin.clone());
-                    preflight_headers.insert(
-                        "Access-Control-Request-Method".to_string(),
-                        method.clone(),
-                    );
-                    if !unsafe_header_names.is_empty() {
-                        preflight_headers.insert(
-                            "Access-Control-Request-Headers".to_string(),
-                            unsafe_header_names.join(","),
-                        );
-                    }
-                    let fallback = match http_client.as_ref() {
-                        Some(hc) => match url::Url::parse(&url) {
-                            Ok(u) => Some(
-                                hc.scripted_fetch_fallback(
-                                    &reqwest::Method::OPTIONS,
-                                    &u,
-                                    &e.to_string(),
-                                    None,
-                                    None,
-                                    e.is_connect(),
-                                    Some(&preflight_headers),
-                                    false,
-                                )
-                                .await,
-                            ),
-                            Err(_) => None,
-                        },
-                        None => None,
-                    };
-                    match fallback {
-                        Some(Ok(fr)) => {
-                            let mut headers = reqwest::header::HeaderMap::new();
-                            for (name, value) in &fr.headers {
-                                if let (Ok(n), Ok(v)) = (
-                                    reqwest::header::HeaderName::try_from(name.as_str()),
-                                    reqwest::header::HeaderValue::try_from(value.as_str()),
-                                ) {
-                                    headers.insert(n, v);
+            match &stealth_preflight {
+                Some(Ok(fr)) => buffered_preflight_parts(fr),
+                _ => match preflight_request.send().await {
+                    Ok(p) => (
+                        p.headers().clone(),
+                        p.headers()
+                            .get("access-control-allow-origin")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string(),
+                        p.headers()
+                            .get("access-control-allow-credentials")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string(),
+                        p.status().as_u16(),
+                    ),
+                    Err(e) => {
+                        // The plain preflight keeps the legacy-TLS escape
+                        // hatch (a CBC-only endpoint kills the OPTIONS in
+                        // the ClientHello before the main request — which
+                        // does retry on connect-stage failure — ever ran)
+                        // unless the stealth stack already fired above.
+                        let fallback = match http_client.as_ref() {
+                            Some(hc) if preflight_stealth_err.is_none() => {
+                                match url::Url::parse(&url) {
+                                    Ok(u) => Some(
+                                        hc.scripted_fetch_fallback(
+                                            &reqwest::Method::OPTIONS,
+                                            &u,
+                                            &e.to_string(),
+                                            None,
+                                            None,
+                                            e.is_connect(),
+                                            Some(&preflight_headers),
+                                            false,
+                                        )
+                                        .await,
+                                    ),
+                                    Err(_) => None,
                                 }
                             }
-                            (
-                                headers,
-                                fr.header("access-control-allow-origin").unwrap_or("").to_string(),
-                                fr.header("access-control-allow-credentials").unwrap_or("").to_string(),
-                                fr.status,
-                            )
-                        }
-                        _ => {
-                            let error = format!("CORS preflight failed: {}", e);
-                            deps.failures.push((url.clone(), method.clone(), error.clone()));
-                            return Err(deno_error::JsErrorBox::generic(error));
+                            _ => None,
+                        };
+                        match fallback {
+                            Some(Ok(fr)) => buffered_preflight_parts(&fr),
+                            _ => {
+                                let error = match preflight_stealth_err {
+                                    Some(se) => format!(
+                                        "CORS preflight failed: {e} (stealth transport also failed: {se})"
+                                    ),
+                                    None => format!("CORS preflight failed: {e}"),
+                                };
+                                deps.failures.push((url.clone(), method.clone(), error.clone()));
+                                return Err(deno_error::JsErrorBox::generic(error));
+                            }
                         }
                     }
-                }
+                },
             };
 
         // Every preflight rejection below is an early exit the JS side sees as
@@ -4876,6 +4937,10 @@ async fn fetch_url_walk(
     let mut cors_tainted = request_origin(&url)
         .map(|o| o != page_origin)
         .unwrap_or(false);
+    // #116: sticky across hops — once the stealth stack has fired for this
+    // request (Ok or Err), plain's own legacy fallback stays off: a request
+    // never burns more than two transports.
+    let mut stealth_fired = false;
 
     // Passive on_request observers (upstream #408): fire with the request as
     // the script shaped it, once, before the first hop goes out.
@@ -4933,7 +4998,18 @@ async fn fetch_url_walk(
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
             .map(|(_, v)| v.clone());
-        let effective_ua = ua_override.clone().unwrap_or_else(|| DEFAULT_UA.to_string());
+        // Scripted hops used to hardcode this macOS-Chrome145 UA while the
+        // document hop carried the context persona's (import_curl sessions
+        // and per-account personas ride their own) — one more identity
+        // mismatch for WAFs to key on. Prefer the context client's UA;
+        // DEFAULT_UA stays the floor for bare runtimes with no owning
+        // client (identical string under the default persona, so pinned
+        // header expectations don't move).
+        let client_ua = match http_client.as_ref() {
+            Some(hc) => hc.user_agent.read().await.clone(),
+            None => DEFAULT_UA.to_string(),
+        };
+        let effective_ua = ua_override.clone().unwrap_or(client_ua);
         let (sec_ch_ua, sec_ch_ua_platform) =
             crate::diting_net::client::derive_client_hints(&effective_ua);
         if ua_override.is_none() {
@@ -5015,6 +5091,52 @@ async fn fetch_url_walk(
             req = req.header(k.as_str(), v.as_str());
         }
 
+        // #116: the hop's full outbound header set as one map. The
+        // stealth-first attempt below and the legacy fallback in the Err
+        // arm both send THIS — the same request on another stack, not a
+        // near-copy rebuilt per site. Custom (filtered) headers ride as
+        // the script shaped them; each browser default joins only when
+        // the script didn't set its own (the same gates the plain hop's
+        // .header() calls above apply).
+        let mut hop_headers: HashMap<String, String> = effective_headers.clone();
+        if (method_needs_origin || current_is_cross_origin)
+            && !header_present(&hop_headers, "origin")
+        {
+            hop_headers.insert("Origin".into(), page_origin.clone());
+        }
+        if ua_override.is_none() && !header_present(&hop_headers, "user-agent") {
+            hop_headers.insert("User-Agent".into(), effective_ua.clone());
+        }
+        for (name, value) in [
+            ("sec-ch-ua", sec_ch_ua.clone()),
+            ("sec-ch-ua-mobile", "?0".to_string()),
+            ("sec-ch-ua-platform", sec_ch_ua_platform.clone()),
+            ("accept", "*/*".to_string()),
+            ("sec-fetch-site", sec_fetch_site.to_string()),
+            ("sec-fetch-mode", sec_fetch_mode.to_string()),
+            ("sec-fetch-dest", "empty".to_string()),
+        ] {
+            if !header_present(&hop_headers, name) {
+                hop_headers.insert(name.to_string(), value);
+            }
+        }
+        if !header_present(&hop_headers, "referer")
+            && (!document_url.is_empty() || referrer_init != "about:client")
+        {
+            if let (Ok(target), Ok(doc)) =
+                (Url::parse(&current_url), Url::parse(&document_url))
+            {
+                let ref_val = fetch_referer(&referrer_policy, &referrer_init, &doc, &target);
+                if !ref_val.is_empty() {
+                    hop_headers.insert("Referer".into(), ref_val);
+                }
+            }
+        }
+        let hop_ctype = hop_headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v.clone());
+
         if !current_body.is_empty() {
             req = req.body(current_body.clone());
         }
@@ -5042,6 +5164,48 @@ async fn fetch_url_walk(
             }
         });
 
+        // #116 stealth-first hop: on a stealth page the scripted request
+        // rides the wreq emulation stack BEFORE plain rustls — the same
+        // TLS fingerprint the navigation above it presented, so the cookie
+        // jar never appears behind two JA3s (the bilibili-412-shaped tell
+        // that held scripted requests until xhr.timeout fired while the
+        // document request sailed through). Some(Ok) settles the whole
+        // request here: the stealth walk re-validates SSRF per hop,
+        // downgrades 303-class redirects and stores cookies itself.
+        // Some(Err) means the stealth stack fired and failed — fall
+        // through to plain with plain's legacy fallback gated off below.
+        // None keeps the plain path exactly as it was (non-stealth
+        // build/context, SOCKS proxy).
+        let stealth_hop = match http_client.as_ref() {
+            Some(hc) => match url::Url::parse(&current_url) {
+                Ok(u) => {
+                    hc.scripted_stealth_hop(
+                        &current_method,
+                        &u,
+                        (!current_body.is_empty()).then_some(current_body.as_slice()),
+                        hop_ctype.as_deref(),
+                        Some(&hop_headers),
+                        credentials_allowed,
+                    )
+                    .await
+                }
+                Err(_) => None,
+            },
+            None => None,
+        };
+        match stealth_hop {
+            Some(Ok(buffered)) => {
+                if let Some(ref counter) = in_flight {
+                    counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                break OpFetchOutcome::Buffered(buffered);
+            }
+            Some(Err(_)) => {
+                stealth_fired = true;
+            }
+            None => {}
+        }
+
         let resp = match req.send().await {
             Ok(r) => r,
             Err(e) => {
@@ -5059,94 +5223,33 @@ async fn fetch_url_walk(
                 // provably never left the machine), so a POST form submit
                 // cannot double-submit (taobao seller-backend shape:
                 // CBC-only endpoints killed every publish POST at the
-                // handshake). The retry also rebuilds the hop's scripted
-                // header set (Origin, Referer, Fetch-Metadata, client hints)
-                // and the credentials policy, so the legacy transport sends
-                // the same request, not a bare one — Referer-checking WAFs
-                // 403 the bare shape even after the handshake succeeds.
-                let fallback_ctype = effective_headers
-                    .iter()
-                    .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-                    .map(|(_, v)| v.clone());
+                // handshake). The retry sends the hop's merged header set
+                // (customs + Origin, UA, Fetch-Metadata, client hints —
+                // `hop_headers`, not a rebuilt near-copy) and the
+                // credentials policy. On a stealth page the stealth-first
+                // attempt above already rode this same transport, so the
+                // fallback stays gated (#116: at most two transports).
                 let fallback = match http_client.as_ref() {
                     Some(hc)
-                        if current_method == reqwest::Method::GET
-                            || current_method == reqwest::Method::HEAD
-                            || e.is_connect() =>
+                        if !stealth_fired
+                            && (current_method == reqwest::Method::GET
+                                || current_method == reqwest::Method::HEAD
+                                || e.is_connect()) =>
                     {
                         match url::Url::parse(&current_url) {
-                            Ok(u) => {
-                                let mut fallback_headers = effective_headers.clone();
-                                fn header_set(
-                                    headers: &HashMap<String, String>,
-                                    name: &str,
-                                ) -> bool {
-                                    headers.keys().any(|k| k.eq_ignore_ascii_case(name))
-                                }
-                                if (method_needs_origin || current_is_cross_origin)
-                                    && !header_set(&fallback_headers, "origin")
-                                {
-                                    fallback_headers
-                                        .insert("Origin".into(), page_origin.clone());
-                                }
-                                if !header_set(&fallback_headers, "user-agent") {
-                                    fallback_headers
-                                        .insert("User-Agent".into(), effective_ua.clone());
-                                }
-                                for (name, value) in [
-                                    ("sec-ch-ua", sec_ch_ua.clone()),
-                                    ("sec-ch-ua-mobile", "?0".to_string()),
-                                    ("sec-ch-ua-platform", sec_ch_ua_platform.clone()),
-                                    ("accept", "*/*".to_string()),
-                                    (
-                                        "sec-fetch-site",
-                                        if current_is_cross_origin {
-                                            "cross-site"
-                                        } else {
-                                            "same-origin"
-                                        }
-                                        .to_string(),
-                                    ),
-                                    (
-                                        "sec-fetch-mode",
-                                        if mode.is_empty() {
-                                            "cors"
-                                        } else {
-                                            mode.as_str()
-                                        }
-                                        .to_string(),
-                                    ),
-                                    ("sec-fetch-dest", "empty".to_string()),
-                                ] {
-                                    if !header_set(&fallback_headers, name) {
-                                        fallback_headers.insert(name.to_string(), value);
-                                    }
-                                }
-                                if (!document_url.is_empty()
-                                    || referrer_init != "about:client")
-                                    && !header_set(&fallback_headers, "referer")
-                                {
-                                    let doc = Url::parse(&document_url).unwrap_or_else(|_| u.clone());
-                                    let referrer =
-                                        fetch_referer(&referrer_policy, &referrer_init, &doc, &u);
-                                    if !referrer.is_empty() {
-                                        fallback_headers.insert("Referer".into(), referrer);
-                                    }
-                                }
-                                Some(
-                                    hc.scripted_fetch_fallback(
-                                        &current_method,
-                                        &u,
-                                        &e.to_string(),
-                                        (!current_body.is_empty()).then_some(current_body.as_slice()),
-                                        fallback_ctype.as_deref(),
-                                        e.is_connect(),
-                                        Some(&fallback_headers),
-                                        credentials_allowed,
-                                    )
-                                    .await,
+                            Ok(u) => Some(
+                                hc.scripted_fetch_fallback(
+                                    &current_method,
+                                    &u,
+                                    &e.to_string(),
+                                    (!current_body.is_empty()).then_some(current_body.as_slice()),
+                                    hop_ctype.as_deref(),
+                                    e.is_connect(),
+                                    Some(&hop_headers),
+                                    credentials_allowed,
                                 )
-                            }
+                                .await,
+                            ),
                             Err(_) => None,
                         }
                     }

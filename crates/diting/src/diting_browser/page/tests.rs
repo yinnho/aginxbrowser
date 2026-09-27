@@ -2050,6 +2050,110 @@ ms.addEventListener('sourceopen', function(){ \
         );
     }
 
+    /// Recording origin for #116: serves a canned /app document and echoes
+    /// the /probe request's own head back as the body, logging every
+    /// request head verbatim so a test can assert both WHAT went out on
+    /// the wire and HOW MANY times (the no-double-transport guarantee).
+    /// Stealth-test-only (its sole caller is the #116 stealth-page test);
+    /// cfg'd out alongside it so non-stealth builds see no dead fixture.
+    #[cfg(feature = "stealth")]
+    fn recording_echo_origin() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log_clone = log.clone();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..64 {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = head
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+                let body = if path == "/probe" {
+                    // Echo the request head (minus the request line) so the
+                    // caller can assert headers as seen by the origin.
+                    head.lines()
+                        .skip(1)
+                        .take_while(|l| !l.is_empty())
+                        .map(|l| l.to_ascii_lowercase())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                } else {
+                    "<html><script>\
+                     fetch('/probe').then(r => r.text()).then(t => { window.__got = t; });\
+                     </script></html>"
+                        .to_string()
+                };
+                log_clone.lock().unwrap().push(head);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (port, log)
+    }
+
+    /// #116 end to end: on a stealth page the JS fetch() hop rides the wreq
+    /// emulation stack — the same handshake the document above it rode.
+    /// The echo body landing in window.__got proves the response resolves
+    /// the promise through the new Buffered path; the recorded head proves
+    /// the request carried the fetch()-shaped Fetch-Metadata trio (the
+    /// plain reqwest main hop sends no sec-fetch-* at all), and exactly
+    /// ONE /probe hit proves the successful stealth hop short-circuits
+    /// plain instead of burning both transports.
+    #[cfg(feature = "stealth")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn stealth_page_script_fetch_rides_wreq_transport() {
+        let _g = net_test_guard();
+        let (port, log) = recording_echo_origin();
+        let context = Arc::new(BrowserContext::with_storage_and_network(
+            "test-stealth".into(),
+            None,
+            true, // stealth → scripted_rides_stealth on the context client
+            None,
+            None,
+            true,
+            None,
+        ));
+        let mut p = Page::new("page-test".into(), context);
+        p.navigate(&format!("http://127.0.0.1:{port}/app")).await.unwrap();
+
+        let got = p
+            .evaluate("window.__got")
+            .as_str()
+            .expect("stealth-hop fetch must resolve the promise")
+            .to_string();
+        assert!(
+            got.contains("sec-fetch-dest: empty") && got.contains("sec-fetch-mode: cors"),
+            "echo body must be the fetch-shaped request head, got: {got}"
+        );
+
+        let log = log.lock().unwrap();
+        let probes: Vec<&String> = log.iter().filter(|h| h.contains(" /probe ")).collect();
+        assert_eq!(probes.len(), 1, "one transport per hop, log: {log:?}");
+        let probe = probes[0].to_ascii_lowercase();
+        assert!(
+            probe.contains("sec-fetch-dest: empty")
+                && probe.contains("sec-fetch-mode: cors")
+                && probe.contains("sec-fetch-site: same-origin"),
+            "the wire must carry the fetch-shaped Fetch-Metadata trio: {probe}"
+        );
+        assert!(
+            !probe.contains("sec-fetch-dest: document"),
+            "the transport's navigation-shaped default must not ride a scripted fetch: {probe}"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn clear_response_bodies_drops_page_and_js_stores() {
         let _g = net_test_guard();
