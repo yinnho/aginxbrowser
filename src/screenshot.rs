@@ -1341,4 +1341,98 @@ mod opacity_pipeline_tests {
         let gray = count_color(&shot.png, |(r, g, b)| r > 80 && g > 80 && b > 80 && r as u32 + g as u32 + b as u32 <= 600);
         assert!(gray > 50, "opacity:0.5 text should paint blended gray, got {gray} px");
     }
+
+    /// #154's pinned walk — attributes → thumb geometry. The paint AND the
+    /// collect both predate the issue (the forms.rs split hid them from its
+    /// grep of paint.rs); what was genuinely missing was this end-to-end
+    /// pin: min/max/value must land the thumb at the fraction of the
+    /// thumb-inset track span, an out-of-range value clamps to the end,
+    /// and missing min/max fall back to the spec's 0..100.
+    #[test]
+    fn range_slider_paints_track_fill_thumb_from_attributes() {
+        // Render one slider and return its measured geometry: the track
+        // span (light-gray family), the fill span (mid-gray family), and
+        // the thumb centroid (the dark disc). Families are matched tight
+        // (±10 around the engine's exact widget ramp) and a column needs
+        // ≥2 matching pixels, so antialiased corner blends can't move a
+        // boundary by more than they physically can (≈1px).
+        let geometry = |attrs: &str| -> (Option<(i64, i64)>, i64, i64, i64) {
+            let html = format!(
+                r#"<html><head><style>body {{ margin: 0; }} input {{ width: 120px; }}</style></head><body><input type="range" {attrs}></body></html>"#
+            );
+            let shot = render_html_to_png_diting(&html, "http://probe.local/", 160, 60, 1.0, false, None, false, None)
+                .expect("render");
+            let decoder = png::Decoder::new(std::io::Cursor::new(&shot.png));
+            let mut reader = decoder.read_info().expect("png read_info");
+            let mut buf = vec![0; reader.output_buffer_size().expect("png buffer size")];
+            let info = reader.next_frame(&mut buf).expect("png decode");
+            let px = &buf[..info.buffer_size()];
+            let gray_family = |x: u8, center: u8| {
+                (x as i32 - center as i32).abs() <= 10
+            };
+            let mut cols: Vec<(u32, u8, u8, u8)> = Vec::new();
+            for y in 0..info.height {
+                for x in 0..info.width {
+                    let i = ((y * info.width + x) * 4) as usize;
+                    cols.push((x, px[i], px[i + 1], px[i + 2]));
+                }
+            }
+            // Optional: the trailing (unfilled) track's span — empty when
+            // the fill covers the whole track (a clamped thumb).
+            let span = |center: u8| -> Option<(i64, i64)> {
+                let mut hits: Vec<u32> = Vec::new();
+                for x in 0..info.width {
+                    let n = cols.iter().filter(|&&(cx, r, g, b)| {
+                        cx == x && gray_family(r, center) && gray_family(g, center) && gray_family(b, center)
+                    }).count();
+                    if n >= 2 {
+                        hits.push(x);
+                    }
+                }
+                if hits.is_empty() {
+                    None
+                } else {
+                    Some((*hits.iter().min().unwrap() as i64, *hits.iter().max().unwrap() as i64))
+                }
+            };
+            let (fill_x0, fill_x1) = span(118).unwrap_or_else(|| panic!("no fill family found for `{attrs}`"));
+            // Thumb centroid: mean column of the dark ink pixels.
+            let ink: Vec<u32> = cols
+                .iter()
+                .filter(|&&(_, r, g, b)| r < 60 && g < 60 && b < 60)
+                .map(|&(x, _, _, _)| x)
+                .collect();
+            assert!(!ink.is_empty(), "no thumb ink found for `{attrs}`");
+            let thumb_cx = ink.iter().map(|&x| x as f64).sum::<f64>() / ink.len() as f64;
+            (span(203), thumb_cx as i64, fill_x0, fill_x1)
+        };
+
+        // Box constants the widget paints against (body margin 0, input
+        // width 120px at the content origin): the track spans the
+        // thumb-inset [7, 113) — 106px, the same span the mousedown snap
+        // maps clicks over.
+        // min=0/max=1000/value=300 → fraction 0.30: thumb at 7+32=39,
+        // fill leading it, trailing track past the disc.
+        let (trailing, thumb, fx0, fx1) = geometry("min=\"0\" max=\"1000\" value=\"300\"");
+        let (tt0, tt1) = trailing.expect("trailing track for a mid value");
+        assert!(fx0 >= 5 && fx0 <= 9, "fill starts at the track head: {fx0}");
+        assert!((thumb - 39).abs() <= 2, "thumb at 30% of the inset span: got {thumb}");
+        assert!(fx1 <= thumb + 2, "fill leads the thumb: {fx0}..{fx1}");
+        assert!(tt0 >= thumb + 4 && tt1 >= 108 && tt1 <= 114, "trailing track: {tt0}..{tt1}");
+
+        // Out-of-range value clamps to max: thumb parks at the track end,
+        // the fill spans the whole track (no trailing track left).
+        let (trailing, thumb, fx0, fx1) = geometry("min=\"0\" max=\"1000\" value=\"2000\"");
+        assert!((thumb - 113).abs() <= 3, "clamped thumb at the end: got {thumb}");
+        // The visible fill can only reach the disc's left edge (106) — the
+        // ink parks on top of the fill's tail — so ≥103 pins "spans the
+        // track" while tolerating the disc's antialiased boundary.
+        assert!(fx0 >= 5 && fx0 <= 9 && fx1 >= 103 && fx1 <= 108, "fill spans the track: {fx0}..{fx1}");
+        assert!(trailing.is_none(), "no unfilled track behind a clamped thumb: {trailing:?}");
+
+        // No min/max: the spec defaults 0..100 apply (value 25 → 25% of
+        // the same 106px span = 7+27=34).
+        let (_, thumb, _, _) = geometry("value=\"25\"");
+        assert!((thumb - 34).abs() <= 2, "thumb at 25% of defaults: got {thumb}");
+    }
 }
