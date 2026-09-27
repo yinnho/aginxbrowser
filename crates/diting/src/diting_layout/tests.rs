@@ -773,6 +773,70 @@ mod batch_124_leading_ws_tests {
         let spaced = text_x(r#"<p>abc<br> def</p>"#, "def");
         assert_eq!(spaced, base, "space after <br> opens the next line and must be removed");
     }
+
+    /// #146: Chrome's trailing-`<br>` line-box accounting, pinned against
+    /// the headless-Chrome ground-truth matrix measured for the issue. A
+    /// forced break ENDS the current line; it contributes a line box iff
+    /// the line it ends is empty (block start / consecutive br / after a
+    /// block sibling). Trailing break after content: no height. Content
+    /// after a break: that content's own line. So `lines = breaks +
+    /// (content after the last break ? 1 : 0)`, floored at `breaks`.
+    #[test]
+    fn br_line_boxes_match_the_chrome_matrix() {
+        use crate::diting_layout::{compute_styles, layout_dom};
+        fn div_height(body: &str) -> f32 {
+            let html = format!(r#"<html><body style="margin:0"><div id="d">{body}</div></body></html>"#);
+            let tree = parse_html(&html);
+            let rules = parse_stylesheet_for("", (800.0, 600.0), CssMediaType::Screen);
+            let styles = compute_styles(&tree, &rules, (800.0, 600.0));
+            let rects = layout_dom(&tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0);
+            rects[&tree.query_selector("#d").unwrap().unwrap()].height
+        }
+        let line = div_height("a");
+        assert!(line > 0.0);
+        // Trailing break after content adds NO line (Chrome: 20 == 20).
+        assert_eq!(div_height("a<br>"), line, "trailing br must not add a line");
+        // Content after the break is the break's own line (Chrome: 40 = 2×20).
+        assert_eq!(div_height("a<br>b"), line * 2.0, "one break, two lines");
+        // The EMPTY line between two breaks owns a line box (Chrome: 40).
+        assert_eq!(div_height("a<br><br>"), line * 2.0, "consecutive brs: the middle empty line exists");
+        // A br-only block is one line tall (Chrome: 20) — the rich-text
+        // empty-paragraph shape <p><br></p>.
+        assert_eq!(div_height("<br>"), line, "br-only block keeps one line box");
+        // Collapsible whitespace after the br is not content (Chrome: 20).
+        assert_eq!(div_height("<br> "), line, "ws after br does not open a second line");
+        // All-break content: every br owns its line (Chrome <br><br> = 40).
+        assert_eq!(div_height("<br><br>"), line * 2.0, "two standalone brs stack two empty lines");
+        // The empty line's height rides the BR's own inherited line-height
+        // (lh:3 → the strut is 3em, not the 1.2 default). Block-level p so
+        // the strut stacks in p's own flow instead of hoisting into a run.
+        let p3 = div_height(r#"<p style="line-height: 3; margin: 0">x</p>"#);
+        let p3_break = div_height(r#"<p style="line-height: 3; margin: 0">x<br><br></p>"#);
+        assert!(
+            (p3_break - p3 * 2.0).abs() < 1.0,
+            "strut follows the br's inherited line-height: break={p3_break} one-line={p3}"
+        );
+    }
+
+    /// The #146 inverse edge, straight from blitz#939: a `display:none` br
+    /// is the classic "hide the trailing spacer" idiom and must break
+    /// nothing and add no line.
+    #[test]
+    fn display_none_br_contributes_no_line() {
+        use crate::diting_layout::{compute_styles, layout_dom};
+        fn div_height(sheet: &str, body: &str) -> f32 {
+            let html = format!(r#"<html><head><style>{sheet}</style></head><body style="margin:0"><div id="d">{body}</div></body></html>"#);
+            let tree = parse_html(&html);
+            let rules = parse_stylesheet_for(sheet, (800.0, 600.0), CssMediaType::Screen);
+            let styles = compute_styles(&tree, &rules, (800.0, 600.0));
+            let rects = layout_dom(&tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0);
+            rects[&tree.query_selector("#d").unwrap().unwrap()].height
+        }
+        let one = div_height("", "a");
+        assert_eq!(div_height("", "a<br style='display:none'>"), one, "hidden br adds no line");
+        // A standalone hidden br owns no line box either.
+        assert_eq!(div_height("", "<br style='display:none'>"), 0.0, "hidden br-only block is 0-height");
+    }
 }
 
 /// Batch 125 (#21, takumi#1490 same face, learn-only channel): a wrapping

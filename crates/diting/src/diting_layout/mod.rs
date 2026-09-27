@@ -1472,6 +1472,23 @@ fn run_wrapper_style() -> Style {    Style {
     }
 }
 
+/// The line box a `<br>` owns when the line it ends is EMPTY (#146): a
+/// zero-width, line-height-tall strut. Chrome's trailing-br accounting —
+/// verified against headless Chrome — is that a forced break ends the
+/// current line and contributes a line box only when that line is empty
+/// (block start, after another `<br>`, after a block sibling); a trailing
+/// break after content adds no height, and the line a break opens for
+/// following content is that content's own line. Not in `node_map` — the
+/// strut paints nothing and owns no DOM identity.
+fn br_strut_leaf(taffy_tree: &mut TaffyTree<TextLeaf>, lh: f32) -> Option<taffy::tree::NodeId> {
+    taffy_tree
+        .new_leaf(Style {
+            size: Size { width: Dimension::length(0.0), height: Dimension::length(lh.max(0.0)) },
+            ..Style::default()
+        })
+        .ok()
+}
+
 /// Tags whose layout box is a replaced leaf: intrinsic size + aspect ratio,
 /// no children in the layout tree. `input`/`textarea` join the img/canvas
 /// family: an unstyled control used to fall through to the plain-block path
@@ -2596,6 +2613,23 @@ fn build_flow_column(
         let out_of_flow = styles.get(&child).is_some_and(|s| {
             matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
         });
+        if child_tag == "br" && !out_of_flow {
+            // #146: same trailing-br accounting as the main walk (see
+            // build_element_inner) — flush, then a strut only for an EMPTY
+            // ended line.
+            let line_has_content = run.iter().any(|seg| match seg {
+                RunSeg::Text(t, ..) => !t.trim().is_empty(),
+                RunSeg::Nodes(n) => !n.is_empty(),
+            });
+            flush_run(&mut run, &mut flow_children, taffy_tree, run_wrappers);
+            if !line_has_content && child_display != Some(CssDisplay::None) {
+                let (_, _, lh) = font_context(tree, child, styles, fonts);
+                if let Some(strut) = br_strut_leaf(taffy_tree, lh) {
+                    flow_children.push(strut);
+                }
+            }
+            continue;
+        }
         if !is_text && is_replaced_tag(&child_tag) {
             // Inline-flavored replaced elements (UA inline-block form
             // controls included) join the text run; the rest stay block
@@ -4604,6 +4638,26 @@ fn build_element_inner(
         let out_of_flow = styles.get(&child).is_some_and(|s| {
             matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
         });
+        if child_tag == "br" && !out_of_flow {
+            // #146: the forced break ends the current line. Flush as the
+            // block model always did (the following content is its own
+            // line), and give the br a line box only when the line it ends
+            // is EMPTY — whitespace-only text and hoisted empty inline
+            // boxes are not content. `display:none` br (the reset idiom)
+            // breaks nothing and owns no line.
+            let line_has_content = run.iter().any(|seg| match seg {
+                RunSeg::Text(t, ..) => !t.trim().is_empty(),
+                RunSeg::Nodes(n) => !n.is_empty(),
+            });
+            flush_run(&mut run, &mut direct, taffy_tree, run_wrappers);
+            if !line_has_content && child_display != Some(CssDisplay::None) {
+                let (_, _, lh) = font_context(tree, child, styles, fonts);
+                if let Some(strut) = br_strut_leaf(taffy_tree, lh) {
+                    direct.push(strut);
+                }
+            }
+            continue;
+        }
         if !is_text && is_replaced_tag(&child_tag) {
             // Replaced elements are atomic: an inline-level box inside a run
             // (like a fat word), a direct item inside flex/grid or when the
