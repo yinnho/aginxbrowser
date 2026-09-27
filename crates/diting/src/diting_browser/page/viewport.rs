@@ -96,18 +96,63 @@ impl Page {
             return false;
         };
         let escaped = tz.replace('\\', "\\\\").replace('\'', "\\'");
-        match js.evaluate(&format!(
-            "(function(){{try{{Intl.DateTimeFormat('en-US',{{timeZone:'{escaped}'}});return true}}catch(e){{return false}}}})()"
-        )) {
-            Ok(serde_json::Value::Bool(true)) => true,
-            _ => false,
-        }
+        matches!(
+            js.evaluate(&format!(
+                "(function(){{try{{Intl.DateTimeFormat('en-US',{{timeZone:'{escaped}'}});return true}}catch(e){{return false}}}})()"
+            )),
+            Ok(serde_json::Value::Bool(true))
+        )
     }
 
     pub(super) fn apply_timezone_override(&mut self) {
         let tz = self.timezone_override.clone();
         if let Some(js) = &mut self.js {
             js.set_timezone(tz.as_deref());
+        }
+    }
+
+    /// Pin `Emulation.setLocaleOverride` (#153). `None` clears back to the
+    /// persona language. The effect face is `globalThis.__diting_locale` —
+    /// a pin the bootstrap's `__ditingLangList` reads ahead of the persona
+    /// `__diting_lang` (same pin-over-derivation shape as `__diting_tz`) —
+    /// so navigator.language/languages, the Intl default-locale binding
+    /// (`__ditingLocaleArg`), and even the language-derived default
+    /// timezone all move together, live, without re-pinning the
+    /// process-global ICU default (sticky per-isolate; the bootstrap
+    /// binding is the authoritative fix, see `set_navigator_language`).
+    pub fn set_locale_override(&mut self, locale: Option<String>) {
+        self.locale_override = locale.filter(|l| !l.is_empty());
+        self.apply_locale_override();
+    }
+
+    /// True when ICU accepts `locale` as a language tag. The check runs in
+    /// the page (`Intl.Locale` is the BCP 47 parser Chrome validates this
+    /// command against), so the answer matches the override's own runtime.
+    pub fn locale_supported(&mut self, locale: &str) -> bool {
+        if locale.is_empty()
+            || locale.len() > 80
+            || !locale
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        {
+            return false;
+        }
+        let Some(js) = &mut self.js else {
+            return false;
+        };
+        let escaped = locale.replace('\\', "\\\\").replace('\'', "\\'");
+        matches!(
+            js.evaluate(&format!(
+                "(function(){{try{{new Intl.Locale('{escaped}');return true}}catch(e){{return false}}}})()"
+            )),
+            Ok(serde_json::Value::Bool(true))
+        )
+    }
+
+    pub(super) fn apply_locale_override(&mut self) {
+        let locale = self.locale_override.clone();
+        if let Some(js) = &mut self.js {
+            js.set_locale(locale.as_deref());
         }
     }
 

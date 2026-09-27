@@ -15055,7 +15055,12 @@ const _OrigDateTimeFormat = Intl.DateTimeFormat;
 // navigator.language must be a single BCP-47 tag and navigator.languages a
 // tag list — a q-weighted string in either is a hard headless tell.
 function __ditingLangList() {
-  const raw = String(globalThis.__diting_lang || 'zh-CN');
+  // CDP Emulation.setLocaleOverride pin outranks the persona language
+  // (Chrome's locale override outranks the accept-language). Pin-over-
+  // derivation, same shape as __diting_tz over __ditingTZFromLang.
+  const pin = globalThis.__diting_locale;
+  const raw = String((typeof pin === 'string' && pin.length) ? pin
+    : (globalThis.__diting_lang || 'zh-CN'));
   const tags = raw.split(',').map((s) => s.split(';')[0].trim()).filter(Boolean);
   const out = tags.length ? tags : ['zh-CN'];
   if (out.length === 1 && out[0].indexOf('-') !== -1) out.push(out[0].split('-')[0]);

@@ -217,6 +217,27 @@ pub async fn handle(
             page.set_timezone_override(Some(tz.to_string()));
             Ok(json!({}))
         }
+        // Chrome: empty locale clears back to the accept-language persona.
+        // Invalid tags error and do not change the page. navigator
+        // .language(s), the Intl default locale, and the language-derived
+        // default timezone all read the pin.
+        "setLocaleOverride" => {
+            let locale = params.get("locale").and_then(Value::as_str).ok_or(
+                "Emulation.setLocaleOverride requires string locale",
+            )?;
+            let Some(page) = ctx.get_session_page_mut(session_id) else {
+                return Err("Emulation.setLocaleOverride requires a page target".to_string());
+            };
+            if locale.is_empty() {
+                page.set_locale_override(None);
+                return Ok(json!({}));
+            }
+            if !page.locale_supported(locale) {
+                return Err(format!("Invalid locale: {locale}"));
+            }
+            page.set_locale_override(Some(locale.to_string()));
+            Ok(json!({}))
+        }
         "setUserAgentOverride" => {
             let ua = params.get("userAgent").and_then(|v| v.as_str()).unwrap_or("");
             let lang = params.get("acceptLanguage").and_then(|v| v.as_str());

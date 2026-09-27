@@ -304,6 +304,13 @@ pub struct Page {
     /// navigation, which rebuilds the realm, replays it. Empty means the
     /// bootstrap's language-derived zone.
     timezone_override: Option<String>,
+    /// CDP `Emulation.setLocaleOverride` (#153). Lives on the Page so a
+    /// navigation, which rebuilds the realm, replays it over the persona
+    /// language — the explicit pin outranks both persona sources (the env
+    /// accept-language at realm build and setUserAgentOverride's
+    /// acceptLanguage), the same posture Chrome gives its locale override.
+    /// Empty means the persona default.
+    locale_override: Option<String>,
     /// 32-bit seed the JS persona draws its hardware identity from
     /// (screen/dpr/GPU/canvas). Lives on the Page because every navigation
     /// rebuilds the realm and `__diting_init` self-deletes after drawing a
@@ -508,6 +515,7 @@ impl Page {
             emulated_media: None,
             touch_override: None,
             timezone_override: None,
+            locale_override: None,
             fp_seed: u64::from_be_bytes(
                 uuid::Uuid::new_v4().into_bytes()[..8].try_into().unwrap(),
             ),
@@ -731,6 +739,7 @@ impl Page {
         self.apply_emulated_media();
         self.apply_touch_override();
         self.apply_timezone_override();
+        self.apply_locale_override();
     }
 
     /// Capture the live realm's `sessionStorage` into `self.session_storage`

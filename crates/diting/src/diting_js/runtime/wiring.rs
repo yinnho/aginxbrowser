@@ -225,4 +225,20 @@ impl JsRuntime {
         };
         let _ = self.runtime.execute_script("<set-tz>", source);
     }
+
+    /// Pin or clear the page locale (`Emulation.setLocaleOverride`, #153).
+    /// The bootstrap's `__ditingLangList` reads `globalThis.__diting_locale`
+    /// per call — the pin outranks the persona `__diting_lang`, so this
+    /// takes effect on the live realm without destroying the persona or
+    /// touching process-global ICU.
+    pub fn set_locale(&mut self, locale: Option<&str>) {
+        let source = match locale.filter(|l| !l.is_empty()) {
+            Some(locale) => {
+                let escaped = locale.replace('\\', "\\\\").replace('\'', "\\'");
+                format!("globalThis.__diting_locale = '{escaped}';")
+            }
+            None => "delete globalThis.__diting_locale;".to_string(),
+        };
+        let _ = self.runtime.execute_script("<set-locale>", source);
+    }
 }

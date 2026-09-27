@@ -303,6 +303,9 @@ impl Page {
             if let Some(ref mut rt) = self.js {
                 rt.set_navigator_language(lang);
             }
+            // The explicit locale pin outranks the UA's acceptLanguage —
+            // put it back on top, same posture as the viewport pin above.
+            self.apply_locale_override();
         }
         if let Some(platform) = platform.filter(|p| !p.is_empty()) {
             if let Some(ref mut rt) = self.js {
