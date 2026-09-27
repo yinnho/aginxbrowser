@@ -16128,3 +16128,113 @@ fn document_evaluate_xpath_subset() {
         assert_eq!(parts[0..3].join("|"), "40px|40px|40");
         assert_ne!(parts[3], "40px", "left: auto must reset the offset");
     }
+
+    // ------------------------------------------------------------------
+    // #108 stress reproducers. The failure shape: inside a setTimeout
+    // callback `typeof Date.now` reads "function" but the call throws
+    // "Date.now(...) is not a function" — a call-path (dispatch) failure
+    // with a healthy object, seen only in dev builds, only from the
+    // timer/promise-reaction delivery path (top-level scripts and
+    // evaluate() stayed clean), never reproducible on demand and
+    // time-clustered across concurrent runs. These tests are #[ignore]d
+    // (too slow for the default suite): run with
+    // `cargo test -p diting --features screenshot -- --ignored date_now`
+    // when touching isolate lifecycle or the event-loop pump.
+    //
+    // Probe: capture typeof at fire time, call under try/catch, report
+    // through globals the test reads after the pump — the exact evidence
+    // channel the #108 samples used.
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "#108 stress: single-isolate timer hammer, minutes-scale"]
+    async fn date_now_timer_hammer_single_isolate() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        for i in 0..2000 {
+            rt.evaluate(
+                "window.__m1 = 0; window.__err = ''; window.__typeof = '';\
+                 setTimeout(function () {\
+                     window.__typeof = typeof Date.now;\
+                     try { window.__m1 = Date.now(); }\
+                     catch (e) { window.__err = (e && e.message) || String(e); }\
+                 }, 2)",
+            )
+            .unwrap();
+            rt.run_event_loop_bounded(600).await.unwrap();
+            // Interleave an execute_script-path call between pumps, the
+            // way session commands interleave with idle slices.
+            let ty = rt.evaluate("typeof Date.now").unwrap();
+            let m1 = rt.evaluate("window.__m1").unwrap();
+            let err = rt.evaluate("window.__err").unwrap();
+            let fired_typeof = rt.evaluate("window.__typeof").unwrap();
+            assert_eq!(ty, serde_json::json!("function"), "iter {i}: execute path");
+            assert!(
+                m1.as_f64().unwrap_or(0.0) > 0.0,
+                "iter {i}: timer callback never landed (m1={m1:?})"
+            );
+            assert_eq!(
+                err,
+                serde_json::json!(""),
+                "iter {i}: timer-callback Date.now threw ({err:?}, typeof at fire time = {fired_typeof:?})"
+            );
+            assert_eq!(
+                fired_typeof, serde_json::json!("function"),
+                "iter {i}: typeof inside the timer callback"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "#108 stress: multi-isolate construct/drop churn, minutes-scale"]
+    fn date_now_timer_hammer_isolate_churn() {
+        // Mimics the failing environment: many runtimes built and dropped
+        // concurrently (cargo-test threads / stateless fetch paths), each
+        // one running the #108 timer probe through the same bounded pump
+        // the session idle loop uses. Construction is serialized by
+        // ISOLATE_CONSTRUCT_LOCK; drop is NOT — if V8 15.0's process-wide
+        // JSDispatchTable has an alloc-vs-free race on that seam, this
+        // is the load that widens it.
+        let mut handles = Vec::new();
+        for t in 0..6u32 {
+            handles.push(std::thread::Builder::new()
+                .name(format!("dt-now-{t}"))
+                .stack_size(crate::env_knobs::js_stack_mb() * 1024 * 1024)
+                .spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("per-thread tokio runtime");
+                    rt.block_on(async move {
+                        for i in 0..200usize {
+                            let mut js = setup_runtime("<html><body></body></html>");
+                            js.evaluate(
+                                "window.__m1 = 0; window.__err = ''; window.__typeof = '';\
+                                 setTimeout(function () {\
+                                     window.__typeof = typeof Date.now;\
+                                     try { window.__m1 = Date.now(); }\
+                                     catch (e) { window.__err = (e && e.message) || String(e); }\
+                                 }, 2)",
+                            )
+                            .unwrap();
+                            js.run_event_loop_bounded(600).await.unwrap();
+                            let m1 = js.evaluate("window.__m1").unwrap();
+                            let err = js.evaluate("window.__err").unwrap();
+                            let ty = js.evaluate("window.__typeof").unwrap();
+                            assert!(
+                                m1.as_f64().unwrap_or(0.0) > 0.0,
+                                "thread {t} iter {i}: callback never landed (m1={m1:?})"
+                            );
+                            assert_eq!(
+                                err, serde_json::json!(""),
+                                "thread {t} iter {i}: Date.now threw ({err:?}, typeof={ty:?})"
+                            );
+                            // drop runs here UNLOCKED vs other threads'
+                            // constructions — the seam under test
+                        }
+                    });
+                })
+                .expect("spawn churn thread"));
+        }
+        for h in handles {
+            h.join().expect("churn thread panicked");
+        }
+    }
