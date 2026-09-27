@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use html5ever::driver::{parse_fragment, ParseOpts, Parser};
 use html5ever::tendril::TendrilSink;
 use html5ever::tree_builder::Tracer;
-use html5ever::{local_name, namespace_url, ns, QualName};
+use html5ever::{local_name, ns, QualName};
 use crate::diting_dom::{DomTree, NodeData, NodeId};
 
 /// Collects every node the TreeBuilder still holds.
@@ -65,7 +65,7 @@ impl DocumentWriteStream {
         // with the fragment parser behind innerHTML.
         let context = QualName::new(None, ns!(html), local_name!("body"));
         DocumentWriteStream {
-            parser: parse_fragment(DomTree::new(), ParseOpts::default(), context, vec![]),
+            parser: parse_fragment(DomTree::new(), ParseOpts::default(), context, vec![], true),
             handed_over: HashMap::new(),
             staging: None,
         }

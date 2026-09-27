@@ -4,7 +4,7 @@ use std::fmt;
 
 use html5ever::tendril::StrTendril;
 use html5ever::tree_builder::{ElemName, ElementFlags, NodeOrText, QuirksMode, TreeSink};
-use html5ever::{local_name, namespace_url, ns, Attribute as HtmlAttribute, LocalName, Namespace, QualName};
+use html5ever::{local_name, ns, Attribute as HtmlAttribute, LocalName, Namespace, QualName};
 
 use crate::diting_dom::tree::{Attribute, DomTree, NodeData, NodeId, ShadowRootMode};
 
@@ -275,7 +275,7 @@ pub fn parse_fragment_with_context(html: &str, context_name: QualName) -> DomTre
     use html5ever::{parse_fragment, ParseOpts};
 
     let tree = DomTree::new();
-    let tree = parse_fragment(tree, ParseOpts::default(), context_name, vec![])
+    let tree = parse_fragment(tree, ParseOpts::default(), context_name, vec![], true)
         .from_utf8()
         .one(html.as_bytes());
     upgrade_declarative_shadow_roots(&tree, tree.document());

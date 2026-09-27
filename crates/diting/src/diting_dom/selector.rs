@@ -1,5 +1,5 @@
 use cssparser::{CowRcStr, ToCss};
-use html5ever::{namespace_url, ns, LocalName, Namespace};
+use html5ever::{ns, LocalName, Namespace};
 use precomputed_hash::PrecomputedHash;
 use selectors::attr::{AttrSelectorOperation, CaseSensitivity, NamespaceConstraint};
 use selectors::context::QuirksMode;

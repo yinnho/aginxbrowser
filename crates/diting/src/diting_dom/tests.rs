@@ -6,7 +6,7 @@
 mod tree_tests {
 
     use crate::diting_dom::tree::*;
-    use html5ever::{local_name, namespace_url, ns, LocalName, Namespace, QualName};
+    use html5ever::{local_name, ns, LocalName, Namespace, QualName};
 
     fn element(tree: &DomTree, local: &str) -> NodeId {
         tree.new_node(NodeData::Element {
@@ -1262,7 +1262,7 @@ mod selector_tests {
     fn incremental_match_survives_random_mutation_storms() {
         use crate::diting_dom::NodeId;
         use crate::diting_dom::tree::{Attribute, DomTree, NodeData};
-        use html5ever::{ns, namespace_url, LocalName, Namespace, QualName};
+        use html5ever::{ns, LocalName, Namespace, QualName};
 
         struct Rng(u64);
         impl Rng {

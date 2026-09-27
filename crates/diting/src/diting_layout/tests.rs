@@ -24,7 +24,7 @@ mod incremental_match_tests {
     use crate::diting_css::{parse_stylesheet_for, CssMediaType};
     use crate::diting_dom::tree_sink::parse_html;
     use crate::diting_layout::compute_styles_timed;
-    use html5ever::{namespace_url, ns};
+    use html5ever::ns;
 
     #[test]
     fn css_keyed_rerun_reflects_mutations() {

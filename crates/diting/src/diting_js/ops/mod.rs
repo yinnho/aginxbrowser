@@ -9,7 +9,6 @@ use deno_core::OpState;
 use deno_core::Extension;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use crate::diting_dom::{AttachShadowError, DomTree, NodeData, NodeId, ShadowRootMode};
-use html5ever::namespace_url;
 use crate::diting_net::{CookieJar, HttpClient};
 use url::Url;
 
