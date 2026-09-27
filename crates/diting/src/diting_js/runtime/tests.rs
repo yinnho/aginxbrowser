@@ -11104,6 +11104,55 @@
     }
 
     #[test]
+    fn test_cssom_setter_rejects_invalid_length_values() {
+        // #148: invalid values are silent no-ops that keep the previous
+        // declaration (Chrome headless ground truth: style.left='NaNpx'
+        // reads back ''). The door covers the pure length/percentage family;
+        // custom properties and judgement-proof values stay permissive.
+        let mut rt = setup_runtime(r#"<div id="el"></div>"#);
+        let result = rt.evaluate(r#"
+            const s = document.getElementById('el').style;
+            s.left = 'NaNpx';
+            const nanRejected = s.left;
+            s.left = '10px';
+            s.left = 'banana';
+            const keepOld = s.left;
+            const moreRejects = (() => {
+                s.top = 'undefinedpx'; const a = s.top;
+                s.top = 'Infinitypx'; const b = s.top;
+                s.top = '[object Object]'; const c = s.top;
+                s.top = '10'; const d = s.top;
+                s.top = '10pxpx'; const e = s.top;
+                return [a, b, c, d, e];
+            })();
+            s.left = '0';
+            const zero = s.left;
+            s.width = '-5.5%';
+            const pct = s.width;
+            s.left = 'auto';
+            const auto = s.left;
+            s.margin = '5px 10px';
+            const shorthand = s.margin;
+            s.paddingTop = 'calc(10px + 2em)';
+            const calc = s.paddingTop;
+            s.borderTopWidth = 'thin';
+            const thin = s.borderTopWidth;
+            s.setProperty('--x', 'NaNpx anything');
+            const custom = s.getPropertyValue('--x');
+            s.cssText = 'left: NaNpx; color: red';
+            const partial = s.cssText;
+            return [nanRejected, keepOld, moreRejects, zero, pct, auto, shorthand, calc, thin, custom, partial];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                "", "10px", ["", "", "", "", ""], "0", "-5.5%", "auto",
+                "5px 10px", "calc(10px + 2em)", "thin", "NaNpx anything", "color: red;"
+            ])
+        );
+    }
+
+    #[test]
     fn test_dataset_in_and_object_keys() {
         // `'foo' in el.dataset` and Object.keys(el.dataset) must reflect data-*
         // attributes (CSSOM/DOMStringMap parity).
