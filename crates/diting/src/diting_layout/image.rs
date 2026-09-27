@@ -19,7 +19,9 @@
 //! sees bytes. Batch 6d adds [`decode_jpeg`] and magic-byte dispatch in
 //! [`decode_bytes`] (JPEG is the dominant photo format on real pages);
 //! both engines decode through the same `image` crate so RGBA output is
-//! bit-identical.
+//! bit-identical. Issue #112 adds [`ImageCache::prefetch`]: the page's
+//! unique srcs decode across scoped worker threads before the serial
+//! layout walk, which then only clones cached `Arc`s.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -79,20 +81,92 @@ impl<'a> ImageCache<'a> {
     }
 
     fn decode_uncached(&self, src: &str) -> Option<Arc<DecodedImage>> {
-        if let Some(rest) = src.strip_prefix("data:") {
-            return decode_data_url_png(&format!("data:{rest}")).map(Arc::new);
-        }
-        if (src.starts_with("http://") || src.starts_with("https://") || src.starts_with("file://"))
-            && self.network_bytes.is_some()
-        {
-            // file:// bytes only reach the table when the net-layer gate
-            // admitted them (the collector refuses otherwise), so decoding
-            // them here grants nothing the gate didn't already grant.
-            let bytes = self.network_bytes.unwrap().get(src)?;
-            return decode_bytes(bytes).map(Arc::new);
-        }
-        None
+        decode_src_uncached(src, self.network_bytes).map(Arc::new)
     }
+
+    /// Pre-decode a page's image srcs across the cores (issue #112). The
+    /// layout pre-pass used to resolve img srcs inline — one decode at a
+    /// time on the layout thread, invisible to the layout trace (which
+    /// times styles/taffy, not this pass) — and an image-heavy page spent
+    /// its whole screenshot wall clock there (~10.5s on the tmall publish
+    /// page). Srcs already cached are skipped; each remaining unique src
+    /// decodes exactly once on a scoped worker thread (round-robin chunks,
+    /// capped at 8 threads so concurrent session layouts don't oversubscribe
+    /// the box), and the serial `resolve` walk that follows only clones
+    /// Arcs. A src that fails to decode simply stays uncached — the caller
+    /// keeps the placeholder path, same as a serial miss.
+    pub fn prefetch(&self, srcs: &[String]) {
+        let todo: Vec<&String> = {
+            let cached = self.cache.borrow();
+            srcs.iter().filter(|s| !cached.contains_key(*s)).collect()
+        };
+        if todo.is_empty() {
+            return;
+        }
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .clamp(1, 8)
+            .min(todo.len());
+        let bytes = self.network_bytes;
+        // Round-robin chunks, not contiguous slices: decode cost varies
+        // wildly by image size, and interleaving keeps the tail from idling
+        // while one thread grinds a 2000×2000 master.
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..threads)
+                .map(|t| {
+                    let chunk: Vec<String> = todo
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| i % threads == t)
+                        .map(|(_, s)| (*s).clone())
+                        .collect();
+                    scope.spawn(move || {
+                        chunk
+                            .into_iter()
+                            .filter_map(|src| {
+                                decode_src_uncached(&src, bytes).map(|d| (src, d))
+                            })
+                            .collect::<Vec<(String, DecodedImage)>>()
+                    })
+                })
+                .collect();
+            for handle in handles {
+                // A decode panic in a worker costs that chunk's images (the
+                // serial resolve fallback re-attempts them); the rest of the
+                // page's decode results still land.
+                if let Ok(rows) = handle.join() {
+                    let mut cached = self.cache.borrow_mut();
+                    for (src, decoded) in rows {
+                        cached.insert(src, Arc::new(decoded));
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// The pure half of the cache's decode path — `(src, byte table) → decoded
+/// image`, no shared state — so [`ImageCache::prefetch`]'s scoped worker
+/// threads can run it in parallel (the `RefCell` cache itself never crosses
+/// a thread boundary).
+fn decode_src_uncached(
+    src: &str,
+    network_bytes: Option<&HashMap<String, std::sync::Arc<Vec<u8>>>>,
+) -> Option<DecodedImage> {
+    if let Some(rest) = src.strip_prefix("data:") {
+        return decode_data_url_png(&format!("data:{rest}"));
+    }
+    if src.starts_with("http://") || src.starts_with("https://") || src.starts_with("file://") {
+        // file:// bytes only reach the table when the net-layer gate
+        // admitted them (the collector refuses otherwise), so decoding
+        // them here grants nothing the gate didn't already grant.
+        if let Some(table) = network_bytes {
+            let bytes = table.get(src)?;
+            return decode_bytes(bytes);
+        }
+    }
+    None
 }
 
 /// Decode a `data:image/png;base64,…` URL into a [`DecodedImage`].
@@ -385,6 +459,67 @@ mod tests {
         assert!(ImageCache::default().resolve("https://example.com/a.png").is_none());
     }
 
+    /// #112: prefetch decodes a page's unique srcs across scoped worker
+    /// threads and fills the cache, so the layout walk's resolve() only
+    /// clones Arcs. 64 distinct data: PNGs (pixel-tagged by index) mixed
+    /// with entries that can't decode — a missing URL and a garbage body —
+    /// must decode every hit to its own pixels without the misses poisoning
+    /// their chunk neighbors, and a src resolved BEFORE the prefetch keeps
+    /// its Arc (prefetch skips, never replaces, cached entries).
+    #[test]
+    fn prefetch_decodes_unique_srcs_in_parallel() {
+        let n = 64; // enough to exercise the multi-thread round-robin chunks
+        let mut urls = Vec::with_capacity(n);
+        for i in 0..n {
+            let rgba = vec![i as u8, 40, 200, 255, 40, 40, 200, 255];
+            let mut png_bytes = Vec::new();
+            {
+                let mut enc = png::Encoder::new(&mut png_bytes, 2, 1);
+                enc.set_color(png::ColorType::Rgba);
+                enc.set_depth(png::BitDepth::Eight);
+                let mut writer = enc.write_header().unwrap();
+                writer.write_image_data(&rgba).unwrap();
+            }
+            urls.push(format!(
+                "data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(&png_bytes)
+            ));
+        }
+
+        let mut bytes: HashMap<String, std::sync::Arc<Vec<u8>>> = HashMap::new();
+        bytes.insert(
+            "https://example.com/bad.png".to_string(),
+            std::sync::Arc::new(b"not a png".to_vec()),
+        );
+        let all: Vec<String> = urls
+            .iter()
+            .cloned()
+            .chain(["https://example.com/missing.png".to_string(), "https://example.com/bad.png".to_string()])
+            .collect();
+
+        let cache = ImageCache::with_network(&bytes);
+        // Resolve one up front: prefetch must skip it, not re-decode/replace.
+        let early = cache.resolve(&urls[0]).expect("data URL decodes");
+        cache.prefetch(&all);
+        let again = cache.resolve(&urls[0]).expect("still resolves");
+        assert!(Arc::ptr_eq(&early, &again), "prefetch keeps cached Arcs");
+
+        for (i, url) in urls.iter().enumerate() {
+            let img = cache.resolve(url).unwrap_or_else(|| panic!("src {i} prefetched"));
+            assert_eq!(&img.rgba[0..4], &[i as u8, 40, 200, 255], "pixel tag {i}");
+        }
+        assert!(
+            cache.resolve("https://example.com/missing.png").is_none(),
+            "URL not in the table stays a placeholder"
+        );
+        assert!(
+            cache.resolve("https://example.com/bad.png").is_none(),
+            "garbage body declines without poisoning chunk neighbors"
+        );
+        // Empty input is a no-op, not a panic.
+        cache.prefetch(&[]);
+    }
+
     /// JPEG bodies decode through the same `image` crate blitz uses, so
     /// RGBA output is bit-identical: encode a solid JPEG, decode it via
     /// `decode_bytes` (magic sniff) and via the data: URL path.
@@ -468,5 +603,111 @@ mod tests {
 
         // Truncated header declines rather than panicking.
         assert!(decode_bytes(b"GIF89a-truncated").is_none());
+    }
+
+    /// #112 phase-split probe (ignored by default — run with
+    /// `--ignored --nocapture` to read the split). An image-heavy page's
+    /// screenshot wall clock decomposed into pure decode / compute_styles /
+    /// full layout (which includes the decode via this cache) / paint, on
+    /// 30 distinct 800×800 JPEGs — the tmall publish-page shape (the
+    /// layout trace showed styles 0.5s while the wall clock was 11.5s, so
+    /// the missing ~10s lives somewhere this test names). Asserts only
+    /// correctness (every image resolved, painted); the timings are prints.
+    #[test]
+    #[ignore = "perf probe: prints a phase split, asserts only correctness"]
+    fn image_heavy_page_phase_split() {
+        use std::time::Instant;
+
+        const N: usize = 30;
+        let mut jpgs: Vec<Vec<u8>> = Vec::with_capacity(N);
+        for i in 0..N {
+            // Gradient + per-image offset: distinct bytes per URL (the cache
+            // would dedupe identical srcs) and compressible like a photo.
+            let mut img = image::RgbImage::new(800, 800);
+            for (x, y, p) in img.enumerate_pixels_mut() {
+                *p = image::Rgb([
+                    ((x / 3) as u8).wrapping_add(i as u8 * 8),
+                    ((y / 3) as u8).wrapping_add(i as u8 * 5),
+                    (((x + y) / 4) as u8).wrapping_add(i as u8 * 3),
+                ]);
+            }
+            let mut buf = Vec::new();
+            let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 75);
+            image::DynamicImage::ImageRgb8(img)
+                .write_with_encoder(enc)
+                .expect("encodes jpeg");
+            jpgs.push(buf);
+        }
+
+        // Phase 1: pure decode of the same bodies, serial loop — the cost
+        // the layout pass pays inline today.
+        let t = Instant::now();
+        for b in &jpgs {
+            assert!(decode_bytes(b).is_some(), "fixture must decode");
+        }
+        let t_decode = t.elapsed();
+
+        // The page: a grid of N imgs at tmall SKU scale, absolute URLs
+        // resolved against the injected byte table (the session
+        // screenshot's prefetch route).
+        let html = {
+            let mut s = String::from("<html><body><div>");
+            for i in 0..N {
+                s.push_str(&format!(
+                    "<img src=\"http://grid.test/img{i}.jpg\" width=\"200\" height=\"200\">"
+                ));
+            }
+            s.push_str("</div></body></html>");
+            s
+        };
+        let tree = crate::diting_dom::tree_sink::parse_html(&html);
+        let rules = crate::diting_css::parse_stylesheet_for(
+            "",
+            (1280.0, 900.0),
+            crate::diting_css::CssMediaType::Screen,
+        );
+        let t = Instant::now();
+        let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 900.0));
+        let t_styles = t.elapsed();
+
+        let table: HashMap<String, std::sync::Arc<Vec<u8>>> = jpgs
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (format!("http://grid.test/img{i}.jpg"), std::sync::Arc::new(b.clone())))
+            .collect();
+        let fonts = crate::diting_fonts::font_book();
+        let t = Instant::now();
+        let (rects, items) = crate::diting_layout::layout_dom_with_paint_and_images(
+            &tree,
+            &styles,
+            &fonts,
+            1280.0,
+            900.0,
+            Some(&table),
+            Some("http://grid.test/"),
+        );
+        let t_layout = t.elapsed();
+        let n_img_items = items
+            .iter()
+            .filter(|it| matches!(it, crate::diting_layout::PaintItem::Image { .. }))
+            .count();
+        assert_eq!(n_img_items, N, "every img must carry decoded pixels");
+
+        let t = Instant::now();
+        let mut canvas = crate::diting_layout::paint::Canvas::new_filled(
+            1280,
+            900,
+            [255, 255, 255, 255],
+        );
+        crate::diting_layout::paint::execute(&items, &fonts, &mut canvas);
+        let t_paint = t.elapsed();
+
+        println!(
+            "#112 phase split (N={N} x 800x800 JPEG, dev build): \
+             decode={t_decode:?} styles={t_styles:?} layout_full={t_layout:?} \
+             paint={t_paint:?} rects={} items={}",
+            rects.len(),
+            items.len()
+        );
     }
 }

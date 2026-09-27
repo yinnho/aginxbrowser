@@ -25,7 +25,7 @@
 //! Same engine both sides of the cross-check (stock taffy 0.13.0), so the
 //! rect comparison isolates the BRIDGE, not the layout algorithm.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use taffy::prelude::*;
 
@@ -5445,13 +5445,40 @@ pub fn layout_solve_rooted(
     let mut taffy_tree = TaffyTree::new();
     let mut node_map: HashMap<taffy::tree::NodeId, NodeId> = HashMap::new();
 
-    // Pre-pass (batches 5b + 6c): resolve every img src through the
-    // ImageCache — data: URLs decode inline, http(s)/file URLs consult the
-    // fetched-byte table; results are cached so repeated srcs and layout
-    // re-runs decode once. Unresolvable imgs keep the batch-5a placeholder.
+    // Pre-pass (batches 5b + 6c, parallelized by #112): resolve every img
+    // src through the ImageCache — data: URLs decode inline, http(s)/file
+    // URLs consult the fetched-byte table; results are cached so repeated
+    // srcs and layout re-runs decode once. Unresolvable imgs keep the
+    // batch-5a placeholder. #112: the decodes used to run inline in
+    // scan_images — serial, one image at a time on the layout thread, and
+    // invisible to the layout trace (which times styles/taffy, not this
+    // pass) — so an image-heavy page's screenshot wall clock was ~all
+    // decode. Collect the page's unique srcs first, decode them across the
+    // cores (ImageCache::prefetch), and the walk below only clones cached
+    // Arcs.
     let empty: HashMap<String, std::sync::Arc<Vec<u8>>> = HashMap::new();
     let cache = image::ImageCache::with_network(network_bytes.unwrap_or(&empty));
     let mut images: HashMap<NodeId, DecodedImage> = HashMap::new();
+    fn collect_img_srcs(
+        tree: &DomTree,
+        id: NodeId,
+        srcs: &mut HashSet<String>,
+        viewport_width: f32,
+        base_url: Option<&str>,
+    ) {
+        let is_img = tree
+            .with_node(id, |n| n.as_element().map(|e| e.local.to_string() == "img"))
+            .flatten()
+            .unwrap_or(false);
+        if is_img {
+            if let Some(src) = resolve_img_source(tree, id, viewport_width, base_url) {
+                srcs.insert(src);
+            }
+        }
+        for child in render_children(tree, id) {
+            collect_img_srcs(tree, child, srcs, viewport_width, base_url);
+        }
+    }
     fn scan_images(
         tree: &DomTree,
         id: NodeId,
@@ -5475,6 +5502,9 @@ pub fn layout_solve_rooted(
         }
     }
     if let Some(root_id) = &root {
+        let mut srcs: HashSet<String> = HashSet::new();
+        collect_img_srcs(tree, *root_id, &mut srcs, viewport_width, base_url);
+        cache.prefetch(&srcs.into_iter().collect::<Vec<_>>());
         scan_images(tree, *root_id, &cache, &mut images, viewport_width, base_url);
     }
 
