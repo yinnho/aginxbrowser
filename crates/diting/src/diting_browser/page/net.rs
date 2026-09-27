@@ -38,6 +38,7 @@ impl Page {
             url: url.to_string(),
             method: method.to_string(),
             resource_type: resource_type.to_string(),
+            nav: self.navigation_epoch,
             status,
             headers: request_headers.clone(),
             response_headers: Arc::new(response_headers.clone()),
@@ -193,6 +194,11 @@ impl Page {
                 url: ev.url,
                 method: ev.method,
                 resource_type: "Fetch".to_string(),
+                // Stamped at drain time with the generation then current:
+                // rows the live realm issued get its epoch, and the drain
+                // at the top of navigate_single (before the epoch bump)
+                // attributes the outgoing document's rows to it (#101).
+                nav: self.navigation_epoch,
                 status: ev.status,
                 headers: ev.request_headers,
                 response_headers: Arc::new(ev.response_headers),

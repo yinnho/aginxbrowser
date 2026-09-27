@@ -144,9 +144,47 @@ impl Page {
         {
             Ok(r) => r,
             Err(_) => {
+                // #101: one deadline, four different failures. Name the
+                // phase and the document that is actually live — computed
+                // BEFORE `Failed` overwrites the lifecycle evidence.
+                let epoch = self.navigation_epoch;
+                let committed = self.realm_epoch == epoch;
+                let doc_received = self
+                    .network_events
+                    .iter()
+                    .any(|e| e.nav == epoch && e.resource_type == "Document");
+                let active = if committed {
+                    self.url_string()
+                } else {
+                    // The attempt never committed: the outgoing document is
+                    // still the live page. Roll the optimistic `url` back
+                    // with it, so /network's url, /state's location.href
+                    // and eval's realm all describe the same document
+                    // (#101's three-faces complaint).
+                    self.url = Url::parse(&self.carried_network_url).ok();
+                    if self.carried_network_url.is_empty() {
+                        "about:blank".to_string()
+                    } else {
+                        self.carried_network_url.clone()
+                    }
+                };
+                let phase = if committed {
+                    match self.lifecycle {
+                        crate::diting_browser::lifecycle::LifecycleState::Loading => {
+                            "document committed, scripts/settle still running"
+                        }
+                        _ => "loaded after the deadline raced",
+                    }
+                } else if doc_received {
+                    "document received, not yet committed"
+                } else {
+                    "document fetch in flight"
+                };
                 self.lifecycle = crate::diting_browser::lifecycle::LifecycleState::Failed;
                 Err(PageError::NetworkError(format!(
-                    "navigation exceeded {nav_timeout_ms}ms deadline"
+                    "navigation exceeded {nav_timeout_ms}ms deadline ({phase}; \
+                     active document: {active}; requested: {url_str}; navigation #{epoch} — \
+                     /network rows carry the generation as \"nav\")"
                 )))
             }
         };
@@ -425,6 +463,12 @@ impl Page {
         self.carried_network_url = self.url_string();
         let mut outgoing = std::mem::take(&mut self.network_events);
         self.carried_network_events.append(&mut outgoing);
+
+        // A new navigation attempt begins: bump the generation so every
+        // row recorded below attributes to it (#101). After the sync above,
+        // which stamps the outgoing document's drained rows with the old
+        // epoch.
+        self.navigation_epoch += 1;
 
         self.lifecycle = LifecycleState::Loading;
         self.url = Some(url.clone());

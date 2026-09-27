@@ -951,6 +951,8 @@ Navigate to a new URL.
 
 When the navigation lands on an anti-bot wall (punish page / `_____tmd_____/punish`), a `challenge` field joins the response — risk-control pages answer like ordinary pages, the flag is the machine-readable verdict: `{"url": "https://punish.taobao.com/", "title": "...", "challenge": "punish"}`.
 
+When a navigation exceeds its deadline (`AGINXBROWSER_NAV_TIMEOUT_MS`, default 30s), the error names the phase that died instead of a bare timer: `document fetch in flight` / `document received, not yet committed` / `document committed, scripts/settle still running` / `loaded after the deadline raced`, plus the **active document URL** and the navigation generation — `navigation exceeded 30000ms deadline (document fetch in flight; active document: https://old.example/; requested: https://new.example/; navigation #3 — /network rows carry the generation as "nav")`. If the attempt never committed, the session's url rolls back to the document still running, so `navigate`'s failure report, `/state` and `eval` describe the same page (#101).
+
 ### POST /session/{id}/preload
 
 Replace the session's document-start preload group (issue #96). Sources run before each new document's own scripts — **including inline `<script>` tags** — which is the only hook that beats pages whose signing layer captures `window.fetch`/XHR natives at HTML-parse time (xhs's inline jsvmp: its API calls go out through references saved at parse time, so any eval-based patch lands too late and the calls fire unsigned/invalid-signed → 406).
@@ -1326,15 +1328,18 @@ The session's network request log for the current page — every document, subre
 ```json
 {
   "url": "https://example.com/watch",
+  "nav": 2,
   "total": 14,
   "requests": [
-    {"method":"GET","url":"https://example.com/watch","status":200,"type":"Document","size":51234},
-    {"method":"GET","url":"https://cdn.example/api/resolve","status":200,"type":"Fetch","size":210},
-    {"method":"GET","url":"https://h5api.example.com/rest","status":0,"type":"Fetch","size":0,
+    {"method":"GET","url":"https://example.com/watch","status":200,"type":"Document","size":51234,"nav":2},
+    {"method":"GET","url":"https://cdn.example/api/resolve","status":200,"type":"Fetch","size":210,"nav":2},
+    {"method":"GET","url":"https://h5api.example.com/rest","status":0,"type":"Fetch","size":0,"nav":1,
      "error":"CORS error: Origin 'https://example.com' not in Access-Control-Allow-Origin ''"}
   ]
 }
 ```
+
+`nav` is the navigation generation (#101): the top-level value is the current one, and each row carries the generation that issued it — a row with a lower `nav` belongs to an earlier navigation attempt (e.g. a timed-out navigation whose log has not been reset yet), so "which attempt made this request" is a filter, not a guess.
 
 `status: 0` rows are requests that never produced a servable response — SSRF-blocked, URL-blocklisted, CORS-refused, or dead at the transport layer. The `error` field says which, so a page whose API calls all die at a gate no longer reads as "never issued a request".
 
@@ -1351,7 +1356,7 @@ The response always carries an `in_flight` array (`[]` when quiet) — script-in
 }
 ```
 
-**Response (`?include_bodies=true`)** — a sibling `xhr` array joins the default response, one row per script-initiated response with its retained body: `{"url":"https://api.example/items","method":"GET","status":200,"mime":"application/json","body":"{\"items\":[…]}","body_truncated":false}`. The same face `/fetch`'s `capture_xhr` returns statelessly, read live off the session. Rows whose body carries risk-control markers (`FAIL_SYS_USER_VALIDATE`, `RGV587`, `x5secdata`) are tagged `"challenge": "punish"` — those bodies answer 200 like any other API, the tag is what separates them from success.
+**Response (`?include_bodies=true`)** — a sibling `xhr` array joins the default response, one row per script-initiated response with its retained body: `{"url":"https://api.example/items","method":"GET","status":200,"mime":"application/json","body":"{\"items\":[…]}","body_truncated":false,"nav":2}`. The same face `/fetch`'s `capture_xhr` returns statelessly, read live off the session. Rows whose body carries risk-control markers (`FAIL_SYS_USER_VALIDATE`, `RGV587`, `x5secdata`) are tagged `"challenge": "punish"` — those bodies answer 200 like any other API, the tag is what separates them from success.
 
 **Response (`?include_headers=true`)** — every compact row gains a `headers` object (and `xhr` rows a `request_headers` object) holding the request's outbound header set, lowercased — the engine defaults plus whatever the page's JS set (`x-s`, `x-s-common`, signed tokens). `/fetch`'s `capture_xhr` rows always carry `request_headers`. Two honest gaps: `status: 0` failure rows never reached the wire, so their set is `{}`; and a stealth-mode document request snapshots only the headers this code explicitly set on the builder — the emulation's transport-layer defaults merge inside wreq at send time and are not duplicated into the snapshot.
 
@@ -1677,7 +1682,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `session_viewport` | Set the session's viewport (device emulation): media queries re-evaluate, `mobile: true` flips `pointer: coarse` / `hover: none`; override survives navigation |
 | `session_screenshot` | Screenshot the session's current DOM state (mutations included) as a base64 PNG; optional `width`/`height`/`full_page`/`selector` |
 | `session_wait` | Wait until a CSS selector matches or a JS predicate turns truthy, with a timeout — the page's event loop keeps running while waiting, so this replaces blind sleeps for async content |
-| `session_network` | Read the session's network request log; `filter: "media"` extracts playback/stream URLs (m3u8, mp4, ...) actually requested by the page — the reliable way to get a real video link. `include_bodies: true` adds an `xhr` array with the page's script-initiated response bodies (its own API face), narrowed by `url_contains`. `include_headers: true` adds each request's outbound header set to its row (#97). The payload always carries `in_flight` (`[]` when quiet; url/method/age_ms rows for script-initiated requests dispatched but not settled) and a `challenges` count (0 = clean) — the "still executing?" check before re-issuing a save |
+| `session_network` | Read the session's network request log; `filter: "media"` extracts playback/stream URLs (m3u8, mp4, ...) actually requested by the page — the reliable way to get a real video link. `include_bodies: true` adds an `xhr` array with the page's script-initiated response bodies (its own API face), narrowed by `url_contains`. `include_headers: true` adds each request's outbound header set to its row (#97). Every row carries `nav`, the navigation generation that issued it, and the payload's top-level `nav` is the current one — a lower row `nav` is an earlier (e.g. timed-out) attempt's leftover (#101). The payload always carries `in_flight` (`[]` when quiet; url/method/age_ms rows for script-initiated requests dispatched but not settled) and a `challenges` count (0 = clean) — the "still executing?" check before re-issuing a save |
 | `session_challenges` | One-call risk-control report: did this session hit an anti-bot wall? Taobao/tmall x5 answers 200 — a punish-page redirect or an MTop body with `FAIL_SYS_USER_VALIDATE`/`RGV587`/`x5secdata`. Returns `{total, events:[{url,method,status,kind,via}]}`, plus `account` and a human-`handoff` instruction when there are hits (detection only — the engine never auto-bypasses) |
 | `session_export` | Export the session's recorded actions: a runnable curl replay script (default), the raw action log (`format=jsonl`), or a flow.json document (`format=json` — cookies stripped, editable ops) that `flow_run` replays server-side |
 | `flow_run` | Run a flow to completion — zero model tokens: an inline flow document or a server-side `workflow/<name>/flow.json` asset, `{{var}}` substitution, `wait`/`expect` gates, `save` outputs; fails with a receipt (failing step, reason, URL, screenshot) and the session stays alive; `session_id` composes flows with imported login state |

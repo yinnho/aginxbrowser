@@ -1171,6 +1171,10 @@ fn session_thread(
                                 let body_of = |rid: &str| page.inner.get_response_body(rid);
                                 let mut payload = serde_json::json!({
                                     "url": page.url(),
+                                    // Current navigation generation (#101):
+                                    // rows with a lower "nav" below are
+                                    // earlier attempts' leftovers.
+                                    "nav": page.inner.navigation_epoch,
                                     "total": events.len(),
                                     "requests": crate::har::compact_events(events, include_headers),
                                 });

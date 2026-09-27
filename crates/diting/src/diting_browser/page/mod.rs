@@ -164,6 +164,12 @@ pub struct NetworkEvent {
     pub url: String,
     pub method: String,
     pub resource_type: String,
+    /// Navigation generation this row belongs to (#101): the epoch that
+    /// was live when the request was issued. `Page.navigation_epoch` is
+    /// the current generation — rows whose `nav` is lower are leftovers of
+    /// earlier navigation attempts (a timed-out attempt's log is NOT
+    /// dropped until the next navigation resets it).
+    pub nav: u64,
     pub status: u16,
     /// The REQUEST's outbound header set, lowercased (#97) — what the
     /// CDP `Network.requestWillBeSent` params and the HAR `request.headers`
@@ -340,6 +346,17 @@ pub struct Page {
     /// The outgoing document's URL, kept beside the carried events so they
     /// can be emitted attributed to the document they belonged to.
     pub carried_network_url: String,
+    /// Navigation generation counter (#101): bumped once per
+    /// `navigate_single` hop, so `NetworkEvent.nav` rows attribute to the
+    /// attempt that issued them. `pub`: the product crate's /network face
+    /// reports the current generation beside the rows.
+    pub navigation_epoch: u64,
+    /// The generation whose document the live JS realm runs — `init_js`
+    /// stamps it on every realm swap, which is the commit point of a
+    /// navigation. `realm_epoch < navigation_epoch` means the newest
+    /// attempt never committed: the outgoing document is still the active
+    /// page and the optimistic `url` must not shadow it (#101).
+    pub realm_epoch: u64,
     network_event_counter: u32,
     /// Passive on_request/on_response callbacks, scoped to this page (upstream
     /// issue #408): they fire for document/subresource fetches this Page makes
@@ -467,6 +484,8 @@ impl Page {
             network_events: Vec::new(),
             carried_network_events: Vec::new(),
             carried_network_url: String::new(),
+            navigation_epoch: 0,
+            realm_epoch: 0,
             network_event_counter: 0,
             session_storage: None,
             suspended_console: Vec::new(),
@@ -616,6 +635,10 @@ impl Page {
         if self.js.is_some() {
             let _ = self.js.take();
         }
+        // The realm swap IS the navigation's commit point: from here on,
+        // the live document is the new one (init_js runs once the response
+        // arrived and parsed — #101's phase evidence).
+        self.realm_epoch = self.navigation_epoch;
 
         // Thread the BrowserContext's proxy through to the ES-module loader
         // and op_fetch_url so dynamic imports and JS fetch() honour the

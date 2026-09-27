@@ -2084,6 +2084,178 @@ ms.addEventListener('sourceopen', function(){ \
         );
     }
 
+    /// #101 fixture: routes answer instantly except those whose path
+    /// starts with a `hang` prefix — those are accepted, read, and never
+    /// answered (the "WAF holds the connection open" shape that eats a
+    /// navigation deadline from the inside).
+    fn hanging_http_server(routes: Vec<(&'static str, &'static str)>, hang: Vec<&'static str>) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut stream) = conn else { continue };
+                let (routes, hang) = (routes.clone(), hang.clone());
+                std::thread::spawn(move || {
+                    use std::io::{Read, Write};
+                    let mut buf = [0u8; 4096];
+                    let Ok(n) = stream.read(&mut buf) else { return };
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = head
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or("/")
+                        .to_string();
+                    if hang.iter().any(|h| path.starts_with(h)) {
+                        // Hold the socket open, never answer: the test's
+                        // navigation deadline fires and the aborted future
+                        // drops the connection.
+                        std::thread::sleep(std::time::Duration::from_secs(30));
+                        return;
+                    }
+                    let body = routes
+                        .iter()
+                        .find(|(p, _)| path.starts_with(p))
+                        .map(|(_, b)| b.to_string())
+                        .unwrap_or_else(|| "404".into());
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                });
+            }
+        });
+        port
+    }
+
+    /// #101: a deadline during the document fetch must (a) name the phase
+    /// that died, (b) name the document that is actually live, and (c)
+    /// roll the optimistic url back so /network's url, /state's
+    /// location.href and eval's realm keep describing the same (old) page.
+    /// The reported failure mode was a network face sitting on the new URL
+    /// while eval still read the old document — same page, two truths.
+    #[tokio::test(flavor = "current_thread")]
+    async fn nav_timeout_fetch_in_flight_names_phase_and_rolls_back_url() {
+        let _g = net_test_guard();
+        let port = hanging_http_server(
+            vec![("/ok", "<html><body>old</body></html>")],
+            vec!["/hang"],
+        );
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/ok")).await.unwrap();
+        let epoch_before = p.navigation_epoch;
+        p.set_navigation_timeout(Some(600));
+        let err = p
+            .navigate(&format!("http://127.0.0.1:{port}/hang"))
+            .await
+            .expect_err("a hung fetch must hit the deadline");
+        let msg = err.to_string();
+        assert!(msg.contains("navigation exceeded 600ms deadline"), "{msg}");
+        assert!(msg.contains("document fetch in flight"), "{msg}");
+        assert!(
+            msg.contains(&format!("active document: http://127.0.0.1:{port}/ok")),
+            "{msg}"
+        );
+        assert!(msg.contains("/hang"), "the requested url must be named: {msg}");
+        assert!(
+            msg.contains(&format!("navigation #{}", epoch_before + 1)),
+            "{msg}"
+        );
+        // The failed attempt must not shadow the live document.
+        assert_eq!(p.url_string(), format!("http://127.0.0.1:{port}/ok"));
+        assert!(
+            p.realm_epoch < p.navigation_epoch,
+            "the realm must predate the failed attempt"
+        );
+        // And every face agrees: the realm still runs the old document.
+        assert_eq!(p.evaluate("location.pathname"), serde_json::json!("/ok"));
+    }
+
+    /// #101's other phase: the document arrived and committed (init_js
+    /// ran, the realm swapped) but a hanging subresource holds the load
+    /// event past the deadline. The new document IS the live page now —
+    /// the url stays, the phase says committed, and the Document row
+    /// attributes to the generation that fetched it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn nav_timeout_after_commit_keeps_new_document() {
+        let _g = net_test_guard();
+        let doc = "<html><head><script src=\"/hang.js\"></script></head><body>new</body></html>";
+        let port = hanging_http_server(vec![("/doc", doc)], vec!["/hang"]);
+        let mut p = test_page();
+        p.set_navigation_timeout(Some(800));
+        let err = p
+            .navigate(&format!("http://127.0.0.1:{port}/doc"))
+            .await
+            .expect_err("a load blocked on a hung subresource must hit the deadline");
+        let msg = err.to_string();
+        assert!(msg.contains("document committed"), "{msg}");
+        assert_eq!(p.url_string(), format!("http://127.0.0.1:{port}/doc"));
+        assert_eq!(p.realm_epoch, p.navigation_epoch);
+        assert_eq!(p.evaluate("location.pathname"), serde_json::json!("/doc"));
+        assert!(
+            p.network_events
+                .iter()
+                .any(|e| e.resource_type == "Document" && e.nav == p.navigation_epoch),
+            "the Document row must attribute to the current generation"
+        );
+    }
+
+    /// #101: rows attribute to the navigation generation that issued them
+    /// — the live attempt's log and the outgoing document's carried log
+    /// are separable by `nav`, script-initiated rows included (drained at
+    /// the top of the next navigation, before the epoch bump, they keep
+    /// the outgoing document's generation).
+    #[tokio::test(flavor = "current_thread")]
+    async fn network_rows_attribute_to_navigation_generation() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![
+            (
+                "/one",
+                200,
+                "<html><script>\
+                 fetch('/api').then(r => r.text()).then(t => { window.__got = t; });\
+                 </script></html>"
+                    .into(),
+            ),
+            ("/api", 200, "7".into()),
+            ("/two", 200, "<html><body>two</body></html>".into()),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/one")).await.unwrap();
+        assert_eq!(p.evaluate("window.__got"), serde_json::json!("7"));
+        let first = p.navigation_epoch;
+
+        p.navigate(&format!("http://127.0.0.1:{port}/two")).await.unwrap();
+        assert_eq!(p.navigation_epoch, first + 1);
+        assert_eq!(p.realm_epoch, p.navigation_epoch);
+        // Every row of the live attempt carries the current generation…
+        assert!(!p.network_events.is_empty());
+        assert!(
+            p.network_events.iter().all(|e| e.nav == p.navigation_epoch),
+            "rows: {:?}",
+            p.network_events
+                .iter()
+                .map(|e| (e.url.as_str(), e.nav))
+                .collect::<Vec<_>>()
+        );
+        // …and the outgoing document's rows — its document fetch and its
+        // script-initiated /api call — carried into the CDP buffer keep
+        // their own generation.
+        assert!(
+            p.carried_network_events
+                .iter()
+                .any(|e| e.url.ends_with("/one") && e.nav == first)
+        );
+        assert!(
+            p.carried_network_events
+                .iter()
+                .any(|e| e.url.ends_with("/api") && e.nav == first),
+            "script rows drained at the next navigation must keep the old generation"
+        );
+    }
+
     /// Recording origin for #116: serves a canned /app document and echoes
     /// the /probe request's own head back as the body, logging every
     /// request head verbatim so a test can assert both WHAT went out on

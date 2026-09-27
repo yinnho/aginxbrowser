@@ -198,6 +198,10 @@ pub fn compact_events(events: &[NetworkEvent], include_headers: bool) -> Vec<Val
                 "status": e.status,
                 "type": e.resource_type,
                 "size": e.body_size,
+                // Navigation generation (#101): rows whose `nav` is below
+                // the payload's top-level `nav` belong to earlier attempts
+                // (e.g. a timed-out navigation whose log was not reset yet).
+                "nav": e.nav,
             });
             if include_headers {
                 row["headers"] = json!(e.headers);
@@ -276,6 +280,9 @@ pub fn xhr_bodies(
             "mime": mime,
             "body": body_text,
             "body_truncated": body_truncated,
+            // Navigation generation (#101) — same attribution contract as
+            // the compact rows.
+            "nav": e.nav,
         });
         if include_headers {
             row["request_headers"] = json!(e.headers);
@@ -526,6 +533,7 @@ mod tests {
             url: url.to_string(),
             method: "GET".to_string(),
             resource_type: resource_type.to_string(),
+            nav: 0,
             status,
             headers: HashMap::new(),
             response_headers: std::sync::Arc::new(HashMap::new()),
@@ -927,5 +935,9 @@ mod tests {
         assert_eq!(rows[0]["url"], "https://e.example/a.js");
         assert_eq!(rows[0]["type"], "Script");
         assert!(rows[0].get("mime").is_none());
+        // #101: the generation rides unconditionally — it's one small int,
+        // and without it a timed-out attempt's rows are indistinguishable
+        // from the current document's.
+        assert_eq!(rows[0]["nav"], 0);
     }
 }
