@@ -302,6 +302,34 @@
         );
     }
 
+    /// 批234 (blitz#940): the UA form-control font surfaces through the
+    /// computed-style face exactly as Chrome reports it — 13.3333px, sans
+    /// family (monospace for textarea), weight 400 — inside a parent pushing
+    /// all four the other way; author longhands still win (the
+    /// `input { font: inherit }` reset contract).
+    #[test]
+    fn computed_face_reports_form_control_ua_font() {
+        let mut rt = setup_runtime(
+            "<html><head><style>\
+             #p { font: 700 24px/3 monospace; }\
+             #i2 { font-family: inherit; font-size: inherit; }\
+             </style></head><body>\
+             <div id='p'><input id='i'><textarea id='t'></textarea><input id='i2'></div>\
+             </body></html>",
+        );
+        let out = rt.evaluate(r#"
+            var i = getComputedStyle(document.getElementById('i'));
+            var t = getComputedStyle(document.getElementById('t'));
+            var i2 = getComputedStyle(document.getElementById('i2'));
+            return [i.fontSize, i.fontWeight, i.fontFamily, t.fontFamily, i2.fontSize].join('|');
+        "#).unwrap();
+        assert_eq!(
+            out.as_str().unwrap(),
+            "13.3333px|400|sans-serif|monospace|24px",
+            "control carries its own UA font; authored inherit falls back to the parent's"
+        );
+    }
+
     /// Small-caps batch: `font-variant-caps` parses, inherits, rides both
     /// shorthands (`font: small-caps …` / `font-variant: small-caps`) and
     /// reads back through getComputedStyle as "small-caps"/"normal".

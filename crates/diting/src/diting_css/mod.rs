@@ -3409,6 +3409,10 @@ pub fn ua_font_weight(tag: &str) -> Option<u16> {
         // heading levels; our ua_font_weight only fed b/strong before,
         // so unstyled <h1> painted regular weight.
         "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => Some(700),
+        // Form controls reset to 400 (blitz#940): a <b>-wrapped control
+        // paints a regular-weight label in every browser — UA beats the
+        // inherited weight, author rules re-declare.
+        "input" | "button" | "select" | "textarea" => Some(400),
         _ => None,
     }
 }
@@ -3452,6 +3456,12 @@ pub fn ua_font_size(tag: &str) -> Option<CssLength> {
         "h6" => Some(CssLength::Em(0.67)),
         "small" | "sub" | "sup" => Some(CssLength::Em(0.8333)),
         "big" => Some(CssLength::Em(1.2)),
+        // Form controls carry an ABSOLUTE UA size (Chromium html.css's
+        // `font: 400 13.3333px system-ui`), unlike the em rows above: a
+        // body { font-size: 24px } page still shows 13.33px input text in
+        // Chrome, so this must not fold against the parent (blitz#940 —
+        // controls previously inherited the page font wholesale).
+        "input" | "button" | "select" | "textarea" => Some(CssLength::Px(13.3333)),
         _ => None,
     }
 }
@@ -3464,6 +3474,13 @@ pub fn ua_font_family(tag: &str) -> Option<&'static str> {
         "code" | "kbd" | "samp" | "tt" | "pre" | "xmp" | "listing" | "plaintext" => {
             Some("monospace")
         }
+        // Form controls carry the UA's own family and do NOT inherit the
+        // page font (why every reset ships `input { font: inherit }`).
+        // textarea is monospace in every browser UA sheet; the rest take
+        // the generic sans stack (blitz#940). Any non-mono name renders
+        // through the primary pair; `sans-serif` says what it means.
+        "input" | "button" | "select" => Some("sans-serif"),
+        "textarea" => Some("monospace"),
         _ => None,
     }
 }
@@ -6229,6 +6246,14 @@ pub fn cascade_element(
     if let Some(family) = ua_font_family(tag) {
         style.font_family = Some(family.to_string());
     }
+    // UA line-height for form controls: `normal`, not inherited (Chromium
+    // html.css; blitz#940 family). The form paint centers a control's run
+    // as (h − lh)/2 inside its ~22px box, so an inherited body
+    // { line-height: 3 } would push the label out of the field. Author
+    // declarations below re-declare like every other slot here.
+    if matches!(tag, "input" | "button" | "select" | "textarea") {
+        style.line_height = Some(LineHeightSpec::Normal);
+    }
     // UA decorations ride the same slot. The link rule is `a:-webkit-any-link`
     // upstream — an <a> without href is a named anchor and stays plain.
     if let Some(d) = ua_text_decoration(tag) {
@@ -6279,20 +6304,32 @@ pub fn cascade_element(
         .and_then(|p| p.font_size)
         .unwrap_or(DEFAULT_ROOT_FONT_SIZE);
     let mut fs_decl: Option<CssLength> = None;
+    let mut fs_inherit = false;
     for candidate in &candidates {
-        if let Some(d) = last_font_size_decl(candidate.declarations) {
-            fs_decl = Some(d);
+        let (d, inherit) = last_font_size_decl(candidate.declarations);
+        if d.is_some() || inherit {
+            fs_decl = d;
+            fs_inherit = inherit;
         }
     }
     if let Some(inline) = inline_css {
-        if let Some(d) = last_font_size_decl(inline) {
-            fs_decl = Some(d);
+        let (d, inherit) = last_font_size_decl(inline);
+        if d.is_some() || inherit {
+            fs_decl = d;
+            fs_inherit = inherit;
         }
     }
-    let fs_decl = fs_decl.or_else(|| ua_font_size(tag));
-    let own_fs = fs_decl
-        .map(|d| font_size_px(d, parent_fs, root_font_size, viewport))
-        .unwrap_or(parent_fs);
+    // An author's explicit `font-size: inherit` beats the UA default
+    // (blitz#940: controls carry one); it rides a flag because the keyword
+    // is not a CssLength the scan can return.
+    let own_fs = if fs_inherit {
+        parent_fs
+    } else {
+        fs_decl
+            .or_else(|| ua_font_size(tag))
+            .map(|d| font_size_px(d, parent_fs, root_font_size, viewport))
+            .unwrap_or(parent_fs)
+    };
     style.font_size = Some(own_fs);
     let fonts = FontCtx { own: own_fs, root: root_font_size, viewport_w: viewport.0, viewport_h: viewport.1 };
 
@@ -6417,16 +6454,25 @@ pub fn cascade_element(
 /// The winning font-size declaration in one declaration block (last
 /// parseable wins, matching apply order). Caller folds candidate+inline in
 /// order to find the overall winner.
-fn last_font_size_decl(declarations: &str) -> Option<CssLength> {
+/// Last font-size declaration wins. Returns `(length, inherit)` — the
+/// keyword `inherit` is not a CssLength, so it rides its own flag: an
+/// author's explicit inherit must beat the UA default the blitz#940 rows
+/// install for form controls.
+fn last_font_size_decl(declarations: &str) -> (Option<CssLength>, bool) {
     let mut found = None;
+    let mut inherit = false;
     for (name, value) in split_declarations(declarations) {
         if name == "font-size" {
             if let Some(d) = parse_font_size_len(&value) {
                 found = Some(d);
+                inherit = false;
+            } else if value.trim().eq_ignore_ascii_case("inherit") {
+                found = None;
+                inherit = true;
             }
         }
     }
-    found
+    (found, inherit)
 }
 
 /// Inline styles use the same declaration grammar.

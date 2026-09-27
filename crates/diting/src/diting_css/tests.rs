@@ -1124,6 +1124,58 @@ fn inheritance_flows_from_parent_and_author_overrides() {
     assert_eq!(block.display, Some(Display::Block));
 }
 
+/// blitz#940: form controls carry their OWN UA font and do not inherit the
+/// page's — absolute 13.3333px (not parent-folded), sans family (monospace
+/// for textarea), weight 400 (a <b> wrapper must not bold the label), and
+/// line-height normal (the form paint centers runs as (h − lh)/2, so an
+/// inherited line-height:3 pushes the text out of the ~22px box). Author
+/// declarations override every slot — the `input { font: inherit }` reset
+/// contract.
+#[test]
+fn form_controls_carry_ua_font_not_inherited() {
+    let tree = diting_dom::tree_sink::parse_html(
+        r#"<div><input><textarea></textarea><em>x</em></div>"#,
+    );
+    let input = tree.query_selector("input").unwrap().unwrap();
+    let textarea = tree.query_selector("textarea").unwrap().unwrap();
+    let em = tree.query_selector("em").unwrap().unwrap();
+
+    // A loud parent: everything a form control must NOT take from the page.
+    let parent = ComputedStyle {
+        font_size: Some(24.0),
+        font_family: Some("monospace".into()),
+        font_weight: Some(700),
+        line_height: Some(LineHeightSpec::Number(3.0)),
+        ..Default::default()
+    };
+    let cs = cascade_element("input", &tree, input, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
+    assert_eq!(cs.font_size, Some(13.3333), "absolute UA size, not parent-folded");
+    assert_eq!(cs.font_family.as_deref(), Some("sans-serif"), "UA sans, not inherited mono");
+    assert_eq!(cs.font_weight, Some(400), "UA reset beats inherited bold");
+    assert_eq!(cs.line_height, Some(LineHeightSpec::Normal), "UA normal beats inherited 3");
+
+    let t_cs = cascade_element("textarea", &tree, textarea, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
+    assert_eq!(t_cs.font_family.as_deref(), Some("monospace"), "textarea is the mono member");
+    assert_eq!(t_cs.font_size, Some(13.3333));
+
+    // Plain tags keep inheriting every slot — only the control family opts out.
+    let e_cs = cascade_element("em", &tree, em, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
+    assert_eq!(e_cs.font_size, Some(24.0));
+    assert_eq!(e_cs.font_family.as_deref(), Some("monospace"));
+    assert_eq!(e_cs.font_weight, Some(700));
+    assert_eq!(e_cs.line_height, Some(LineHeightSpec::Number(3.0)));
+
+    // The reset contract: author declarations override every UA slot, and an
+    // author em still folds against the parent (the UA row is absolute only).
+    let rule = ParsedRule { selector: "input".into(), declarations: "font-size: 2em; font-family: serif; font-weight: 700; line-height: 2".into() };
+    let spec = tree.compile_rule_selector("input").unwrap().specificity();
+    let authored = cascade_element("input", &tree, input, &[(&rule, spec)], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
+    assert_eq!(authored.font_size, Some(48.0), "2em folds against the 24px parent");
+    assert_eq!(authored.font_family.as_deref(), Some("serif"));
+    assert_eq!(authored.font_weight, Some(700));
+    assert_eq!(authored.line_height, Some(LineHeightSpec::Number(2.0)));
+}
+
 #[test]
 fn th_centers_by_default_and_beats_an_inherited_align() {
     let tree = diting_dom::tree_sink::parse_html(
