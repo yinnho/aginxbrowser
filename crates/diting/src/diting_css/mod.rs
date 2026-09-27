@@ -1134,6 +1134,11 @@ pub struct ComputedStyle {
     /// Inherited: `nowrap` disables wrapping for inline runs inside this box.
     /// `None` = `normal`.
     pub white_space: Option<WhiteSpace>,
+    /// Inherited, attribute-derived (#139): the nearest ancestor's
+    /// `lang`/`xml:lang` attribute. Not a cascade property — author rules
+    /// never write it; the text layer maps it to the run's Han-unification
+    /// font slot (`diting_layout::text::han`).
+    pub lang: Option<String>,
     /// `text-overflow` (non-inherited): the marker a clipping box draws over
     /// overflowing inline content. `None` = `clip`.
     pub text_overflow: Option<TextOverflow>,
@@ -6195,6 +6200,22 @@ pub fn cascade_element(
         // Custom properties inherit computed (already-substituted-where-
         // possible) values; author rules below may re-declare per element.
         style.custom = parent.custom.clone();
+        // lang inherits computed (the nearest ancestor's attribute, #139);
+        // the element's own attribute read below overrides.
+        style.lang = parent.lang.clone();
+    }
+    // #139 (Han unification): the element's own lang/xml:lang attribute
+    // wins over the inherited one; neither present keeps the parent's
+    // language. Attribute-driven, never declared by author rules.
+    if let Some(own) = tree
+        .with_node(node_id, |n| {
+            n.get_attribute("lang")
+                .or_else(|| n.get_attribute("xml:lang"))
+                .map(str::to_string)
+        })
+        .flatten()
+    {
+        style.lang = Some(own);
     }
     // UA per-tag family/colors AFTER inherited defaults (an element's own
     // UA declaration beats an inherited value — same posture as text_align

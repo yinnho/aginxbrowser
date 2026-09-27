@@ -263,10 +263,10 @@ mod tests {
         let book = font_book();
         let sample = "国庆节快乐浏览器引擎字体渲染简体汉字上海北京深圳杭州";
         for ch in sample.chars() {
-            let w = book.advance_width(&ch.to_string(), 20.0, false, false);
+            let w = book.advance_width(&ch.to_string(), 20.0, false, false, None);
             assert!((w - 20.0).abs() < 0.05, "{ch}: advance {w} (want one em)");
         }
-        let raster = book.rasterize("汉字渲染", 24.0, false, [0, 0, 0, 255], 24.0 * 1.2, false);
+        let raster = book.rasterize("汉字渲染", 24.0, false, [0, 0, 0, 255], 24.0 * 1.2, false, None);
         assert!(raster.ink_bbox().is_some(), "bundle raster must have ink");
     }
 
@@ -280,7 +280,7 @@ mod tests {
         let book = font_book();
         let sample = "·—–…✓→←↑↓●○◆◇■□▲△▼▽★☆";
         for ch in sample.chars() {
-            let raster = book.rasterize(&ch.to_string(), 24.0, false, [0, 0, 0, 255], 24.0 * 1.2, false);
+            let raster = book.rasterize(&ch.to_string(), 24.0, false, [0, 0, 0, 255], 24.0 * 1.2, false, None);
             assert!(
                 raster.ink_bbox().is_some(),
                 "{ch} (U+{:04X}) must have ink",
@@ -304,14 +304,14 @@ mod tests {
         let book = font_book();
         assert!(book.has_fallbacks(), "the emoji face must load as a fallback");
 
-        let adv_cjk = book.advance_width("字字", 24.0, false, false);
-        let adv_mixed = book.advance_width("字🚀字", 24.0, false, false);
+        let adv_cjk = book.advance_width("字字", 24.0, false, false, None);
+        let adv_mixed = book.advance_width("字🚀字", 24.0, false, false, None);
         assert!(
             adv_mixed > adv_cjk + 4.0,
             "the emoji must contribute its own advance: {adv_mixed} vs {adv_cjk}"
         );
 
-        let raster = book.rasterize("🚀", 24.0, false, [0, 0, 0, 255], 24.0 * 1.2, false);
+        let raster = book.rasterize("🚀", 24.0, false, [0, 0, 0, 255], 24.0 * 1.2, false, None);
         assert!(raster.ink_bbox().is_some(), "the emoji must have ink");
         let colored = raster
             .data
@@ -340,6 +340,7 @@ mod tests {
             None,
             crate::diting_css::WhiteSpace::Normal,
             false,
+            None,
         );
         assert!(wrapped.ink_bbox().is_some(), "wrapped mixed run must have ink");
     }
@@ -352,14 +353,14 @@ mod tests {
     #[test]
     fn bundled_mono_face_routes_ascii() {
         let book = font_book();
-        let mono = book.advance_width("0000000000", 20.0, false, true);
+        let mono = book.advance_width("0000000000", 20.0, false, true, None);
         assert!((mono - 120.0).abs() < 0.01, "10 × 0.6em = 120px, got {mono}");
-        let sans = book.advance_width("0000000000", 20.0, false, false);
+        let sans = book.advance_width("0000000000", 20.0, false, false, None);
         assert!(
             (sans - mono).abs() > 1.0,
             "proportional digits differ from mono ({sans} vs {mono})"
         );
-        let mono_raster = book.rasterize("code()", 20.0, false, [0, 0, 0, 255], 24.0, true);
+        let mono_raster = book.rasterize("code()", 20.0, false, [0, 0, 0, 255], 24.0, true, None);
         assert!(mono_raster.ink_bbox().is_some(), "a mono run must paint");
     }
 
@@ -385,7 +386,7 @@ mod tests {
 
         let with_dir = build_book(faces);
         assert!(with_dir.has_fallbacks(), "dir faces joined as fallbacks");
-        let routed = with_dir.advance_width("\u{E000}", 20.0, false, false);
+        let routed = with_dir.advance_width("\u{E000}", 20.0, false, false, None);
         assert!(
             (routed - 12.0).abs() < 0.05,
             "U+E000 routes to the dir face (0.6em of 20px = 12, got {routed})"
@@ -394,7 +395,7 @@ mod tests {
         // Without the dir face the same char rides the primary .notdef —
         // the routing above is the dir face's doing, not a coverage change.
         let base = build_book(Vec::new());
-        let notdef = base.advance_width("\u{E000}", 20.0, false, false);
+        let notdef = base.advance_width("\u{E000}", 20.0, false, false, None);
         assert!(
             (notdef - routed).abs() > 0.5,
             "base book must not cover U+E000 ({notdef} vs {routed})"

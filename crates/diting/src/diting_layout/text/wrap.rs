@@ -56,6 +56,7 @@ pub(crate) fn caps_case_runs(text: &str) -> Vec<(String, bool)> {
 /// Append one case-run of a small-caps token: lowercase runs are uppercased
 /// and shaped at the reduced size; other runs keep the full size. `ß`
 /// expands to "SS" per Unicode case mapping.
+#[allow(clippy::too_many_arguments)]
 fn push_caps_segment(
     seg: &str,
     lower: bool,
@@ -63,6 +64,7 @@ fn push_caps_segment(
     font_size: f32,
     bold: bool,
     mono: bool,
+    han: Option<super::HanSlot>,
     out: &mut Vec<Token>,
 ) {
     if seg.is_empty() {
@@ -70,7 +72,7 @@ fn push_caps_segment(
     }
     if lower {
         let up: String = seg.chars().flat_map(char::to_uppercase).collect();
-        let width = fonts.advance_width(&up, font_size * SMALL_CAPS_RATIO, bold, mono);
+        let width = fonts.advance_width(&up, font_size * SMALL_CAPS_RATIO, bold, mono, han);
         out.push(Token {
             is_space: false,
             is_break: false,
@@ -79,7 +81,7 @@ fn push_caps_segment(
             scale: SMALL_CAPS_RATIO,
         });
     } else {
-        let width = fonts.advance_width(seg, font_size, bold, mono);
+        let width = fonts.advance_width(seg, font_size, bold, mono, han);
         out.push(Token {
             is_space: false,
             is_break: false,
@@ -96,9 +98,11 @@ fn push_caps_segment(
 /// (CSS Text §7.1) so measure, paint and the shared wrap breaker all see
 /// the same widened widths. With `small_caps`, lowercase runs inside a
 /// token become separate uppercase tokens at the reduced scale (case-run
-/// segmentation: "Hello" → "H"@1.0 + "ELLO"@0.7). Public for the product
-/// crate's dual-engine cross-check, which shapes fixture runs through the
-/// engine's own path so both sides measure identical tokens.
+/// segmentation: "Hello" → "H"@1.0 + "ELLO"@0.7). `han` is the run's
+/// Han slot from its lang (#139) — it rides every shaped advance. Public
+/// for the product crate's dual-engine cross-check, which shapes fixture
+/// runs through the engine's own path so both sides measure identical
+/// tokens.
 pub fn tokens_of(
     text: &str,
     font_size: f32,
@@ -108,6 +112,7 @@ pub fn tokens_of(
     word_spacing: f32,
     ws: crate::diting_css::WhiteSpace,
     small_caps: bool,
+    han: Option<super::HanSlot>,
 ) -> Vec<Token> {
     crate::diting_layout::tokenize_ws(text, ws)
         .into_iter()
@@ -121,7 +126,7 @@ pub fn tokens_of(
                     width: if is_break {
                         0.0
                     } else {
-                        fonts.advance_width(&t, font_size, bold, mono)
+                        fonts.advance_width(&t, font_size, bold, mono, han)
                             + if is_space { word_spacing } else { 0.0 }
                     },
                     text: t,
@@ -130,7 +135,7 @@ pub fn tokens_of(
             } else {
                 let mut out: Vec<Token> = Vec::new();
                 for (seg, lower) in caps_case_runs(&t) {
-                    push_caps_segment(&seg, lower, fonts, font_size, bold, mono, &mut out);
+                    push_caps_segment(&seg, lower, fonts, font_size, bold, mono, han, &mut out);
                 }
                 out
             }
@@ -254,12 +259,13 @@ pub(crate) fn truncate_tokens(
     mono: bool,
     word_spacing: f32,
     ws: crate::diting_css::WhiteSpace,
+    han: Option<super::HanSlot>,
 ) -> Option<(Vec<Token>, Vec<Token>)> {
     let total: f32 = tokens.iter().map(|t| t.width).sum();
     if total <= limit {
         return None;
     }
-    let marker = tokens_of("\u{2026}", font_size, bold, fonts, mono, word_spacing, ws, false);
+    let marker = tokens_of("\u{2026}", font_size, bold, fonts, mono, word_spacing, ws, false, han);
     let marker_w = marker.first().map(|t| t.width).unwrap_or(0.0);
     let mut kept: Vec<Token> = Vec::with_capacity(tokens.len());
     let mut w = 0.0f32;
@@ -283,6 +289,7 @@ pub(crate) fn truncate_tokens(
                         0.0,
                         ws,
                         false,
+                        han,
                     )
                     .first()
                     .map(|t| t.width)

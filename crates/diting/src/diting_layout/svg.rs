@@ -1082,7 +1082,7 @@ pub fn paint_svg(
                 let (sx, sy) = map((*x, *y));
                 // `normal` line height from the face metrics (#16), not a
                 // flat 1.2× — multi-line <text> pitch follows the real font.
-                let r = fonts.rasterize(content, fs, *bold, col(*color), fonts.normal_line_height(fs, *bold), false);
+                let r = fonts.rasterize(content, fs, *bold, col(*color), fonts.normal_line_height(fs, *bold), false, None);
                 if r.width == 0 || r.height == 0 {
                     continue;
                 }

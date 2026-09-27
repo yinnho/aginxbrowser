@@ -255,7 +255,7 @@ pub(crate) fn canvas_text_tile(
     }
     let px = size.clamp(1.0, 512.0) as f32;
     let book = crate::diting_fonts::font_book();
-    let raster = book.rasterize(text, px, bold, rgba, px * 1.2, mono);
+    let raster = book.rasterize(text, px, bold, rgba, px * 1.2, mono, None);
     CanvasTextTile {
         width: raster.width,
         height: raster.height,

@@ -542,7 +542,7 @@
         // Run width = ceil(real shaped advance of "hi" at 16px in the fixture
         // face) (batch 3a: 14.112 → 15 ceiled — the old deterministic model
         // guessed 17.6).
-        let hi = fixture_fonts().advance_width("hi", 16.0, false, false).ceil();
+        let hi = fixture_fonts().advance_width("hi", 16.0, false, false, None).ceil();
         assert!((mi.width - hi).abs() < EPS as f32, "run width: {} want {hi}", mi.width);
         assert!((mi.x - (200.0 - mi.width) / 2.0).abs() < EPS as f32, "centered x: {}", mi.x);
     }
@@ -1067,7 +1067,7 @@
         let (_doc, tree, _styles, rects) = both_engines(html, sheet);
         let fonts = fixture_fonts();
         let text = "谛听引擎中文渲染测试文本一行";
-        let tokens = text::tokens_of(text, 16.0, false, &fonts, false, 0.0, diting::diting_css::WhiteSpace::Normal, false);
+        let tokens = text::tokens_of(text, 16.0, false, &fonts, false, 0.0, diting::diting_css::WhiteSpace::Normal, false, None);
         let lines = text::greedy_wrap(&tokens, Some(160.0), diting::diting_css::WhiteSpace::Normal).len() as f32;
         assert!(lines >= 2.0, "the fixture must wrap to ≥2 lines");
 
@@ -1365,7 +1365,7 @@
         let fonts = fixture_fonts();
         for fs in [12.0, 16.0, 20.0, 24.0] {
             for ch in ["你", "界", "测", "渲"] {
-                let w = fonts.advance_width(ch, fs, false, false);
+                let w = fonts.advance_width(ch, fs, false, false, None);
                 assert!((w - fs).abs() < 0.01, "{ch} at {fs}px: {w} (want one em)");
             }
         }
@@ -1386,7 +1386,7 @@
         // ceil(shaped advance sum) — blitz rounds text runs UP so the box
         // never under-fits its glyphs; taffy's round-to-nearest would.
         let fonts = fixture_fonts();
-        let want = fonts.advance_width("hello world WebKit", 16.0, false, false).ceil();
+        let want = fonts.advance_width("hello world WebKit", 16.0, false, false, None).ceil();
         assert!((w.width - want).abs() < EPS as f32, "ascii run: {} want {want}", w.width);
         // Cross-assert against blitz's parley/harfrust shaping of the same
         // bytes. Kerning differences between shapers stay inside EPS.
@@ -1414,8 +1414,8 @@
         let (doc, tree, _styles, rects) = both_engines(html, sheet);
         let b = rects[&tree.query_selector("#b").unwrap().unwrap()];
         let fonts = fixture_fonts();
-        let bold_w = fonts.advance_width("加粗Bold文本", 20.0, true, false);
-        let reg_w = fonts.advance_width("加粗Bold文本", 20.0, false, false);
+        let bold_w = fonts.advance_width("加粗Bold文本", 20.0, true, false, None);
+        let reg_w = fonts.advance_width("加粗Bold文本", 20.0, false, false, None);
         assert!(bold_w > reg_w + 1.0, "fixture faces must differ: bold={bold_w} reg={reg_w}");
         assert!((b.width - bold_w.ceil()).abs() < EPS as f32, "bold run: {} want {}", b.width, bold_w.ceil());
         assert!((b.width - reg_w).abs() > EPS as f32, "bold must not measure with the regular face");
@@ -1537,7 +1537,7 @@
             // Our tile: same text, same fixture bytes, baseline per the model.
             let fonts = fixture_fonts();
             let lh = fonts.normal_line_height(fs, false);
-            let raster = fonts.rasterize("你好gapa渲染", fs, false, [0, 0, 0, 255], lh, false);
+            let raster = fonts.rasterize("你好gapa渲染", fs, false, [0, 0, 0, 255], lh, false, None);
             let (ox0, oy0, ox1, oy1) = raster.ink_bbox().expect("our raster has ink");
             let m = fonts.metrics(fs, false).unwrap();
             let baseline = baseline_offset(m.ascent, m.descent, lh);
@@ -1569,12 +1569,12 @@
         let fonts = fixture_fonts();
         let (text, fs, wrap_at) = ("谛听引擎渲染测试文本行", 20.0f32, 105.0f32);
         let lh = fonts.normal_line_height(fs, false);
-        let tokens = text::tokens_of(text, fs, false, &fonts, false, 0.0, diting::diting_css::WhiteSpace::Normal, false);
+        let tokens = text::tokens_of(text, fs, false, &fonts, false, 0.0, diting::diting_css::WhiteSpace::Normal, false, None);
         let lines = text::greedy_wrap(&tokens, Some(wrap_at), diting::diting_css::WhiteSpace::Normal);
         assert_eq!(lines.len(), 3, "5 glyphs per 105px line, 11 glyphs → 3 lines");
         assert!((lines[0].width - 100.0).abs() < 0.05, "5 × 1em");
 
-        let r = fonts.rasterize_wrapped(text, fs, false, [0, 0, 0, 255], wrap_at, lh, false, 0.0, None, diting::diting_css::WhiteSpace::Normal, false);
+        let r = fonts.rasterize_wrapped(text, fs, false, [0, 0, 0, 255], wrap_at, lh, false, 0.0, None, diting::diting_css::WhiteSpace::Normal, false, None);
         // One ink band per wrapped line (band = maximal run of ink rows).
         let band_tops: Vec<usize> = {
             let mut tops = Vec::new();

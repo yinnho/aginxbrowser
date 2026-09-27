@@ -84,7 +84,7 @@ pub(super) fn paint_form_widget(
         // Centering goes by the tile's ink bbox, not its full line box —
         // the cramped CJK metrics leave the glyph off-center inside the box.
         let fs = (h as f32 * 0.82).max(6.0);
-        let r = fonts.rasterize("✓", fs, false, ink, fs * 1.45, false);
+        let r = fonts.rasterize("✓", fs, false, ink, fs * 1.45, false, None);
         if let Some((bx0, by0, bx1, by1)) = r.ink_bbox() {
             let iw = (bx1 - bx0 + 1) as i64;
             let ih = (by1 - by0 + 1) as i64;
@@ -188,6 +188,7 @@ pub(super) fn paint_form_control(
             None, // control labels never truncate (input text-overflow is a v2 face)
             WhiteSpace::Normal, // control labels always collapse (textarea value editing is a v2 face)
             false, // control labels never synthesize small-caps
+            None, // no lang slot: control labels use the plain cascade
         );
         out.push_clip(x + 1, y + 1, x + w - 1, y + h - 1);
         out.blit_text(&r, tx.round() as i64, (ty + r.top).round() as i64);
@@ -203,7 +204,7 @@ pub(super) fn paint_form_control(
     // the ink so the placeholder gray can never leak into the bar.
     if let Some((off, ink)) = caret {
         if matches!(form, FormRun::Input | FormRun::Textarea) {
-            let tokens = tokens_of(text, font_size, bold, fonts, false, 0.0, WhiteSpace::Normal, false);
+            let tokens = tokens_of(text, font_size, bold, fonts, false, 0.0, WhiteSpace::Normal, false, None);
             let lines = greedy_wrap(&tokens, Some(wrap_at.max(1) as f32), WhiteSpace::Normal);
             // tokens_of tokenizes the TRIMMED text: map the offset into
             // trimmed coordinates. A caret inside the leading whitespace

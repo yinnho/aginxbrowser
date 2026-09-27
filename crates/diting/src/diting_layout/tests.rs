@@ -293,6 +293,7 @@ mod run_token_memo_tests {
                 ellipsis: false,
                 tokens: std::cell::RefCell::new(None),
                 small_caps: false,
+                han: None,
             },
         )
         .unwrap()
@@ -333,7 +334,7 @@ mod run_token_memo_tests {
             match ctx {
                 Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, .. }) => {
                     let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                    let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps);
+                    let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, None);
                     measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws)
                 }
                 _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
@@ -869,7 +870,7 @@ mod batch_125_inline_fragment_deco_tests {
         let mut tt = TaffyTree::<TextLeaf>::new();
         let leaves = build_word_leaves(
             "hello AB", 16.0, false, [0, 0, 0, 255], 20.0, TextDecorations::default(),
-            0.0, false, 0.0, true, &crate::diting_fonts::font_book(), &mut tt,
+            0.0, false, 0.0, true, None, &crate::diting_fonts::font_book(), &mut tt,
         );
         let got: Vec<(String, f32)> = leaves
             .iter()
