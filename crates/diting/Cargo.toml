@@ -124,7 +124,7 @@ url = "2"
 
 # --- html / dom parsing ---
 html5ever = "0.29"
-markup5ever = "0.14"
+markup5ever = "0.39"
 selectors = "0.26"
 servo_arc = "0.4"
 cssparser = "0.34"
