@@ -325,7 +325,33 @@ impl FontBook {
         let mut out: Vec<(FaceSel, &str)> = Vec::new();
         let mut start = 0usize;
         let mut cur: Option<FaceSel> = None;
+        let covers_sel = |sel: FaceSel, ch: char| -> bool {
+            match sel {
+                FaceSel::Primary => covers(primary, ch),
+                FaceSel::Mono => covers(mono_face, ch),
+                FaceSel::Fallback(i) => covers(fallbacks[i], ch),
+            }
+        };
         for (i, ch) in text.char_indices() {
+            // A variation selector (U+FE00..=U+FE0F) is default-ignorable:
+            // it only modifies the presentation of the base before it. It
+            // rides that base's face when the face maps it — a covered VS
+            // is conventionally zero-width and can drive GSUB presentation
+            // choice (Mongolian FVS). Otherwise it is dropped: picked on
+            // its own it fell to another face's .notdef and measured a
+            // full em of phantom advance (archify #91, the engine twin),
+            // and even riding, an unmapped selector shapes as .notdef.
+            if matches!(ch, '\u{FE00}'..='\u{FE0F}') {
+                if let Some(sel) = cur {
+                    if covers_sel(sel, ch) {
+                        continue;
+                    }
+                    out.push((sel, &text[start..i]));
+                }
+                start = i + ch.len_utf8();
+                cur = None;
+                continue;
+            }
             let sel = pick(ch);
             match cur {
                 Some(prev) if prev == sel => continue,

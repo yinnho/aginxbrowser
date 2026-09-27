@@ -512,3 +512,45 @@ fn han_slot_rides_the_raster_key() {
     let zh2 = book.rasterize("直", 16.0, false, [0, 0, 0, 255], 24.0, false, Some(HanSlot::Simplified));
     assert!(Arc::ptr_eq(&zh, &zh2), "same slot still caches");
 }
+
+
+/// archify #91 (engine twin): a variation selector (U+FE00..=U+FE0F) is
+/// default-ignorable and must never open its own segment. Before the fix,
+/// fallback-base + VS16 split as [fallback(base), primary(VS16)] and the
+/// stranded selector measured a full .notdef em of phantom advance
+/// (32px where the base alone is 12px).
+#[test]
+fn variation_selectors_ride_the_base_and_measure_zero() {
+    let (reg, bold) = production_pair();
+    let zw = include_bytes!("../fixtures/zero-width-ebdt.ttf").to_vec();
+    let book = FontBook::from_pairs(reg, bold).unwrap().with_fallbacks(vec![zw]);
+    let _held = isolated();
+    // U+E000 routes to the fallback face (its cmap does not cover FE0F).
+    let base = book.advance_width("\u{E000}", 20.0, false, false, None);
+    let veed = book.advance_width("\u{E000}\u{FE0F}", 20.0, false, false, None);
+    assert!(
+        (base - veed).abs() < 0.01,
+        "VS16 rides the base segment and adds no advance ({base} vs {veed})"
+    );
+    // The selector is dropped from the slice — the fallback face does not
+    // map it, and an unmapped selector would shape as .notdef.
+    let segs = book.segments("\u{E000}\u{FE0F}", false, false, None);
+    assert_eq!(segs.len(), 1, "the selector never opens a segment: {segs:?}");
+    assert!(matches!(segs[0].0, FaceSel::Fallback(0)));
+    assert_eq!(segs[0].1, "\u{E000}");
+    // Same contract on the primary pair: U+2714 is covered, FE0F is not
+    // (its zero contribution there was cluster merging, not a cmap entry)
+    // — the selector is dropped and the advance is the base's alone.
+    // (A face that DOES map the selectors — a Mongolian face carrying
+    // FVS1-4 — keeps them in the segment for GSUB; none of the bundled
+    // faces do, so that half rides on code review.)
+    let check = book.advance_width("\u{2714}", 20.0, false, false, None);
+    let check_veed = book.advance_width("\u{2714}\u{FE0F}", 20.0, false, false, None);
+    assert!((check - check_veed).abs() < 0.01, "{check} vs {check_veed}");
+    let segs = book.segments("\u{2714}\u{FE0F}", false, false, None);
+    assert_eq!(segs.len(), 1);
+    assert_eq!(segs[0].1, "\u{2714}");
+    // A leading selector has no base: default-ignorable, measures nothing.
+    let lead = book.advance_width("\u{FE0F}\u{E000}", 20.0, false, false, None);
+    assert!((lead - base).abs() < 0.01, "leading VS16 dropped ({lead} vs {base})");
+}

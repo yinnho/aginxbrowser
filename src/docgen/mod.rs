@@ -513,4 +513,57 @@ mod tests {
             assert!(x >= 0.0 && x <= w as f64, "x {x} escapes {w}");
         }
     }
+
+    /// archify #114 (cross-family pin): no emitted SVG carries a valueless
+    /// `data-*` attribute — a marker token that survives to the artifact is
+    /// not XML-well-formed (an XML parser rejects `<path data-fill/>`). The
+    /// sigil path consumes its ` data-fill` template token via replace
+    /// (pinned in sigil.rs); this is the family-wide fence that catches the
+    /// next template token anyone introduces, wherever it leaks.
+    #[test]
+    fn no_valueless_data_attributes_in_any_family_svg() {
+        let md = "# All families\n\n```archify\n{\"sequence\":{\"title\":\"S\",\"participants\":[\n  {\"id\":\"a\",\"type\":\"frontend\",\"label\":\"A\"},\n  {\"id\":\"b\",\"type\":\"backend\",\"label\":\"B\"}],\n \"messages\":[{\"from\":\"a\",\"to\":\"b\",\"label\":\"hi\"}]}}\n```\n\n```archify\n{\"workflow\":{\"title\":\"W\",\"lanes\":[{\"id\":\"l\",\"label\":\"L\"}],\n \"nodes\":[{\"id\":\"n\",\"lane\":\"l\",\"col\":0,\"label\":\"N\",\"type\":\"backend\"},\n  {\"id\":\"o\",\"lane\":\"l\",\"col\":1,\"label\":\"O\",\"type\":\"backend\"}],\n \"edges\":[{\"from\":\"n\",\"to\":\"o\",\"label\":\"go\"}]}}\n```\n\n```archify\n{\"architecture\":{\"title\":\"A\",\"components\":[\n  {\"id\":\"web\",\"type\":\"frontend\",\"label\":\"Web\",\"row\":0,\"col\":0},\n  {\"id\":\"api\",\"type\":\"backend\",\"label\":\"API\",\"row\":1,\"col\":1}],\n \"boundaries\":[{\"kind\":\"region\",\"label\":\"VPC\",\"wraps\":[\"api\"]}],\n \"connections\":[{\"from\":\"web\",\"to\":\"api\",\"label\":\"https\"}]}}\n```\n\n```archify\n{\"dataflow\":{\"title\":\"D\",\"stages\":[{\"label\":\"In\"},{\"label\":\"Out\"}],\n \"nodes\":[{\"id\":\"src\",\"type\":\"external\",\"label\":\"Source\",\"stage\":0,\"row\":0},\n  {\"id\":\"dst\",\"type\":\"database\",\"label\":\"Store\",\"stage\":1,\"row\":0}],\n \"flows\":[{\"from\":\"src\",\"to\":\"dst\",\"label\":\"rows\"}]}}\n```\n\n```archify\n{\"lifecycle\":{\"title\":\"C\",\"lanes\":[{\"id\":\"main\",\"label\":\"M\"},{\"id\":\"terminal\",\"label\":\"T\"}],\n \"states\":[{\"id\":\"s\",\"type\":\"start\",\"label\":\"S\",\"lane\":\"main\",\"col\":0},\n  {\"id\":\"e\",\"type\":\"success\",\"label\":\"E\",\"lane\":\"terminal\",\"col\":1}],\n \"transitions\":[{\"from\":\"s\",\"to\":\"e\",\"label\":\"go\"}]}}\n```\n";
+        let r = render(md);
+        assert_eq!(r.receipt["diagnostics"].as_array().unwrap().len(), 0);
+        // All five fences rendered (guards a vacuous pass on a parse slip).
+        assert_eq!(r.receipt["diagrams"].as_array().unwrap().len(), 5);
+        let mut svgs = 0usize;
+        for svg in r.html.split("<svg").skip(1) {
+            svgs += 1;
+            let svg = svg.split("</svg>").next().unwrap();
+            let bytes = svg.as_bytes();
+            let mut i = 0;
+            while let Some(pos) = svg[i..].find("data-") {
+                let at = i + pos;
+                i = at + 4;
+                // Attribute position: preceded by tag whitespace.
+                if at > 0 && !(bytes[at - 1] as char).is_ascii_whitespace() {
+                    continue;
+                }
+                let mut j = at + 5;
+                while j < bytes.len()
+                    && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'-')
+                {
+                    j += 1;
+                }
+                assert_eq!(
+                    bytes.get(j),
+                    Some(&b'='),
+                    "valueless `{}` in svg #{svgs} — a marker token leaked into the artifact",
+                    &svg[at..j.min(at + 40)]
+                );
+                // The value must open with a quote right after `=`.
+                assert_eq!(
+                    bytes.get(j + 1),
+                    Some(&b'"'),
+                    "unquoted value on `{}` in svg #{svgs}",
+                    &svg[at..j.min(at + 40)]
+                );
+            }
+        }
+        assert!(svgs >= 5, "each family emits its svg, got {svgs}");
+        // And the artifact carries real data-* attributes to scan — a doc
+        // that emitted none would pass the scan vacuously.
+        assert!(r.html.matches("data-from=\"").count() >= 3);
+    }
 }

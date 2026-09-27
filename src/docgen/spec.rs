@@ -1362,7 +1362,7 @@ fn is_fullwidth(c: u32) -> bool {
         | 0x2795..=0x2797 | 0x27B0 | 0x27BF
         | 0x2B1B..=0x2B1C | 0x2B50 | 0x2B55
         | 0x2E80..=0xA4CF
-        | 0xA960..=0xA97C
+        | 0xA960..=0xA97F
         | 0xAC00..=0xD7A3
         | 0xF900..=0xFAFF
         | 0xFE10..=0xFE19
@@ -1439,6 +1439,18 @@ mod tests {
         assert_eq!(text_units("GET /dashboard"), 14);
         // Variation selectors are width-zero.
         assert_eq!(text_units("a\u{FE0F}"), 1);
+    }
+
+    #[test]
+    fn emoji_presentation_counts_two_and_narrow_neighbours_one() {
+        // archify #91: BMP emoji-presentation symbols are East Asian Wide —
+        // they render at the same square advance as a CJK glyph.
+        assert_eq!(text_units("✅⭐⚡⌛⛔"), 10);
+        // …and the narrow neighbours inside the same blocks stay one unit
+        // (→ U+2192 arrows, ☎ U+260E telephone, ① U+2460 enclosed).
+        assert_eq!(text_units("→☎①"), 3);
+        // The Jamo Ext-A tail (U+A97D..A97F) closes the block to its end.
+        assert_eq!(text_units("\u{A960}"), 2);
     }
 
     #[test]
