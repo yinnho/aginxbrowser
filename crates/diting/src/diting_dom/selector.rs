@@ -234,6 +234,21 @@ impl<'a> DomElement<'a> {
         DomElement { tree, node_id }
     }
 
+    /// True when the subject is `start` itself or an ancestor of it — the
+    /// containment climb `:focus-within`, `:hover`, and `:active` all share
+    /// (each matches a live pointer/focus target *or anything containing
+    /// it*).
+    fn chain_contains(&self, start: Option<NodeId>) -> bool {
+        let mut cur = start;
+        while let Some(id) = cur {
+            if id == self.node_id {
+                return true;
+            }
+            cur = self.tree.get_node(id).and_then(|n| n.parent);
+        }
+        false
+    }
+
     /// Is this a form control element that `:enabled`/`:disabled` apply to?
     fn is_form_control(&self) -> bool {
         self.tree
@@ -511,16 +526,8 @@ impl<'a> Element for DomElement<'a> {
             PseudoClass::Focus => self.tree.focused_node() == Some(self.node_id),
             PseudoClass::FocusWithin => {
                 // :focus-within = the subject itself is focused OR contains
-                // the focused node — so climb from the focused element and
-                // see whether the subject is on that ancestor chain.
-                let mut cur = self.tree.focused_node();
-                while let Some(id) = cur {
-                    if id == self.node_id {
-                        return true;
-                    }
-                    cur = self.tree.get_node(id).and_then(|n| n.parent);
-                }
-                false
+                // the focused node — the shared containment climb.
+                self.chain_contains(self.tree.focused_node())
             }
             // Chrome's :focus-visible heuristic narrowed to what a
             // script-driven engine knows: text-entry controls show the ring
@@ -531,9 +538,16 @@ impl<'a> Element for DomElement<'a> {
             PseudoClass::FocusVisible => {
                 self.tree.focused_node() == Some(self.node_id) && self.is_text_entry_control()
             }
-            // Hover/active stay snapshot-false: nothing in the engine holds
-            // a live hover/active target.
-            PseudoClass::Hover | PseudoClass::Active => false,
+            // Hover/active track the live pointer state the interaction
+            // layer mirrors into the tree (#152): a mousemove that changes
+            // the hit target re-stamps both chains, a press sets the active
+            // target and the release clears it (before pointerup dispatch,
+            // where Chrome's gCS already shows the un-active style).
+            // Headless-Chrome quirk noted for the record: gCS reflects
+            // :hover/:active there while el.matches() does not — we keep
+            // one matching path, so both faces agree (headed semantics).
+            PseudoClass::Hover => self.chain_contains(self.tree.hovered_node()),
+            PseudoClass::Active => self.chain_contains(self.tree.active_node()),
             // :root = the document element — the one element with no element
             // parent. Automation frameworks probe `:root` as an
             // is-this-document-alive sentinel (Playwright's waitForSelector

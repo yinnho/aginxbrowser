@@ -3744,6 +3744,169 @@ r.addEventListener('change',function(){globalThis.__ev.push('change:'+r.value)})
         );
     }
 
+    /// #152 (obscura#1103): a real Input.dispatchMouseEvent mouseMoved drives
+    /// the full Chrome transition sequence — family-grouped (the pointer
+    /// family completes before the mouse family starts), enter/leave chains
+    /// walk only the non-common part (cold entry's chain includes the
+    /// Document, outermost first; leave runs innermost first), and
+    /// relatedTarget names the other side within one document. Then the
+    /// cascade: :hover styles compute inside the transition (the tree mirror
+    /// lands before the events fire), a same-target re-move fires nothing,
+    /// and :active spans press→release exactly. Pinned against headless
+    /// Chrome 152 via CDP probes (/tmp/chrome_hover_probe2.py methodology).
+    #[cfg(feature = "screenshot")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn mouse_moves_fire_chrome_hover_transitions_and_live_pseudo_styles() {
+        let html = "<!DOCTYPE html><html><head><style>\
+#a:hover{background:rgb(9,8,7)} #a:active{background:rgb(4,5,6)} \
+.menu{display:none} #b:hover .menu{display:block}\
+</style></head><body style=\"margin:0\">\
+<div id=o style=\"position:absolute;left:0;top:0;width:320px;height:100px\">\
+<div id=a style=\"width:160px;height:100px\">a</div></div>\
+<div id=b style=\"position:absolute;left:0;top:100px;width:320px;height:100px\">\
+<span class=menu>m</span>b</div>\
+<script>globalThis.__ev=[];\
+function rec(e){var rt=e.relatedTarget;\
+__ev.push(e.type+'@'+(e.target.id||e.target.nodeName)+'>'+(rt?(rt.id||rt.nodeName):'null'));}\
+['pointerout','pointerleave','pointerover','pointerenter',\
+'mouseout','mouseleave','mouseover','mouseenter',\
+'pointermove','mousemove'].forEach(function(k){\
+document.addEventListener(k,rec,true);});</script>\
+</body></html>";
+        let (mut ctx, session) = band_setup(html).await;
+        set_viewport_320x200(&mut ctx, &session).await;
+
+        // Cold entry onto #a (50,50): no leave side; over fires on a with a
+        // null relatedTarget; the enter chain runs outermost-first and
+        // includes the Document itself; pointer family precedes mouse family.
+        let r = band_dispatch(
+            &mut ctx, &session, 3, "Input.dispatchMouseEvent",
+            json!({ "type": "mouseMoved", "x": 50, "y": 50 }),
+        ).await;
+        assert!(r.error.is_none(), "cold move: {:?}", r.error);
+
+        let v = band_dispatch(
+            &mut ctx, &session, 4, "Runtime.evaluate",
+            json!({ "expression": "JSON.stringify(globalThis.__ev)", "returnByValue": true }),
+        ).await;
+        let got = v.result.expect("result")["result"]["value"].as_str().expect("log").to_string();
+        assert_eq!(
+            got,
+            "[\"pointerover@a>null\",\"pointerenter@#document>null\",\"pointerenter@HTML>null\",\
+\"pointerenter@BODY>null\",\"pointerenter@o>null\",\"pointerenter@a>null\",\
+\"mouseover@a>null\",\"mouseenter@#document>null\",\"mouseenter@HTML>null\",\
+\"mouseenter@BODY>null\",\"mouseenter@o>null\",\"mouseenter@a>null\",\
+\"pointermove@a>null\",\"mousemove@a>null\"]",
+            "cold-entry transition order must match Chrome's"
+        );
+
+        // Cascade inside the same tick: #a:hover computes, the ancestor
+        // matches too, and matches() agrees with gCS (one match path).
+        let v = band_dispatch(
+            &mut ctx, &session, 5, "Runtime.evaluate",
+            json!({ "expression": "JSON.stringify([\
+getComputedStyle(document.getElementById('a')).backgroundColor,\
+document.getElementById('a').matches(':hover'),\
+document.getElementById('o').matches(':hover'),\
+document.getElementById('b').matches(':hover'),\
+getComputedStyle(document.querySelector('.menu')).display])", "returnByValue": true }),
+        ).await;
+        let got = v.result.expect("result")["result"]["value"].as_str().expect("styles").to_string();
+        assert_eq!(
+            got,
+            "[\"rgb(9, 8, 7)\",true,true,false,\"none\"]",
+            ":hover style + ancestor climb + hover-menu stays shut: {got}"
+        );
+
+        // Warm move within #a: same target — no transitions, just the pair.
+        let _ = band_dispatch(
+            &mut ctx, &session, 6, "Input.dispatchMouseEvent",
+            json!({ "type": "mouseMoved", "x": 60, "y": 60 }),
+        ).await;
+        let v = band_dispatch(
+            &mut ctx, &session, 7, "Runtime.evaluate",
+            json!({ "expression": "globalThis.__ev.length", "returnByValue": true }),
+        ).await;
+        assert_eq!(
+            v.result.expect("result")["result"]["value"].as_f64(),
+            Some(16.0),
+            "same-target move must be transition-free (14 + the move pair)"
+        );
+
+        // Cousin move a → b (50,150): chains share [body, html, document];
+        // leave=[a,o] innermost-first, enter=[b]; relatedTarget crosses over.
+        let _ = band_dispatch(
+            &mut ctx, &session, 8, "Input.dispatchMouseEvent",
+            json!({ "type": "mouseMoved", "x": 50, "y": 150 }),
+        ).await;
+        let v = band_dispatch(
+            &mut ctx, &session, 9, "Runtime.evaluate",
+            json!({ "expression": "JSON.stringify(globalThis.__ev.slice(16))", "returnByValue": true }),
+        ).await;
+        let got = v.result.expect("result")["result"]["value"].as_str().expect("log").to_string();
+        assert_eq!(
+            got,
+            "[\"pointerout@a>b\",\"pointerleave@a>b\",\"pointerleave@o>b\",\
+\"pointerover@b>a\",\"pointerenter@b>a\",\
+\"mouseout@a>b\",\"mouseleave@a>b\",\"mouseleave@o>b\",\
+\"mouseover@b>a\",\"mouseenter@b>a\",\
+\"pointermove@b>null\",\"mousemove@b>null\"]",
+            "cousin transition must walk only the non-common chains, family-grouped"
+        );
+
+        // The hover-menu pattern rides the same wire: #b:hover opens .menu,
+        // #a's hover style reverts with the move.
+        let v = band_dispatch(
+            &mut ctx, &session, 10, "Runtime.evaluate",
+            json!({ "expression": "JSON.stringify([\
+getComputedStyle(document.querySelector('.menu')).display,\
+getComputedStyle(document.getElementById('a')).backgroundColor])", "returnByValue": true }),
+        ).await;
+        let got = v.result.expect("result")["result"]["value"].as_str().expect("styles").to_string();
+        assert_eq!(
+            got,
+            "[\"block\",\"rgba(0, 0, 0, 0)\"]",
+            "hover-menu opens on #b, #a's hover style reverted: {got}"
+        );
+
+        // :active spans press → release: set before pointerdown dispatch,
+        // cleared before pointerup (Chrome's gCS inside a pointerup handler
+        // already shows the un-active style). Press on #b.
+        let _ = band_dispatch(
+            &mut ctx, &session, 11, "Input.dispatchMouseEvent",
+            json!({ "type": "mousePressed", "x": 50, "y": 150, "button": "left", "clickCount": 1 }),
+        ).await;
+        let v = band_dispatch(
+            &mut ctx, &session, 12, "Runtime.evaluate",
+            json!({ "expression": "JSON.stringify([\
+document.getElementById('b').matches(':active'),\
+document.getElementById('b').matches(':hover')])", "returnByValue": true }),
+        ).await;
+        let got = v.result.expect("result")["result"]["value"].as_str().expect("active").to_string();
+        assert_eq!(
+            got,
+            "[true,true]",
+            "press holds both :active and :hover: {got}"
+        );
+
+        let _ = band_dispatch(
+            &mut ctx, &session, 13, "Input.dispatchMouseEvent",
+            json!({ "type": "mouseReleased", "x": 50, "y": 150, "button": "left", "clickCount": 1 }),
+        ).await;
+        let v = band_dispatch(
+            &mut ctx, &session, 14, "Runtime.evaluate",
+            json!({ "expression": "JSON.stringify([\
+document.getElementById('b').matches(':active'),\
+getComputedStyle(document.querySelector('.menu')).display])", "returnByValue": true }),
+        ).await;
+        let got = v.result.expect("result")["result"]["value"].as_str().expect("released").to_string();
+        assert_eq!(
+            got,
+            "[false,\"block\"]",
+            "release clears :active, hover persists: {got}"
+        );
+    }
+
     #[cfg(feature = "screenshot")]
     #[tokio::test(flavor = "current_thread")]
     async fn capture_screenshot_no_params_keeps_legacy_full_page() {

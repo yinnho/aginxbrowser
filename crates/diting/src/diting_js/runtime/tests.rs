@@ -13830,6 +13830,107 @@
         );
     }
 
+    /// #152's complaint through the whole stack, same shape as the blitz#839
+    /// focus test above: the hover mirror must reach the Rust tree so
+    /// :hover rules re-style — on the hit target, on ancestors, and through
+    /// descendant combinators off an hovered ancestor — and leaving must
+    /// clear them again.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn test_hover_pseudo_styles_react_to_hover_state() {
+        let mut rt = setup_runtime(
+            "<!DOCTYPE html><html><head><style>\
+             #a:hover { background-color: rgb(10, 20, 30); }\
+             #outer:hover .menu { display: block; }\
+             .menu { display: none; }\
+             </style></head><body>\
+             <div id=\"outer\"><div id=\"a\"></div><div class=\"menu\">m</div></div>\
+             </body></html>",
+        );
+        let result = rt.evaluate(r#"
+            const a = document.getElementById("a");
+            const menu = document.querySelector(".menu");
+            const before = getComputedStyle(a).backgroundColor;
+            const menuHidden = getComputedStyle(menu).display;
+            globalThis.__diting_setHoverTree(null, a);
+            const hoveredBg = getComputedStyle(a).backgroundColor;
+            const menuShown = getComputedStyle(menu).display;
+            const matchesA = a.matches(":hover");
+            globalThis.__diting_setHoverTree(a, null);
+            return [before, hoveredBg, menuHidden, menuShown, matchesA,
+                    getComputedStyle(a).backgroundColor, getComputedStyle(menu).display];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        let before = parts[0].as_str().expect("before is a string");
+        let hovered = parts[1].as_str().expect("hovered is a string");
+        assert_ne!(before, hovered, ":hover rule must re-style the hit target");
+        assert_eq!(
+            hovered, "rgb(10, 20, 30)",
+            "the :hover background lands in computed style"
+        );
+        assert_eq!(
+            parts[2].as_str().expect("menu hidden"),
+            "none",
+            "menu starts hidden"
+        );
+        assert_eq!(
+            parts[3].as_str().expect("menu shown"),
+            "block",
+            "an ancestor's :hover flips a descendant-combinator rule"
+        );
+        assert_eq!(
+            parts[4], true,
+            "matches(':hover') agrees with computed style (single match path)"
+        );
+        assert_eq!(
+            parts[5].as_str().expect("after leave"),
+            before,
+            "leaving restores the un-hovered style"
+        );
+        assert_eq!(
+            parts[6].as_str().expect("menu re-hidden"),
+            "none",
+            "leaving re-hides the menu"
+        );
+    }
+
+    /// :active window (#152): the press/release mirrors flip the state
+    /// around the dispatch window exactly like Chrome's gCS showed —
+    /// set before pointerdown, cleared before pointerup.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn test_active_pseudo_styles_react_to_press_state() {
+        let mut rt = setup_runtime(
+            "<!DOCTYPE html><html><head><style>\
+             #a:active { color: rgb(4, 5, 6); }\
+             </style></head><body><div id=\"a\">x</div></body></html>",
+        );
+        let result = rt.evaluate(r#"
+            const a = document.getElementById("a");
+            const before = getComputedStyle(a).color;
+            globalThis.__diting_setActiveTree(null, a);
+            const activeColor = getComputedStyle(a).color;
+            globalThis.__diting_setActiveTree(a, null);
+            return [before, activeColor, getComputedStyle(a).color];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_ne!(
+            parts[0].as_str().expect("before"),
+            parts[1].as_str().expect("active"),
+            ":active rule must re-style mid-press"
+        );
+        assert_eq!(
+            parts[1].as_str().expect("active"),
+            "rgb(4, 5, 6)",
+            "the :active color lands in computed style"
+        );
+        assert_eq!(
+            parts[2].as_str().expect("after release"),
+            parts[0].as_str().expect("before"),
+            "release restores the un-pressed style"
+        );
+    }
+
     /// #100 (tmall SKU): blur/focus never bubble, so the only way a
     /// delegated listener sees them is the capture leg — and React 16 traps
     /// both at the root container as CAPTURE listeners. A dispatch model

@@ -277,6 +277,11 @@ pub(crate) struct DomTreeInner {
     pub(crate) quirks: bool,
     /// The document's focused element — see [`DomTree::focused_node`].
     focused_node: Option<NodeId>,
+    /// The element under the pointer — see [`DomTree::hovered_node`] (#152).
+    hovered_node: Option<NodeId>,
+    /// The element mid-press (mousedown → mouseup window) — see
+    /// [`DomTree::active_node`] (#152).
+    active_node: Option<NodeId>,
     /// Text selection in a text-entry control as (node, start, end) — see
     /// [`DomTree::selection`].
     selection: Option<(NodeId, usize, usize)>,
@@ -307,6 +312,9 @@ pub(crate) struct DomTreeInner {
 }
 
 mod slots;
+// Live interaction state (focus/hover/active/selection/scroll) lives in the
+// state child module; split for the god-file ratchet (ARCHITECTURE.md §6).
+mod state;
 
 impl DomTree {
     pub fn new() -> Self {
@@ -328,6 +336,8 @@ impl DomTree {
                 shadow_roots_by_host: HashMap::new(),
                 quirks: false,
                 focused_node: None,
+                hovered_node: None,
+                active_node: None,
                 selection: None,
                 scroll_offsets: HashMap::new(),
                 scroll_gen: 0,
@@ -338,81 +348,14 @@ impl DomTree {
         }
     }
 
-    /// The currently focused element, if any (blitz#839: :focus and friends
-    /// must match live focus, not a static snapshot). Tree-level on purpose:
-    /// focus dies with the document — navigation builds a new tree, and
-    /// Chrome resets activeElement to body on navigation the same way.
-    pub fn focused_node(&self) -> Option<NodeId> {
-        self.inner.borrow().focused_node
-    }
-
-    pub fn set_focused_node(&self, id: Option<NodeId>) {
-        let prev = {
-            let mut inner = self.inner.borrow_mut();
-            let prev = inner.focused_node;
-            inner.focused_node = id;
-            prev
-        };
-        // :focus/:focus-visible on the node and :focus-within up its
-        // ancestor chain re-match when focus moves — stamp both ends so
-        // the incremental matcher stays live (the old always-full match
-        // picked this up implicitly).
-        for node in prev.into_iter().chain(id.into_iter()) {
-            self.note_restyle(node);
-        }
-    }
-
-    /// The recorded text-entry selection as (node, start, end), if a
-    /// script wrote one (setSelectionRange, selectionStart/End setters,
-    /// value writes, focus). Offsets are the JS numbers passed through
-    /// as-is — UTF-16 units; paint clamps to the value's char count, so
-    /// astral characters diverge (accepted). Tree-level like focus: the
-    /// record dies with the document on navigation. The caret paints only
-    /// while this node ALSO holds focus — blur keeps the record, matching
-    /// Chrome's hidden caret on an unfocused control.
-    pub fn selection(&self) -> Option<(NodeId, usize, usize)> {
-        self.inner.borrow().selection
-    }
-
-    pub fn set_selection(&self, sel: Option<(NodeId, usize, usize)>) {
-        self.inner.borrow_mut().selection = sel;
-    }
-
-    /// Record one element-scroller's (scrollLeft, scrollTop). Write-through
-    /// from the bootstrap's scrollTop/scrollLeft setters (sticky v2); the
-    /// JS wrapper keeps its own copy for reads, so this is the paint-side
-    /// truth only. Does NOT bump the tree epoch — scroll is read-time paint
-    /// state; `scroll_gen` is the fingerprint shift-dependent caches key on.
-    pub fn set_node_scroll(&self, id: NodeId, x: f32, y: f32) {
-        let mut inner = self.inner.borrow_mut();
-        let v = [x.max(0.0), y.max(0.0)];
-        if inner.scroll_offsets.get(&id) != Some(&v) {
-            inner.scroll_offsets.insert(id, v);
-            inner.scroll_gen += 1;
-        }
-    }
-
-    pub fn node_scroll(&self, id: NodeId) -> [f32; 2] {
-        self.inner.borrow().scroll_offsets.get(&id).copied().unwrap_or([0.0, 0.0])
-    }
-
-    /// The live element-scroller offsets, for the read-time shift walks.
-    pub fn scroll_offsets(&self) -> HashMap<NodeId, [f32; 2]> {
-        self.inner.borrow().scroll_offsets.clone()
-    }
-
-    pub fn scroll_gen(&self) -> u64 {
-        self.inner.borrow().scroll_gen
-    }
-
     pub fn document(&self) -> NodeId {
         self.inner.borrow().document
     }
 
-    // Document generation stamp: bumps on every allocation/free, so a layout
-    // cache keyed to it invalidates whenever the tree mutates. Cheap (one
-    // u64 read); not a mutation counter (attribute writes don't bump), which
-    // is fine for consumers whose cache only needs "tree shape changed".
+    // Document generation stamp: bumps on every allocation/free — and on
+    // focus/hover/active flips (tree/state.rs; style-carrying caches re-key
+    // on it alone) — so a layout cache keyed to it invalidates when the tree
+    // mutates. Not a mutation counter: attribute writes don't bump.
     // A monotonic counter, never a packing of (len, free): the packed form
     // collided whenever free_list crossed a 256 boundary without an
     // allocation (nodes.len() is unchanged by pure removals), handing

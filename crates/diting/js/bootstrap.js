@@ -124,6 +124,10 @@ const _DOM_MUTATION_COMMANDS = new Set([
   // Focus changes what :focus/:focus-within/:focus-visible rules resolve
   // to — the getComputedStyle snapshot epoch must go stale on it (blitz#839).
   "set_focused",
+  // Hover/active likewise (#152): a mousemove that changes the hit target
+  // or a press/release flips :hover/:active resolution.
+  "set_hover",
+  "set_active",
 ]);
 const _domRaw = (cmd, a1, a2) => {
   if (_DOM_MUTATION_COMMANDS.has(cmd)) _ditingMutationEpoch++;
@@ -1345,6 +1349,22 @@ function _fireBlurFamily(el) {
   el.dispatchEvent(new FocusEvent("blur"));
   el.dispatchEvent(new FocusEvent("focusout", {bubbles: true}));
 }
+
+// Hover/active tree mirrors (#152). The interaction layer (INPUT_HELPERS,
+// eval'd per interaction) owns the pointer markers and the transition
+// events; these bridges carry the same facts through _domRaw so the
+// mutation epoch — and with it the style snapshot — goes stale on every
+// hover/active move. Two-arg shape keeps them stateless: setting wins,
+// clearing names the node it is leaving (the Rust arm is identity-guarded,
+// like set_focused's clear leg).
+globalThis.__diting_setHoverTree = function (prevEl, nextEl) {
+  if (nextEl && nextEl._nid !== undefined) _domRaw("set_hover", String(nextEl._nid), "1");
+  else if (prevEl && prevEl._nid !== undefined) _domRaw("set_hover", String(prevEl._nid), "0");
+};
+globalThis.__diting_setActiveTree = function (prevEl, nextEl) {
+  if (nextEl && nextEl._nid !== undefined) _domRaw("set_active", String(nextEl._nid), "1");
+  else if (prevEl && prevEl._nid !== undefined) _domRaw("set_active", String(prevEl._nid), "0");
+};
 
 function __prepareInsertedScript(script) {
   if (!_OPS.op_script_try_start(script._nid)) return;
@@ -5795,8 +5815,26 @@ class Document extends Node {
   }
   dispatchEvent(event) {
     if (!event) return true;
+    // At-target capture bucket (#152): the spec runs the target phase for
+    // capture-registered listeners too — Element.dispatchEvent already
+    // fires both buckets at the target. pointerenter/mouseenter dispatched
+    // ON the Document (hover transition chains include it) must reach
+    // document-capture registrations the same way. Origin-only: a bubbled
+    // re-entry has its target pinned and already ran the origin's capture
+    // walk over this node — firing here would double-fire.
+    if (!event.target) {
+      event.target = this;
+      if (this._nid !== undefined) {
+        const caps = (_eventRegistryCap[this._nid] || {})[event.type] || [];
+        event.currentTarget = this;
+        for (const h of caps.slice()) {
+          try { h.call(this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
+        }
+      }
+    }
     const L = __evtStore.get(this);
     const handlers = ((L && L[event.type]) || []).slice();
+    if (handlers.length) event.currentTarget = this;
     for (const h of handlers) { try { h.call(this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); } }
     return !event.defaultPrevented;
   }

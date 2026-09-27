@@ -428,6 +428,140 @@ globalThis.__diting_inFrameScope = globalThis.__diting_inFrameScope || function(
     globalThis.frames = saved[3];
   }
 };
+// Hover transitions (#152). The marker is the deepest-frame hit element of
+// the last move/press; a hit-target change mirrors the new element into the
+// tree FIRST (Chrome's computed styles already answer :hover inside
+// mouseover handlers, and the tree side early-returns on an unchanged
+// target so per-pixel moves within one element are free), then fires
+// Chrome's exact transition sequence:
+//   pointerout(prev, rt=next) → pointerleave x leaving-chain (innermost
+//   first, non-bubbling) → pointerover(next, rt=prev) → pointerenter x
+//   entering-chain (outermost first) → the same four for the mouse family
+//   → the move pair itself lands on the new target. Enter/leave walk only
+//   the non-common part of the two chains, and the chain includes the
+//   Document (cold entry fires pointerenter on it). Pinned against
+//   headless Chrome 152 via CDP mouseMoved probes.
+globalThis.__diting_hoverEl = globalThis.__diting_hoverEl === undefined ? null : globalThis.__diting_hoverEl;
+globalThis.__diting_activeEl = globalThis.__diting_activeEl === undefined ? null : globalThis.__diting_activeEl;
+// Chain of `el` plus ancestors, innermost first, stopping at the document
+// (nodeType 9) or a frame doc root — hover is per-document in Chrome, and
+// frame trees never parent-link back to the iframe element. The bootstrap
+// keeps documentElement.parentNode null, so the main-document walk falls
+// out past html without the Document — reattach it from ownerDocument:
+// Chrome's chain includes the Document itself (cold entry fires enter on
+// it; the split's shared tail absorbs it on cousin moves).
+function __htChain(el) {
+  var chain = [], n = el;
+  while (n) {
+    chain.push(n);
+    if (n._isIframeDocRoot) break;
+    n = n.parentNode;
+  }
+  if (!n && el.nodeType !== 9) {
+    var doc = el.ownerDocument;
+    if (doc && chain[chain.length - 1] !== doc) chain.push(doc);
+  }
+  return chain;
+}
+// Both chains innermost→outermost; returns [leave, enter] with the shared
+// outer tail dropped from both.
+function __htSplit(a, b) {
+  var shared = 0;
+  while (shared < a.length && shared < b.length &&
+         a[a.length - 1 - shared] === b[b.length - 1 - shared]) shared++;
+  return [a.slice(0, a.length - shared), b.slice(0, b.length - shared)];
+}
+// Viewport coords translated into el's own document (walk out through
+// frame doc roots, subtracting each iframe's origin).
+function __htLocalXY(el, x, y) {
+  var ox = 0, oy = 0, n = el;
+  while (n) {
+    if (n._isIframeDocRoot) {
+      var doc = n._ownerDoc || null;
+      var ifr = doc && doc._iframeEl;
+      if (ifr && ifr.getBoundingClientRect) {
+        var r = ifr.getBoundingClientRect();
+        ox += r.left; oy += r.top;
+      }
+    }
+    n = n.parentNode;
+  }
+  return [x - ox, y - oy];
+}
+// out/over (bubbling, cancelable) and enter/leave chains (non-bubbling;
+// leave fires innermost-first going up, enter outermost-first coming down).
+function __htFireOverOut(kind, el, rt, x, y, win) {
+  var ev = globalThis.__diting_markTrusted(kind.indexOf('pointer') === 0
+    ? new PointerEvent(kind, {bubbles:true, cancelable:true, composed:true, view:win, clientX:x, clientY:y, button:0, buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true, pressure:0, width:1, height:1, relatedTarget:rt})
+    : new MouseEvent(kind, {bubbles:true, cancelable:true, composed:true, view:win, clientX:x, clientY:y, button:0, buttons:0, detail:0, relatedTarget:rt}));
+  el.dispatchEvent(ev);
+}
+function __htFireEnterLeave(kind, chain, rt, x, y, enter) {
+  var order = enter ? chain.slice().reverse() : chain;
+  for (var i = 0; i < order.length; i++) {
+    var el = order[i];
+    var scope = globalThis.__diting_frameScopeOf(el);
+    globalThis.__diting_inFrameScope(scope, function (win) {
+      var ev = globalThis.__diting_markTrusted(kind.indexOf('pointer') === 0
+        ? new PointerEvent(kind, {bubbles:false, cancelable:false, composed:true, view:win, clientX:x, clientY:y, button:0, buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true, pressure:0, width:1, height:1, relatedTarget:rt})
+        : new MouseEvent(kind, {bubbles:false, cancelable:false, composed:true, view:win, clientX:x, clientY:y, button:0, buttons:0, detail:0, relatedTarget:rt}));
+      el.dispatchEvent(ev);
+    });
+  }
+}
+globalThis.__diting_hoverMove = globalThis.__diting_hoverMove || function(nextEl, x, y) {
+  var prev = globalThis.__diting_hoverEl;
+  if (nextEl === prev) return;
+  // A detached previous target gets no events (Chrome silently clears
+  // hover when the hovered element is removed; only the tree mirror
+  // clears). Event coords are the current move's, in each side's own
+  // document viewport.
+  var fireable = (prev && prev.isConnected !== false) ? prev : null;
+  globalThis.__diting_hoverEl = nextEl;
+  if (globalThis.__diting_setHoverTree) globalThis.__diting_setHoverTree(fireable, nextEl);
+  var aChain = fireable ? __htChain(fireable) : [];
+  var bChain = nextEl ? __htChain(nextEl) : [];
+  if (!aChain.length && !bChain.length) return;
+  var parts = __htSplit(aChain, bChain);
+  var leave = parts[0], enter = parts[1];
+  // relatedTarget stays an element only within one document; crossing a
+  // frame boundary hands Chrome a null on both sides.
+  var sameDoc = aChain.length > 0 && bChain.length > 0 &&
+    aChain[aChain.length - 1] === bChain[bChain.length - 1];
+  var rtLeave = (nextEl && sameDoc) ? nextEl : null;
+  var rtEnter = (fireable && sameDoc) ? fireable : null;
+  var ac = fireable ? __htLocalXY(fireable, x, y) : [x, y];
+  var bc = nextEl ? __htLocalXY(nextEl, x, y) : [x, y];
+  // One family at a time: Chrome completes the pointer family (out →
+  // leave chain → over → enter chain) before starting the mouse one —
+  // pinned order from the CDP probes.
+  for (var fam = 0; fam < 2; fam++) {
+    var outKind = fam === 0 ? 'pointerout' : 'mouseout';
+    var overKind = fam === 0 ? 'pointerover' : 'mouseover';
+    var leaveKind = fam === 0 ? 'pointerleave' : 'mouseleave';
+    var enterKind = fam === 0 ? 'pointerenter' : 'mouseenter';
+    if (fireable) {
+      globalThis.__diting_inFrameScope(globalThis.__diting_frameScopeOf(fireable), function (win) {
+        __htFireOverOut(outKind, fireable, rtLeave, ac[0], ac[1], win);
+      });
+      __htFireEnterLeave(leaveKind, leave, rtLeave, ac[0], ac[1], false);
+    }
+    if (nextEl) {
+      globalThis.__diting_inFrameScope(globalThis.__diting_frameScopeOf(nextEl), function (win) {
+        __htFireOverOut(overKind, nextEl, rtEnter, bc[0], bc[1], win);
+      });
+      __htFireEnterLeave(enterKind, enter, rtEnter, bc[0], bc[1], true);
+    }
+  }
+};
+// Press/release active bookkeeping (#152): :active matches from before the
+// pointerdown dispatch until just before pointerup (Chrome's gCS inside a
+// pointerup handler already shows the un-active style).
+globalThis.__diting_pressActive = globalThis.__diting_pressActive || function(el) {
+  var prev = globalThis.__diting_activeEl;
+  globalThis.__diting_activeEl = el || null;
+  if (globalThis.__diting_setActiveTree) globalThis.__diting_setActiveTree(prev, el || null);
+};
 })();
 "#;
 
@@ -482,6 +616,8 @@ pub(crate) fn mouse_down_js(
             var target = (hit && hit.el) || globalThis.__diting_click_target || document.activeElement || document.body;\
             if (!target) return;\
             var ex = hit ? hit.x : {x}, ey = hit ? hit.y : {y};\
+            if (globalThis.__diting_hoverMove) globalThis.__diting_hoverMove(hit ? hit.el : null, ex, ey);\
+            if (globalThis.__diting_pressActive) globalThis.__diting_pressActive(target);\
             globalThis.__diting_click_target = target;\
             globalThis.__diting_mouse_down = {{target:target,button:{button_code},clickCount:{click_count}}};\
             globalThis.__diting_inFrameScope(globalThis.__diting_frameScopeOf(target), function(win) {{\
@@ -506,6 +642,7 @@ pub(crate) fn mouse_move_js(x: f64, y: f64, buttons: u64, modifiers: u64) -> Str
             var target = (hit && hit.el) || document.body;\
             if (!target) return;\
             var ex = hit ? hit.x : {x}, ey = hit ? hit.y : {y};\
+            if (globalThis.__diting_hoverMove) globalThis.__diting_hoverMove(hit ? hit.el : null, ex, ey);\
             globalThis.__diting_inFrameScope(globalThis.__diting_frameScopeOf(target), function(win) {{\
                 var pm = globalThis.__diting_markTrusted(new PointerEvent('pointermove', {{bubbles:true,cancelable:true,composed:true,view:win,clientX:ex,clientY:ey,button:0,buttons:{buttons},pointerId:1,pointerType:'mouse',isPrimary:true,pressure:{buttons}!==0?0.5:0,width:1,height:1}}));\
                 target.dispatchEvent(pm);\
@@ -535,6 +672,8 @@ pub(crate) fn mouse_up_js(
             var ex = hit ? hit.x : {x}, ey = hit ? hit.y : {y};\
             var down = globalThis.__diting_mouse_down;\
             globalThis.__diting_mouse_down = null;\
+            if (globalThis.__diting_hoverMove) globalThis.__diting_hoverMove(hit ? hit.el : null, ex, ey);\
+            if (globalThis.__diting_pressActive) globalThis.__diting_pressActive(null);\
             globalThis.__diting_inFrameScope(globalThis.__diting_frameScopeOf(target), function(win) {{\
                 var pu = globalThis.__diting_markTrusted(new PointerEvent('pointerup', {{bubbles:true,cancelable:true,composed:true,view:win,clientX:ex,clientY:ey,button:{button_code},buttons:0,pointerId:1,pointerType:'mouse',isPrimary:true,pressure:0,width:1,height:1}}));\
                 target.dispatchEvent(pu);\

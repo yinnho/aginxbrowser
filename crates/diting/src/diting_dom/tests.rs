@@ -981,6 +981,51 @@ mod selector_tests {
         );
     }
 
+    /// The pointer-state pseudos (#152): the tree's hovered/active nodes
+    /// drive :hover/:active, both climb to ancestors (an element is hovered
+    /// when it or a descendant holds the pointer), and clearing resets.
+    #[test]
+    fn hover_and_active_pseudo_classes_match_live_pointer_state() {
+        // Doctype keeps the fixture out of quirks mode: the selectors crate
+        // carries the web-compat hover/active quirk (a BARE :hover compound
+        // on a non-link matches nothing in quirks documents — Blink/Gecko
+        // legacy behavior), which would gate the bare-:hover assertions.
+        let tree = parse_html(
+            r#"<!DOCTYPE html><div id="outer"><div id="a"><span id="child">x</span></div><div id="b"></div></div>"#,
+        );
+        let child = tree.get_element_by_id("child").unwrap();
+        tree.set_hovered_node(Some(child));
+        // html and body are chain elements too — Chrome's querySelectorAll
+        //(':hover') reports the whole ancestor chain, 5 elements deep here.
+        assert_eq!(tree.query_selector_all(":hover").unwrap().len(), 5);
+        assert_eq!(
+            tree.query_selector_all("#outer:hover").unwrap().len(),
+            1,
+            "hover climbs from the hit target to every ancestor"
+        );
+        // The sibling stays unhovered.
+        assert_eq!(tree.query_selector_all("#b:hover").unwrap().len(), 0);
+
+        // Moving to the sibling flips the whole set.
+        let b = tree.get_element_by_id("b").unwrap();
+        tree.set_hovered_node(Some(b));
+        assert_eq!(tree.query_selector_all("#a:hover").unwrap().len(), 0);
+        assert_eq!(tree.query_selector_all("#b:hover").unwrap().len(), 1);
+        // ...and the shared ancestor keeps matching (outer contains b).
+        assert_eq!(tree.query_selector_all("#outer:hover").unwrap().len(), 1);
+
+        // :active rides the same shape, independent of hover.
+        tree.set_active_node(Some(child));
+        assert_eq!(tree.query_selector_all(":active").unwrap().len(), 5);
+        assert_eq!(tree.query_selector_all("#b:active").unwrap().len(), 0);
+
+        // Both clear.
+        tree.set_hovered_node(None);
+        tree.set_active_node(None);
+        assert_eq!(tree.query_selector_all(":hover").unwrap().len(), 0);
+        assert_eq!(tree.query_selector_all(":active").unwrap().len(), 0);
+    }
+
     #[test]
     fn link_pseudo_class_matches_anchor_with_href() {
         let tree = parse_html(

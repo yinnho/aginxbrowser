@@ -1277,6 +1277,36 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             }
             "true".into()
         }
+        // Hover/active mirrors (#152): the interaction layer's hover
+        // transitions and press/release builders keep JS-side markers and
+        // mirror the same facts into the tree so :hover/:active match on
+        // the next style run. Same identity guard as set_focused's clear
+        // arm — a stale blur/clear for a node that no longer holds the
+        // state must not steal it.
+        "set_hover" => {
+            let node_id = match parse_nid(&arg1) {
+                Some(id) => id,
+                None => return "false".into(),
+            };
+            if arg2 == "1" {
+                dom.set_hovered_node(Some(node_id));
+            } else if dom.hovered_node() == Some(node_id) {
+                dom.set_hovered_node(None);
+            }
+            "true".into()
+        }
+        "set_active" => {
+            let node_id = match parse_nid(&arg1) {
+                Some(id) => id,
+                None => return "false".into(),
+            };
+            if arg2 == "1" {
+                dom.set_active_node(Some(node_id));
+            } else if dom.active_node() == Some(node_id) {
+                dom.set_active_node(None);
+            }
+            "true".into()
+        }
         // Selection mirror (caret batch): the bootstrap's selection APIs
         // keep (start, end) in WeakMaps for JS reads; this op mirrors the
         // same record into the tree so paint can resolve the caret at
