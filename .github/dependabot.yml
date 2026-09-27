@@ -8,6 +8,15 @@ updates:
     groups:
       cargo-minor:
         update-types: [minor, patch]
+    ignore:
+      # RustCrypto cipher-0.5 family majors must migrate together
+      # (aes/ctr/cbc/pbkdf2/hmac/sha2) - solo bumps break trait bounds (#94, #92).
+      - dependency-name: "aes"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "pbkdf2"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "ureq"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
     directory: /dsh-aginxbrowser
