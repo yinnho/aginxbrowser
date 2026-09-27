@@ -531,6 +531,24 @@ fn parse_color_rgb_function_forms() {
 }
 
 #[test]
+fn parse_color_hsl_function_forms() {
+    // #136 (obscura #1085): hsl()/hsla() parse to the same sRGB values as
+    // the rgb() arm — comma/space separated, deg/turn/bare hue, % or bare
+    // s/l on the same 0-100 scale, alpha 0-1 or %.
+    assert_eq!(parse_color("hsl(0, 100%, 50%)"), Some(Color(255, 0, 0, 255)));
+    assert_eq!(parse_color("hsl(120 100% 25%)"), Some(Color(0, 128, 0, 255)), "space-separated");
+    assert_eq!(parse_color("hsl(240deg, 100%, 50%)"), Some(Color(0, 0, 255, 255)), "deg hue");
+    assert_eq!(parse_color("hsl(0.5turn, 100%, 50%)"), Some(Color(0, 255, 255, 255)), "turn hue = 180° cyan");
+    assert_eq!(parse_color("hsl(-120, 100%, 50%)"), Some(Color(0, 0, 255, 255)), "negative hue wraps");
+    assert_eq!(parse_color("hsl(30, 50%, 50%)"), Some(Color(191, 128, 64, 255)), "Chrome-parity spot value");
+    assert_eq!(parse_color("hsl(30, 50, 50)"), Some(Color(191, 128, 64, 255)), "bare s/l read on the % scale");
+    assert_eq!(parse_color("hsla(0, 100%, 50%, 0.5)"), Some(Color(255, 0, 0, 128)));
+    assert_eq!(parse_color("hsl(0, 100%, 50%, 50%)"), Some(Color(255, 0, 0, 128)), "percent alpha");
+    assert_eq!(parse_color("hsl(0, 0%, 100%)"), Some(Color(255, 255, 255, 255)));
+    assert_eq!(parse_color("hsl(1, 2)"), None, "wrong arity");
+}
+
+#[test]
 fn linear_gradient_135deg_two_stops() {
     let g = parse_linear_gradient("linear-gradient(135deg, #2c3e50 0%, #fd79a8 100%)").expect("parses");
     assert_eq!(g.css_deg, 135.0);
@@ -1082,6 +1100,26 @@ fn table_height_attribute_is_a_presentational_hint() {
     // Non-table tags ignore the attribute entirely.
     let plain = cascade_element("div", &tree, td1, &[], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
     assert_eq!(plain.height, None, "height attr is table-cell/row only");
+}
+
+#[test]
+fn td_nowrap_attribute_is_a_presentational_hint() {
+    // #135 (blitz#931): td[nowrap]/th[nowrap] reads as white-space: nowrap,
+    // presence-based, slotted below every author declaration.
+    let tree = diting_dom::tree_sink::parse_html(
+        r#"<table><tr><td nowrap>x</td><td style="white-space:normal" nowrap>y</td></tr></table>"#,
+    );
+    let td1 = tree.query_selector("td").unwrap().unwrap();
+    let td2 = tree.query_selector("td[style]").unwrap().unwrap();
+
+    let cs = cascade_element("td", &tree, td1, &[], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
+    assert_eq!(cs.white_space, Some(WhiteSpace::Nowrap), "attr nowrap lands as white-space: nowrap");
+    // Inline style applies after the hint and wins.
+    let authored = cascade_element("td", &tree, td2, &[], None, Some("white-space:normal"), DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
+    assert_eq!(authored.white_space, Some(WhiteSpace::Normal), "author white-space outranks the hint");
+    // Non-table tags ignore the attribute entirely.
+    let plain = cascade_element("div", &tree, td1, &[], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
+    assert_eq!(plain.white_space, None, "nowrap attr is table-cell only");
 }
 
 #[test]

@@ -5689,6 +5689,46 @@ pub fn parse_color(v: &str) -> Option<Color> {
         let a = if nums.len() == 4 { (nums[3].clamp(0.0, 1.0) * 255.0).round() as u8 } else { 255 };
         return Some(Color(chan(nums[0]), chan(nums[1]), chan(nums[2]), a));
     }
+    // hsl()/hsla() (#136, obscura #1085): hue is a bare number, deg, or
+    // turn; s/l are percentages (a bare number reads on the same 0-100
+    // scale, like Chrome); alpha is 0-1 or %. Comma and space separated.
+    if let Some(rest) = v
+        .strip_prefix("hsl(")
+        .or_else(|| v.strip_prefix("hsla("))
+        .and_then(|r| r.strip_suffix(')'))
+    {
+        let toks: Vec<&str> = rest
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if toks.len() != 3 && toks.len() != 4 {
+            return None;
+        }
+        let hue = if let Some(n) = toks[0].strip_suffix("turn") {
+            n.css_f32().map(|x| x * 360.0)
+        } else {
+            toks[0].strip_suffix("deg").unwrap_or(toks[0]).css_f32()
+        }?;
+        let frac = |tok: &str| {
+            tok.strip_suffix('%')
+                .and_then(|p| p.css_f32())
+                .or_else(|| tok.css_f32())
+                .map(|p| (p / 100.0).clamp(0.0, 1.0))
+        };
+        let sat = frac(toks[1])?;
+        let lig = frac(toks[2])?;
+        let a = if toks.len() == 4 {
+            toks[3]
+                .strip_suffix('%')
+                .and_then(|p| p.css_f32().map(|p| p / 100.0))
+                .or_else(|| toks[3].css_f32())
+                .map(|a| a.clamp(0.0, 1.0))?
+        } else {
+            1.0
+        };
+        let hue = ((hue % 360.0) + 360.0) % 360.0;
+        return Some(hsl_to_color(hue, sat, lig, a));
+    }
     let named = match v.as_str() {
         "black" => Color(0, 0, 0, 255),
         "white" => Color(255, 255, 255, 255),
@@ -5702,6 +5742,26 @@ pub fn parse_color(v: &str) -> Option<Color> {
         _ => return parse_hex_color(&v),
     };
     Some(named)
+}
+
+/// CSS HSL → sRGB (the chroma ladder, CSS Color 3 §4.2.1/§4.2.5): h in
+/// [0,360), s/l/a already normalized to [0,1]. Feeds parse_color's
+/// hsl()/hsla() arm (#136).
+fn hsl_to_color(h: f32, s: f32, l: f32, a: f32) -> Color {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = h / 60.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r, g, b) = match hp as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    let ch = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Color(ch(r), ch(g), ch(b), (a * 255.0).round() as u8)
 }
 
 fn parse_hex_color(v: &str) -> Option<Color> {
@@ -6092,6 +6152,18 @@ pub fn cascade_element(
             });
         if attr_va.is_some() {
             style.vertical_align = attr_va;
+        }
+    }
+    // nowrap attribute (blitz#931), same hint slot: td[nowrap]/th[nowrap]
+    // reads as white-space: nowrap — presence-based, matching the UA rule
+    // `td[nowrap] { white-space: nowrap }`. Author CSS outranks it like
+    // every hint here: the declarations below apply after and win.
+    if matches!(tag, "td" | "th") {
+        let attr_nw = tree
+            .with_node(node_id, |n| n.get_attribute("nowrap").is_some())
+            .unwrap_or(false);
+        if attr_nw {
+            style.white_space = Some(WhiteSpace::Nowrap);
         }
     }
     // Author declarations in two passes (CSS 2.1 §6.4.1). Normal pass:

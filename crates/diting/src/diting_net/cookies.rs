@@ -42,6 +42,9 @@ impl CookieJar {
         let request_host = url.host_str().unwrap_or("").to_lowercase();
         let mut domain_attr: Option<String> = None;
         let mut path = default_cookie_path(url.path());
+        // Whether the cookie carried an explicit Path attribute — the
+        // __Host- prefix rule (#137) reads this, not the derived path.
+        let mut path_attr: Option<String> = None;
         let mut secure = false;
         let mut http_only = false;
         let mut expires: Option<u64> = None;
@@ -56,7 +59,9 @@ impl CookieJar {
                             domain_attr = Some(val.trim().trim_start_matches('.').to_lowercase());
                         }
                         "path" => {
-                            path = val.trim().to_string();
+                            let p = val.trim().to_string();
+                            path = p.clone();
+                            path_attr = Some(p);
                         }
                         "expires" => {
                             if let Ok(ts) = parse_http_date(val.trim()) {
@@ -102,7 +107,7 @@ impl CookieJar {
         // Reject before storage AND before the expiry-delete branch below —
         // a prefix-violating cookie is ignored entirely, so it must not even
         // serve as a deletion of a previously-valid same-name cookie.
-        if !cookie_prefix_ok(&name, secure, host_only, &path) {
+        if !cookie_prefix_ok(&name, secure, host_only, path_attr.as_deref()) {
             return;
         }
 
@@ -286,6 +291,9 @@ impl CookieJar {
         let request_host = url.host_str().unwrap_or("").to_lowercase();
         let mut domain_attr: Option<String> = None;
         let mut path = default_cookie_path(url.path());
+        // #137: same explicit-Path tracking as the Set-Cookie path — the
+        // __Host- prefix rule reads the attribute, not the derived path.
+        let mut path_attr: Option<String> = None;
         let mut secure = false;
         let mut expires: Option<u64> = None;
         let mut same_site = "Lax".to_string();
@@ -299,7 +307,9 @@ impl CookieJar {
                             domain_attr = Some(val.trim().trim_start_matches('.').to_lowercase());
                         }
                         "path" => {
-                            path = val.trim().to_string();
+                            let p = val.trim().to_string();
+                            path = p.clone();
+                            path_attr = Some(p);
                         }
                         "expires" => {
                             if let Ok(ts) = parse_http_date(val.trim()) {
@@ -340,7 +350,7 @@ impl CookieJar {
 
         // Same prefix rules on the document.cookie write path (#67) —
         // otherwise page JS could just mint a __Host- cookie itself.
-        if !cookie_prefix_ok(&name, secure, host_only, &path) {
+        if !cookie_prefix_ok(&name, secure, host_only, path_attr.as_deref()) {
             return;
         }
 
@@ -577,16 +587,19 @@ fn normalize_same_site(value: &str) -> String {
 
 // RFC 6265bis §4.1.3 cookie name prefixes (#67): __Secure- demands the
 // Secure attribute; __Host- demands Secure, host-only scope (no effective
-// Domain attribute), and Path=/. Prefix matching is case-insensitive. A
-// violating cookie is dropped like any other invalid Set-Cookie — on both
-// the HTTP and the document.cookie write path.
-fn cookie_prefix_ok(name: &str, secure: bool, host_only: bool, path: &str) -> bool {
+// Domain attribute), and an *explicit* Path=/ attribute (#137, obscura
+// #1099) — a default-path of "/" derived from a root request URL does not
+// qualify, and an explicit Path=/ on a deep URL must be honored (the old
+// check read the request path and got both directions wrong). Prefix
+// matching is case-insensitive. A violating cookie is dropped like any
+// other invalid Set-Cookie — on both the HTTP and document.cookie paths.
+fn cookie_prefix_ok(name: &str, secure: bool, host_only: bool, path_attr: Option<&str>) -> bool {
     let lower = name.to_ascii_lowercase();
     if lower.starts_with("__secure-") {
         return secure;
     }
     if lower.starts_with("__host-") {
-        return secure && host_only && path == "/";
+        return secure && host_only && path_attr == Some("/");
     }
     true
 }
@@ -1288,6 +1301,29 @@ mod tests {
         );
         jar.set_cookie("__Host-sid=1; Secure; Path=/", &https);
         assert!(jar.get_cookie_header(&https).contains("__Host-sid=1"));
+    }
+
+    // #137 (obscura #1099): the __Host- Path rule reads the *attribute*,
+    // not the request path — a root URL with no Path attribute derives "/"
+    // but must not qualify; an explicit Path=/ on a deep URL must be honored.
+    #[test]
+    fn test_host_prefix_path_rule_reads_the_attribute_not_the_url() {
+        let jar = CookieJar::new();
+        let root = Url::parse("https://example.com/").unwrap();
+        jar.set_cookie("__Host-sid=1; Secure", &root);
+        assert!(
+            jar.get_all_cookies().is_empty(),
+            "a derived '/' from the request URL is not an explicit Path=/ attribute"
+        );
+        let deep = Url::parse("https://example.com/a/b").unwrap();
+        jar.set_cookie("__Host-sid=1; Secure; Path=/", &deep);
+        assert!(
+            jar.get_cookie_header(&root).contains("__Host-sid=1"),
+            "an explicit Path=/ on a deep-URL response is a valid __Host- cookie"
+        );
+        let jar2 = CookieJar::new();
+        jar2.set_cookie("__Host-sid=1; Secure", &deep); // derives path "/a"
+        assert!(jar2.get_all_cookies().is_empty());
     }
 
     #[test]
