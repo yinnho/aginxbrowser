@@ -96,7 +96,7 @@ urlencoding = "2"
 http-body-util = "0.1"
 
 # --- html / dom parsing (product-side convenience wrappers) ---
-scraper = "0.21"
+scraper = "0.27"
 html2md = "0.2"
 
 base64 = "0.22"
