@@ -1358,7 +1358,6 @@ dependencies = [
  "html5ever 0.29.1",
  "http",
  "image",
- "markup5ever 0.14.1",
  "p256",
  "p384",
  "parley",
