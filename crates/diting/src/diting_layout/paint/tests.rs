@@ -1525,7 +1525,7 @@ fn box_blur_alpha_preserves_mass_and_flat() {
     // only. Guards the transposed-stride bug (a square buffer hides it
     // because w == h makes row and column strides coincide).
     let mut col = vec![0u8; 21]; // 7 wide, 3 tall
-    col[1 * 7 + 2] = 255; // row 1, col 2
+    col[7 + 2] = 255; // row 1, col 2
     let out = box_blur_alpha(&col, 7, 3, 1, false);
     for x in 0..7 {
         for y in 0..3 {

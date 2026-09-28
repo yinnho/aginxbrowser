@@ -310,6 +310,7 @@ impl Canvas {
     /// LOCAL space (the gradient rides the element's box through the
     /// rotation), colors sample per inverse-mapped pixel center, and the
     /// shape clips by the same local rounded test a solid fill uses.
+    #[allow(clippy::too_many_arguments)] // paint plumbing — see run_tokens
     fn fill_gradient_affine(
         &mut self,
         x: f64,
@@ -672,6 +673,7 @@ impl Canvas {
     /// colors interpolate in premultiplied space; the shape clips through
     /// the same per-corner elliptical test a solid `BgCorner` uses (the
     /// fill follows the rounded box).
+    #[allow(clippy::too_many_arguments)] // paint plumbing — see run_tokens
     pub fn fill_gradient(
         &mut self,
         x: i64,

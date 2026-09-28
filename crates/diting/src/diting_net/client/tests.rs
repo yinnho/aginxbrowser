@@ -342,9 +342,8 @@ fn is_forbidden_ip_unwraps_teredo_embedded_ipv4() {
     // A Teredo wrapper with a public v4 in every slot stays allowed —
     // server 65.54.227.120 (real Teredo server), raw client 176.16.33.80,
     // de-obfuscated client 79.239.222.175.
-    for good in ["2001:0:4136:e378:8000:63bf:b010:2150"] {
-        assert!(!is_forbidden_ip(IpAddr::from_str(good).unwrap()), "{good} must be allowed");
-    }
+    let good = "2001:0:4136:e378:8000:63bf:b010:2150";
+    assert!(!is_forbidden_ip(IpAddr::from_str(good).unwrap()), "{good} must be allowed");
 }
 
 #[test]
@@ -364,6 +363,7 @@ fn validate_url_rejects_embedded_ipv6_literal_hosts() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
 async fn ssrf_guard_resolver_blocks_loopback_resolution() {
     let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
     std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");

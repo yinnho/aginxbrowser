@@ -544,6 +544,7 @@ impl FontBook {
     /// rounded to whole pixels (no subpixel placement — ink-extent
     /// cross-checks against blitz stay within tolerance because both
     /// rasterizers cover the same outlines to within ~a pixel).
+    #[allow(clippy::too_many_arguments)] // rasterizer plumbing — see run_tokens
     pub fn rasterize(
         &self,
         text: &str,
@@ -819,6 +820,7 @@ impl FontBook {
     /// segments additionally try embedded color bitmaps (Apple sbix / CBDT
     /// strikes, best fit) and land their RGBA pixels in `color_layer` —
     /// same tile geometry, own colors, max-alpha blend like the mono path.
+    #[allow(clippy::too_many_arguments)] // rasterizer plumbing — see run_tokens
     fn blit_line(
         &self,
         alpha: &mut [u8],

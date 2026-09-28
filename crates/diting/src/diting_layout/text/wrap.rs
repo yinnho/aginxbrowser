@@ -103,6 +103,7 @@ fn push_caps_segment(
 /// for the product crate's dual-engine cross-check, which shapes fixture
 /// runs through the engine's own path so both sides measure identical
 /// tokens.
+#[allow(clippy::too_many_arguments)] // glyph plumbing — see run_tokens
 pub fn tokens_of(
     text: &str,
     font_size: f32,
@@ -186,7 +187,7 @@ pub fn greedy_wrap(
             }
         }
         cur.width += pending_space + t.width;
-        cur.token_idx.extend(pending_idx.drain(..));
+        cur.token_idx.append(&mut pending_idx);
         cur.token_idx.push(i);
         pending_space = 0.0;
     }

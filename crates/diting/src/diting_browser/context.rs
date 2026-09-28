@@ -69,6 +69,7 @@ impl BrowserContext {
     /// process-global jar this way so repeat visits to a site look like the
     /// same returning client rather than a brand-new incognito profile on
     /// every request (fresh profiles maximize anti-bot CAPTCHA triggers).
+    #[allow(clippy::too_many_arguments)] // client-construction plumbing — see run_tokens
     pub fn with_shared_cookie_jar(
         id: String,
         proxy_url: Option<String>,
@@ -82,6 +83,7 @@ impl BrowserContext {
         Self::_new_with_jar(id, proxy_url, stealth, user_agent, storage_dir, allow_private_network, tls_fingerprint, Some(cookie_jar))
     }
 
+    #[allow(clippy::too_many_arguments)] // client-construction plumbing — see run_tokens
     fn _new_with_jar(
         id: String,
         proxy_url: Option<String>,

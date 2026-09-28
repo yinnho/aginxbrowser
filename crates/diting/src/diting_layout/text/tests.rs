@@ -232,7 +232,7 @@ fn tokens_of_applies_word_spacing_to_space_tokens_only() {
     }
     // `normal` is modeled as 0.0 — identical tokens.
     let normal = tokens_of("ab cd", 16.0, false, &book, false, 0.0, crate::diting_css::WhiteSpace::Normal, false, None);
-    assert_eq!(normal[1].is_space, true);
+    assert!(normal[1].is_space);
 }
 
 /// The wrapped rasterizer must actually MOVE the second word, not just

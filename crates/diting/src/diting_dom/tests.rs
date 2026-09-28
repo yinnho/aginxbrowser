@@ -924,10 +924,7 @@ mod selector_tests {
             2
         );
         // Compound subject: .control:is(...) narrows by both parts.
-        assert_eq!(
-            tree.query_selector_all(r#"input:is([class="field"])"#.trim_end_matches('"')).is_err(),
-            false
-        );
+        assert!(tree.query_selector_all(r#"input:is([class="field"])"#.trim_end_matches('"')).is_ok());
         assert_eq!(tree.query_selector_all("button:where(.btn)").unwrap().len(), 1);
     }
 
@@ -1461,15 +1458,14 @@ mod selector_tests {
                         value: data,
                     });
                 }
-                let id = tree.new_node(NodeData::Element {
+                tree.new_node(NodeData::Element {
                     name: QualName::new(None, ns!(html), LocalName::from(tag)),
                     attrs,
                     template_contents: None,
                     mathml_annotation_xml_integration_point: false,
                     live_value: None,
                     live_checked: None,
-                });
-                id
+                })
             };
 
             for step in 0..160 {
@@ -1538,7 +1534,7 @@ mod selector_tests {
                                 ("data-kind", ""),
                                 ("id", "zz9"),
                             ][rng.below(5)];
-                            tree.with_node_mut(node, |n| n.set_attribute(name.into(), value.into()));
+                            tree.with_node_mut(node, |n| n.set_attribute(name, value.to_string()));
                             tree.note_restyle(node);
                         }
                     }
@@ -1548,7 +1544,7 @@ mod selector_tests {
                     8 => {
                         if let (Some(node), Some(parent)) = (pick(&tree, &mut rng), pick(&tree, &mut rng)) {
                             tree.remove_child(node);
-                            tree.with_node_mut(node, |n| n.set_attribute("class".into(), "sinkitem".into()));
+                            tree.with_node_mut(node, |n| n.set_attribute("class", "sinkitem".to_string()));
                             tree.note_restyle(node);
                             check(&format!("{stage}: detached restyle"), key, if key == key_b { late_sel } else { base_sel });
                             tree.append_child(parent, node);
@@ -1613,7 +1609,7 @@ mod selector_tests {
         let star = sets.hits.get(&3).cloned().unwrap_or_default();
         assert!(star.len() >= 5, "universal rule matched only {star:?}");
         // Never-matching unkeyed rule contributes nothing.
-        assert!(sets.hits.get(&2).is_none());
+        assert!(!sets.hits.contains_key(&2));
     }
 
     // ---- pseudo-element rule routing (::before/::after v1) ----
@@ -1642,7 +1638,7 @@ mod selector_tests {
         // author's case, so class matching stays case-sensitive: routing
         // is orthogonal to matching.
         assert_eq!(sets.pseudo_kinds.get(&2), Some(&PseudoKind::Before));
-        assert!(sets.pseudo_hits.get(&2).is_none(), ".LI matches nothing");
+        assert!(!sets.pseudo_hits.contains_key(&2), ".LI matches nothing");
     }
 
     #[test]

@@ -545,6 +545,7 @@ fn rounded_rect_poly(x: f32, y: f32, w: f32, h: f32, rx: f32, ry: f32) -> Vec<(f
     pts
 }
 
+#[allow(clippy::too_many_arguments)] // svg plumbing — see run_tokens
 fn emit_fill_stroke(
     poly: Vec<(f32, f32)>,
     closed: bool,
@@ -1143,7 +1144,7 @@ fn dash_on_runs(
         let mut remain = (b.0 - a.0).hypot(b.1 - a.1);
         while remain > f32::EPSILON {
             let chunk = remain.min(pat[idx] - pat_pos);
-            if idx % 2 == 0 {
+            if idx.is_multiple_of(2) {
                 on_start.get_or_insert(d);
             } else if let Some(s) = on_start.take() {
                 runs.push((s, d));

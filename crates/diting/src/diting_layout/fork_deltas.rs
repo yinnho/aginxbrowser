@@ -89,6 +89,7 @@
     /// Grid-in-grid: outer 300px fixed track, inner item with `fr(1.0)` track
     /// holding a text leaf of the given intrinsic size. Returns the inner
     /// item's resolved width.
+    #[allow(clippy::too_many_arguments)] // grid plumbing — see run_tokens
     fn layout_nested_grid_item(
         intrinsic: IntrinsicInlineSize,
         margin: Rect<LengthPercentageAuto>,
@@ -185,7 +186,9 @@
     fn grid_ordinary_aspect_ratio_alignment_matrix() {
         // Each entry's Size is the STOCK 0.13.0 result (locked); the comment
         // above it is the fork's expectation where it differs.
-        let cases: [(Option<AlignSelf>, Option<AlignSelf>, Option<AlignItems>, Option<AlignItems>, Size<f32>); 8] = [
+        type AlignCase =
+            (Option<AlignSelf>, Option<AlignSelf>, Option<AlignItems>, Option<AlignItems>, Size<f32>);
+        let cases: [AlignCase; 8] = [
             // fork: 300x150 (agrees) — both normal: inline stretch, block start
             (None, None, None, None, Size { width: 300.0, height: 150.0 }),
             // fork: 400x200 — explicit block stretch drives ratio-derived width;
@@ -195,13 +198,7 @@
             (Some(AlignSelf::STRETCH), None, None, None, Size { width: 300.0, height: 150.0 }),
             // fork: 300x200 — both axes definite, ratio must not overwrite;
             // stock re-derives height 150 from the ratio anyway
-            (
-                Some(AlignSelf::STRETCH),
-                Some(AlignSelf::STRETCH),
-                None,
-                None,
-                Size { width: 300.0, height: 150.0 },
-            ),
+            (Some(AlignSelf::STRETCH), Some(AlignSelf::STRETCH), None, None, Size { width: 300.0, height: 150.0 }),
             // fork: 300x150 (agrees)
             (None, Some(AlignSelf::START), None, None, Size { width: 300.0, height: 150.0 }),
             // fork: 400x200 — inline start frees block normal to stretch;
