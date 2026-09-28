@@ -1529,6 +1529,91 @@ ms.addEventListener('sourceopen', function(){ \
         );
     }
 
+    // ---- obscura#1105: window.history reflects the real session history --
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn history_length_and_back_survive_cross_document_navigation() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![
+            ("/a", 200, "<html><body><script>window.__doc = 'A';</script></body></html>".into()),
+            ("/b", 200, "<html><body><script>window.__doc = 'B';</script></body></html>".into()),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        assert_eq!(p.evaluate("history.length"), serde_json::json!(1.0), "first document");
+        p.navigate(&format!("http://127.0.0.1:{port}/b")).await.unwrap();
+        // The runtime was rebuilt for the second document — the seed must
+        // carry the first entry over (this read used to be 1, and back()
+        // below a silent no-op).
+        assert_eq!(p.evaluate("history.length"), serde_json::json!(2.0));
+        assert_eq!(p.evaluate("window.__doc"), serde_json::json!("B"));
+        p.evaluate("history.back()");
+        assert!(p.process_pending_navigation().await.unwrap());
+        assert!(p.url_string().ends_with("/a"));
+        assert_eq!(p.evaluate("window.__doc"), serde_json::json!("A"));
+        assert_eq!(
+            p.evaluate("history.length"),
+            serde_json::json!(2.0),
+            "the back-jump lands on entry 0 of the SAME 2-entry history"
+        );
+        // The jump moved the cursor; it did not append a third entry.
+        assert_eq!(p.history.len(), 2);
+        assert_eq!(p.history_index, 0);
+        // forward() from the landed document re-enters B — the seeded
+        // forward entry jumps too, cursor back to 1, still 2 entries.
+        p.evaluate("history.forward()");
+        assert!(p.process_pending_navigation().await.unwrap());
+        assert!(p.url_string().ends_with("/b"));
+        assert_eq!(p.evaluate("window.__doc"), serde_json::json!("B"));
+        assert_eq!(p.history.len(), 2);
+        assert_eq!(p.history_index, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_state_stacks_over_the_seed_and_back_stays_virtual() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![
+            ("/a", 200, "<html><body>A</body></html>".into()),
+            ("/b", 200, "<html><body>B</body></html>".into()),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        p.navigate(&format!("http://127.0.0.1:{port}/b")).await.unwrap();
+        // Same-document entries stack over the seeded cross-document one.
+        p.evaluate("history.pushState({x: 1}, '', '/b?page=2')");
+        assert_eq!(p.evaluate("history.length"), serde_json::json!(3.0));
+        assert_eq!(p.evaluate("history.state"), serde_json::json!({"x": 1}));
+        // back() to the document's OWN entry stays virtual: popstate fires,
+        // no engine jump queued, no navigation runs.
+        p.evaluate("window.__pops = 0");
+        p.evaluate("addEventListener('popstate', () => { window.__pops++; })");
+        p.evaluate("history.back()");
+        assert_eq!(p.evaluate("window.__pops"), serde_json::json!(1.0));
+        assert!(!p.process_pending_navigation().await.unwrap());
+        assert_eq!(p.evaluate("history.state"), serde_json::json!(null));
+        // go(-2) crosses into document A's entry: a real engine jump.
+        p.evaluate("history.go(-2)");
+        assert!(p.process_pending_navigation().await.unwrap());
+        assert!(p.url_string().ends_with("/a"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn same_url_renavigation_dedupe_keeps_length_honest() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![("/a", 200, "<html><body>A</body></html>".into())]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        p.evaluate("location.href = '/a'");
+        assert!(p.process_pending_navigation().await.unwrap());
+        assert!(p.url_string().ends_with("/a"));
+        // push_history dedupes consecutive same-URL entries and the seed
+        // honors that (pos stays 0) instead of inventing a phantom back
+        // entry the Rust side does not have.
+        assert_eq!(p.evaluate("history.length"), serde_json::json!(1.0));
+        assert_eq!(p.history.len(), 1);
+        assert_eq!(p.history_index, 0);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn add_preload_script_appends_in_order() {
         let _g = net_test_guard();

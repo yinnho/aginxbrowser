@@ -53,6 +53,22 @@ impl JsRuntime {
         self.state.borrow_mut().url = url.to_string();
     }
 
+    /// Seed the JS history stack for the document being committed
+    /// (obscura#1105): `pos` is this document's entry index in the session
+    /// history, `total` the whole history length. Bootstrap reads them via
+    /// the dom-parse channel before any page script runs.
+    pub fn set_history_seed(&self, pos: i32, total: i32) {
+        let mut st = self.state.borrow_mut();
+        st.history_pos = pos;
+        st.history_total = total;
+    }
+
+    /// Take the session-history jump page JS queued (history.back/forward/
+    /// go crossing a document boundary) — an absolute entry index.
+    pub fn take_pending_history_jump(&self) -> Option<i32> {
+        self.state.borrow_mut().pending_history_jump.take()
+    }
+
     /// Set the document's character encoding (WHATWG canonical name). Backs
     /// `document.characterSet` and the `<a>`/`<area>` URL query encoding
     /// override for legacy-charset documents.

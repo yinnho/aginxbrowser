@@ -162,7 +162,7 @@ const _domStrA1 = new Set([
   "create_processing_instruction", "create_doctype",
   "create_document_fragment",
   "query_selector", "query_selector_all", "get_element_by_id",
-  "document_node_id", "document_title", "set_document_title", "document_referrer", "document_url", "document_base_url", "document_encoding", "document_content_type", "document_referrer_policy",
+  "document_node_id", "document_title", "set_document_title", "document_referrer", "document_url", "document_base_url", "document_encoding", "document_content_type", "document_referrer_policy", "history_pos", "history_total",
   "document_element", "document_doctype",
   "document_write", "document_write_reset",
   "add_css_transition",
@@ -12033,8 +12033,38 @@ globalThis.atob = globalThis.atob || ((s) => {
 // reads the new URL. Real Chrome doesn't fire popstate on push/replace,
 // only on user-driven back/forward — we match that exactly.
 (() => {
-  const stack = [{state: null, url: undefined}]; // initial entry; url=undefined means "use document URL"
+  // Seeded from the engine's real session history (obscura#1105): the JS
+  // runtime is rebuilt on every cross-document navigation, so a fresh
+  // single-entry stack would report history.length === 1 and swallow
+  // back() entirely. The seeding is LAZY — on the first history touch —
+  // because this bootstrap runs from the V8 snapshot (before any ops or
+  // per-document state exist) and even __diting_init fires inside the
+  // runtime constructor, before the page setters land. By the time page
+  // script reads history, the seed values are readable through _domParse.
+  // Seeded entries other than this document's own belong to another
+  // document (cross:true) — go() to one queues a real session-history jump
+  // through the engine instead of a virtual move. Entries pushState
+  // appends later are this document's own (no cross flag).
+  const stack = [{state: null, url: undefined}]; // doc entry; url=undefined means "use document URL"
   let idx = 0;
+  let seeded = false;
+  const ensureSeed = () => {
+    if (seeded) return;
+    seeded = true;
+    let p = 0, t = 1;
+    try {
+      p = Math.max(0, parseInt(_domParse("history_pos") || "0", 10) || 0);
+      t = Math.max(p + 1, parseInt(_domParse("history_total") || "1", 10) || 1);
+    } catch {}
+    const pre = stack.splice(0, stack.length);
+    for (let i = 0; i < t; i++) {
+      stack.push(i === p ? (pre[0] || {state: null, url: undefined}) : {state: null, url: undefined, cross: true});
+    }
+    // Same-document entries the page pushed before its first history read
+    // stack after the doc entry (pre was [doc, ps...] before seeding).
+    for (let i = 1; i < pre.length; i++) stack.push(pre[i]);
+    idx = p + pre.length - 1;
+  };
   // Shared history push/replace state steps (HTML spec): resolve the URL
   // against the document, then throw SecurityError if it fails to parse or
   // parses to a different origin. The old raw-string fallback let a page pin
@@ -12079,10 +12109,11 @@ globalThis.atob = globalThis.atob || ((s) => {
     } catch {}
   };
   globalThis.history = {
-    get length() { return stack.length; },
-    get state() { return stack[idx].state; },
+    get length() { ensureSeed(); return stack.length; },
+    get state() { ensureSeed(); return stack[idx].state; },
     scrollRestoration: "auto",
     pushState(state, _title, url) {
+      ensureSeed();
       const prevUrl = __currentUrl();
       const resolved = resolveStateUrl(url);
       // Truncate forward entries (real Chrome drops the forward stack on a
@@ -12094,6 +12125,7 @@ globalThis.atob = globalThis.atob || ((s) => {
       fireHashChangeIfNeeded(prevUrl);
     },
     replaceState(state, _title, url) {
+      ensureSeed();
       const prevUrl = __currentUrl();
       const resolved = resolveStateUrl(url);
       stack[idx] = {state: state ?? null, url: resolved};
@@ -12101,10 +12133,20 @@ globalThis.atob = globalThis.atob || ((s) => {
       fireHashChangeIfNeeded(prevUrl);
     },
     go(n) {
+      ensureSeed();
       n = (n | 0);
       if (n === 0) return; // real spec: go(0) reloads. We don't reload SPAs.
       const next = Math.max(0, Math.min(stack.length - 1, idx + n));
       if (next === idx) return;
+      if (stack[next].cross) {
+        // Cross-document entry (obscura#1105): queue a real session-history
+        // jump — the engine moves its cursor and refetches the entry's
+        // document. Seeded indices map 1:1 onto the engine's entry indices,
+        // so the absolute index goes straight through. popstate fires on the
+        // landing document, not this one.
+        _OPS.op_history_jump_to(next);
+        return;
+      }
       const prevUrl = __currentUrl();
       idx = next;
       applyVirtual();

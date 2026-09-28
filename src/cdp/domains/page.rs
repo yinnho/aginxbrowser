@@ -885,25 +885,26 @@ pub async fn handle(
         "resetNavigationHistory" => Ok(json!({})),
         "navigateToHistoryEntry" => {
             let entry_id = params.get("entryId").and_then(|v| v.as_i64()).unwrap_or(0) as usize;
-            // Snapshot the stack first. The navigate below runs the normal
-            // pipeline, which pushes the loaded URL into history — but a
-            // history jump must neither grow nor truncate the back/forward
-            // list (Chrome only moves currentIndex), and a FAILED navigation
-            // must leave the index pointing at the page still shown instead
-            // of an entry that never loaded (obscura #920).
-            let (url, snapshot) = {
+            // Move the cursor BEFORE the navigate, not after: init_js seeds
+            // the landing document's JS history from the cursor position
+            // (obscura#1105), and with the cursor already at the entry,
+            // push_history's consecutive-dedupe sees the same URL and
+            // early-returns — the jump moves currentIndex without growing or
+            // truncating the back/forward list. A FAILED navigation restores
+            // the index of the page still shown (obscura #920).
+            let (url, prev_index) = {
                 let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
                 let Some(url) = page.history.get(entry_id).cloned() else {
                     return Err(format!("History entry {entry_id} not found"));
                 };
-                (url, (page.history.clone(), page.history_index))
+                let prev_index = page.history_index;
+                page.set_history_index(entry_id);
+                (url, prev_index)
             };
             let result = navigate_page(ctx, session_id, &url).await;
-            if let Some(page) = ctx.get_session_page_mut(session_id) {
-                page.history = snapshot.0;
-                page.history_index = snapshot.1;
-                if result.is_ok() {
-                    page.set_history_index(entry_id);
+            if result.is_err() {
+                if let Some(page) = ctx.get_session_page_mut(session_id) {
+                    page.set_history_index(prev_index);
                 }
             }
             result

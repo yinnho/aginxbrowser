@@ -120,6 +120,16 @@ pub struct JsState {
     pub cookie_jar: Option<Arc<CookieJar>>,
     pub http_client: Option<Arc<HttpClient>>,
     pub pending_navigation: Option<(String, String, String)>,
+    // Session-history seed (obscura#1105): the JS runtime is rebuilt on every
+    // cross-document navigation, so bootstrap re-seeds its history stack from
+    // these before any page script runs. `history_pos` is this document's
+    // entry index, `history_total` the whole session history length.
+    pub history_pos: i32,
+    pub history_total: i32,
+    // Session-history jump queued by page JS (history.back/forward/go past
+    // this document's boundaries) — an absolute entry index into the page's
+    // real history, consumed by `Page::process_pending_navigation`.
+    pub pending_history_jump: Option<i32>,
     pub intercept_tx: Option<tokio::sync::mpsc::UnboundedSender<InterceptedRequest>>,
     pub intercept_enabled: bool,
     // Queue of (binding_name, payload) calls made by page JS via the
@@ -435,6 +445,9 @@ impl JsState {
             cookie_jar: None,
             http_client: None,
             pending_navigation: None,
+            history_pos: 0,
+            history_total: 1,
+            pending_history_jump: None,
             intercept_tx: None,
             intercept_enabled: false,
             pending_binding_calls: Vec::new(),
@@ -966,6 +979,15 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
     }
     let gs = state.borrow::<SharedState>().clone();
     let gs = gs.borrow();
+    // The history seed answers without a DOM tree and must survive the
+    // no-dom guard: bootstrap reads these to re-seed its history stack
+    // before any page script runs (obscura#1105).
+    if cmd == "history_pos" {
+        return gs.history_pos.to_string();
+    }
+    if cmd == "history_total" {
+        return gs.history_total.to_string();
+    }
     let dom = match &gs.dom {
         Some(d) => d,
         None => return "null".to_string(),
@@ -6181,6 +6203,17 @@ fn op_navigate(state: &OpState, #[string] url: &str, #[string] method: &str, #[s
     gs.pending_navigation = Some((url.to_string(), method.to_string(), body.to_string()));
 }
 
+/// Queue a session-history jump (history.back/forward/go across a document
+/// boundary — obscura#1105). `target` is an absolute index into the page's
+/// real session history; the pump (`Page::process_pending_navigation`) moves
+/// the cursor and refetches the entry's document.
+#[op2(fast)]
+fn op_history_jump_to(state: &OpState, target: i32) {
+    let gs = state.borrow::<SharedState>().clone();
+    let mut gs = gs.borrow_mut();
+    gs.pending_history_jump = Some(target);
+}
+
 #[op2(async(deferred), fast)]
 async fn op_sleep(#[number] millis: u64) {
     // Reactor-less contexts (plain #[test] isolates): a tokio timer would
@@ -6566,6 +6599,7 @@ pub fn build_extension() -> Extension {
             op_storage_read(),
             op_storage_write(),
             op_navigate(),
+            op_history_jump_to(),
             op_sleep(),
             op_binding_called(),
             op_subtle_digest(),

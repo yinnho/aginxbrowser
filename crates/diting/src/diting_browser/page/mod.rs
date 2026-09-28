@@ -672,6 +672,28 @@ impl Page {
             self.context.proxy_url.clone(),
         );
         rt.set_url(&self.url_string());
+        // Seed the JS history stack from the REAL session history
+        // (obscura#1105): a fresh runtime would report history.length === 1
+        // and swallow back(). push_history has not run yet — the cursor
+        // still names the outgoing document. The landing entry either
+        // appends after it (dedupe miss → doc index = cursor+1) or reuses
+        // the cursor's own entry (dedupe hit: re-navigation to the same
+        // URL, or a history jump whose cursor was pre-moved by the pump).
+        {
+            let landing = self.url_string();
+            let dedupe_hit = self
+                .history
+                .get(self.history_index)
+                .is_some_and(|u| *u == landing);
+            let (pos, total) = if self.history.is_empty() {
+                (0, 1)
+            } else if dedupe_hit {
+                (self.history_index, self.history.len())
+            } else {
+                (self.history_index + 1, self.history.len() + 1)
+            };
+            rt.set_history_seed(pos as i32, total as i32);
+        }
         rt.set_encoding(&self.encoding);
         rt.set_content_type(self.content_type.as_deref().unwrap_or(""));
         rt.set_title(&self.title);
@@ -873,6 +895,17 @@ impl Page {
         }
     }
 
+    /// Session-history jump queued by page JS (`history.back()` past this
+    /// document's first entry, `forward()` into seeded forward entries) —
+    /// an absolute index into `self.history`.
+    pub fn take_pending_history_jump(&self) -> Option<i32> {
+        if let Some(js) = &self.js {
+            js.take_pending_history_jump()
+        } else {
+            None
+        }
+    }
+
     pub fn take_pending_write_nav(&self) -> bool {
         match &self.js {
             Some(js) => js.take_pending_write_nav(),
@@ -931,6 +964,39 @@ impl Page {
     }
 
     pub async fn process_pending_navigation(&mut self) -> Result<bool, PageError> {
+        // Session-history jump (history.back/forward past this document's
+        // boundaries — obscura#1105): navigate to the EXISTING entry, never
+        // append. A stale or out-of-range target (hostile page, raced CDP
+        // edit) falls through to the regular pending-navigation arm.
+        let history_jump = self
+            .take_pending_history_jump()
+            .filter(|&t| t >= 0)
+            .map(|t| t as usize)
+            .filter(|&t| t != self.history_index && t < self.history.len());
+        if let Some(t) = history_jump {
+            let url = self.history[t].clone();
+            let prev_index = self.history_index;
+            // Move the cursor FIRST: init_js seeds the landing document's JS
+            // history from the cursor position, and push_history's
+            // consecutive-dedupe then sees the same URL and early-returns —
+            // the jump MOVES the session history instead of appending.
+            self.history_index = t;
+            let result = self
+                .navigate_with_wait_post_ref(
+                    &url,
+                    crate::diting_browser::lifecycle::WaitUntil::Load,
+                    "GET",
+                    "",
+                    "",
+                )
+                .await;
+            if result.is_err() {
+                // The outgoing document is still live (obscura#920 failed-nav
+                // semantics): restore the cursor it was seeded with.
+                self.history_index = prev_index;
+            }
+            return result.map(|_| true);
+        }
         if let Some((url, method, body)) = self.take_pending_navigation() {
             // A navigation the page asked for itself is document-initiated:
             // the first hop carries a referrer per
