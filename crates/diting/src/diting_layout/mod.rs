@@ -9068,7 +9068,9 @@ pub fn compute_styles_timed_within(
 }
 
 #[cfg(test)]
+#[cfg(test)]
 mod absorption_pins;
+#[cfg(test)]
 mod fork_deltas;
 #[cfg(test)]
 mod fork_table_deltas;

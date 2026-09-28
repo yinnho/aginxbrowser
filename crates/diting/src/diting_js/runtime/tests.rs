@@ -16657,3 +16657,95 @@ fn document_evaluate_xpath_subset() {
         assert_eq!(v["parsed"]["none"], serde_json::json!([0, 0, 0, 0]));
         assert_eq!(v["parsed"]["transparent"], serde_json::json!([0, 0, 0, 0]));
     }
+
+    /// #160 / obscura#1067: the deprecated IDL spellings — visibilityProperty
+    /// / opacityProperty — answer the same as checkVisibilityCSS/checkOpacity.
+    /// Playwright 1.25-era call sites pass the old names.
+    #[test]
+    fn check_visibility_answers_deprecated_aliases() {
+        let mut rt = setup_runtime(
+            r#"<div style="visibility:hidden"><span id="in-v">x</span></div>
+               <div style="opacity:0"><span id="in-zero">x</span></div>
+               <div id="plain">s</div>"#,
+        );
+        let vis_alias = rt
+            .evaluate("document.getElementById('in-v').checkVisibility({visibilityProperty:true})")
+            .unwrap();
+        assert_eq!(vis_alias, serde_json::json!(false), "visibilityProperty behaves as checkVisibilityCSS");
+
+        let vis_alias_off = rt
+            .evaluate("document.getElementById('in-v').checkVisibility({visibilityProperty:false})")
+            .unwrap();
+        assert_eq!(vis_alias_off, serde_json::json!(true), "explicit false opts out");
+
+        let op_alias = rt
+            .evaluate("document.getElementById('in-zero').checkVisibility({opacityProperty:true})")
+            .unwrap();
+        assert_eq!(op_alias, serde_json::json!(false), "opacityProperty behaves as checkOpacity");
+
+        let plain = rt
+            .evaluate("document.getElementById('plain').checkVisibility({visibilityProperty:true,opacityProperty:true})")
+            .unwrap();
+        assert_eq!(plain, serde_json::json!(true));
+    }
+
+    /// #161 / obscura#1038 family: send() while CONNECTING buffers (Chrome
+    /// semantics) instead of throwing InvalidStateError — the queued frames
+    /// flush in order once the handshake completes, and bufferedAmount
+    /// tracks the queued bytes until then.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn websocket_send_buffers_while_connecting() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.expect("ws handshake");
+            let mut got = Vec::new();
+            // Read until both queued frames arrive or the peer stalls.
+            while got.len() < 2 {
+                match tokio::time::timeout(std::time::Duration::from_secs(10), ws.next()).await {
+                    Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(t)))) => got.push(t),
+                    Ok(Some(Ok(_))) => continue,
+                    _ => break,
+                }
+            }
+            got
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const ws = new WebSocket('ws://127.0.0.1:__PORT__/');
+                    let sent = 'no-throw';
+                    let queued = -1;
+                    try { ws.send('early-1'); ws.send('early-2'); } catch (e) { sent = 'throw:' + e.name; }
+                    queued = ws.bufferedAmount;
+                    await new Promise((res) => { ws.onopen = res; ws.onerror = res; });
+                    return { sent, queued, state: ws.readyState, after: ws.bufferedAmount };
+                }"#
+                    .replace("__PORT__", &port.to_string())
+                    .as_str(),
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let v = result.value.unwrap();
+        assert_eq!(v["sent"], serde_json::json!("no-throw"), "send at CONNECTING must buffer, not throw");
+        assert_eq!(v["queued"], serde_json::json!(14), "bufferedAmount counts the queued bytes (7+7)");
+        assert_eq!(v["state"], serde_json::json!(1), "open resolved");
+        assert_eq!(v["after"], serde_json::json!(0), "bufferedAmount resets after the flush");
+
+        let got = server.await.unwrap();
+        assert_eq!(got, vec!["early-1".to_string(), "early-2".to_string()], "queued frames flush in order");
+    }

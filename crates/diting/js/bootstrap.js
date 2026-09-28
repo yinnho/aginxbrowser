@@ -4966,6 +4966,12 @@ class Element extends Node {
   // it filter on rects themselves (issue #45).
   checkVisibility(opts) {
     opts = opts || {};
+    // The spec names are checkVisibilityCSS/checkOpacity; the IDL shipped
+    // visibilityProperty/opacityProperty first and Chrome answers to both
+    // (obscura#1067 / #160 — Playwright's expect(visible) passes the
+    // deprecated spellings).
+    var visOn = !!(opts.checkVisibilityCSS || opts.visibilityProperty);
+    var opOn = !!(opts.checkOpacity || opts.opacityProperty);
     if (!this.isConnected) return false;
     var opacity = 1;
     for (var node = this; node && node.nodeType === 1; node = node.parentElement) {
@@ -4974,7 +4980,7 @@ class Element extends Node {
       if (!cs) return false;
       var display = String(cs.getPropertyValue('display'));
       if (display === 'none') return false;
-      if (opts.checkVisibilityCSS) {
+      if (visOn) {
         var vis = String(cs.getPropertyValue('visibility'));
         if (vis !== 'visible') return false;
       }
@@ -4986,7 +4992,7 @@ class Element extends Node {
       var op = parseFloat(String(cs.getPropertyValue('opacity')));
       if (Number.isFinite(op)) opacity *= op;
     }
-    if (opts.checkOpacity && opacity === 0) return false;
+    if (opOn && opacity === 0) return false;
     return true;
   }
   // ARIA reflection properties. Without an accessibility tree we expose the
@@ -16795,6 +16801,9 @@ if (typeof WebSocket === 'undefined') {
       this._id = undefined;
       this._terminal = false; // close event fired; no further events
       this._lbox = new Map();
+      // #161: send() during CONNECTING buffers (Chrome/spec) instead of
+      // throwing — flushed in order when the pump reaches `open`.
+      this._sendQueue = [];
       const protocolsJson = JSON.stringify(list);
       Promise.resolve().then(() => {
         _OPS.op_ws_open(this.url, protocolsJson).then((raw) => {
@@ -16827,6 +16836,7 @@ if (typeof WebSocket === 'undefined') {
       this._terminal = true;
       this.readyState = 3; // CLOSED
       this._id = undefined;
+      this._sendQueue.length = 0; // queued CONNECTING sends die with the attempt
       this._emit(new Event('error'));
       this._fireCloseEvent(1006, '', false);
     }
@@ -16835,6 +16845,7 @@ if (typeof WebSocket === 'undefined') {
       this._terminal = true;
       this.readyState = 3; // CLOSED
       this._id = undefined;
+      this._sendQueue.length = 0;
       this._fireCloseEvent(code, reason, wasClean);
     }
     _fireCloseEvent(code, reason, wasClean) {
@@ -16852,6 +16863,10 @@ if (typeof WebSocket === 'undefined') {
         if (ev.kind === 'open') {
           if (this._terminal || this._id !== id) break;
           this.readyState = 1; // OPEN
+          for (const item of this._sendQueue.splice(0)) {
+            try { _OPS.op_ws_send(id, item[0], item[1]); } catch (e) { break; }
+          }
+          this.bufferedAmount = 0;
           this._emit(new Event('open'));
         } else if (ev.kind === 'message') {
           if (this._terminal) break;
@@ -16868,25 +16883,31 @@ if (typeof WebSocket === 'undefined') {
       }
     }
     send(data) {
-      if (this.readyState === 0) {
-        throw new DOMException("Failed to execute 'send' on 'WebSocket': Still in CONNECTING state.", 'InvalidStateError');
-      }
       if (this.readyState >= 2) {
         throw new DOMException("Failed to execute 'send' on 'WebSocket': WebSocket is already in CLOSING or CLOSED state.", 'InvalidStateError');
       }
+      let kind, payload, byteLen;
       if (typeof data === 'string') {
-        _OPS.op_ws_send(this._id, 'text', data);
-        return;
-      }
-      let bytes;
-      if (data instanceof ArrayBuffer) {
-        bytes = new Uint8Array(data);
-      } else if (ArrayBuffer.isView(data)) {
-        bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+        kind = 'text'; payload = data;
+        byteLen = new TextEncoder().encode(data).length;
+      } else if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+        const bytes = data instanceof ArrayBuffer
+          ? new Uint8Array(data)
+          : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+        kind = 'binary'; payload = _bytesToBase64(bytes);
+        byteLen = bytes.length;
       } else {
         throw new TypeError("Failed to execute 'send' on 'WebSocket': parameter 1 is not of type 'ArrayBuffer' or 'ArrayBufferView'.");
       }
-      _OPS.op_ws_send(this._id, 'binary', _bytesToBase64(bytes));
+      if (this.readyState === 0) {
+        // Chrome/spec: CONNECTING sends buffer (in order) and flush on
+        // open; only CLOSING/CLOSED throw (#161). bufferedAmount tracks
+        // the queued bytes like Chrome's.
+        this._sendQueue.push([kind, payload]);
+        this.bufferedAmount += byteLen;
+        return;
+      }
+      _OPS.op_ws_send(this._id, kind, payload);
     }
     close(code, reason) {
       if (this.readyState >= 2) return;
