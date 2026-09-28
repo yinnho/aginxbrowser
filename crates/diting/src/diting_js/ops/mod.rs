@@ -84,6 +84,16 @@ pub struct ResourceTimingRecord {
     pub render_blocking: bool,
 }
 
+/// Blob URL → (bytes, MIME) mirror shared with the module loader.
+type BlobStoreMap = HashMap<String, (Vec<u8>, String)>;
+/// (epoch, layout_rev, root_scroll_x/y, viewport_w/h, scroll_gen) key
+/// with the memoized sticky shifts — see the `sticky_shift_cache` field.
+#[cfg(feature = "screenshot")]
+type StickyShiftCache = Option<(
+    (u64, u64, f32, f32, f32, f32, u64),
+    std::rc::Rc<HashMap<NodeId, [f32; 2]>>,
+)>;
+
 pub struct JsState {
     pub dom: Option<DomTree>,
     pub url: String,
@@ -147,11 +157,11 @@ pub struct JsState {
     /// Window-global import-map state shared by parser-discovered scripts,
     /// dynamically inserted import maps, and the module loader.
     pub(crate) import_map: Rc<RefCell<crate::diting_js::import_map::ImportMap>>,
-    /// Blob bodies mirrored from JS `URL.createObjectURL` (blob URL → bytes
-    /// + MIME), shared with the module loader so `import("blob:…")` and
-    /// `<script type=module src="blob:…">` resolve URLs no HTTP client can
-    /// fetch. Realm-scoped like the JS-side `__blobObjs`.
-    pub(crate) blob_store: Rc<RefCell<HashMap<String, (Vec<u8>, String)>>>,
+    /// Blob bodies mirrored from JS `URL.createObjectURL` (blob URL →
+    /// bytes + MIME), shared with the module loader so `import("blob:…")`
+    /// and `<script type=module src="blob:…">` resolve URLs no HTTP client
+    /// can fetch. Realm-scoped like the JS-side `__blobObjs`.
+    pub(crate) blob_store: Rc<RefCell<BlobStoreMap>>,
     /// In-flight dynamic `<script src>` fetches. Dynamic scripts fetch via the
     /// op-level reqwest client, invisible to the page-level http_client's
     /// active_requests() counter — without this, the post-script settle loop
@@ -300,12 +310,13 @@ pub struct JsState {
     /// covers element-scroller writes, which bump neither. Cleared
     /// alongside the layout caches in drop_layout. See `sticky_shifts`.
     #[cfg(feature = "screenshot")]
-    pub(crate) sticky_shift_cache: std::cell::RefCell<
-        Option<(
-            (u64, u64, f32, f32, f32, f32, u64),
-            std::rc::Rc<HashMap<NodeId, [f32; 2]>>,
-        )>,
-    >,
+    pub(crate) sticky_shift_cache: std::cell::RefCell<StickyShiftCache>,
+}
+
+impl Default for JsState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// A script-initiated request as a CDP-shaped network event. Static
@@ -1136,7 +1147,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                         Some(ShadowRootMode::Closed) => "closed",
                         _ => "open",
                     };
-                    format!("{}|{}", root.index(), mode).into()
+                    format!("{}|{}", root.index(), mode)
                 }
                 None => "-1".into(),
             }
@@ -4590,7 +4601,7 @@ pub(crate) fn resolve_referrer_policy_from(gs: &JsState, dom: &DomTree) -> Strin
         let Some(n) = dom.get_node(nid) else { continue };
         let is_referrer_meta = n
             .get_attribute("name")
-            .map(|v| v.to_ascii_lowercase() == "referrer")
+            .map(|v| v.eq_ignore_ascii_case("referrer"))
             .unwrap_or(false);
         if !is_referrer_meta {
             continue;
@@ -5638,14 +5649,14 @@ pub(crate) fn glob_match(pattern: &str, url: &str) -> bool {
     if pattern == "*" {
         return true;
     }
-    if pattern.starts_with('*') && pattern.ends_with('*') {
-        return url.contains(&pattern[1..pattern.len() - 1]);
+    if let Some(mid) = pattern.strip_prefix('*').and_then(|p| p.strip_suffix('*')) {
+        return url.contains(mid);
     }
-    if pattern.starts_with('*') {
-        return url.ends_with(&pattern[1..]);
+    if let Some(tail) = pattern.strip_prefix('*') {
+        return url.ends_with(tail);
     }
-    if pattern.ends_with('*') {
-        return url.starts_with(&pattern[..pattern.len() - 1]);
+    if let Some(head) = pattern.strip_suffix('*') {
+        return url.starts_with(head);
     }
     url == pattern
 }
