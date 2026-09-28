@@ -22,6 +22,9 @@ mod captcha;
 mod config;
 mod cookie;
 mod curl_import;
+// Panic persistence (aginxos REQ #414): append panics to {data}/crash.log —
+// the device respawned with zero death trace anywhere else.
+mod crash;
 mod docgen;
 mod doctor_cli;
 mod download;
@@ -279,6 +282,11 @@ async fn main() -> anyhow::Result<()> {
     } else {
         subscriber.init();
     }
+
+    // Before anything else can die: the crash hook must be in place before
+    // the first engine warmup, not after (device died mid-search with no
+    // trace; REQ #414).
+    crash::install();
 
     // CLI subcommands exit before the server boots — doctor especially must
     // not pay the V8 warmup below (self-hosters run it to debug a box that

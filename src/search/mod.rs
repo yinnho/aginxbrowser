@@ -874,6 +874,97 @@ fn log_rejected_body(url: &str, path: &str, body: &str) {
     tracing::warn!("search: {path} body failed validation for {url} (len={}): {head:?}", body.len());
 }
 
+/// Speculative direct-leg budget (aginxos REQ #414). The direct attempt is a
+/// probe — on a walled network it exists only to be failed — so it gets 4s,
+/// not the full fetch budget; the proxy retry keeps its own (longer) client
+/// timeout. Bounded the per-engine cost of a blocked host at 4s + proxy
+/// instead of 12s + proxy (device log 2026-09-28: single /search calls at
+/// 2m08s–2m18s, mostly waiting out direct timeouts that never succeed).
+const DIRECT_PROBE_TIMEOUT_SECS: u64 = 4;
+
+/// Consecutive direct failures before a host is sentenced to proxy-only.
+const DIRECT_FAIL_THRESHOLD: u8 = 2;
+/// How long the proxy-only sentence lasts; any direct success lifts it.
+const DIRECT_SKIP_SECS: u64 = 600;
+/// Hosts tracked before eviction (expired first, then soonest-to-expire).
+const DIRECT_FAILS_CAP: usize = 64;
+
+/// Per-host memory of direct-probe outcomes (aginxos REQ #414). The wall is
+/// a property of the box, not of the request, so the memory is process
+/// global: after `DIRECT_FAIL_THRESHOLD` consecutive unusable direct legs
+/// the host skips straight to the proxy instead of re-paying the probe
+/// timeout on every query.
+#[derive(Debug, Clone, PartialEq)]
+struct DirectFailState {
+    fails: u8,
+    skip_until: u64,
+}
+
+static DIRECT_FAILS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, DirectFailState>>,
+> = std::sync::OnceLock::new();
+
+fn direct_fails()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, DirectFailState>> {
+    DIRECT_FAILS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Seconds left on a host's proxy-only sentence (0 = probe allowed). Pure
+/// half — the fetch path feeds it the shared map, tests feed their own.
+fn direct_skip_remaining(
+    map: &std::collections::HashMap<String, DirectFailState>,
+    host: &str,
+    now: u64,
+) -> u64 {
+    match map.get(host) {
+        Some(s) if s.skip_until > now => s.skip_until - now,
+        _ => 0,
+    }
+}
+
+/// Record a direct-probe outcome. Ok clears the host; a fail bumps the
+/// streak, sentencing it once the threshold is reached, and the map is
+/// capped (expired entries first, then the soonest-to-expire).
+fn note_direct_outcome(
+    map: &mut std::collections::HashMap<String, DirectFailState>,
+    host: &str,
+    ok: bool,
+    now: u64,
+) {
+    if ok {
+        map.remove(host);
+        return;
+    }
+    let st = map
+        .entry(host.to_string())
+        .or_insert(DirectFailState { fails: 0, skip_until: 0 });
+    st.fails = st.fails.saturating_add(1);
+    if st.fails >= DIRECT_FAIL_THRESHOLD {
+        st.skip_until = now.saturating_add(DIRECT_SKIP_SECS);
+    }
+    if map.len() > DIRECT_FAILS_CAP {
+        map.retain(|_, s| s.skip_until > now);
+        while map.len() > DIRECT_FAILS_CAP {
+            let Some(k) = map
+                .iter()
+                .min_by_key(|(_, s)| (s.skip_until, s.fails))
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            map.remove(&k);
+        }
+    }
+}
+
+/// [`note_direct_outcome`] over the process-global map.
+fn note_direct_outcome_global(host: &str, ok: bool) {
+    let mut map = direct_fails()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    note_direct_outcome(&mut map, host, ok, crate::now_secs());
+}
+
 /// Fetch `url` with GET, **direct first**; retry through the proxy when the
 /// direct attempt fails at transport level (connect/timeout — the signature
 /// of a blocked target) OR when the returned body fails `body_ok` (the
@@ -884,6 +975,14 @@ fn log_rejected_body(url: &str, path: &str, body: &str) {
 /// overseas operators never configure a proxy and everything connects
 /// directly; CN operators set AGINXBROWSER_PROXY once and blocked targets
 /// automatically fall through to it. No per-request use_proxy flag needed.
+///
+/// On a walled network the direct leg is a *probe* — it exists to be failed
+/// — so it carries a short budget ([`DIRECT_PROBE_TIMEOUT_SECS`]) and a
+/// per-host failure memory: after [`DIRECT_FAIL_THRESHOLD`] consecutive
+/// unusable direct outcomes the host goes straight to the proxy for
+/// [`DIRECT_SKIP_SECS`] instead of re-paying the probe on every query
+/// (aginxos REQ #414: device /search calls ran 2m08s+ mostly waiting out
+/// direct timeouts that never succeed).
 pub async fn get_direct_first<F>(
     url: &str,
     headers: &[(&str, &str)],
@@ -907,40 +1006,59 @@ pub async fn get_direct_first_if<F>(
 where
     F: FnOnce() -> Option<reqwest::Client>,
 {
-    let plain = build_plain_client(12);
+    let host = Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()));
+    // Built up front: the skip decision below needs to know whether a proxy
+    // exists at all — skipping the probe without a fallback would just fail.
+    let proxied = build_proxied_client();
+    let skip_direct = proxied.is_some()
+        && host.as_deref().is_some_and(|h| {
+            direct_skip_remaining(&direct_fails().lock().unwrap_or_else(|e| e.into_inner()), h, crate::now_secs()) > 0
+        });
+
+    let plain = build_plain_client(DIRECT_PROBE_TIMEOUT_SECS);
     let last_err;
 
-    // Attempt 1: direct.
-    let mut req = plain.get(url);
-    for (k, v) in headers {
-        req = req.header(*k, *v);
-    }
-    let direct_body: Option<String> = match req.send().await {
-        Ok(resp) => match resp.text().await {
-            Ok(body) => {
-                if body_ok(&body) {
-                    return Ok(body);
-                }
-                log_rejected_body(url, "direct", &body);
-                last_err = "direct: body failed validation (geo-substituted?)".into();
-                None
-            }
-            Err(_) => {
-                last_err = "direct: read body failed".into();
-                None
-            }
-        },
-        Err(e) => {
-            last_err = format!("direct: {}", err_chain(&e));
-            None
+    if skip_direct {
+        tracing::debug!(
+            "search: skipping direct probe for {} (recent consecutive failures; straight to proxy)",
+            host.as_deref().unwrap_or("?")
+        );
+        last_err = "direct skipped: host on recent-failure list".into();
+    } else {
+        // Attempt 1: direct.
+        let mut req = plain.get(url);
+        for (k, v) in headers {
+            req = req.header(*k, *v);
         }
-    };
-    if let Some(body) = direct_body {
-        return Ok(body);
+        match req.send().await {
+            Ok(resp) => match resp.text().await {
+                Ok(body) => {
+                    if body_ok(&body) {
+                        if let Some(h) = &host {
+                            note_direct_outcome_global(h, true);
+                        }
+                        return Ok(body);
+                    }
+                    log_rejected_body(url, "direct", &body);
+                    last_err = "direct: body failed validation (geo-substituted?)".into();
+                }
+                Err(_) => {
+                    last_err = "direct: read body failed".into();
+                }
+            },
+            Err(e) => {
+                last_err = format!("direct: {}", err_chain(&e));
+            }
+        }
+        if let Some(h) = &host {
+            note_direct_outcome_global(h, false);
+        }
     }
 
     // Attempt 2: proxied retry, only when a proxy is configured.
-    if let Some(proxied) = build_proxied_client() {
+    if let Some(proxied) = proxied {
         tracing::info!(
             "search: direct fetch of {} unusable ({}); retrying via proxy",
             url,
@@ -970,12 +1088,10 @@ where
         };
     }
 
-    // No proxy configured — hand back whatever the direct attempt produced
-    // so engines can distinguish "wrong content" from "no connection".
-    match direct_body {
-        Some(body) => Ok(body),
-        None => Err(SearchEngineError::Transient(last_err)),
-    }
+    // No proxy configured — hand back the direct attempt's failure so
+    // engines can distinguish "wrong content" from "no connection" (a
+    // body that passed validation already returned above).
+    Err(SearchEngineError::Transient(last_err))
 }
 
 #[cfg(test)]
@@ -1094,5 +1210,76 @@ mod tests {
         r.cookies = vec!["session=abc".into()];
         let merged = merge_results(vec![r], 10);
         assert_eq!(merged[0].cookies, vec!["session=abc"]);
+    }
+
+    // ---- direct-probe failure learning (aginxos REQ #414) ----
+
+    fn fresh_fail_map() -> std::collections::HashMap<String, DirectFailState> {
+        std::collections::HashMap::new()
+    }
+
+    #[test]
+    fn two_consecutive_failures_sentence_the_host() {
+        let mut map = fresh_fail_map();
+        note_direct_outcome(&mut map, "wall.example", false, 1_000);
+        assert_eq!(direct_skip_remaining(&map, "wall.example", 1_001), 0, "first fail is still just a streak");
+        note_direct_outcome(&mut map, "wall.example", false, 1_100);
+        let left = direct_skip_remaining(&map, "wall.example", 1_101);
+        assert!(
+            left > DIRECT_SKIP_SECS - 10 && left <= DIRECT_SKIP_SECS,
+            "sentenced for ~{DIRECT_SKIP_SECS}s, got {left}"
+        );
+        // Other hosts are unaffected — the wall is per-host.
+        assert_eq!(direct_skip_remaining(&map, "open.example", 1_101), 0);
+    }
+
+    #[test]
+    fn direct_success_lifts_the_sentence() {
+        let mut map = fresh_fail_map();
+        note_direct_outcome(&mut map, "wall.example", false, 1_000);
+        note_direct_outcome(&mut map, "wall.example", false, 1_000);
+        assert!(direct_skip_remaining(&map, "wall.example", 1_000) > 0);
+        note_direct_outcome(&mut map, "wall.example", true, 1_050);
+        assert_eq!(direct_skip_remaining(&map, "wall.example", 1_051), 0);
+    }
+
+    #[test]
+    fn sentence_expires() {
+        let mut map = fresh_fail_map();
+        note_direct_outcome(&mut map, "wall.example", false, 1_000);
+        note_direct_outcome(&mut map, "wall.example", false, 1_000);
+        let until = 1_000 + DIRECT_SKIP_SECS;
+        assert!(direct_skip_remaining(&map, "wall.example", until - 1) > 0);
+        assert_eq!(direct_skip_remaining(&map, "wall.example", until), 0, "expired");
+    }
+
+    #[test]
+    fn geo_substituted_bodies_count_as_failures() {
+        // Body-validation failures feed the same streak as transport errors
+        // (get_direct_first_if calls note_direct_outcome on both unusable
+        // outcomes); the pure halves can't see the reason, only that the
+        // fetch path told them "unusable" — pin that wiring expectation
+        // against the threshold constant.
+        let mut map = fresh_fail_map();
+        for _ in 0..DIRECT_FAIL_THRESHOLD {
+            note_direct_outcome(&mut map, "cn-redirect.example", false, 5_000);
+        }
+        assert!(direct_skip_remaining(&map, "cn-redirect.example", 5_001) > 0);
+    }
+
+    #[test]
+    fn fail_map_is_capped() {
+        let mut map = fresh_fail_map();
+        for i in 0..(DIRECT_FAILS_CAP + 8) as u64 {
+            let host = format!("h{i}.example");
+            note_direct_outcome(&mut map, &host, false, 10_000);
+            note_direct_outcome(&mut map, &host, false, 10_000); // sentenced
+        }
+        assert!(
+            map.len() <= DIRECT_FAILS_CAP,
+            "cap {} exceeded: {}",
+            DIRECT_FAILS_CAP,
+            map.len()
+        );
     }
 }
