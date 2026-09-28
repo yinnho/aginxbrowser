@@ -40,15 +40,15 @@ fn check(status: Status, name: &'static str, detail: impl Into<String>) -> Check
 /// Compiled-in features — the same booleans `/doctor` reports over HTTP,
 /// readable without a listener (self-hosters behind firewalls especially).
 fn features_check() -> Check {
-    // Pushes are cfg'd by feature, so mut-ness is feature-dependent.
-    #[allow(unused_mut)]
-    let mut feats: Vec<&str> = Vec::new();
-    #[cfg(feature = "screenshot")]
-    feats.push("screenshot");
-    #[cfg(feature = "blitz-reference")]
-    feats.push("blitz-reference");
-    #[cfg(feature = "stealth")]
-    feats.push("stealth");
+    // Element-level cfg keeps the list feature-true without mut-ness.
+    let feats: Vec<&str> = vec![
+        #[cfg(feature = "screenshot")]
+        "screenshot",
+        #[cfg(feature = "blitz-reference")]
+        "blitz-reference",
+        #[cfg(feature = "stealth")]
+        "stealth",
+    ];
     let detail = if feats.is_empty() {
         "none (plain build: no /screenshot, no stealth TLS)".to_string()
     } else {
@@ -102,7 +102,7 @@ fn env_checks() -> Vec<Check> {
         format!("{bind} (env AGINXBROWSER_BIND; prefer 127.0.0.1 behind a proxy)"),
     ));
     match std::env::var("AGINXBROWSER_PROXY") {
-        Ok(p) if !p.is_empty() => out.push(check(Status::Info, "proxy", format!("{p}"))),
+        Ok(p) if !p.is_empty() => out.push(check(Status::Info, "proxy", p)),
         _ => {
             out.push(check(Status::Info, "proxy", "none — direct-first, auto-fallback per fetch"));
             // The engine ignores standard proxy env vars (every client pins

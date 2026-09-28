@@ -362,7 +362,7 @@ mod tests {
 
         // WeChat shape: hidden text IS the content — majority guard keeps it.
         let article = "很长的文章正文。".repeat(40);
-        let (out, report) = sanitize_text(&format!("标题\n{article}"), &[article.clone()]);
+        let (out, report) = sanitize_text(&format!("标题\n{article}"), std::slice::from_ref(&article));
         assert!(out.contains(&article), "SSR container text must survive");
         assert_eq!(report.hidden_spans_removed, 0);
     }

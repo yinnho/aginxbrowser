@@ -1364,7 +1364,7 @@ html,body{margin:0;padding:0;width:800px;height:450px;background:#ffffff}
         w.extend_from_slice(&1u16.to_le_bytes()); // PCM
         w.extend_from_slice(&1u16.to_le_bytes()); // mono
         w.extend_from_slice(&rate.to_le_bytes());
-        w.extend_from_slice(&((rate * 2) as u32).to_le_bytes()); // byte rate
+        w.extend_from_slice(&(rate * 2).to_le_bytes()); // byte rate
         w.extend_from_slice(&2u16.to_le_bytes()); // block align
         w.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
         w.extend_from_slice(b"data");

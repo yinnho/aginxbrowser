@@ -387,9 +387,7 @@ fn fetch_cache_get(key: &str) -> Option<FetchResponse> {
     let Ok(mut cache) = FETCH_CACHE.lock() else {
         return None;
     };
-    let Some((ts, resp)) = cache.get(key) else {
-        return None;
-    };
+    let (ts, resp) = cache.get(key)?;
     if now.saturating_sub(*ts) < ttl {
         Some(resp.clone())
     } else {

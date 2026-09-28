@@ -199,11 +199,10 @@ fn extract_weixin_url_from_html(html: &str) -> Option<String> {
         // Match: url += '...' or url += "..."
         // Also match: url = '...' or url = "..."
         if trimmed.starts_with("url +=") || trimmed.starts_with("url=") {
-            let rest = if trimmed.starts_with("url +=") {
-                trimmed[6..].trim()
-            } else {
-                trimmed[4..].trim()
-            };
+            let rest = trimmed
+                .strip_prefix("url +=")
+                .or_else(|| trimmed.strip_prefix("url="))?
+                .trim();
             // Extract the string between quotes.
             if let Some(content) = extract_quoted_string(rest) {
                 fragments.push(content);
@@ -221,7 +220,7 @@ fn extract_weixin_url_from_html(html: &str) -> Option<String> {
     // Strategy 2: Look for meta refresh.
     if let Some(start) = html.find("url=") {
         let rest = &html[start + 4..];
-        let end = rest.find(&['"', '\'', ';', ' ']).unwrap_or(rest.len());
+        let end = rest.find(['"', '\'', ';', ' ']).unwrap_or(rest.len());
         let url = &rest[..end];
         if url.contains("mp.weixin.qq.com") {
             return Some(url.to_string());
@@ -232,7 +231,7 @@ fn extract_weixin_url_from_html(html: &str) -> Option<String> {
     for pattern in &["location.href=\"", "location.href='", "location=\"", "location='", "window.location=\"", "window.location='"] {
         if let Some(start) = html.find(pattern) {
             let rest = &html[start + pattern.len()..];
-            let end = rest.find(&['"', '\'']).unwrap_or(rest.len());
+            let end = rest.find(['"', '\'']).unwrap_or(rest.len());
             let url = &rest[..end];
             if url.contains("mp.weixin.qq.com") {
                 return Some(url.to_string());
@@ -248,7 +247,7 @@ fn extract_weixin_url_from_html(html: &str) -> Option<String> {
         let proto_start = before.rfind("http").unwrap_or(0);
         let url_start = &html[proto_start..];
         // Find the end of the URL.
-        let end = url_start.find(&['"', '\'', '<', ' ', '\\', '\n']).unwrap_or(url_start.len());
+        let end = url_start.find(['"', '\'', '<', ' ', '\\', '\n']).unwrap_or(url_start.len());
         let url = &url_start[..end];
         if url.starts_with("http") && url.contains("weixin.qq") {
             return Some(url.to_string());
@@ -261,15 +260,14 @@ fn extract_weixin_url_from_html(html: &str) -> Option<String> {
 /// Extract the content of
 fn extract_quoted_string(s: &str) -> Option<String> {
     let s = s.trim_start();
-    if s.starts_with('\'') {
-        let end = s[1..].find('\'')?;
-        Some(s[1..1 + end].to_string())
-    } else if s.starts_with('"') {
-        let end = s[1..].find('"')?;
-        Some(s[1..1 + end].to_string())
-    } else {
-        None
-    }
+    let q = match s.chars().next()? {
+        '\'' => '\'',
+        '"' => '"',
+        _ => return None,
+    };
+    let rest = s.strip_prefix(q)?;
+    let end = rest.find(q)?;
+    Some(rest[..end].to_string())
 }
 
 /// Parse Sogou WeChat HTML search results.

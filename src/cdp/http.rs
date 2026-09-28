@@ -90,8 +90,8 @@ pub async fn devtools_ws(
     ws.on_upgrade(move |socket| async move {
         // The dispatch loop is blocking (it parks V8 on one thread), so hand
         // the socket to the blocking pool rather than pinning a Tokio worker
-        // for the connection's lifetime.
-        let _ = tokio::task::spawn_blocking(move || run_connection(socket, page_mode));
+        // for the connection's lifetime. drop() marks the detach as on purpose.
+        drop(tokio::task::spawn_blocking(move || run_connection(socket, page_mode)));
     })
 }
 

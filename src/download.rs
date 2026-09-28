@@ -548,6 +548,7 @@ mod tests {
         )
     }
 
+    #[allow(clippy::await_holding_lock)] // the env lock must span the wrapped future — that IS the serialization
     async fn with_private_net<F, T>(f: F) -> T
     where
         F: std::future::Future<Output = T>,

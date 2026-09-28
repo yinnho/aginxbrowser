@@ -4575,7 +4575,7 @@ getComputedStyle(document.querySelector('.menu')).display])", "returnByValue": t
 
             let done = load_rx.next().await.expect("load task reports back");
             assert_eq!(done.page_id, page_id);
-            let err = done.result.as_ref().err().expect("load must fail");
+            let Err(err) = &done.result else { panic!("load must fail") };
             assert!(!err.is_empty());
             ctx.pages.push(done.page);
             let pending = ctx.pending_loads.remove(&page_id).unwrap();

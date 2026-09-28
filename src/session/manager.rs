@@ -862,11 +862,10 @@ fn session_thread(
                                     let before = page.url();
                                     click_by_index(&mut page, &element_map, index)
                                         .await
-                                        .map(|resp| {
+                                        .inspect(|resp| {
                                             if resp.url != before {
                                                 pages_loaded += 1;
                                             }
-                                            resp
                                         })
                                 }
                             };

@@ -1350,10 +1350,10 @@ async fn do_search_with_registry(
     let n = req.fetch_top.min(items.len());
     if n > 0 {
         let mut handles = Vec::with_capacity(n);
-        for i in 0..n {
+        for (i, item) in items.iter_mut().enumerate().take(n) {
             // Image results: `url` is a binary image link, not a page — fetching
             // it as HTML is meaningless. Leave content as None for images.
-            if items[i].image_url.is_some() {
+            if item.image_url.is_some() {
                 continue;
             }
             // robots.txt gates the body-grab too: /search must not become a
@@ -1361,16 +1361,16 @@ async fn do_search_with_registry(
             // its result entry; only the content fetch is skipped, with the
             // reason in fetch_error so the agent can see why. Same for the
             // per-domain page budget — the reason text carries the stance.
-            if let Err(reason) = crate::rate::check_domain(&items[i].url) {
-                items[i].fetch_error = Some(reason);
+            if let Err(reason) = crate::rate::check_domain(&item.url) {
+                item.fetch_error = Some(reason);
                 continue;
             }
-            if let Err(reason) = crate::robots::assert_allowed(&items[i].url).await {
-                items[i].fetch_error = Some(reason);
+            if let Err(reason) = crate::robots::assert_allowed(&item.url).await {
+                item.fetch_error = Some(reason);
                 continue;
             }
-            let url = items[i].url.clone();
-            let cookies = items[i].cookies.clone();
+            let url = item.url.clone();
+            let cookies = item.cookies.clone();
             let use_proxy = req.use_proxy;
             let wait = req.wait_secs;
             let max_chars = req.max_chars_per;
@@ -1383,10 +1383,7 @@ async fn do_search_with_registry(
                 );
             }
             handles.push(tokio::task::spawn_blocking(move || {
-                (
-                    i,
-                    fetch_url_text_with_cookies(url, use_proxy, wait, max_chars, &cookies),
-                )
+                (i, fetch_url_text_with_cookies(url, use_proxy, wait, max_chars, &cookies))
             }));
         }
         for h in handles {

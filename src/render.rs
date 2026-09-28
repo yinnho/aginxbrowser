@@ -96,9 +96,7 @@ pub fn strip_non_content(html: &str) -> String {
     while i < bytes.len() {
         if b[i] == b'<' {
             // Find the tag name end to match DROP prefixes.
-            let matched = DROP.iter().any(|tag| {
-                lower[i..].as_bytes().starts_with(tag)
-            });
+            let matched = DROP.iter().any(|tag| lower.as_bytes()[i..].starts_with(tag));
             if matched {
                 // Skip to the matching close tag.
                 let close = find_close_tag(&lower, i);
@@ -160,6 +158,7 @@ fn is_byte_waf_challenge_html(html: &str) -> bool {
 ///
 /// `proxy_url`: the `AGINXBROWSER_PROXY` value, applied when `use_proxy` is set or
 /// the domain is known-blocked (mirrors `build_browser` in server.rs).
+#[allow(clippy::too_many_arguments)] // mirrors build_browser in server.rs — a params struct would split the public API
 pub async fn http_fetch(
     url: &str,
     use_proxy: bool,
@@ -395,7 +394,7 @@ pub async fn smart_fetch(req: crate::FetchRequest) -> Result<FetchResponse, anyh
     // run_on_local_runtime directly from an async context panics).
     tracing::info!("smart_fetch: Tier 2 (browser) for {}", req.url);
     match tokio::task::spawn_blocking(move || crate::server::do_fetch(req)).await {
-        Ok(res) => res.map_err(Into::into),
+        Ok(res) => res,
         Err(e) => Err(anyhow::anyhow!("Tier 2 fetch task panicked: {}", e)),
     }
 }
@@ -804,10 +803,9 @@ mod tests {
             sanitize: true,
             capture_xhr: None,
         };
-        let err = smart_fetch(req)
-            .await
-            .err()
-            .expect("tier http must refuse the upgrade instead of serving tier browser");
+        let Err(err) = smart_fetch(req).await else {
+            panic!("tier http must refuse the upgrade instead of serving tier browser")
+        };
         assert!(
             err.to_string().contains("render_tier=http"),
             "error must name the contract, got: {err}"

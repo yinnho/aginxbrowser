@@ -1415,10 +1415,10 @@ mod opacity_pipeline_tests {
         // fill leading it, trailing track past the disc.
         let (trailing, thumb, fx0, fx1) = geometry("min=\"0\" max=\"1000\" value=\"300\"");
         let (tt0, tt1) = trailing.expect("trailing track for a mid value");
-        assert!(fx0 >= 5 && fx0 <= 9, "fill starts at the track head: {fx0}");
+        assert!((5..=9).contains(&fx0), "fill starts at the track head: {fx0}");
         assert!((thumb - 39).abs() <= 2, "thumb at 30% of the inset span: got {thumb}");
         assert!(fx1 <= thumb + 2, "fill leads the thumb: {fx0}..{fx1}");
-        assert!(tt0 >= thumb + 4 && tt1 >= 108 && tt1 <= 114, "trailing track: {tt0}..{tt1}");
+        assert!(tt0 >= thumb + 4 && (108..=114).contains(&tt1), "trailing track: {tt0}..{tt1}");
 
         // Out-of-range value clamps to max: thumb parks at the track end,
         // the fill spans the whole track (no trailing track left).
@@ -1427,7 +1427,7 @@ mod opacity_pipeline_tests {
         // The visible fill can only reach the disc's left edge (106) — the
         // ink parks on top of the fill's tail — so ≥103 pins "spans the
         // track" while tolerating the disc's antialiased boundary.
-        assert!(fx0 >= 5 && fx0 <= 9 && fx1 >= 103 && fx1 <= 108, "fill spans the track: {fx0}..{fx1}");
+        assert!((5..=9).contains(&fx0) && (103..=108).contains(&fx1), "fill spans the track: {fx0}..{fx1}");
         assert!(trailing.is_none(), "no unfilled track behind a clamped thumb: {trailing:?}");
 
         // No min/max: the spec defaults 0..100 apply (value 25 → 25% of

@@ -71,7 +71,7 @@ impl SearchEngine for SogouEngine {
             .map_err(|e| SearchEngineError::Transient(format!("read body: {e}")))?;
 
         // Decode with charset detection (Sogou may return GBK).
-        let html = diting::diting_net::encoding::decode_non_html(&bytes.to_vec(), None);
+        let html = diting::diting_net::encoding::decode_non_html(&bytes, None);
 
         // Check for CAPTCHA indicators in the HTML body.
         if looks_walled(&html) {

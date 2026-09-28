@@ -300,9 +300,8 @@ mod on {
         for row in 0..rows {
             let src = &rgba[row * stride..];
             let dst = &mut cache.px[(y0 + row) * cache.w..(y0 + row) * cache.w + w];
-            for x in 0..w {
-                let i = x * 4;
-                dst[x] = ((src[i] as u32) << 16) | ((src[i + 1] as u32) << 8) | src[i + 2] as u32;
+            for (d, px) in dst.iter_mut().zip(src.chunks_exact(4)) {
+                *d = ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32;
             }
         }
     }

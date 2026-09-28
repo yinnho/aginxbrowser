@@ -601,11 +601,11 @@ mod tests {
     #[test]
     fn longest_match_wins_ties_to_allow() {
         let rs = vec![rule(false, "/"), rule(true, "/p")];
-        assert_eq!(best_match(&rs, "/p").unwrap().allow, true);
-        assert_eq!(best_match(&rs, "/x").unwrap().allow, false);
+        assert!(best_match(&rs, "/p").unwrap().allow);
+        assert!(!best_match(&rs, "/x").unwrap().allow);
         // Same length: Allow wins.
         let rs = vec![rule(false, "/a"), rule(true, "/b")];
-        assert!(best_match(&rs, "/a").unwrap().allow == false);
+        assert!(!best_match(&rs, "/a").unwrap().allow);
     }
 
     #[test]
@@ -666,6 +666,7 @@ mod tests {
     // With HONOR_ROBOTS=1 the gate actually runs and the same input errors.
     // Both branches stay network-free, so the test makes no requests.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the env lock must span the awaits — that IS the serialization
     async fn default_allows_without_consulting_robots_honor_runs_the_gate() {
         static HONOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _env = HONOR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

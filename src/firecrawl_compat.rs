@@ -173,7 +173,7 @@ async fn scrape_with_fetch(
         .sum();
     let wait_ms = req.wait_for.unwrap_or(0).max(extra_wait_ms);
     let wait_secs = if wait_ms > 0 {
-        Some((wait_ms + 999) / 1000)
+        Some(wait_ms.div_ceil(1000))
     } else {
         None
     };
@@ -634,12 +634,9 @@ fn extract_description(html: &str) -> Option<String> {
     let window = &lower[start..end];
     let content_idx = window.find("content=")?;
     let after = &window[content_idx + 8..];
-    let desc = if after.starts_with('"') {
-        after[1..].split('"').next()?
-    } else if after.starts_with('\'') {
-        after[1..].split('\'').next()?
-    } else {
-        after.split_whitespace().next()?
+    let desc = match after.chars().next() {
+        Some(q @ ('"' | '\'')) => after.strip_prefix(q)?.split(q).next()?,
+        _ => after.split_whitespace().next()?,
     };
     let desc = desc.trim();
     if desc.is_empty() {

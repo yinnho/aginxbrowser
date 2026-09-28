@@ -276,18 +276,19 @@ async fn run_flow_http_step_posts_json_and_chains_saved_fields() {
     assert_eq!(receipt["saved"]["t"]["json"]["access_token"], "abc123");
     assert_eq!(receipt["saved"]["d"]["json"]["media_id"], "M1");
 
+    let sid = receipt["session_id"].as_str().unwrap().to_string();
+    assert!(mgr.close_and_wait(&sid).await);
+
     let hits = hits.lock().unwrap();
     let second = hits.iter().find(|h| h.contains("/draft")).expect("second request recorded");
     // URL carries the token spliced from step 1's saved response.
-    assert!(second.contains(&format!("access_token=abc123")), "hit: {second}");
+    assert!(second.contains("access_token=abc123"), "hit: {second}");
     // Hit format is "METHOD path PROTO body" (the recording server
     // extracts the body past the first header blank line) — the JSON
     // body stayed legal through interpolation, quotes and all.
     let body = second.splitn(4, ' ').nth(3).unwrap_or("");
     let parsed: Value = serde_json::from_str(body).unwrap_or_else(|e| panic!("body {body:?}: {e}"));
     assert_eq!(parsed["title"], "He said \"hi\" <b>&</b>");
-    let sid = receipt["session_id"].as_str().unwrap().to_string();
-    assert!(mgr.close_and_wait(&sid).await);
 }
 
 /// The multipart variant: base64 content lands as a well-formed
@@ -316,6 +317,9 @@ async fn run_flow_http_step_multipart_uploads() {
     assert_eq!(receipt["status"], "ok", "receipt: {receipt}");
     assert_eq!(receipt["saved"]["up"]["json"]["media_id"], "THUMB");
 
+    let sid = receipt["session_id"].as_str().unwrap().to_string();
+    assert!(mgr.close_and_wait(&sid).await);
+
     let hits = hits.lock().unwrap();
     let hit = hits.iter().find(|h| h.contains("/upload")).expect("upload recorded");
     // The recording server logs "METHOD path PROTO body" — header lines
@@ -329,8 +333,6 @@ async fn run_flow_http_step_multipart_uploads() {
     // boundary marker (hex suffix is time-derived).
     assert!(body.contains("hello"));
     assert!(body.trim_end().ends_with("--"));
-    let sid = receipt["session_id"].as_str().unwrap().to_string();
-    assert!(mgr.close_and_wait(&sid).await);
 }
 
 /// An http step referencing a path that no earlier step saved fails at

@@ -225,7 +225,7 @@ mod sanitize_fetch_tests {
         req.capture_xhr = Some(vec!["/api".to_string()]);
         let resp = do_fetch(req).unwrap();
 
-        assert_eq!(resp.tier.as_deref(), Some("browser"));
+        assert_eq!(resp.tier, Some("browser"));
         assert_eq!(resp.xhr.len(), 1, "one matching XHR body: {:?}", resp.xhr);
         assert!(
             resp.xhr[0]["url"].as_str().unwrap().ends_with("/api/data"),

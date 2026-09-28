@@ -1308,14 +1308,11 @@ mod tests {
             minimum: 4000,
         }]);
         assert_eq!(cols[1], 940 + 1200);
-        assert_eq!(cols[3], (940 + 1200 + 4000).max(940 + 3 * 1200));
+        // Col 3 sits on the constraint floor, which dominates the lattice seed.
+        assert_eq!(cols[3], 940 + 1200 + 4000);
         assert_eq!(cols[5], cols[3] + 2 * 1200);
         // Constraints never move a column left of the lattice seed.
-        let cols = solve_columns(&[ColConstraint {
-            from: 2,
-            to: 4,
-            minimum: 100,
-        }]);
+        let cols = solve_columns(&[ColConstraint { from: 2, to: 4, minimum: 100 }]);
         assert_eq!(cols[4], 940 + 4 * 1200);
     }
 

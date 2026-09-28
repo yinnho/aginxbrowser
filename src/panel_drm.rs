@@ -307,8 +307,7 @@ impl Drm {
             return Err("no usable connector".into());
         }
         let mut crtc_id = 0u32;
-        let mut ge = drm_mode_get_encoder::default();
-        ge.encoder_id = enc_id;
+        let mut ge = drm_mode_get_encoder { encoder_id: enc_id, ..Default::default() };
         if unsafe { libc::ioctl(fd, DRM_IOCTL_MODE_GETENCODER as _, &mut ge) } == 0 {
             if ge.crtc_id != 0 {
                 crtc_id = ge.crtc_id;
@@ -341,10 +340,12 @@ impl Drm {
                 return Err("CREATE_DUMB failed".into());
             }
             handles[_b] = dumb.handle;
-            let mut fb2 = drm_mode_fb_cmd2::default();
-            fb2.width = mode.hdisplay as u32;
-            fb2.height = mode.vdisplay as u32;
-            fb2.pixel_format = DRM_FORMAT_XRGB8888;
+            let mut fb2 = drm_mode_fb_cmd2 {
+                width: mode.hdisplay as u32,
+                height: mode.vdisplay as u32,
+                pixel_format: DRM_FORMAT_XRGB8888,
+                ..Default::default()
+            };
             fb2.handles[0] = dumb.handle;
             fb2.pitches[0] = dumb.pitch;
             if unsafe { libc::ioctl(fd, DRM_IOCTL_MODE_ADDFB2 as _, &mut fb2) } != 0 {

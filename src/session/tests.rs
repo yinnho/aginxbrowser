@@ -210,7 +210,7 @@
 
         // Unknown id: SESSION_NOT_FOUND with the recreate hint.
         let err = mgr
-            .send(&"s_missing".to_string(), |reply| SessionCommand::State {
+            .send("s_missing", |reply| SessionCommand::State {
                 reply,
             })
             .await
@@ -2394,7 +2394,7 @@
         assert!(
             err.to_string().contains("Error: async boom"),
             "got: {}",
-            err.to_string()
+            err
         );
 
         assert!(mgr.close_and_wait(&sid).await);

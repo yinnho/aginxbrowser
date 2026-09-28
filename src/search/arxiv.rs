@@ -122,7 +122,7 @@ fn parse_arxiv_atom(body: &str) -> Result<Vec<RawSearchResult>, SearchEngineErro
     Ok(results)
 }
 
-fn tag_content<'a>(entry: &'a str, tag: &str) -> String {
+fn tag_content(entry: &str, tag: &str) -> String {
     let open = format!("<{}>", tag);
     let close = format!("</{}>", tag);
     match entry.find(&open) {
