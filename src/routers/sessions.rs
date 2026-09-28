@@ -669,6 +669,28 @@ pub(crate) async fn flow_install_handler(
 }
 
 #[derive(Deserialize)]
+pub(crate) struct FlowSearchQuery {
+    /// Optional substring to narrow the listing (the hub's q filter over
+    /// name/description). Empty lists everything installable.
+    #[serde(default)]
+    q: Option<String>,
+}
+
+/// Flow discovery over the configured DupHub (REQ aginx-hub-asset-kind
+/// §4): lists flow packages (`kind=agx-flow`, client-side re-filtered) so
+/// the agent can learn names before `POST /flow/install`. A hub predating
+/// the kind protocol reports `kind_filter: "unsupported"` instead of
+/// presenting clones as flows.
+pub(crate) async fn flow_search_handler(
+    axum::extract::Query(query): axum::extract::Query<FlowSearchQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let receipt = flow::install::search_hub(query.q.as_deref().unwrap_or(""))
+        .await
+        .map_err(AppError::BadRequest)?;
+    Ok((StatusCode::OK, Json(receipt)))
+}
+
+#[derive(Deserialize)]
 pub(crate) struct SessionNetworkQuery {
     /// `media` extracts playback/stream links (m3u8, mp4, ...) from the
     /// requests the page actually issued; anything else lists all traffic.

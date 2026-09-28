@@ -224,6 +224,115 @@ pub(crate) async fn install_from(
     }))
 }
 
+/// The templates-market listing envelope (aginx-carrier `clone` crate
+/// `search_templates` consumes the same shape).
+#[derive(serde::Deserialize)]
+struct TemplatesEnvelope {
+    #[serde(default)]
+    templates: Vec<TemplatesItem>,
+    #[serde(default)]
+    total: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+struct TemplatesItem {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    latest_version: String,
+    #[serde(default)]
+    download_count: i64,
+    /// The market's asset kind (REQ aginx-hub-asset-kind §1): `agx-flow`
+    /// for packages whose tree root carries a flow.json, `clone` for
+    /// avatars. Absent on a hub that predates the protocol.
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+/// List flow packages available on the configured hub — flow discovery
+/// (REQ aginx-hub-asset-kind §4: flow_install takes a name; this is how
+/// the agent learns the names). Queries the templates market with
+/// `kind=agx-flow`, then re-filters client-side so a hub that ignores the
+/// param can't sneak clones into the flow list. A listing with no `kind`
+/// fields at all predates the protocol — the receipt says so instead of
+/// presenting clones as installable flows.
+pub async fn search_hub(query: &str) -> Result<Value, String> {
+    search_hub_from(&duphub_url(), query).await
+}
+
+pub(crate) async fn search_hub_from(base: &str, query: &str) -> Result<Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let mut url = url::Url::parse(&format!("{base}/api/templates"))
+        .map_err(|e| format!("hub url: {e}"))?;
+    url.query_pairs_mut()
+        .append_pair("kind", "agx-flow")
+        .append_pair("limit", "50");
+    let q = query.trim();
+    if !q.is_empty() {
+        url.query_pairs_mut().append_pair("q", q);
+    }
+
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("hub listing failed: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "hub listing failed ({status}): {}",
+            body.chars().take(200).collect::<String>()
+        ));
+    }
+    let listing: TemplatesEnvelope = resp
+        .json()
+        .await
+        .map_err(|e| format!("hub listing is not the templates shape: {e}"))?;
+
+    if !listing.templates.is_empty()
+        && !listing.templates.iter().any(|t| t.kind.is_some())
+    {
+        // Old hub: the kind filter is silently ignored and every template
+        // (avatars included) comes back. Naming them as flows would just
+        // produce "package has no flow.json" on install. An empty listing
+        // is NOT this case — "no flows" is a valid answer from any hub.
+        return Ok(json!({
+            "hub": base,
+            "kind_filter": "unsupported",
+            "templates_seen": listing.templates.len(),
+            "flows": [],
+            "note": "hub listing predates the kind protocol — cannot tell flows \
+                 from clones; upgrade the hub (templates.kind) to enable discovery",
+        }));
+    }
+
+    let flows: Vec<Value> = listing
+        .templates
+        .iter()
+        .filter(|t| t.kind.as_deref() == Some("agx-flow"))
+        .map(|t| {
+            json!({
+                "name": t.name,
+                "description": t.description.chars().take(200).collect::<String>(),
+                "version": t.latest_version,
+                "downloads": t.download_count,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "hub": base,
+        "query": q,
+        "total": listing.total.unwrap_or(flows.len() as u64),
+        "flows": flows,
+        "install": "flow_install(<name>)",
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,5 +530,121 @@ mod tests {
             std::fs::read_to_string(dir.join("twice/flow.json")).unwrap();
         assert!(text.contains("1 + 4"), "second install's bytes must be the ones on disk");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- flow discovery (REQ aginx-hub-asset-kind §4) ----
+
+    /// A loopback templates market: serves `listing` at `/api/templates`
+    /// and records every request target (query string included) so tests
+    /// can pin what the discovery face actually asked for.
+    async fn mock_hub_market(
+        listing: String,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_srv = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let listing = listing.clone();
+                let seen = seen_srv.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = vec![0u8; 8192];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = req.split_whitespace().nth(1).unwrap_or("").to_string();
+                    seen.lock().unwrap().push(path.clone());
+                    let (status, ctype, body): (&str, &str, Vec<u8>) = if path
+                        .starts_with("/api/templates")
+                    {
+                        ("200 OK", "application/json", listing.into_bytes())
+                    } else {
+                        ("404 Not Found", "text/plain", b"no such route".to_vec())
+                    };
+                    let head = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes()).await;
+                    let _ = stream.write_all(&body).await;
+                });
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), seen)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn flow_search_lists_only_flow_kind() {
+        let listing = json!({
+            "templates": [
+                {"name": "xhs-post", "description": "post to xhs", "latest_version": "1.2.0",
+                 "download_count": 41, "kind": "agx-flow"},
+                {"name": "qr-login", "description": "", "latest_version": "0.1.0",
+                 "download_count": 3, "kind": "agx-flow"},
+                {"name": "chennan-avatar", "description": "a clone, not a flow",
+                 "latest_version": "2.0", "download_count": 99, "kind": "clone"},
+            ],
+            "total": 3,
+        })
+        .to_string();
+        let (base, seen) = mock_hub_market(listing).await;
+
+        let receipt = search_hub_from(&base, "").await.unwrap();
+        let names: Vec<&str> = receipt["flows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["xhs-post", "qr-login"], "clones must not surface as flows");
+        assert_eq!(receipt["total"], 3);
+        assert_eq!(receipt["kind_filter"], json!(null), "supported hub: no degrade note");
+        // The ask carried the kind filter even though the client re-filters.
+        assert!(seen.lock().unwrap()[0].contains("kind=agx-flow"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn flow_search_passes_the_query_through() {
+        let (base, seen) = mock_hub_market(json!({"templates": [], "total": 0}).to_string()).await;
+
+        let receipt = search_hub_from(&base, "  xhs  ").await.unwrap();
+        assert_eq!(receipt["flows"].as_array().map(Vec::len), Some(0));
+        assert_eq!(receipt["query"], "xhs", "trimmed query in the receipt");
+        assert!(
+            seen.lock().unwrap()[0].contains("q=xhs"),
+            "query must ride to the hub: {}",
+            seen.lock().unwrap()[0]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn flow_search_degrades_on_a_kindless_hub() {
+        // A hub predating the kind protocol ignores the filter param and
+        // returns every template — clones included. The receipt must say
+        // "unsupported" and name nothing, not present clones as flows.
+        let listing = json!({
+            "templates": [
+                {"name": "some-avatar", "description": "clone", "latest_version": "1",
+                 "download_count": 7},
+                {"name": "another", "description": "clone", "latest_version": "1",
+                 "download_count": 8},
+            ],
+            "total": 2,
+        })
+        .to_string();
+        let (base, _seen) = mock_hub_market(listing).await;
+
+        let receipt = search_hub_from(&base, "").await.unwrap();
+        assert_eq!(receipt["kind_filter"], "unsupported");
+        assert_eq!(receipt["templates_seen"], 2);
+        assert_eq!(receipt["flows"].as_array().map(Vec::len), Some(0));
+        assert!(receipt["note"].as_str().unwrap().contains("upgrade the hub"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn flow_search_reports_an_unreachable_hub() {
+        let err = search_hub_from("http://127.0.0.1:1", "").await.unwrap_err();
+        assert!(err.contains("hub listing failed"), "{err}");
     }
 }

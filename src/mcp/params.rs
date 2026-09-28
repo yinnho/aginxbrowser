@@ -545,6 +545,14 @@ pub struct FlowInstallParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct FlowSearchParams {
+    /// Optional substring to narrow the listing (the hub's q filter over
+    /// name/description). Empty lists everything installable.
+    #[serde(default)]
+    pub query: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SessionNetworkParams {
     /// Session ID
     pub session_id: String,

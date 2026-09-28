@@ -1180,6 +1180,17 @@ it does not exist.",
     }
 
     #[tool(
+        description = "List flow packages installable from the hub (env-configured AGINXBROWSER_DUPHUB_URL, default the public DupHub) — flow discovery: flow_install takes a name, this is how you learn the names. Each entry carries name/description/version/downloads; feed the name to flow_install. Queries the market's kind=agx-flow filter (flows are templates whose package root carries flow.json) and re-filters client-side, so clones never surface as flows. A hub predating the kind protocol reports kind_filter unsupported instead of guessing.",
+        annotations(title = "Search Flows")
+    )]
+    async fn flow_search(&self, Parameters(params): Parameters<FlowSearchParams>) -> String {
+        match crate::flow::install::search_hub(&params.query).await {
+            Ok(receipt) => receipt.to_string(),
+            Err(e) => json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
         description = "Close a browser session and free its resources. For a persistent session this also drops the on-disk login snapshot - idle expiry keeps it, an explicit close does not.",
         annotations(title = "Session Close")
     )]

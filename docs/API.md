@@ -1322,6 +1322,32 @@ Install semantics, in order — every failure leaves the filesystem untouched:
 
 `eval_steps` counts steps carrying `args.script` — the disclosure line is the point: a third-party flow's scripts run with this engine's privileges in session pages, so review before `flow_run`. Uploading is the `dup` CLI's job (credentials stay there); this endpoint only ever reads.
 
+### GET /flow/search
+
+Flow discovery — `POST /flow/install` takes a name; this is how you learn the names. Lists flow packages on the configured DupHub (`AGINXBROWSER_DUPHUB_URL`): the market's `kind=agx-flow` filter plus a client-side re-filter, so clones (avatar templates) never surface as installable flows. A hub whose listings predate the kind protocol reports `kind_filter: "unsupported"` rather than guessing.
+
+**Query parameters:**
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| q | string | — | optional substring; the hub's filter over name/description |
+
+**Response:**
+
+```json
+{
+  "hub": "https://duphub.com",
+  "query": "",
+  "total": 2,
+  "flows": [
+    {"name": "xhs-post", "description": "post to xhs", "version": "1.2.0", "downloads": 41}
+  ],
+  "install": "flow_install(<name>)"
+}
+```
+
+MCP face: `flow_search(query)`.
+
 ### GET /session/{id}/network
 
 The session's network request log for the current page — every document, subresource and script-initiated `fetch()`/XHR the page actually issued, one compact row each. This is the sniffer surface.

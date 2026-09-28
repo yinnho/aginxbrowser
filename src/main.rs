@@ -109,7 +109,7 @@ use routers::acquisition::{
 use routers::outputs::{pdf_handler, screenshot_handler, video_handler};
 use routers::sessions::{
     account_delete_handler, account_login_handler, account_verify_handler, accounts_handler,
-    flow_install_handler, flow_run_handler, import_curl_handler, max_body_bytes, session_challenges_handler, session_click_handler,
+    flow_install_handler, flow_run_handler, flow_search_handler, import_curl_handler, max_body_bytes, session_challenges_handler, session_click_handler,
     session_click_xy_handler, session_clone_handler, session_close_handler,
     session_console_handler, session_cookies_handler, session_create_handler,
     session_dialog_handler, session_drag_handler, session_eval_handler, session_export_handler,
@@ -413,6 +413,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/create", post(session_create_handler))
         .route("/flow/run", post(flow_run_handler))
         .route("/flow/install", post(flow_install_handler))
+        .route("/flow/search", get(flow_search_handler))
         .route("/session/:id/clone", post(session_clone_handler))
         .route("/import/curl", post(import_curl_handler))
         .route("/session/list", get(session_list_handler))
