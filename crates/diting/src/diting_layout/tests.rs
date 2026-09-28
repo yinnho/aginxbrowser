@@ -1558,3 +1558,81 @@ mod inline_block_interior_tests {
         }
     }
 }
+
+mod text_align_block_children_tests {
+    // #169: `text-align: center` aligns the INLINE content only — block-level
+    // children still fill the container width (§10.3.3). The flex-column
+    // alignment stand-in used to shrink EVERY item to content width: on the
+    // 1688 punish page `body, p { text-align: center }` collapsed the whole
+    // nc-slider chain (`#nocaptcha` … `.nc_scale`) to 0-width tracks.
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::{compute_styles, layout_dom};
+
+    const VW: f32 = 1280.0;
+
+    fn rect(html: &str, sheet: &str, sel: &str) -> (f32, f32, f32, f32) {
+        let tree = parse_html(html);
+        let rules = parse_stylesheet_for(sheet, (VW, 800.0), CssMediaType::Screen);
+        let styles = compute_styles(&tree, &rules, (VW, 800.0));
+        let rects = layout_dom(&tree, &styles, &crate::diting_fonts::font_book(), VW, 800.0);
+        let id = tree.query_selector(sel).unwrap().unwrap();
+        let r = rects.get(&id).unwrap();
+        (r.x, r.y, r.width, r.height)
+    }
+
+    #[test]
+    fn block_child_fills_centered_body() {
+        // The punish-page shape: `body, p { text-align: center }` — a bare
+        // block child of body must fill, not shrink to its text.
+        let (_x, _y, w, _h) = rect(
+            r#"<html><body><div id="track" style="height: 34px">向右滑动验证</div></body></html>"#,
+            "body { margin: 0 } body, p { text-align: center }",
+            "#track",
+        );
+        assert!((w - VW).abs() <= 1.0, "block under centered body must fill; got w={w}");
+    }
+
+    #[test]
+    fn deep_chain_of_blocks_fills() {
+        // The actual collapse cascade: three nested auto blocks inside the
+        // centered container all fill, so a fixed-width track at the bottom
+        // has room (and itself stretches only if width:auto).
+        let (_x, _y, w, _h) = rect(
+            r#"<html><body><div id="a"><div id="b"><div id="c" style="height: 8px">x</div></div></div></body></html>"#,
+            "body { margin: 0; text-align: center }",
+            "#c",
+        );
+        assert!((w - VW).abs() <= 1.0, "nested auto blocks fill; got w={w}");
+    }
+
+    #[test]
+    fn run_text_stays_centered() {
+        // Alignment of the inline content itself is the promote's whole
+        // point — keep it: a short text run in the centered body sits at the
+        // horizontal middle, not at the left edge.
+        let rules = parse_stylesheet_for("body { text-align: center }", (VW, 800.0), CssMediaType::Screen);
+        let tree = parse_html(r#"<html><body><i id="m">.</i></body></html>"#);
+        let styles = compute_styles(&tree, &rules, (VW, 800.0));
+        let rects = layout_dom(&tree, &styles, &crate::diting_fonts::font_book(), VW, 800.0);
+        let id = tree.query_selector("#m").unwrap().unwrap();
+        let r = rects.get(&id).unwrap();
+        assert!(
+            r.x > VW * 0.4 && r.x < VW * 0.6,
+            "inline run still centers; marker x={}",
+            r.x
+        );
+    }
+
+    #[test]
+    fn table_child_keeps_shrink_to_fit_center() {
+        // Tables under text-align:center shrink-to-fit and center in Chrome —
+        // the STRETCH patch must not widen them.
+        let (_x, _y, w, _h) = rect(
+            r#"<html><body><table id=t><tr><td>仅一行</td></tr></table></body></html>"#,
+            "body { margin: 0; text-align: center }",
+            "#t",
+        );
+        assert!(w < VW * 0.5, "table stays shrink-to-fit; got w={w}");
+    }
+}

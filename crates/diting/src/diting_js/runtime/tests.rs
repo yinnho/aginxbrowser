@@ -1148,6 +1148,64 @@
             "ongamepadconnected/ongamepaddisconnected exist on window too");
     }
 
+    /// (#168) The dispatch host is the event's target. The window arm never
+    /// pinned target/currentTarget/eventPhase, so a listener reading
+    /// e.target.tagName saw null — Alibaba AWSC's nc-slider init dies on
+    /// exactly that (the punish-page slider track then never sizes). The
+    /// document/element arms already pinned; this pins the window arm, the
+    /// on*-attribute leg, and the srcElement alias Chrome keeps on
+    /// Event.prototype.
+    #[test]
+    fn window_dispatch_pins_target_family() {
+        let mut rt = setup_runtime(
+            "<html><body><div id=\"d\">x</div></body></html>",
+        );
+        let out = rt.evaluate(r#"
+            var seen = {};
+            addEventListener('__wt', function (e) {
+                seen.l = [e.target === window, e.currentTarget === window,
+                          e.eventPhase, e.srcElement === window];
+            });
+            window.dispatchEvent(new CustomEvent('__wt'));
+            var onSeen = {};
+            // a name inside _WINDOW_EVENT_NAMES — custom names land as plain
+            // data props and never reach the __windowOnHandlers store
+            window.onlanguagechange = function (e) {
+                onSeen.l = [e.target === window, e.currentTarget === window,
+                            e.eventPhase, e.srcElement === window];
+            };
+            window.dispatchEvent(new Event('languagechange'));
+            var docSeen = {}, elSeen = {};
+            document.addEventListener('__wt3', function (e) {
+                docSeen.l = [e.target === document, e.srcElement === document,
+                             e.currentTarget === document];
+            });
+            document.dispatchEvent(new Event('__wt3'));
+            var el = document.getElementById('d');
+            el.addEventListener('__wt4', function (e) {
+                elSeen.l = [e.target === el, e.srcElement === el,
+                            e.currentTarget === el, e.eventPhase];
+            });
+            el.dispatchEvent(new Event('__wt4'));
+            var srcDesc = Object.getOwnPropertyDescriptor(Event.prototype, 'srcElement');
+            return JSON.stringify({
+                l: seen.l, on: onSeen.l, doc: docSeen.l, el: elSeen.l,
+                srcGetter: !!srcDesc && !!srcDesc.get && !srcDesc.set,
+            });
+        "#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        assert_eq!(v["l"], serde_json::json!([true, true, 2, true]),
+            "window dispatch: listener sees target/currentTarget/srcElement=window at AT_TARGET");
+        assert_eq!(v["on"], serde_json::json!([true, true, 2, true]),
+            "the on*-attribute leg sees the same pinned state");
+        assert_eq!(v["doc"], serde_json::json!([true, true, true]),
+            "document dispatch stays pinned to document (regression guard)");
+        assert_eq!(v["el"], serde_json::json!([true, true, true, 2]),
+            "element dispatch stays pinned to the element (regression guard)");
+        assert_eq!(v["srcGetter"], serde_json::json!(true),
+            "srcElement is a getter-only alias on Event.prototype, Chrome shape");
+    }
+
 
     #[cfg(feature = "screenshot")]
     #[test]
@@ -2184,6 +2242,36 @@
         assert_eq!(
             names,
             serde_json::json!(r#"["HTMLDivElement","HTMLSpanElement","HTMLElement"]"#)
+        );
+        // #167: document's concrete interface is HTMLDocument — a real
+        // global class (site SDKs reference it by name; Alibaba's AWSC
+        // nc-slider init died on `HTMLDocument is not defined` and its
+        // punish-page track stayed 0-wide), with document still instanceof
+        // Document, and construction illegal like Chrome's.
+        let html_doc = rt
+            .evaluate(
+                r#"(() => {
+                    let threw = false;
+                    try { new HTMLDocument(); } catch (e) { threw = e instanceof TypeError; }
+                    const d = Object.getOwnPropertyDescriptor(window, 'HTMLDocument');
+                    return JSON.stringify({
+                        t: typeof HTMLDocument,
+                        instDoc: document instanceof HTMLDocument,
+                        instSuper: document instanceof Document,
+                        name: document.constructor.name,
+                        chain: Object.getPrototypeOf(Object.getPrototypeOf(document)) === Document.prototype,
+                        threw,
+                        ne: d ? d.enumerable === false : false,
+                        xml: new DOMParser().parseFromString('<a/>', 'text/xml') instanceof HTMLDocument,
+                    });
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(
+            html_doc,
+            serde_json::json!(
+                r#"{"t":"function","instDoc":true,"instSuper":true,"name":"HTMLDocument","chain":true,"threw":true,"ne":true,"xml":false}"#
+            )
         );
         // A patch on one interface's prototype reaches its own tags only.
         let isolation = rt

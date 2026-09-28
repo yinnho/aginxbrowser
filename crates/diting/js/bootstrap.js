@@ -79,6 +79,15 @@ globalThis.removeEventListener = function(type, fn) {
 };
 globalThis.dispatchEvent = function(event) {
   if (!event) return true;
+  // (#168) The dispatch host IS the event's target at the AT_TARGET phase —
+  // the element dispatchEvent below pins the same trio at its level, but
+  // this arm never did, so a window listener reading e.target.tagName
+  // (Alibaba AWSC's nc-slider init does) saw null and died mid-flight,
+  // leaving the punish-page slider track unsized. Spec semantics: every
+  // dispatch re-pins target to the host it runs on.
+  event.target = globalThis;
+  event.currentTarget = globalThis;
+  event.eventPhase = 2;
   const handlers = globalThis.__windowListeners[event.type] || [];
   for (const h of handlers) { try { h.call(globalThis, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); } }
   return !event.defaultPrevented;
@@ -6341,6 +6350,27 @@ function _elementClassFor(nid) {
   if (C) return C;
   return globalThis.HTMLElement || Element;
 }
+// (#167) HTMLDocument is the document's concrete interface: Chrome's chain
+// is document → HTMLDocument.prototype → Document.prototype, with
+// `document instanceof HTMLDocument` true and constructor.name
+// "HTMLDocument". Site SDKs touch the global BY NAME — Alibaba's AWSC
+// nc-slider init dies on `ReferenceError: HTMLDocument is not defined`
+// (the punish-page slider track then stays at width 0, what 批163's
+// "SDK 未初始化" verdict actually saw). Declared before _wrap so the
+// nodeType-9 branch below can instantiate it with no TDZ window; the
+// node-less documents (DOMParser / `new Document()`, which make XML-ish
+// docs) never route through _wrap and stay plain Document.
+class HTMLDocument extends Document {
+  constructor(nid) {
+    if (typeof nid !== "number") {
+      // Chrome: `new HTMLDocument()` throws; `new Document()` (an XML
+      // document) is the legal WHATWG constructor face.
+      throw new TypeError("Illegal constructor");
+    }
+    super(nid);
+  }
+}
+globalThis.HTMLDocument = HTMLDocument;
 function _wrap(nid) {
   if (nid < 0 || nid === null || nid === undefined || isNaN(nid)) return null;
   if (_cache.has(nid)) return _cache.get(nid);
@@ -6349,7 +6379,7 @@ function _wrap(nid) {
   if (t === 1) { const C = _elementClassFor(nid); n = new C(nid); if (C === globalThis.HTMLFormElement) n = new Proxy(n, _formNamedProxy); }
   else if (t === 3) n = new Text(nid);
   else if (t === 8) n = new Comment(nid);
-  else if (t === 9) n = new Document(nid);
+  else if (t === 9) n = new HTMLDocument(nid);
   else n = new Node(nid);
   _cache.set(nid, n);
   return n;
@@ -10255,6 +10285,10 @@ globalThis.Event = class Event {
   // is "123", not the number (issue #552). Subclasses inherit both via super.
   constructor(t,o={}) { if (arguments.length < 1) throw new TypeError("Failed to construct 'Event': 1 argument required, but only 0 present."); this.type=String(t);this.bubbles=!!o.bubbles;this.cancelable=!!o.cancelable;this.composed=!!o.composed;this.defaultPrevented=false;this.target=null;this.currentTarget=null;this.eventPhase=0;this.timeStamp=Date.now();this._propagationStopped=false;this._immediatePropagationStopped=false;  __hideOwn(this);}
   get isTrusted() { return true; }
+  // Legacy IE alias, still on Chrome's Event.prototype: srcElement tracks
+  // target on every leg. Site code reading e.srcElement.tagName (the
+  // AWSC-family dispatch probes do) found nothing before (#168).
+  get srcElement() { return this.target; }
   preventDefault() { if (this.cancelable) this.defaultPrevented=true; } stopPropagation(){ this._propagationStopped=true; } stopImmediatePropagation(){ this._propagationStopped=true; this._immediatePropagationStopped=true; }
   initEvent(type,bubbles,cancelable) { if (arguments.length < 1) throw new TypeError("Failed to execute 'initEvent' on 'Event': 1 argument required, but only 0 present."); this.type=String(type);this.bubbles=!!bubbles;this.cancelable=!!cancelable;this.defaultPrevented=false;this._propagationStopped=false;this._immediatePropagationStopped=false; }
   composedPath() {
@@ -18316,6 +18350,13 @@ _markNative(Document.prototype.dispatchEvent);
 const _windowDispatch = globalThis.dispatchEvent;
 globalThis.dispatchEvent = function(event) {
   if (event && event.type !== 'error') {
+    // (#168) Pin the dispatch host before the IDL-attribute handler runs —
+    // on*-assigned handlers must see the same target/currentTarget
+    // AT_TARGET state as addEventListener ones (the base wrapper re-pins,
+    // but it only runs after this leg).
+    event.target = globalThis;
+    event.currentTarget = globalThis;
+    event.eventPhase = 2;
     // (#37) 'error' is pipeline-only in Chrome: onerror runs from the
     // uncaught-error pipeline (__diting_reportUncaught), never from a
     // synthetic dispatchEvent(new ErrorEvent('error')) — and the pipeline

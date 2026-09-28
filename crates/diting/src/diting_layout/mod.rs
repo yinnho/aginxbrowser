@@ -1228,13 +1228,53 @@ pub(crate) fn tokenize_ws(text: &str, ws: crate::diting_css::WhiteSpace) -> Vec<
 /// time — such pairs keep whatever the engine does), collapse-through of
 /// empty self-collapsing blocks, and first/last-child collapse with the
 /// parent.
+/// Whether this taffy style is the flex-column alignment stand-in for a
+/// block's `text-align: center/right` (see `to_taffy_style`). Tables share
+/// Column but stretch; rows are Row — both stay outside this predicate.
+fn is_alignment_promote(s: &Style) -> bool {
+    s.display == Display::Flex
+        && s.flex_direction == FlexDirection::Column
+        && matches!(s.align_items, Some(AlignItems::CENTER) | Some(AlignItems::FLEX_END))
+}
+
+/// (#169) CSS `text-align` aligns the INLINE content only; block-level
+/// children of a centered block still fill the container width (§10.3.3),
+/// centering their own inline content through inheritance. The flex-column
+/// stand-in instead shrinks EVERY item to content width — on the 1688 punish
+/// page `body, p { text-align: center }` collapsed the whole nc-slider chain
+/// (`#nocaptcha` … `.nc_scale`) to 0 width. Patch block-level element
+/// children with `align_self: STRETCH` before assembly: only real element
+/// children carry a node_map entry (runs, float zones, bars and anonymous
+/// wrappers don't), and tables/images keep the centered shrink-to-fit Chrome
+/// gives them under text-align.
+fn stretch_block_children_in_aligned_parent(
+    taffy_tree: &mut TaffyTree<TextLeaf>,
+    node_map: &HashMap<taffy::tree::NodeId, NodeId>,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    children: &[taffy::tree::NodeId],
+) {
+    for &n in children {
+        let Some(&dom) = node_map.get(&n) else { continue };
+        let Some(cs) = styles.get(&dom) else { continue };
+        if !matches!(
+            cs.display,
+            Some(CssDisplay::Block) | Some(CssDisplay::Flex) | Some(CssDisplay::Grid) | Some(CssDisplay::TableCell)
+        ) {
+            continue;
+        }
+        if let Ok(mut st) = taffy_tree.style(n).cloned() {
+            st.align_self = Some(AlignSelf::STRETCH);
+            let _ = taffy_tree.set_style(n, st);
+        }
+    }
+}
+
 fn collapse_adjacent_sibling_margins(
     taffy_tree: &mut TaffyTree<TextLeaf>,
     styles: &HashMap<NodeId, ComputedStyle>,
     node_map: &HashMap<taffy::tree::NodeId, NodeId>,
     direct: &[taffy::tree::NodeId],
-) {
-    let px = |v: Option<crate::diting_css::Length>| match v {
+) {    let px = |v: Option<crate::diting_css::Length>| match v {
         Some(crate::diting_css::Length::Px(px)) => Some(px),
         _ => None,
     };
@@ -4417,6 +4457,9 @@ fn build_element_inner(
             }
             collapse_adjacent_sibling_margins(taffy_tree, styles, node_map, &direct);
             let taffy_style = to_taffy_style(&style, pct_height_resolves(tree, styles, id));
+            if is_alignment_promote(&taffy_style) {
+                stretch_block_children_in_aligned_parent(taffy_tree, node_map, styles, &direct);
+            }
             let node = if direct.is_empty() {
                 taffy_tree.new_leaf(taffy_style).ok()?
             } else {
@@ -4900,6 +4943,9 @@ fn build_element_inner(
     collapse_adjacent_sibling_margins(taffy_tree, styles, node_map, &direct);
 
     let taffy_style = to_taffy_style(&style, pct_height_resolves(tree, styles, id));
+    if is_alignment_promote(&taffy_style) {
+        stretch_block_children_in_aligned_parent(taffy_tree, node_map, styles, &direct);
+    }
     let node = if direct.is_empty() {
         taffy_tree.new_leaf(taffy_style).ok()?
     } else {
