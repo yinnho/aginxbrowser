@@ -14366,6 +14366,39 @@
         assert_eq!(t, serde_json::json!("one\ntwo"), "got: {t}");
     }
 
+    /// obscura#1106 absorption: three rendered-text contracts the old walk
+    /// missed — a DECLARED visibility:visible descendant restores text under
+    /// a hidden ancestor (undeclared descendants stay hidden); table cells
+    /// separate with tabs (one per boundary, an empty cell keeps its own,
+    /// rows break with newlines and eat the trailing tab); an unrendered
+    /// root — display:none or detached — falls back to textContent exactly
+    /// like Chrome instead of "".
+    #[test]
+    fn inner_text_restores_visible_descendants_tables_and_unrendered_roots() {
+        let mut rt = setup_runtime(
+            "<html><body>\
+             <div style=\"visibility:hidden\">veiled<span style=\"visibility:visible\">shown</span><i>still-hidden</i></div>\
+             <table><tr><td>a</td><td>b</td><td></td><td>c</td></tr><tr><td>d</td></tr></table>\
+             <div id=\"cloaked\" style=\"display:none\">raw<script>var x = 1;</script>text</div>\
+             </body></html>",
+        );
+        let t = rt.evaluate("document.body.innerText").unwrap();
+        assert_eq!(t, serde_json::json!("shown\na\tb\t\tc\nd"), "got: {t}");
+        // Unrendered root: display:none reads back raw textContent (script
+        // source included, whitespace uncollapsed) — the classic scraper
+        // shape where innerText on a hidden node still yields the text.
+        let t = rt.evaluate("document.getElementById('cloaked').innerText").unwrap();
+        assert_eq!(t, serde_json::json!("rawvar x = 1;text"), "got: {t}");
+        // Detached roots take the same fallback, not the collapsed walk.
+        let t = rt
+            .evaluate(
+                "(() => { const d = document.createElement('div');\
+                 d.textContent = '  detached  '; return d.innerText; })()",
+            )
+            .unwrap();
+        assert_eq!(t, serde_json::json!("  detached  "), "got: {t}");
+    }
+
     // UA `q` marks (Chrome q::before/::after open-quote/close-quote): diting
     // has no generated content, so the layout synthesizes the quote leaves
     // around flattened q content. They must take layout space in front of

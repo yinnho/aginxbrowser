@@ -2862,15 +2862,22 @@ const _innerTextDisplay = (el) => {
   if (cs && cs.display != null) return String(cs.display);
   return null;
 };
-const _itPushBreak = (out) => {
-  if (!out.length) return;
-  const last = out[out.length - 1];
-  if (last.s.endsWith('\n')) return;
-  if (!last.pre) {
-    last.s = last.s.replace(/[ \t]+$/, '');
-    if (last.s === '') { out.pop(); if (!out.length) return; }
+const _itPushSep = (out, sep) => {
+  // Push a structural separator (block '\n', table-cell '\t'). Consecutive
+  // cell tabs stack (Chrome emits one per empty cell); a row break eats a
+  // trailing tab; a text run before the break loses its trailing spaces.
+  while (out.length) {
+    const last = out[out.length - 1];
+    if (last.s.endsWith('\n')) return;
+    if (last.sep && sep === '\n') { out.pop(); continue; }
+    if (!last.sep && !last.pre) {
+      last.s = last.s.replace(/[ \t]+$/, '');
+      if (last.s === '') { out.pop(); continue; }
+    }
+    break;
   }
-  out.push({ s: '\n', pre: false });
+  if (!out.length) return;
+  out.push({ s: sep, pre: false, sep: true });
 };
 // 批240 / blitz#924: innerText REFLECTS text-transform (Chrome: uppercase
 // renders "ABC DEF", innerText reads it back transformed while textContent
@@ -2919,16 +2926,26 @@ const _innerTextCollect = (node, out, st) => {
   const el = node;
   const tag = el.localName;
   if (_IT_SKIP_TAGS.has(tag)) return;
-  if (tag === 'br') { _itPushBreak(out); return; }
+  if (tag === 'br') { _itPushSep(out, '\n'); return; }
   const cs = _itCascade(el);
   let display = (el.style && el.style.display) || null;
   if (display == null && el.getAttribute && el.getAttribute('hidden') != null) display = 'none';
   if (display == null && cs && cs.display != null) display = String(cs.display);
   if (display === 'none') return;
-  const blockish = display != null
+  // Cells break with a tab (Chrome's cell separator), not a newline. Tag
+  // shape covers the no-cascade walk; an explicit display (including
+  // non-cell overrides on td/th) wins.
+  const cell = display === 'table-cell' || (display == null && (tag === 'td' || tag === 'th'));
+  const blockish = cell || (display != null
     ? _IT_BLOCK_DISPLAY.test(display)
-    : _IT_BLOCK_TAGS.has(tag);
+    : _IT_BLOCK_TAGS.has(tag));
+  const sep = cell ? '\t' : '\n';
   let visibility = cs && cs.visibility != null ? String(cs.visibility) : null;
+  // Whether the visibility value is DECLARED (cascade answered, or inline
+  // style carries one) rather than the walk's 'visible' default — only a
+  // declared 'visible' restores text under a hidden ancestor (obscura#1106);
+  // an undeclared child inherits whatever state it walked into.
+  const visDeclared = visibility != null || !!(el.style && el.style.visibility);
   if (visibility == null) visibility = (el.style && el.style.visibility) || 'visible';
   const ws = cs && typeof cs['white-space'] === 'string' ? cs['white-space'] : '';
   // Cascade first (it already folds the inline style); the inline read only
@@ -2939,12 +2956,16 @@ const _innerTextCollect = (node, out, st) => {
   const prevPre = st.pre;
   const prevTt = st.tt;
   if (visibility === 'hidden' || visibility === 'collapse') st.hidden = true;
+  else if (visDeclared && visibility === 'visible') st.hidden = false;
   if (_IT_PRE_TAGS.has(tag) || ws.startsWith('pre')) st.pre = true;
   if (tt) st.tt = tt;
-  if (blockish) _itPushBreak(out);
+  // Cells separate on CLOSE only — the previous cell's close already laid
+  // the tab, an open-push would double it, and an empty cell still
+  // contributes its own tab via its close (Chrome emits one per boundary).
+  if (blockish && !cell) _itPushSep(out, sep);
   const kids = el.childNodes;
   for (let i = 0; i < kids.length; i++) _innerTextCollect(kids[i], out, st);
-  if (blockish) _itPushBreak(out);
+  if (blockish) _itPushSep(out, sep);
   st.hidden = prevHidden;
   st.pre = prevPre;
   st.tt = prevTt;
@@ -3042,17 +3063,26 @@ class Element extends Node {
   get outerHTML() { return _domParse("outer_html", this._nid) ?? ""; }
   // innerText approximates rendered-text semantics (obscura #828 lineage):
   // <script>/<style>/<template>/<noscript> and display:none subtrees are not
-  // rendered so contribute nothing; visibility:hidden suppresses text but not
-  // overridable descendants; block-level boxes break lines; collapsible
-  // whitespace collapses as rendered; text-transform reflects (批240).
-  // Known approximations: no list markers, no table-cell tabs. The cascade is
-  // read per element (stylesheet rules + inline style); when the style engine
-  // hasn't run, the inline style attribute and the UA-default tag table below
-  // stand in.
+  // rendered so contribute nothing; visibility:hidden suppresses text but a
+  // declared visibility:visible descendant restores it (obscura#1106);
+  // block-level boxes break lines, table cells separate with tabs;
+  // collapsible whitespace collapses as rendered; text-transform reflects
+  // (批240). A root that is NOT being rendered — display:none/[hidden], or
+  // detached from the document — falls back to textContent exactly like
+  // Chrome; the rendered-text contract governs descendants of a rendered
+  // root. Known approximations: no list markers. The cascade is read per
+  // element (stylesheet rules + inline style); when the style engine
+  // hasn't run, the inline style attribute and the UA-default tag table
+  // below stand in.
   get innerText() {
     try {
+      // A visibility:hidden root deliberately keeps the walk (the WeChat
+      // fetch contract reads #js_content's innerText while the container is
+      // still visibility:hidden SSR-pending — v0.3.1 P1-3); only display:none
+      // / detachment are "not being rendered".
       const rootDisp = _innerTextDisplay(this);
-      if (rootDisp === 'none') return '';
+      if (rootDisp === 'none') return this.textContent;
+      if (!_nodeInDocument(this)) return this.textContent;
       // Seed the walk's context from the element's OWN declarations (批240):
       // reading innerText on the element carrying text-transform must reflect
       // it — a children-only walk never saw the declaration on the very
