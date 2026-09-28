@@ -996,7 +996,7 @@ fn cascade_specificity_then_source_order_then_inline() {
     );
     let node = tree.get_element_by_id("main").unwrap();
 
-    let rules = vec![
+    let rules = [
         ParsedRule { selector: "p".into(), declarations: "color: #111111".into() },
         ParsedRule { selector: ".intro".into(), declarations: "color: #222222".into() },
         ParsedRule { selector: "#main".into(), declarations: "color: #333333".into() },
@@ -1053,7 +1053,7 @@ fn cascade_important_beats_inline_and_important_inline_wins() {
         r#"<p id="main" class="slide">x</p>"#,
     );
     let node = tree.get_element_by_id("main").unwrap();
-    let rules = vec![ParsedRule {
+    let rules = [ParsedRule {
         selector: ".slide".into(),
         declarations: "margin-top: 1px !important; transform: none !important".into(),
     }];
@@ -1820,7 +1820,7 @@ fn cascade_font_size_wins_by_specificity_not_prepass_order() {
     // the WINNER.
     let tree = diting_dom::tree_sink::parse_html(r#"<p id="m" class="c">x</p>"#);
     let p = tree.get_element_by_id("m").unwrap();
-    let rules = vec![
+    let rules = [
         ParsedRule { selector: "p.c".into(), declarations: "font-size: 10px; width: 2em".into() },
         ParsedRule { selector: "#m".into(), declarations: "font-size: 30px".into() },
     ];
@@ -2057,7 +2057,7 @@ fn flex_basis_and_gap_length_percentage() {
     assert!(apply_declarations(&mut s, "flex-basis: calc(60px + 40px)"));
     assert_eq!(s.flex_basis, Some(Length::Px(100.0)));
     let mut s = ComputedStyle::default();
-    assert_eq!(apply_declarations(&mut s, "flex-basis: auto"), false);
+    assert!(!apply_declarations(&mut s, "flex-basis: auto"));
     assert_eq!(s.flex_basis, None);
     let mut s = ComputedStyle::default();
     assert!(apply_declarations(&mut s, "flex-basis: 50%"));
@@ -2183,7 +2183,7 @@ fn background_clip_parses_text_and_box_keywords() {
     let mut s = ComputedStyle::default();
     assert!(apply_declarations(&mut s, "background-clip: border-box"));
     assert!(!s.background_clip_text);
-    assert_eq!(ComputedStyle::default().background_clip_text, false);
+    assert!(!ComputedStyle::default().background_clip_text);
     let mut s = ComputedStyle::default();
     assert!(!apply_declarations(&mut s, "background-clip: no-box"));
     assert!(!s.background_clip_text);
@@ -2367,8 +2367,7 @@ fn transition_sampler_overrides_values_along_the_clock() {
     list.push(CssTransition { nid: 99, ..stale });
 
     let mut styles = std::collections::HashMap::new();
-    let mut cs = ComputedStyle::default();
-    cs.opacity = Some(1.0);
+    let cs = ComputedStyle { opacity: Some(1.0), ..Default::default() };
     styles.insert(crate::diting_dom::NodeId(7), cs);
 
     sample_css_transitions(&list, None, &mut styles);
@@ -2415,7 +2414,7 @@ fn transition_sampler_lerps_colors_and_kind_mismatch_keeps_cascade() {
     };
     let mut styles = std::collections::HashMap::new();
     styles.insert(crate::diting_dom::NodeId(3), ComputedStyle::default());
-    sample_css_transitions(&[base.clone()], Some(0.5), &mut styles);
+    sample_css_transitions(std::slice::from_ref(&base), Some(0.5), &mut styles);
     let c = styles[&crate::diting_dom::NodeId(3)]
         .color
         .expect("color overridden");
@@ -2433,8 +2432,7 @@ fn transition_sampler_lerps_colors_and_kind_mismatch_keeps_cascade() {
         to: TransitionValue::Opacity(0.0),
         ..base
     };
-    let mut cs = ComputedStyle::default();
-    cs.color = Some(Color(9, 9, 9, 255));
+    let cs = ComputedStyle { color: Some(Color(9, 9, 9, 255)), ..Default::default() };
     let mut styles = std::collections::HashMap::new();
     styles.insert(crate::diting_dom::NodeId(3), cs);
     sample_css_transitions(&[bad], Some(0.5), &mut styles);
@@ -2676,8 +2674,7 @@ fn ua_pre_default_and_author_override() {
 // ---- box-shadow (blitz#349 family, v1) ----
 
 fn shadow(v: &str) -> Option<Vec<BoxShadow>> {
-    let mut s = ComputedStyle::default();
-    s.color = Some(Color(10, 20, 30, 255));
+    let mut s = ComputedStyle { color: Some(Color(10, 20, 30, 255)), ..Default::default() };
     apply_declarations(&mut s, &format!("box-shadow: {v}"));
     s.box_shadow
 }
@@ -2706,7 +2703,7 @@ fn box_shadow_four_lengths_and_color_on_either_side() {
 fn box_shadow_layers_and_inset_parse() {
     let layers = shadow("2px 2px rgba(0, 0, 0, 0.5), inset 0 1px red").unwrap();
     assert_eq!(layers.len(), 2);
-    assert_eq!(layers[0].inset, false);
+    assert!(!layers[0].inset);
     assert_eq!(layers[0].color, Color(0, 0, 0, 128));
     assert_eq!(layers[1], BoxShadow { dx: 0.0, dy: 1.0, blur: 0.0, spread: 0.0, color: Color(255, 0, 0, 255), inset: true });
 }
@@ -2720,8 +2717,7 @@ fn box_shadow_rejections_and_reset() {
     assert!(shadow("1px 1px red red").is_none(), "two colors");
     assert_eq!(shadow("none"), None);
     // `none` clears a prior value; an invalid re-declaration must not.
-    let mut s = ComputedStyle::default();
-    s.color = Some(Color(0, 0, 0, 255));
+    let mut s = ComputedStyle { color: Some(Color(0, 0, 0, 255)), ..Default::default() };
     apply_declarations(&mut s, "box-shadow: 1px 1px red; box-shadow: none");
     assert_eq!(s.box_shadow, None, "none clears");
     apply_declarations(&mut s, "box-shadow: 1px 1px red; box-shadow: blue blue");
@@ -2774,8 +2770,7 @@ fn backdrop_filter_does_not_inherit() {
 // ---- text-shadow (blitz#271 family) ----
 
 fn tshadow(v: &str) -> Option<Vec<TextShadow>> {
-    let mut s = ComputedStyle::default();
-    s.color = Some(Color(10, 20, 30, 255));
+    let mut s = ComputedStyle { color: Some(Color(10, 20, 30, 255)), ..Default::default() };
     apply_declarations(&mut s, &format!("text-shadow: {v}"));
     s.text_shadow
 }
@@ -2816,8 +2811,7 @@ fn text_shadow_rejections_and_reset() {
     assert!(tshadow("red 1px 1px red").is_none(), "two colors");
     assert_eq!(tshadow("none"), None);
     // `none` clears a prior value; an invalid re-declaration must not.
-    let mut s = ComputedStyle::default();
-    s.color = Some(Color(0, 0, 0, 255));
+    let mut s = ComputedStyle { color: Some(Color(0, 0, 0, 255)), ..Default::default() };
     apply_declarations(&mut s, "text-shadow: 1px 1px red; text-shadow: none");
     assert_eq!(s.text_shadow, None, "none clears");
     apply_declarations(&mut s, "text-shadow: 1px 1px red; text-shadow: blue blue");
