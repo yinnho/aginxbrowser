@@ -27,9 +27,9 @@ body {
   padding: 104px 88px 160px;
   position: relative;
 }
-/* CRT 背景：扫描线 + 顶部磷光辉光 + 下缘暗角 —— 背景不是纯色填充 */
-body::before {
-  content: "";
+/* CRT 背景：扫描线 + 顶部磷光辉光 + 下缘暗角 —— 真 .fx div 不用 body::before
+   （伪元素装饰旧引擎不落墨，REQ #415） */
+.fx {
   position: fixed;
   inset: 0;
   pointer-events: none;
@@ -38,7 +38,7 @@ body::before {
     radial-gradient(120% 46% at 50% 0%, var(--bg-glow), transparent 70%),
     linear-gradient(to bottom, transparent 76%, rgba(0,0,0,0.55));
 }
-/* 查询命令回显：与 reply 的 > 问句同一语言 */
+/* 查询命令回显：与 reply 的 > 问句同一语言（真 span 前缀） */
 .cmd {
   color: var(--muted);
   font-size: 30px;
@@ -46,7 +46,7 @@ body::before {
   padding-bottom: 30px;
   border-bottom: 1px solid var(--dim);
 }
-.cmd::before { content: "> "; color: var(--accent); }
+.cmd .p { color: var(--accent); }
 /* 巨型温度读数：仪表主角，等宽数字 */
 .temp {
   margin-top: 72px;
@@ -58,13 +58,13 @@ body::before {
   font-variant-numeric: tabular-nums;
 }
 .temp .unit { color: var(--muted); font-size: 100px; font-weight: 400; }
-/* 状态行：● 前缀 + 城市 */
+/* 状态行：● 前缀 + 城市（真 span） */
 .cond {
   margin-top: 48px;
   font-size: 44px;
   color: var(--fg);
 }
-.cond::before { content: "● "; color: var(--accent); font-size: 34px; }
+.cond .dot { color: var(--accent); font-size: 34px; }
 .cond .where { color: var(--muted); }
 /* 规格行：man-page 式点线引导 —— 不用卡片，不用三等分 */
 .spec {
@@ -94,19 +94,20 @@ body::before {
   font-size: 26px;
   overflow-wrap: break-word;
 }
-.src::before { content: "src: "; color: var(--dim); }
+.src .k2 { color: var(--dim); }  /* 真 span 前缀，不用 .src::before */
 a { color: var(--muted); text-decoration-color: var(--dim); }
 </style>
 </head>
 <body>
-<p class="cmd">weather --now {{city}}</p>
+<div class="fx" aria-hidden="true"></div>
+<p class="cmd"><span class="p">&gt; </span>weather --now {{city}}</p>
 <p class="temp">{{temp}}<span class="unit">°C</span></p>
-<p class="cond">{{condition}}<span class="where"> · {{city}}</span></p>
+<p class="cond"><span class="dot">●</span> {{condition}}<span class="where"> · {{city}}</span></p>
 <div class="spec">
   <div class="row"><span class="k">今日区间</span><span class="fill"></span><span class="v"><em>{{low}}°</em> — {{high}}°</span></div>
   <div class="row"><span class="k">湿度</span><span class="fill"></span><span class="v">{{humidity}}</span></div>
   <div class="row"><span class="k">紫外线</span><span class="fill"></span><span class="v">{{uv}}</span></div>
 </div>
-<p class="src"><a href="{{source_url}}">{{source_url}}</a></p>
+<p class="src"><span class="k2">src: </span><a href="{{source_url}}">{{source_url}}</a></p>
 </body>
 </html>

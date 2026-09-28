@@ -26,8 +26,8 @@ body {
   padding: 120px 90px 160px;
   position: relative;
 }
-body::before {
-  content: "";
+/* CRT 背景：真 .fx div 不用 body::before——伪元素装饰旧引擎不落墨（REQ #415） */
+.fx {
   position: fixed;
   inset: 0;
   pointer-events: none;
@@ -70,6 +70,7 @@ body::before {
 </style>
 </head>
 <body>
+<div class="fx" aria-hidden="true"></div>
 <div class="title">{{title}}</div>
 <div class="subtitle">{{subtitle}}</div>
 <div class="qrpanel" id="qrbox"><div class="nosvg">二维码生成失败——用手机浏览器打开下面的链接。</div></div>

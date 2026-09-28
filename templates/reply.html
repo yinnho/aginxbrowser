@@ -26,9 +26,10 @@ body {
   position: relative;
   overflow-wrap: break-word;
 }
-/* CRT 背景：扫描线纹理 + 顶部磷光辉光 + 下缘暗角 —— 背景不是纯色填充 */
-body::before {
-  content: "";
+/* CRT 背景：扫描线纹理 + 顶部磷光辉光 + 下缘暗角 —— 背景不是纯色填充。
+   真 .fx div 不用 body::before：伪元素装饰在旧引擎不落墨（REQ #415），
+   金样本必须是「参照系自身健康」的写法。 */
+.fx {
   position: fixed;
   inset: 0;
   pointer-events: none;
@@ -46,17 +47,17 @@ body::before {
   padding-bottom: 30px;
   border-bottom: 1px solid var(--dim);
 }
-.q::before { content: "> "; color: var(--accent); }
+.q .p { color: var(--accent); }  /* 真 span 前缀，不用 .q::before（同上） */
 article { margin-top: 64px; position: relative; }
 p { margin: 0 0 44px; }
-/* 列表行：缩进竖线 + ▸ 前缀，不用圆点 */
+/* 列表行：缩进竖线 + > 前缀（真 span），不用圆点；▸ 在 macOS 宿主栈缺字形（REQ #415 附注） */
 .row {
   padding-left: 44px;
   border-left: 2px solid var(--dim);
   margin: 20px 0;
   position: relative;
 }
-.row::before { content: "▸ "; color: var(--accent); }
+.row .p { color: var(--accent); }
 strong { color: var(--accent); font-weight: 600; }
 code {
   font-family: inherit;
@@ -77,7 +78,8 @@ hr {
 </style>
 </head>
 <body>
-<p class="q">{{question}}</p>
+<div class="fx" aria-hidden="true"></div>
+<p class="q"><span class="p">&gt; </span>{{question}}</p>
 <pre id="src" hidden>{{body}}</pre>
 <article id="out"></article>
 <script>
@@ -107,7 +109,7 @@ hr {
     } else if (/^\s*(-{3,}|\*{3,})\s*$/.test(L)) {
       flush(); html.push('<hr>');
     } else if ((m = L.match(/^\s*[-*]\s+(.*)$/))) {
-      flush(); html.push('<div class="row">' + inline(m[1]) + '</div>');
+      flush(); html.push('<div class="row"><span class="p">&gt; </span>' + inline(m[1]) + '</div>');
     } else if ((m = L.match(/^\s*(\d+)[.、)]\s*(.*)$/))) {
       flush(); html.push('<div class="row">' + m[1] + '. ' + inline(m[2]) + '</div>');
     } else {
