@@ -1,3 +1,5 @@
+    #![allow(clippy::await_holding_lock)] // net tests hold PRIVATE_NET_ENV_LOCK across awaits on purpose — the guard IS the serialization (1f7486c)
+
     use super::*;
     use crate::diting_dom::parse_html;
 
@@ -14165,7 +14167,7 @@
             let _ = stream.flush();
             path_tx.send(path).unwrap();
         });
-        rt.set_url(&format!("https://example.com/app/index"));
+        rt.set_url("https://example.com/app/index");
         // Point <base href> at the local server so the resolved fetch lands
         // there (the page URL itself is non-fetchable https).
         rt.evaluate(&format!(
@@ -15322,7 +15324,7 @@ async fn fetch_referrer_policy_reaches_the_wire() {
             .and_then(|r| {
                 r.lines()
                     .find(|l| l.to_ascii_lowercase().starts_with("referer:"))
-                    .map(|l| l.splitn(2, ':').nth(1).unwrap_or("").trim().to_string())
+                    .and_then(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()))
             })
     };
     assert_eq!(referer_of("/default").as_deref(), Some("http://example.com/"));
@@ -16426,7 +16428,7 @@ fn document_evaluate_xpath_subset() {
 
     /// #110: the meta_code watchdog used to be a hard-coded 10s while the
     /// settle half of the same eval waits the caller's budget — a legitimate
-    /// >10s synchronous script (e.g. one forcing the #109 layout pass) was
+    /// `>10s` synchronous script (e.g. one forcing the #109 layout pass) was
     /// beheaded at 10s even with timeout_ms=90000. The watchdog must track
     /// the caller's budget, with the 10s floor preserved for default calls.
     #[test]
