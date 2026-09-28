@@ -94,7 +94,7 @@ GOD_FILE_GRANDFATHER = {
     "src/video.rs": 1672,
     "src/docgen/workflow.rs": 1615,
     "src/docgen/graph.rs": 1584,
-    "src/cdp/domains/page.rs": 1527,
+    "src/cdp/domains/page.rs": 1322,
 }
 
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)

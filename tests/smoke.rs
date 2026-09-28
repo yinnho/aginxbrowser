@@ -138,7 +138,7 @@ fn live_view_served_locally_with_drag_takeover() {
         let resp = ureq::get(&server.url(path))
             .timeout(Duration::from_secs(15))
             .call()
-            .unwrap_or_else(|_| panic!("GET {path}"));
+            .unwrap_or_else(|e| panic!("GET {path}: {e}"));
         assert!(
             resp.content_type().starts_with("text/html"),
             "{path} content-type: {}",
