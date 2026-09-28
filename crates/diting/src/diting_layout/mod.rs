@@ -158,8 +158,9 @@ fn to_taffy_style(style: &ComputedStyle, pct_h_resolves: bool) -> Style {
     // flex-column stand-in because taffy's native block algorithm has no
     // line alignment (upstream to_taffy_style's promote_for_alignment).
     // Cells join the promote: `td { text-align: center }` is everywhere in
-    // HTML-email-era markup.
-    let promote = matches!(display, CssDisplay::Block | CssDisplay::TableCell)
+    // HTML-email-era markup. So do inline-blocks: text-align inside them
+    // aligns the interior's inline content the same way (§9.4.2).
+    let promote = matches!(display, CssDisplay::Block | CssDisplay::TableCell | CssDisplay::InlineBlock)
         && matches!(style.text_align, Some(TextAlign::Center) | Some(TextAlign::Right));
     s.display = match display {
         CssDisplay::Block if promote => Display::Flex,
@@ -168,7 +169,19 @@ fn to_taffy_style(style: &ComputedStyle, pct_h_resolves: bool) -> Style {
         CssDisplay::Flex => Display::Flex,
         CssDisplay::Grid => Display::Grid,
         // The inline/IFC stand-in is a wrapping flex row (upstream model).
-        CssDisplay::Inline | CssDisplay::InlineBlock => Display::Flex,
+        CssDisplay::Inline => Display::Flex,
+        // An inline-block's INTERIOR is its own block formatting context
+        // (§9.4.1: an inline-block establishes an independent BFC): children
+        // stack vertically and block width:auto fills the box, same as any
+        // block container's children. Routing it through the flex-row IFC
+        // stand-in made block children ROW items — content-sized
+        // shrink-to-fit instead of fill (#166: Fusion Loading's
+        // `.next-loading-wrap` collapsed the cascade columns to min-content,
+        // 21px-wide category trees). The box's ATOMIC shrink-to-fit against
+        // the parent run lives in the run machinery (RunSeg::Nodes), not
+        // here.
+        CssDisplay::InlineBlock if promote => Display::Flex,
+        CssDisplay::InlineBlock => Display::Block,
         // Table stand-ins (table layout batch): a table is a column of row
         // wrappers, a row a non-wrapping row of cell items; cells already
         // mapped to Block above.
@@ -191,7 +204,7 @@ fn to_taffy_style(style: &ComputedStyle, pct_h_resolves: bool) -> Style {
         s.flex_direction = FlexDirection::Row;
         s.align_items = Some(AlignItems::STRETCH);
         s.flex_wrap = FlexWrap::NoWrap;
-    } else if display == CssDisplay::Inline || display == CssDisplay::InlineBlock {
+    } else if display == CssDisplay::Inline {
         s.flex_direction = FlexDirection::Row;
         s.flex_wrap = FlexWrap::Wrap;
         s.align_items = Some(AlignItems::FLEX_START);

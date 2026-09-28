@@ -1449,3 +1449,112 @@ mod anon_cell_stale_key_tests {
         assert_eq!(sp.len(), 1, "abs inline box missing from layout: {rects:?}");
     }
 }
+
+mod inline_block_interior_tests {
+    // #166: an inline-block's interior is its own BFC (§9.4.1) — block
+    // children stack and width:auto fills the box. The flex-row IFC
+    // stand-in used to make them row items: content-sized shrink-to-fit
+    // (the tmall cascade columns collapsed to 21px min-content).
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::{compute_styles, layout_dom};
+
+    const VW: f32 = 1280.0;
+
+    fn rect(html: &str, sheet: &str, sel: &str) -> (f32, f32, f32, f32) {
+        let tree = parse_html(html);
+        let rules = parse_stylesheet_for(sheet, (VW, 800.0), CssMediaType::Screen);
+        let styles = compute_styles(&tree, &rules, (VW, 800.0));
+        let rects = layout_dom(&tree, &styles, &crate::diting_fonts::font_book(), VW, 800.0);
+        let id = tree.query_selector(sel).unwrap().unwrap();
+        let r = rects.get(&id).unwrap();
+        (r.x, r.y, r.width, r.height)
+    }
+
+    #[test]
+    fn block_child_fills_inline_block() {
+        // The real-page shape: fixed-width inline-block shell (Fusion
+        // Loading), block width:auto inside, percent-width grandchild.
+        let (_x, _y, w, _h) = rect(
+            r#"<html><body><div id="row">
+                <span id="shell" style="display: inline-block; width: 250px"><div id="wrap">
+                    <div id="pct" style="width: 100%">仅百分比宽内容</div>
+                </div></span>
+            </div></body></html>"#,
+            "body { margin: 0 } #row { width: 750px }",
+            "#wrap",
+        );
+        assert!((w - 250.0).abs() <= 1.0, "block width:auto must fill the inline-block; got w={w}");
+    }
+
+    #[test]
+    fn empty_block_child_does_not_collapse_to_zero() {
+        // Variant D of the repro: no children at all — the block still
+        // fills; the old row mapping measured it to 0.
+        let (_x, _y, w, _h) = rect(
+            r#"<html><body>
+                <span id="shell" style="display: inline-block; width: 250px"><div id="wrap"></div></span>
+            </body></html>"#,
+            "body { margin: 0 }",
+            "#wrap",
+        );
+        assert!((w - 250.0).abs() <= 1.0, "childless block must not collapse; got w={w}");
+    }
+
+    #[test]
+    fn block_children_stack_vertically() {
+        // Two blocks inside one inline-block stack (BFC block flow), they
+        // must not end up side-by-side row items.
+        let tree = parse_html(r#"<html><body>
+            <span id="shell" style="display: inline-block; width: 250px">
+                <div id="a" style="height: 30px">a</div>
+                <div id="b" style="height: 30px">b</div>
+            </span>
+        </body></html>"#);
+        let rules = parse_stylesheet_for("body { margin: 0 }", (VW, 800.0), CssMediaType::Screen);
+        let styles = compute_styles(&tree, &rules, (VW, 800.0));
+        let rects = layout_dom(&tree, &styles, &crate::diting_fonts::font_book(), VW, 800.0);
+        let mut got = [None, None];
+        for (sel, slot) in [("#a", 0), ("#b", 1)] {
+            let id = tree.query_selector(sel).unwrap().unwrap();
+            got[slot] = rects.get(&id).map(|r| (r.x, r.y, r.width, r.height));
+        }
+        let (Some((_ax, ay, aw, _ah)), Some((_bx, by, bw, _bh))) = (got[0], got[1]) else {
+            panic!("missing boxes: {got:?}");
+        };
+        assert!(
+            (aw - 250.0).abs() <= 1.0 && (bw - 250.0).abs() <= 1.0 && by >= ay + 29.0,
+            "siblings stack and fill; got a(y={ay},w={aw}) b(y={by},w={bw})"
+        );
+    }
+
+    #[test]
+    fn auto_inline_block_still_shrinks_to_fit_in_run() {
+        // Regression guard for the OUTER side (#166 fix must not un-atomic
+        // the box): an auto-width inline-block in a text run keeps its
+        // shrink-to-fit content width instead of filling the line.
+        let (_x, _y, w, _h) = rect(
+            r#"<html><body><div id="row">word <span id="atom" style="display: inline-block">短</span></div></body></html>"#,
+            "body { margin: 0 } #row { width: 750px }",
+            "#atom",
+        );
+        assert!(w < 60.0, "auto inline-block stays shrink-to-fit; got w={w}");
+    }
+
+    #[test]
+    fn cascade_columns_all_fill() {
+        // The shipped symptom: three fixed-width inline-block columns; the
+        // 2nd/3rd collapsed because their content was narrower than the
+        // shell (col 1 masked the bug — its preferred width overflowed).
+        let sheet = "body { margin: 0 } #row { width: 750px } .col { display: inline-block; width: 250px } .wrap { height: 100px }";
+        let html = r#"<html><body><div id="row">
+            <span class="col"><div class="wrap" id="c1"><div style="width: 100%">很长很长很长很长很长很长很长很长</div></div></span>
+            <span class="col"><div class="wrap" id="c2"><div style="width: 100%">短</div></div></span>
+            <span class="col"><div class="wrap" id="c3"><input id="inp" style="width: 100%"></div></span>
+        </div></body></html>"#;
+        for sel in ["#c1", "#c2", "#c3"] {
+            let (_x, _y, w, _h) = rect(html, sheet, sel);
+            assert!((w - 250.0).abs() <= 1.0, "{sel} must be 250 wide; got w={w}");
+        }
+    }
+}

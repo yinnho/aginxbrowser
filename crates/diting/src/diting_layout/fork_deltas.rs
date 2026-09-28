@@ -558,12 +558,12 @@ fn sub_super_grows_line_box_and_strut_keeps_img_honest() {
 /// layer used to drop `display: inline-block` entirely (no enum variant, the
 /// declaration fell to `_ => return false`), so every inline list/stack
 /// rendered as a full-width block — and @supports (display:inline-block)
-/// claimed support the cascade then ignored. The atomic-box model must also
-/// keep the box from overflowing: upstream's NoWrap single-line approximation
-/// ran wikipedia's .cslist as one ~1000px line inside the infobox <td>, which
-/// became the table's min-content floor and blew the 22em table to 641px.
-/// Ours wraps, so shrink-to-fit is min(max-content, available) by
-/// construction. Structural assertions, no Chrome oracle.
+/// claimed support the cascade then ignored. The atomic box keeps its own
+/// shrink-to-fit width against the parent run, and since 批259 (#166) the
+/// INTERIOR is a real BFC: `li`s are block-level list-items and stack
+/// VERTICALLY (Chrome truth — the pre-#166 flex-row mapping laid them out as
+/// wrapping horizontal rows, a divergence this ledger entry used to pin by
+/// accident). Structural assertions, no Chrome oracle.
 #[test]
 fn inline_block_is_atomic_shrink_to_fit_and_wraps() {
     use crate::diting_css::{parse_stylesheet_for, CssMediaType};
@@ -590,16 +590,16 @@ fn inline_block_is_atomic_shrink_to_fit_and_wraps() {
         "inline-block must not exceed its containing block (upstream ran ~1000px); got {rl:?}"
     );
     assert!(
-        rl.width > 100.0,
-        "17 items must shrink-wrap to more than one item's width; got {rl:?}"
+        rl.width > 40.0,
+        "shrink-to-fit keeps the widest item's width, not one glyph; got {rl:?}"
     );
     let lh = {
         let (_, _, lh) = super::font_context(&tree, list, &styles, &crate::diting_fonts::font_book());
         lh
     };
     assert!(
-        rl.height >= lh * 1.8,
-        "must wrap onto multiple lines (min-content floor bomb came from one-line layout); got {rl:?}"
+        rl.height >= lh * 15.0,
+        "17 block-level list items stack vertically inside the BFC; got {rl:?}"
     );
 
     let chip = tree.query_selector_all("#chip").unwrap()[0];
