@@ -506,3 +506,31 @@ common+workflow schema、template 结构+:3642 现场、cli.writeDiagram；
 批5 又读了 architecture/dataflow/lifecycle 渲染器全文。
 未细读（开工前必读）：workflow-compiler 4400 行细节、i18n 目录、legend 内部、
 bin/archify.mjs 工件检查器、engineering-profiles、delta、migrations。
+
+## 7. 上游 issue 流吸收账（2026-09-27 起）
+
+总纲之外的第二条吸收通道：上游 tt-a1i/archify 的开放 issue 当免费审计
+清单——先查我们免疫与否，免疫则补钉测，有洞则修。与「曝光循环=先修后秀」
+同一打法，方向反过来（吃进来的洞不回帖，archify 无账号且只学不发纪律
+不变——上游引用只在本地账与 memory 里记）。
+
+- **#424（viewer 原型链洞）** ✅ 批221（4753d27 关本仓 #142）：null-proto
+  自食 hasOwnProperty——VIEWER_JS 数据岛查询 `data[node]` 在 Object 原型
+  属性上翻车（"constructor" 命中真节点字段的概率性污染）。我们的数据岛
+  走 null-proto 防 hasOwnProperty 注入，但 VIEWER_JS 读侧没防原型链。
+- **#91（BMP emoji-presentation 宽度）** ✅ 批223：docgen 侧 `is_fullwidth`
+  （spec.rs）申诉符号表已全覆盖（0x2705/0x2B50/0x26A1/0x231A..B/0x26D4 在
+  表），唯一缺口 Hangul Jamo Ext-A 尾巴 A97C→A97F 补齐 + 钉测
+  `emoji_presentation_counts_two_and_narrow_neighbours_one`
+  （✅⭐⚡⌛⛔=10 单元、→☎①=3、Jamo Ext-A=2）。**引擎孪生洞**：diting
+  `segments()` 对 U+FE00..=FE0F 无特判——VS16 跟着 fallback 脸基字符时
+  掉队到 primary notdef 独立成段，量出整 em 幽灵 advance（实测 12→32px）。
+  修=变体选择符骑基字符的段（脸真映射它才保留——蒙古文 FVS 的 GSUB 路；
+  未映射则丢弃，default-ignorable 不画不量）。钉测
+  `variation_selectors_ride_the_base_and_measure_zero`。
+- **#114（SVG 裸 data-* 属性非 XML 良构）** ✅ 批223：sigil 路径既有
+  replace+`every_shape_emits_a_scaled_group` 钉测已看住；补跨家族防线
+  `no_valueless_data_attributes_in_any_family_svg`——五族（sequence/
+  workflow/architecture/dataflow/lifecycle）各一道 fence 渲染后扫全部
+  `<svg>` 段，`data-*` 名后必须紧跟 `="`。下一个人引入模板 token 漏进
+  产物，这里红。
