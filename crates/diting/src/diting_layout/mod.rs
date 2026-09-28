@@ -1386,7 +1386,7 @@ fn trim_run_edge_whitespace(
 /// upstream, which keys a 16-entry per-item cache by (width, Wrap).
 #[allow(clippy::too_many_arguments)]
 fn run_tokens(
-    text: &String,
+    text: &str,
     font_size: f32,
     bold: bool,
     fonts: &FontBook,
@@ -1456,7 +1456,7 @@ fn measure_text_leaf(
     };
     // Greedy wrap over the shared breaker (batch 4a): measure and paint see
     // the same lines by construction.
-    let lines = text::greedy_wrap(&tokens, wrap_at, ws);
+    let lines = text::greedy_wrap(tokens, wrap_at, ws);
     let min_content = matches!(inputs.available_space.width, taffy::AvailableSpace::MinContent);
     // no-soft-wrap modes remove every soft wrap opportunity (CSS Text §5):
     // min-content rises to the full single line, same as max-content.
@@ -1989,17 +1989,20 @@ fn build_replaced_leaf(
         _ => None,
     };
 
-    let mut s = Style::default();
-    s.item_is_replaced = true;
     // Positioning rides into replaced leaves too (to_taffy_style does this
     // for every boxed element): without it an absolutely-positioned
     // input/img/select kept its taffy-relative style, the reparent pass
     // still moved it to the containing block, and it then stacked in flow
     // there ignoring its insets.
-    s.position = match style.position {
+    let position = match style.position {
         Some(crate::diting_css::PositionMode::Absolute)
         | Some(crate::diting_css::PositionMode::Fixed) => Position::Absolute,
         _ => Position::Relative,
+    };
+    let mut s = Style {
+        item_is_replaced: true,
+        position,
+        ..Default::default()
     };
     // Inset/clamp unset values are CSS `auto` (same mapping as
     // to_taffy_style's local lpa_auto).
@@ -2284,7 +2287,7 @@ fn build_normal_sibling(
 /// keywords, which resolve through auto quote nesting: even depth uses double
 /// curly quotes, odd depth flips to singles.
 fn q_quote_pair(depth: usize) -> (&'static str, &'static str) {
-    if depth % 2 == 0 {
+    if depth.is_multiple_of(2) {
         ("\u{201C}", "\u{201D}")
     } else {
         ("\u{2018}", "\u{2019}")
@@ -2503,11 +2506,9 @@ fn estimate_float_height(tree: &DomTree, styles: &HashMap<NodeId, ComputedStyle>
             .flatten()
             .unwrap_or_default();
         let st = styles.get(&id);
-        if let Some(h) = st.and_then(|s| s.height) {
-            if let crate::diting_css::Length::Px(v) = h {
-                *est += v;
-                return;
-            }
+        if let Some(crate::diting_css::Length::Px(v)) = st.and_then(|s| s.height) {
+            *est += v;
+            return;
         }
         if matches!(tag.as_str(), "li" | "tr" | "dt" | "dd" | "p" | "figcaption" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
             *est += st.and_then(|s| s.font_size).unwrap_or(16.0) * 1.2;
@@ -2574,7 +2575,7 @@ fn zone_end_at_budget(
         // character-count wrap estimate (same heuristic as the float side).
         let st = styles.get(cid);
         // Whitespace-only text between blocks contributes nothing.
-        let ws_text = tree.with_node(*cid, |n| !n.is_element() && n.text_content_of_text_node().map_or(false, |t| t.trim().is_empty())).unwrap_or(false);
+        let ws_text = tree.with_node(*cid, |n| !n.is_element() && n.text_content_of_text_node().is_some_and(|t| t.trim().is_empty())).unwrap_or(false);
         if ws_text {
             continue;
         }
@@ -4088,6 +4089,7 @@ fn pseudo_leaf(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_element_inner(
     tree: &DomTree,
     id: NodeId,
@@ -4246,9 +4248,9 @@ fn build_element_inner(
             .get(cid)
             .is_some_and(|s| s.float_side.is_some() && s.display != Some(CssDisplay::None))
     };
-    if child_ids.iter().any(|cid| is_float_child(cid)) {
+    if child_ids.iter().any(is_float_child) {
         let is_whitespace_text =
-            |cid: &NodeId| -> bool { tree.with_node(*cid, |n| !n.is_element() && n.text_content_of_text_node().map_or(false, |t| t.trim().is_empty())).unwrap_or(false) };
+            |cid: &NodeId| -> bool { tree.with_node(*cid, |n| !n.is_element() && n.text_content_of_text_node().is_some_and(|t| t.trim().is_empty())).unwrap_or(false) };
         // An empty bridge sibling (upstream is_empty_bridge): whitespace
         // text OR an element with no authored size/margin/padding/border
         // whose subtree paints nothing — the legacy compatibility boxes real
@@ -4300,7 +4302,7 @@ fn build_element_inner(
             }
             styles
                 .get(cid)
-                .map_or(true, |s| s.display != Some(CssDisplay::Block))
+                .is_none_or(|s| s.display != Some(CssDisplay::Block))
         });
         let right_floats: Vec<NodeId> = child_ids
             .iter()
@@ -4481,12 +4483,12 @@ fn build_element_inner(
             let mut pair_children: Vec<taffy::tree::NodeId> = Vec::new();
             if run_len >= 2 {
                 let mut inner: Vec<taffy::tree::NodeId> = Vec::new();
-                for i in float_idx..run_end {
-                    if !is_float_child(&child_ids[i]) {
+                for cid in &child_ids[float_idx..run_end] {
+                    if !is_float_child(cid) {
                         continue;
                     }
                     if let Some(f) =
-                        build_element(tree, child_ids[i], styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta)
+                        build_element(tree, *cid, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta)
                     {
                         inner.push(f);
                     }
@@ -4497,7 +4499,7 @@ fn build_element_inner(
                     align_items: Some(AlignItems::FLEX_START),
                     ..Default::default()
                 };
-                if let Some(row) = taffy_tree.new_with_children(inner_style, &inner).ok() {
+                if let Ok(row) = taffy_tree.new_with_children(inner_style, &inner) {
                     pair_children.push(row);
                 }
             } else if let Some(f) =
@@ -4658,11 +4660,11 @@ fn build_element_inner(
         if run_len >= 2 {
             // --- 8c: the wrapping float-grid row -------------------------
             let mut row_children: Vec<taffy::tree::NodeId> = Vec::new();
-            for i in float_idx..run_end {
-                if !is_float_child(&child_ids[i]) {
+            for cid in &child_ids[float_idx..run_end] {
+                if !is_float_child(cid) {
                     continue;
                 }
-                if let Some(f) = build_element(tree, child_ids[i], styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta) {
+                if let Some(f) = build_element(tree, *cid, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta) {
                     row_children.push(f);
                 }
             }
@@ -5633,6 +5635,7 @@ pub fn layout_solve(
 /// orphan subtree's topmost element — the whole downstream build
 /// (build_element walk, layout_collect) runs from it, and the ICB is that
 /// subtree's own viewport.
+#[allow(clippy::too_many_arguments)]
 pub fn layout_solve_rooted(
     tree: &DomTree,
     styles: &HashMap<NodeId, ComputedStyle>,
