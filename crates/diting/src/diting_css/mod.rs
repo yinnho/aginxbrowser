@@ -2005,19 +2005,14 @@ pub enum TextOverflow {
 /// stretches, Contain/Cover pick min/max of the per-axis scale ratios,
 /// None uses the natural size, ScaleDown is Contain unless the natural
 /// size is already smaller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ObjectFit {
+    #[default]
     Fill,
     Contain,
     Cover,
     None,
     ScaleDown,
-}
-
-impl Default for ObjectFit {
-    fn default() -> Self {
-        ObjectFit::Fill
-    }
 }
 
 /// One axis of `object-position` (batch 5c): a percentage of the free
@@ -2096,8 +2091,9 @@ pub enum AlignMode {
     FlexEnd,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Display {
+    #[default]
     Block,
     Inline,
     InlineBlock,
@@ -2110,12 +2106,6 @@ pub enum Display {
     TableRow,
     TableCell,
     None,
-}
-
-impl Default for Display {
-    fn default() -> Self {
-        Display::Block
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4348,7 +4338,7 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             let mut line: Option<Option<BorderStyle>> = None; // Some(None) = explicit none
             let mut color: Option<Color> = None;
             for tok in v.split_whitespace() {
-                let w = len(tok).or_else(|| match tok {
+                let w = len(tok).or(match tok {
                     "thin" => Some(Length::Px(1.0)),
                     "medium" => Some(Length::Px(3.0)),
                     "thick" => Some(Length::Px(5.0)),
@@ -4391,7 +4381,7 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             let mut line: Option<Option<BorderStyle>> = None;
             let mut color: Option<Color> = None;
             for tok in v.split_whitespace() {
-                let w = len(tok).or_else(|| match tok {
+                let w = len(tok).or(match tok {
                     "thin" => Some(Length::Px(1.0)),
                     "medium" => Some(Length::Px(3.0)),
                     "thick" => Some(Length::Px(5.0)),
@@ -4472,9 +4462,9 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
         "font-size" => {
             // Resolved by the cascade's font-size pre-pass (em/% need the
             // PARENT font-size); here only px/keywords can apply directly.
-            parse_font_size_len(v).map(|l| match l {
-                CssLength::Px(px) => style.font_size = Some(px),
-                _ => {} // em/rem/% handled by the pre-pass, not this arm
+            // em/rem/% handled by the pre-pass, not this arm.
+            parse_font_size_len(v).map(|l| if let CssLength::Px(px) = l {
+                style.font_size = Some(px)
             }).is_some()
         }
         "width" => {
@@ -4865,7 +4855,7 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             };
             let parse_list = |s: &str| -> Option<Vec<Length>> {
                 let vals: Vec<Option<Length>> =
-                    s.split_whitespace().map(|t| len(t)).collect();
+                    s.split_whitespace().map(len).collect();
                 if vals.iter().any(|v| v.is_none()) || vals.is_empty() || vals.len() > 4 {
                     return None;
                 }
@@ -4914,7 +4904,7 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                     "center" => Some(ObjectPositionPart::Percent(50.0)),
                     "right" | "bottom" => Some(ObjectPositionPart::Percent(100.0)),
                     _ => {
-                        let num = s.strip_suffix('%').map(|n| n.css_f32()).flatten();
+                        let num = s.strip_suffix('%').and_then(|n| n.css_f32());
                         if let Some(p) = num {
                             return Some(ObjectPositionPart::Percent(p));
                         }
