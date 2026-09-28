@@ -11,6 +11,7 @@ use rmcp::transport::streamable_http_server::{
 use serde::{Deserialize, Serialize};
 
 mod account;
+mod auth;
 mod browser;
 // CDP bridge (faces layer): /json discovery, the /devtools WebSocket face
 // and the domain dispatch. Rides the engine's Page API; a product concern
@@ -370,6 +371,19 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // #162: opt-in token gate. Validated here — a mis-shaped token is a
+    // hard refusal, never a silently half-open surface. The ambient copy
+    // feeds CDP discovery's webSocketDebuggerUrl embedding.
+    let auth_token = auth::token_from_env().map_err(|e| anyhow::anyhow!(e))?;
+    auth::set_ambient(auth_token.clone());
+    if auth_token.is_some() {
+        tracing::info!(
+            "auth gate on ({}): every route except /health requires the token; \
+             CDP discovery embeds it into webSocketDebuggerUrl",
+            auth::TOKEN_ENV
+        );
+    }
+
     let app = Router::new()
         .route("/", get(status_handler))
         .route("/status", get(status_handler))
@@ -457,6 +471,19 @@ async fn main() -> anyhow::Result<()> {
             post(pdf_handler).layer(axum::extract::DefaultBodyLimit::max(max_body_bytes())),
         );
 
+    // #162: the gate layers on AFTER every route above (screenshot routes,
+    // /mcp, and the CDP discovery + /devtools WS surface included) so it
+    // wraps the whole face; /health stays open inside the middleware.
+    // Unset env = no layer at all — the open-loopback default keeps its
+    // exact behavior (dogfood, install.sh, DSH, carrier untouched).
+    let auth_gate_on = auth_token.is_some();
+    let app = match auth_token {
+        Some(t) => app.layer(axum::middleware::from_fn(move |req, next| {
+            auth::gate(t.clone(), req, next)
+        })),
+        None => app,
+    };
+
     let bind_addr = if let Some(port) = cdp_port {
         format!("127.0.0.1:{port}")
     } else {
@@ -479,6 +506,22 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tracing::info!("aginxbrowser listening on {}", listener.local_addr()?);
+    // #162: a non-loopback bind with no token is an open driving surface
+    // for the whole LAN — say so once at startup instead of letting it
+    // look "configured" (obscura#491's env-mismatch precedent).
+    if !auth_gate_on {
+        let addr = listener.local_addr()?;
+        let loopback = addr.ip().is_loopback();
+        if !loopback {
+            tracing::warn!(
+                "HTTP/CDP surface has NO auth on {} — any process on this \
+                 machine (and, on this bind, the LAN) can drive logged-in \
+                 sessions; set {} to gate it (#162)",
+                addr,
+                auth::TOKEN_ENV
+            );
+        }
+    }
     if let Some(port) = cdp_port {
         tracing::info!(
             "CDP on loopback — agent-browser: `agent-browser --cdp {port}` · \

@@ -152,6 +152,9 @@
 // ---------------------------------------------------------------------------
 const qs = new URLSearchParams(location.search);
 const API = (qs.get("api") || "").replace(/\/+$/, "");
+// #162: when the instance sets AGINXBROWSER_TOKEN, the human opens
+// /live?token=<t> and every API call here carries it as a Bearer header.
+const TOKEN = qs.get("token") || "";
 const $ = (id) => document.getElementById(id);
 
 const state = {
@@ -168,7 +171,11 @@ const state = {
 };
 
 function api(path, opts) {
-  return fetch(API + path, Object.assign({ headers: { "Content-Type": "application/json" } }, opts))
+  const headers = Object.assign(
+    { "Content-Type": "application/json" },
+    TOKEN ? { "Authorization": "Bearer " + TOKEN } : {}
+  );
+  return fetch(API + path, Object.assign({}, opts, { headers }))
     .then(async (r) => {
       if (!r.ok) throw new Error((await r.text().catch(() => "")) || r.status + " " + r.statusText);
       return r;

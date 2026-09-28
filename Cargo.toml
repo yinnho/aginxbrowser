@@ -156,6 +156,9 @@ ureq = { version = "2", features = ["json"] }
 # (moved with diting_cdp into the product crate; the engine still carries
 # its own copy for its parser tests).
 html5ever = "0.39"
+# auth.rs gate tests drive the axum Router via ServiceExt::oneshot (same
+# version axum 0.7.9 already compiles into the tree).
+tower = { version = "0.5", features = ["util"] }
 
 # Unwinding is REQUIRED: ops wrap their bodies in std::panic::catch_unwind so a
 # panic degrades to an error return instead of unwinding into V8's FFI frame and

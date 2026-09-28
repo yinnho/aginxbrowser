@@ -24,6 +24,17 @@ use crate::cdp::types::{CdpRequest, CdpResponse};
 const BROWSER_STRING: &str = "Chrome/122.0.6261.69";
 const PROTOCOL_VERSION: &str = "1.3";
 
+/// `ws://{host}/devtools/{kind}/{id}`, with `?token=` appended when the
+/// #162 gate is on — the URL itself becomes the capability, Chrome's own
+/// discovery shape, so Playwright/Puppeteer clients connect with zero
+/// change. Pure so the embedding is pinnable without booting a server.
+pub fn ws_debugger_url(host: &str, kind: &str, id: &str, token: Option<&str>) -> String {
+    match token {
+        Some(t) => format!("ws://{host}/devtools/{kind}/{id}?token={t}"),
+        None => format!("ws://{host}/devtools/{kind}/{id}"),
+    }
+}
+
 /// `/json/version` — the discovery endpoint Playwright (`connectOverCDP`) and
 /// Puppeteer (`connect`) hit first to learn the WebSocket debugger URL. Each
 /// call mints a fresh browser id; there is no persistent browser registry.
@@ -35,7 +46,7 @@ pub async fn json_version(Host(host): Host) -> impl IntoResponse {
         "User-Agent": BROWSER_STRING,
         "V8-Version": "12.2.285.20",
         "WebKit-Version": "537.36",
-        "webSocketDebuggerUrl": format!("ws://{host}/devtools/browser/{browser_id}"),
+        "webSocketDebuggerUrl": ws_debugger_url(&host, "browser", &browser_id.to_string(), crate::auth::ambient()),
     }))
 }
 
@@ -73,7 +84,7 @@ pub async fn json_list(Host(host): Host) -> impl IntoResponse {
         "title": "about:blank",
         "type": "page",
         "url": "about:blank",
-        "webSocketDebuggerUrl": format!("ws://{host}/devtools/page/{page_id}"),
+        "webSocketDebuggerUrl": ws_debugger_url(&host, "page", &page_id.to_string(), crate::auth::ambient()),
     }]))
 }
 
@@ -366,6 +377,21 @@ pub(crate) async fn pump_idle_pages(ctx: &mut CdpContext) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::cdp::types::CdpRequest;
+
+    /// #162: discovery embeds the gate token into webSocketDebuggerUrl —
+    /// gate off keeps the bare Chrome shape; gate on appends ?token= so
+    /// the URL itself is the capability.
+    #[test]
+    fn ws_debugger_url_embeds_gate_token_only_when_set() {
+        assert_eq!(
+            ws_debugger_url("127.0.0.1:8089", "browser", "abc", None),
+            "ws://127.0.0.1:8089/devtools/browser/abc"
+        );
+        assert_eq!(
+            ws_debugger_url("127.0.0.1:8089", "page", "abc", Some("t-ok-0123456789")),
+            "ws://127.0.0.1:8089/devtools/page/abc?token=t-ok-0123456789"
+        );
+    }
 
     /// Provision a page-mode connection's default page and load a real
     /// document, mirroring what connection_loop does before any command.

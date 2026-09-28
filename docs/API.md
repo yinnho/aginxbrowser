@@ -1853,6 +1853,7 @@ If AginxBrowser is deployed on a remote server, connect through an SSH tunnel:
 
 | Variable | Default | Description |
 |------|------|------|
+| `AGINXBROWSER_TOKEN` | unset | Opt-in auth gate for the whole HTTP/WS surface (#162). Unset = no gate (loopback dev, `/mcp` dogfood, DSH, carrier all keep zero-config access). Set = every route except `/health` requires the token via `Authorization: Bearer <t>` or `?token=<t>` — the `/devtools/*` WebSocket upgrade and `/mcp` included. CDP discovery (`/json/version`, `/json/list`) embeds the token into `webSocketDebuggerUrl`, so Playwright `connectOverCDP` / Puppeteer `connect` work with zero client change; the human takeover view carries it too (`/live?session=…&token=…`). Value must be 16+ chars of `[A-Za-z0-9_-]` (URL-safe so the header and query forms are the same string) — an invalid shape refuses to boot rather than serve a half-open surface |
 | `AGINXBROWSER_BIND` | `0.0.0.0:8089` | HTTP server listen address |
 | `AGINXBROWSER_STEALTH` | Enabled | `0` disables stealth (for diagnostics) |
 | `AGINXBROWSER_UA` | macOS Chrome145 persona | Spoofed User-Agent for browser traffic (a pinned persona from the fingerprint pool — see `/health`'s `ua` for what this instance presents; search-engine transports keep their own defaults). Startup logs a `fingerprint mismatch` warning when the UA's browser family/major version disagrees with the TLS fingerprint (default chrome145) — an intentionally coherent pair avoids a WAF tell |
