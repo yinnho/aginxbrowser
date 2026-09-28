@@ -78,8 +78,14 @@ pub fn detect_captcha_type(url: &str, html: Option<&str>) -> Option<CaptchaType>
         return Some(CaptchaType::SliderCaptcha);
     }
     // Ali/Taobao risk control: the punish page is a slider; x5sec is the
-    // token appended once risk control has engaged.
-    if url.contains("punish.taobao.com") || url.contains("punish.tmall.com") || url.contains("x5sec")
+    // token appended once risk control has engaged. 1688 lands the same
+    // wall on the store's own domain at `_____tmd_____/punish` — no
+    // punish.* host ever appears (the kongze field report). Same needle
+    // the session faces already know (har::challenge_kind, verdict.rs).
+    if url.contains("punish.taobao.com")
+        || url.contains("punish.tmall.com")
+        || url.contains("x5sec")
+        || url.contains("_____tmd_____/punish")
     {
         return Some(CaptchaType::SliderCaptcha);
     }
@@ -118,7 +124,16 @@ pub fn detect_captcha_type(url: &str, html: Option<&str>) -> Option<CaptchaType>
         {
             return Some(CaptchaType::SliderCaptcha);
         }
-        if html.contains("punish.taobao.com") || html.contains("punish.tmall.com") {
+        // 1688 serves the punish page in place: the product URL answers
+        // HTTP 200 and only the body betrays it — `<title>验证码拦截</title>`
+        // plus the tmd endpoints in its scripts. That title is how the
+        // kongze operator detected the wall by hand; here it becomes a
+        // machine-readable event. Same needles as har::body_challenge.
+        if html.contains("punish.taobao.com")
+            || html.contains("punish.tmall.com")
+            || html.contains("_____tmd_____/punish")
+            || html.contains("\u{9a8c}\u{8bc1}\u{7801}\u{62e6}\u{622a}")
+        {
             return Some(CaptchaType::SliderCaptcha);
         }
     }
@@ -407,6 +422,40 @@ mod tests {
         assert!(detect_captcha_type(
             "https://h5api.m.taobao.com/h5/mtop.taobao.shop.simple.item.fetch/1.0/",
             Some(ok)
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn tmd_punish_pages_are_detected_on_the_store_domain() {
+        // The kongze field report: 1688 lands the wall on the store's own
+        // domain, so the punish.* host needles never fire.
+        assert!(matches!(
+            detect_captcha_type(
+                "https://kongze.1688.com/_____tmd_____/punish?src=detail",
+                None
+            ),
+            Some(CaptchaType::SliderCaptcha)
+        ));
+        // The in-place variant — the product URL answers 200, only the
+        // body betrays it (the title is the operator's own evidence).
+        let wall = r#"<html><head><title>验证码拦截</title></head><body><div id="nc_1_wrapper"></div></body></html>"#;
+        assert!(matches!(
+            detect_captcha_type("https://kongze.1688.com/page/offerlist.htm", Some(wall)),
+            Some(CaptchaType::SliderCaptcha)
+        ));
+        // A tmd punish URL riding in a body (script-driven redirect).
+        assert!(matches!(
+            detect_captcha_type(
+                "https://detail.1688.com/offer/123.html",
+                Some(r#"<script>location.href="https://detail.1688.com/_____tmd_____/punish"</script>"#)
+            ),
+            Some(CaptchaType::SliderCaptcha)
+        ));
+        // An ordinary store page stays clean.
+        assert!(detect_captcha_type(
+            "https://kongze.1688.com/page/offerlist.htm",
+            Some(r#"<html><title>某某硅胶制品旗舰店</title></html>"#)
         )
         .is_none());
     }
