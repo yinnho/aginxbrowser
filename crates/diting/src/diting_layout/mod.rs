@@ -1482,12 +1482,68 @@ fn measure_text_leaf(
 
 /// The inline-formatting-context stand-in around a run of inline content:
 /// a wrapping flex row (upstream run_wrapper_style / outer_style model).
-fn run_wrapper_style() -> Style {    Style {
+/// `ws` is the white-space in effect on the run's formatting context
+/// (#158): a mode with no soft wrap opportunities (nowrap/pre) removes
+/// the break between atomic inlines too — the row stops wrapping and its
+/// items stop shrinking (a nowrap run overflows its box like Chrome's, it
+/// never compresses its atoms to fit).
+fn run_wrapper_style(ws: WhiteSpace) -> Style {
+    Style {
         display: Display::Flex,
         flex_direction: FlexDirection::Row,
-        flex_wrap: FlexWrap::Wrap,
+        flex_wrap: if ws.no_soft_wrap() { FlexWrap::NoWrap } else { FlexWrap::Wrap },
         align_items: Some(AlignItems::FLEX_START),
         ..Style::default()
+    }
+}
+
+/// #158 companion: leaves entering a no-soft-wrap run keep their measured
+/// width — flex's default shrink would squeeze them onto the one line,
+/// where Chrome lets the unbreakable content overflow instead.
+fn pin_leaf_widths(taffy_tree: &mut TaffyTree<TextLeaf>, leaves: &[taffy::tree::NodeId]) {
+    for &l in leaves {
+        let mut st = match taffy_tree.style(l) {
+            Ok(s) => s.clone(),
+            Err(_) => continue,
+        };
+        st.flex_shrink = 0.0;
+        let _ = taffy_tree.set_style(l, st);
+    }
+}
+
+/// The effective white-space governing `child`'s participation in an
+/// inline formatting context: the fold (most-restrictive wins, the
+/// documented "any nowrap pins the run" precedent) of the CONTAINER's
+/// resolved value — the parent, white-space being inherited — and the
+/// child's own when it is an element that declared one. Text nodes have
+/// no style entry; their parent read mirrors the nws lookup the run
+/// builder uses.
+fn ifc_white_space(
+    tree: &DomTree,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    child: NodeId,
+    is_text: bool,
+) -> WhiteSpace {
+    let parent_ws = tree
+        .with_node(child, |n| n.parent)
+        .flatten()
+        .and_then(|h| styles.get(&h))
+        .and_then(|s| s.white_space);
+    let own_ws = if is_text {
+        None
+    } else {
+        styles.get(&child).and_then(|s| s.white_space)
+    };
+    match (parent_ws, own_ws) {
+        (Some(p), Some(o)) => {
+            if ws_rank(o) > ws_rank(p) {
+                o
+            } else {
+                p
+            }
+        }
+        (Some(p), None) | (None, Some(p)) => p,
+        (None, None) => WhiteSpace::Normal,
     }
 }
 
@@ -2122,9 +2178,10 @@ fn build_normal_sibling(
             if let Some(leaf) = build_replaced_leaf(tree, child, styles, images, taffy_tree, node_map, sd) {
                 // A lone inline atom still gets the wrapping-run stand-in so
                 // it lays out on the text baseline path like the main loop.
-                if let Ok(wrapper) =
-                    taffy_tree.new_with_children(run_wrapper_style(), &[leaf])
-                {
+                if let Ok(wrapper) = taffy_tree.new_with_children(
+                    run_wrapper_style(ifc_white_space(tree, styles, child, false)),
+                    &[leaf],
+                ) {
                     run_wrappers.push(wrapper);
                     direct.push(wrapper);
                 }
@@ -2143,7 +2200,10 @@ fn build_normal_sibling(
         // box and gets the wrapping-run stand-in so it sits on the text line
         // path like a replaced atom, sized shrink-to-fit by the parent run.
         if let Some(sub) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta) {
-            if let Ok(wrapper) = taffy_tree.new_with_children(run_wrapper_style(), &[sub]) {
+            if let Ok(wrapper) = taffy_tree.new_with_children(
+                run_wrapper_style(ifc_white_space(tree, styles, child, false)),
+                &[sub],
+            ) {
                 run_wrappers.push(wrapper);
                 direct.push(wrapper);
             }
@@ -2204,7 +2264,11 @@ fn build_normal_sibling(
             }
         }
         if !leaves.is_empty() {
-            if let Ok(wrapper) = taffy_tree.new_with_children(run_wrapper_style(), &leaves) {
+            let ws = ifc_white_space(tree, styles, child, is_text);
+            if ws.no_soft_wrap() {
+                pin_leaf_widths(taffy_tree, &leaves);
+            }
+            if let Ok(wrapper) = taffy_tree.new_with_children(run_wrapper_style(ws), &leaves) {
                 run_wrappers.push(wrapper);
                 direct.push(wrapper);
             }
@@ -2570,6 +2634,7 @@ fn build_flow_column(
     meta: &mut TableBuildMeta,
     font_size: f32,
     lh_elem: f32,
+    container_ws: WhiteSpace,
 ) -> Vec<taffy::tree::NodeId> {
     enum RunSeg {
         Text(String, f32, bool, [u8; 4], f32, TextDecorations, f32, bool, f32, WhiteSpace, bool, Option<text::HanSlot>),
@@ -2611,6 +2676,14 @@ fn build_flow_column(
             }
             return;
         }
+        // #158: the wrapper stops wrapping when no segment (nor the
+        // container) leaves a soft wrap opportunity — the same fold the
+        // pure-text branch runs, plus the column's container value for
+        // runs of pure atomic inlines that carry no ws of their own.
+        let ws = segs.iter().fold(container_ws, |acc, s| match s {
+            RunSeg::Text(.., w, _, _) if ws_rank(*w) > ws_rank(acc) => *w,
+            _ => acc,
+        });
         let mut leaves: Vec<taffy::tree::NodeId> = Vec::new();
         for seg in segs {
             match seg {
@@ -2622,7 +2695,10 @@ fn build_flow_column(
         }
         trim_run_edge_whitespace(taffy_tree, &mut leaves);
         if !leaves.is_empty() {
-            if let Ok(wrapper) = taffy_tree.new_with_children(run_wrapper_style(), &leaves) {
+            if ws.no_soft_wrap() {
+                pin_leaf_widths(taffy_tree, &leaves);
+            }
+            if let Ok(wrapper) = taffy_tree.new_with_children(run_wrapper_style(ws), &leaves) {
                 run_wrappers.push(wrapper);
                 flow_children.push(wrapper);
             }
@@ -3177,7 +3253,18 @@ fn build_table(
                                 run_wrappers.retain(|r| r != &w);
                                 let _ = taffy_tree.remove(w);
                             }
-                            match taffy_tree.new_with_children(run_wrapper_style(), &leaves) {
+                            // #158: the merged run inherits the members' most
+                            // restrictive white-space — a nowrap inline split
+                            // by a block keeps its pieces on one line.
+                            let ws = group.iter().fold(WhiteSpace::Normal, |acc, &mid| {
+                                let is_text = tree.with_node(mid, |n| n.is_text()).unwrap_or(false);
+                                let w = ifc_white_space(tree, styles, mid, is_text);
+                                if ws_rank(w) > ws_rank(acc) { w } else { acc }
+                            });
+                            if ws.no_soft_wrap() {
+                                pin_leaf_widths(taffy_tree, &leaves);
+                            }
+                            match taffy_tree.new_with_children(run_wrapper_style(ws), &leaves) {
                                 Ok(wrapper) => {
                                     run_wrappers.push(wrapper);
                                     Some(wrapper)
@@ -4097,6 +4184,18 @@ fn build_element_inner(
                 return;
             }
         }
+        // #158: the element's own white-space seeds the fold — the
+        // container governs the breaks between its inline content, and
+        // segment values only pin further (the ranked "any nowrap pins
+        // the run" precedent).
+        let container_ws = styles
+            .get(&id)
+            .and_then(|s| s.white_space)
+            .unwrap_or(WhiteSpace::Normal);
+        let ws = segs.iter().fold(container_ws, |acc, s| match s {
+            RunSeg::Text(.., w, _, _) if ws_rank(*w) > ws_rank(acc) => *w,
+            _ => acc,
+        });
         let mut leaves: Vec<taffy::tree::NodeId> = Vec::new();
         for seg in segs {
             match seg {
@@ -4108,7 +4207,10 @@ fn build_element_inner(
         }
         trim_run_edge_whitespace(taffy_tree, &mut leaves);
         if !leaves.is_empty() {
-            if let Ok(wrapper) = taffy_tree.new_with_children(run_wrapper_style(), &leaves) {
+            if ws.no_soft_wrap() {
+                pin_leaf_widths(taffy_tree, &leaves);
+            }
+            if let Ok(wrapper) = taffy_tree.new_with_children(run_wrapper_style(ws), &leaves) {
                 run_wrappers.push(wrapper);
                 direct.push(wrapper);
             }
@@ -4486,6 +4588,7 @@ fn build_element_inner(
                     meta,
                     font_size,
                     lh_elem,
+                    style.white_space.unwrap_or(WhiteSpace::Normal),
                 );
                 let float_right = run_side == Some(crate::diting_css::FloatSide::Right);
                 let mut rail_children: Vec<taffy::tree::NodeId> = Vec::new();
@@ -4609,6 +4712,7 @@ fn build_element_inner(
             meta,
             font_size,
             lh_elem,
+            style.white_space.unwrap_or(WhiteSpace::Normal),
         );
         let float_right = styles.get(&float_dom)
             .and_then(|s| s.float_side)
@@ -8964,6 +9068,7 @@ pub fn compute_styles_timed_within(
 }
 
 #[cfg(test)]
+mod absorption_pins;
 mod fork_deltas;
 #[cfg(test)]
 mod fork_table_deltas;

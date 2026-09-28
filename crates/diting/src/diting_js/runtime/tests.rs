@@ -7503,6 +7503,7 @@
     /// A Continue resolution that rewrites the request URL must pass the same
     /// SSRF gate as the original request and as redirect hops — otherwise a
     /// rewrite to an internal address bypasses validate_fetch_url entirely.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
     #[tokio::test(flavor = "current_thread")]
     async fn test_intercept_url_rewrite_is_revalidated_against_ssrf() {
         let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
@@ -7838,9 +7839,7 @@
                     .to_string(),
                     // The 302 itself carries ACAO because a cors-tainted
                     // request CORS-checks every response in the chain.
-                    2 => format!(
-                        "HTTP/1.1 302 Found\r\naccess-control-allow-origin: *\r\nlocation: /data\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-                    ),
+                    2 => "HTTP/1.1 302 Found\r\naccess-control-allow-origin: *\r\nlocation: /data\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string(),
                     _ => {
                         let body = b"done";
                         format!(
@@ -8096,9 +8095,7 @@
                         "content-length: 0\r\nconnection: close\r\n\r\n",
                     )
                     .to_string(),
-                    2 => format!(
-                        "HTTP/1.1 302 Found\r\naccess-control-allow-origin: *\r\nlocation: /data\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-                    ),
+                    2 => "HTTP/1.1 302 Found\r\naccess-control-allow-origin: *\r\nlocation: /data\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string(),
                     _ => {
                         let body = b"moved";
                         format!(
@@ -16593,4 +16590,70 @@ fn document_evaluate_xpath_subset() {
         for h in handles {
             h.join().expect("churn thread panicked");
         }
+    }
+
+    /// #157 / obscura#1085: Canvas2D color parsing covers the CSS Color
+    /// grammar Chrome accepts — hsl()/hsla() with hue wrap and percent
+    /// channels, percent alpha, the modern space/slash syntax, hex8,
+    /// keywords, and 'none'. Opaque families pin through the
+    /// fillRect→getImageData roundtrip (parse feeds the real raster);
+    /// alpha families pin on _parseColor directly because the raster
+    /// src-over composites alpha over whatever is already in the buffer.
+    #[tokio::test(flavor = "current_thread")]
+    async fn canvas_fill_style_parses_css_color_grammar() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const px = (fill) => {
+                        // Fresh canvas per sample: the raster composites
+                        // src-over, so leftover ink from the previous fill
+                        // would leak into this one's channels.
+                        const c = document.createElement('canvas');
+                        c.width = 4; c.height = 1;
+                        const g = c.getContext('2d');
+                        g.fillStyle = fill;
+                        g.fillRect(0, 0, 4, 1);
+                        const d = g.getImageData(0, 0, 1, 1).data;
+                        return [d[0], d[1], d[2], d[3]];
+                    };
+                    const g0 = document.createElement('canvas').getContext('2d');
+                    return {
+                        hsl: px('hsl(120, 50%, 50%)'),
+                        hueWraps: px('hsl(480, 50%, 50%)'),
+                        rgbPercent: px('rgb(100%, 0%, 0%)'),
+                        rgbaComma: px('rgba(12, 34, 56, 1)'),
+                        keyword: px('rebeccapurple'),
+                        garbage: px('not-a-color'),
+                        parsed: {
+                            hslaPercentAlpha: g0._parseColor('hsla(120, 50%, 50%, 50%)'),
+                            rgbaModernSlash: g0._parseColor('rgba(255 0 0 / 0.5)'),
+                            hex8: g0._parseColor('#ff000080'),
+                            none: g0._parseColor('none'),
+                            transparent: g0._parseColor('transparent'),
+                        },
+                    };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        // Chrome truth: hsl(120,50%,50%) = #40BF40 = (64,191,64); 480 wraps
+        // to 120; rgb percents scale ×255/100; rebeccapurple is (102,51,153);
+        // garbage falls back to opaque black; 50% alpha rounds to 128.
+        assert_eq!(v["hsl"], serde_json::json!([64, 191, 64, 255]), "hsl sextant math");
+        assert_eq!(v["hueWraps"], serde_json::json!([64, 191, 64, 255]), "hue wraps mod 360");
+        assert_eq!(v["rgbPercent"], serde_json::json!([255, 0, 0, 255]));
+        assert_eq!(v["rgbaComma"], serde_json::json!([12, 34, 56, 255]));
+        assert_eq!(v["keyword"], serde_json::json!([102, 51, 153, 255]));
+        assert_eq!(v["garbage"], serde_json::json!([0, 0, 0, 255]));
+        assert_eq!(v["parsed"]["hslaPercentAlpha"], serde_json::json!([64, 191, 64, 128]));
+        assert_eq!(v["parsed"]["rgbaModernSlash"], serde_json::json!([255, 0, 0, 128]));
+        assert_eq!(v["parsed"]["hex8"], serde_json::json!([255, 0, 0, 128]));
+        assert_eq!(v["parsed"]["none"], serde_json::json!([0, 0, 0, 0]));
+        assert_eq!(v["parsed"]["transparent"], serde_json::json!([0, 0, 0, 0]));
     }

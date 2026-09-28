@@ -3553,13 +3553,21 @@ pub fn ua_margin(tag: &str) -> Option<[CssLength; 4]> {    let em = |n: f32| Css
     }
 }
 
-/// UA paddings (list indentation): the classic 40px inline-start of nested
-/// list containers, same source as the margin table.
+/// UA paddings: the classic 40px inline-start of nested list containers,
+/// and Chrome html.css's `button { padding: 1px 6px }` — the horizontal
+/// chrome auto-sized buttons were missing entirely (#159: an "OK" button
+/// measured 19px, the bare label advance; Chrome ≈ 31).
 pub fn ua_padding(tag: &str) -> Option<[CssLength; 4]> {
     match tag {
         "ul" | "ol" | "menu" | "dir" => {
             Some([CssLength::Px(0.0), CssLength::Px(0.0), CssLength::Px(0.0), CssLength::Px(40.0)])
         }
+        "button" => Some([
+            CssLength::Px(1.0),
+            CssLength::Px(6.0),
+            CssLength::Px(1.0),
+            CssLength::Px(6.0),
+        ]),
         _ => None,
     }
 }
@@ -3568,10 +3576,12 @@ pub fn ua_padding(tag: &str) -> Option<[CssLength; 4]> {
 /// document frame, same rule blitz's assets/default.css carries (and every
 /// real browser). The border lays out (600 attr width → 604 border box)
 /// and paints as our uniform solid band; the `inset` style distinction is
-/// a later batch.
+/// a later batch. Buttons carry their 2px UA border from the same sheet
+/// (#159) — the border box completes the shrink-to-fit chrome.
 pub fn ua_border(tag: &str) -> Option<(f32, BorderStyle)> {
     match tag {
         "iframe" => Some((2.0, BorderStyle::Solid)),
+        "button" => Some((2.0, BorderStyle::Solid)),
         _ => None,
     }
 }
@@ -6219,6 +6229,12 @@ pub fn cascade_element(
         style.border_width.bottom = Some(Length::Px(px));
         style.border_width.left = Some(Length::Px(px));
         style.border_style = Some(line);
+        // The UA button border is the gray `buttonborder`, not currentColor
+        // (which would paint black); the same value the FormRun shell uses,
+        // so a <button> and an <input type=button> read as one control.
+        if tag == "button" {
+            style.border_color = Some(Color(118, 118, 118, 255));
+        }
     }
 
     // Inherited defaults from parent BEFORE author rules (author overrides).

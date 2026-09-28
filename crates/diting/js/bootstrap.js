@@ -13440,6 +13440,7 @@ class _Canvas2D {
   }
   _parseColor(css) {
     if (typeof css !== 'string') css = String(css ?? '');
+    css = css.trim().toLowerCase();
     if (!css || css === 'none') return [0,0,0,0];
     if (css.startsWith('#')) {
       const hex = css.slice(1);
@@ -13447,9 +13448,62 @@ class _Canvas2D {
       if (hex.length === 6) return [parseInt(hex.slice(0,2),16),parseInt(hex.slice(2,4),16),parseInt(hex.slice(4,6),16),255];
       if (hex.length === 8) return [parseInt(hex.slice(0,2),16),parseInt(hex.slice(2,4),16),parseInt(hex.slice(4,6),16),parseInt(hex.slice(6,8),16)];
     }
-    const m = css.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
-    if (m) return [+m[1],+m[2],+m[3],m[4]!==undefined?Math.round(+m[4]*255):255];
-    const named = {red:[255,0,0,255],green:[0,128,0,255],blue:[0,0,255,255],white:[255,255,255,255],black:[0,0,0,255],yellow:[255,255,0,255],orange:[255,165,0,255],gray:[128,128,128,255],transparent:[0,0,0,0]};
+    // (#157) The CSS Color function forms, legacy comma AND modern space/
+    // slash syntax, with percent channels and percent alpha. Charting libs
+    // are hsla-heavy; before this every one of these fell to opaque black.
+    const fn = css.match(/^(rgba?|hsla?)\(([^)]*)\)$/);
+    if (fn) {
+      const parts = fn[2].split('/'); // modern alpha separator; channel bodies never contain '/'
+      let alpha = 1;
+      if (parts.length === 2) {
+        const a = parts[1].trim();
+        if (a === 'none') alpha = 0;
+        else if (a.endsWith('%')) alpha = parseFloat(a) / 100;
+        else alpha = parseFloat(a);
+      }
+      const chans = parts[0].split(parts[0].indexOf(',') >= 0 ? ',' : /\s+/)
+        .map(s => s.trim()).filter(s => s.length);
+      if (chans.length >= 3 && isFinite(alpha)) {
+        const num = (raw, scale255) => {
+          // 'none' reads as 0 (CSS Color 4); percents scale per family.
+          if (raw === 'none') return 0;
+          const pct = raw.endsWith('%');
+          let v = parseFloat(raw);
+          if (!isFinite(v)) return NaN;
+          if (pct) v = scale255 ? v * 255 / 100 : v / 100;
+          return v;
+        };
+        let [r, g, b] = [num(chans[0], true), num(chans[1], true), num(chans[2], true)];
+        if (fn[1][0] === 'h') {
+          // hsl(): hue in degrees (wraps), s/l as 0..1 fractions.
+          let h = chans[0] === 'none' ? 0 : parseFloat(chans[0]);
+          const s = num(chans[1], false), l = num(chans[2], false);
+          if (!isFinite(h) || !isFinite(s) || !isFinite(l)) return this._parseNamed(css);
+          h = ((h % 360) + 360) % 360;
+          const c = (1 - Math.abs(2 * l - 1)) * s;
+          const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+          const m = l - c / 2;
+          const sextant = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x]
+            : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+          [r, g, b] = [(sextant[0] + m) * 255, (sextant[1] + m) * 255, (sextant[2] + m) * 255];
+        }
+        if ([r, g, b].every(isFinite)) {
+          const a8 = chans.length >= 4 && parts.length === 1
+            ? num(chans[3], false) * 255 // comma syntax carries alpha inline
+            : Math.round(alpha * 255);
+          return [
+            Math.max(0, Math.min(255, Math.round(r))),
+            Math.max(0, Math.min(255, Math.round(g))),
+            Math.max(0, Math.min(255, Math.round(b))),
+            Math.max(0, Math.min(255, Math.round(a8))),
+          ];
+        }
+      }
+    }
+    return this._parseNamed(css);
+  }
+  _parseNamed(css) {
+    const named = {aliceblue:[240,248,255,255],antiquewhite:[250,235,215,255],aqua:[0,255,255,255],aquamarine:[127,255,212,255],azure:[240,255,255,255],beige:[245,245,220,255],bisque:[255,228,196,255],black:[0,0,0,255],blanchedalmond:[255,235,205,255],blue:[0,0,255,255],blueviolet:[138,43,226,255],brown:[165,42,42,255],burlywood:[222,184,135,255],cadetblue:[95,158,160,255],chartreuse:[127,255,0,255],chocolate:[210,105,30,255],coral:[255,127,80,255],cornflowerblue:[100,149,237,255],cornsilk:[255,248,220,255],crimson:[220,20,60,255],cyan:[0,255,255,255],darkblue:[0,0,139,255],darkcyan:[0,139,139,255],darkgoldenrod:[184,134,11,255],darkgray:[169,169,169,255],darkgreen:[0,100,0,255],darkgrey:[169,169,169,255],darkkhaki:[189,183,107,255],darkmagenta:[139,0,139,255],darkolivegreen:[85,107,47,255],darkorange:[255,140,0,255],darkorchid:[153,50,204,255],darkred:[139,0,0,255],darksalmon:[233,150,122,255],darkseagreen:[143,188,143,255],darkslateblue:[72,61,139,255],darkslategray:[47,79,79,255],darkslategrey:[47,79,79,255],darkturquoise:[0,206,209,255],darkviolet:[148,0,211,255],deeppink:[255,20,147,255],deepskyblue:[0,191,255,255],dimgray:[105,105,105,255],dimgrey:[105,105,105,255],dodgerblue:[30,144,255,255],firebrick:[178,34,34,255],floralwhite:[255,250,240,255],forestgreen:[34,139,34,255],fuchsia:[255,0,255,255],gainsboro:[220,220,220,255],ghostwhite:[248,248,255,255],gold:[255,215,0,255],goldenrod:[218,165,32,255],gray:[128,128,128,255],green:[0,128,0,255],greenyellow:[173,255,47,255],grey:[128,128,128,255],honeydew:[240,255,240,255],hotpink:[255,105,180,255],indianred:[205,92,92,255],indigo:[75,0,130,255],ivory:[255,255,240,255],khaki:[240,230,140,255],lavender:[230,230,250,255],lavenderblush:[255,240,245,255],lawngreen:[124,252,0,255],lemonchiffon:[255,250,205,255],lightblue:[173,216,230,255],lightcoral:[240,128,128,255],lightcyan:[224,255,255,255],lightgoldenrodyellow:[250,250,210,255],lightgray:[211,211,211,255],lightgreen:[144,238,144,255],lightgrey:[211,211,211,255],lightpink:[255,182,193,255],lightsalmon:[255,160,122,255],lightseagreen:[32,178,170,255],lightskyblue:[135,206,250,255],lightslategray:[119,136,153,255],lightslategrey:[119,136,153,255],lightsteelblue:[176,196,222,255],lightyellow:[255,255,224,255],lime:[0,255,0,255],limegreen:[50,205,50,255],linen:[250,240,230,255],magenta:[255,0,255,255],maroon:[128,0,0,255],mediumaquamarine:[102,205,170,255],mediumblue:[0,0,205,255],mediumorchid:[186,85,211,255],mediumpurple:[147,112,219,255],mediumseagreen:[60,179,113,255],mediumslateblue:[123,104,238,255],mediumspringgreen:[0,250,154,255],mediumturquoise:[72,209,204,255],mediumvioletred:[199,21,133,255],midnightblue:[25,25,112,255],mintcream:[245,255,250,255],mistyrose:[255,228,225,255],moccasin:[255,228,181,255],navajowhite:[255,222,173,255],navy:[0,0,128,255],oldlace:[253,245,230,255],olive:[128,128,0,255],olivedrab:[107,142,35,255],orange:[255,165,0,255],orangered:[255,69,0,255],orchid:[218,112,214,255],palegoldenrod:[238,232,170,255],palegreen:[152,251,152,255],paleturquoise:[175,238,238,255],palevioletred:[219,112,147,255],papayawhip:[255,239,213,255],peachpuff:[255,218,185,255],peru:[205,133,63,255],pink:[255,192,203,255],plum:[221,160,221,255],powderblue:[176,224,230,255],purple:[128,0,128,255],rebeccapurple:[102,51,153,255],red:[255,0,0,255],rosybrown:[188,143,143,255],royalblue:[65,105,225,255],saddlebrown:[139,69,19,255],salmon:[250,128,114,255],sandybrown:[244,164,96,255],seagreen:[46,139,87,255],seashell:[255,245,238,255],sienna:[160,82,45,255],silver:[192,192,192,255],skyblue:[135,206,235,255],slateblue:[106,90,205,255],slategray:[112,128,144,255],slategrey:[112,128,144,255],snow:[255,250,250,255],springgreen:[0,255,127,255],steelblue:[70,130,180,255],tan:[210,180,140,255],teal:[0,128,128,255],thistle:[216,191,216,255],tomato:[255,99,71,255],turquoise:[64,224,208,255],violet:[238,130,238,255],wheat:[245,222,179,255],white:[255,255,255,255],whitesmoke:[245,245,245,255],yellow:[255,255,0,255],yellowgreen:[154,205,50,255],transparent:[0,0,0,0]};
     return named[css] || [0,0,0,255];
   }
   _setPixel(x, y, r, g, b, a) {
