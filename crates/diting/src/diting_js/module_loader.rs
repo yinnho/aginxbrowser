@@ -29,7 +29,7 @@ pub struct DitingModuleLoader {
     /// MIME), shared with JsState. The JS-side `__blobObjs` table is
     /// unreachable from here, so createObjectURL mirrors each entry in via
     /// `op_blob_register` and `import("blob:…")` resolves through this map.
-    pub blob_store: Rc<RefCell<HashMap<String, (Vec<u8>, String)>>>,
+    pub blob_store: Rc<RefCell<crate::diting_js::ops::BlobStoreMap>>,
     /// The page's context HTTP client, set post-construction via
     /// `JsRuntime::set_http_client`. Owns the legacy-TLS transport the fetch
     /// falls back to when the plain-reqwest primary dies at handshake.
@@ -52,7 +52,7 @@ impl DitingModuleLoader {
         base_url: &str,
         proxy_url: Option<String>,
         import_map: Rc<RefCell<ImportMap>>,
-        blob_store: Rc<RefCell<HashMap<String, (Vec<u8>, String)>>>,
+        blob_store: Rc<RefCell<crate::diting_js::ops::BlobStoreMap>>,
     ) -> Self {
         DitingModuleLoader {
             base_url: base_url.to_string(),
@@ -134,7 +134,7 @@ fn decode_base64_payload(payload: &str) -> Result<Vec<u8>, ModuleLoaderError> {
         return Err(io_err("Invalid base64 payload in module data: URL".to_string()));
     }
     let mut padded = stripped.to_string();
-    while padded.len() % 4 != 0 {
+    while !padded.len().is_multiple_of(4) {
         padded.push('=');
     }
     BASE64

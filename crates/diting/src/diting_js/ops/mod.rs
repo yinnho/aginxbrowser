@@ -85,7 +85,7 @@ pub struct ResourceTimingRecord {
 }
 
 /// Blob URL → (bytes, MIME) mirror shared with the module loader.
-type BlobStoreMap = HashMap<String, (Vec<u8>, String)>;
+pub(crate) type BlobStoreMap = HashMap<String, (Vec<u8>, String)>;
 /// (epoch, layout_rev, root_scroll_x/y, viewport_w/h, scroll_gen) key
 /// with the memoized sticky shifts — see the `sticky_shift_cache` field.
 #[cfg(feature = "screenshot")]

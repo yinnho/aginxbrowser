@@ -61,7 +61,7 @@ impl Page {
                                     found_base = true;
                                     if let Some(resolved) = active_base
                                         .as_ref()
-                                        .and_then(|base| base.join(&href).ok())
+                                        .and_then(|base| base.join(href).ok())
                                     {
                                         active_base = Some(resolved);
                                     }
@@ -354,28 +354,26 @@ impl Page {
 
         let mut fetched: std::collections::HashMap<usize, (String, String, crate::diting_net::Response)> = std::collections::HashMap::new();
         let mut script_timings: Vec<crate::diting_js::ops::ResourceTimingRecord> = Vec::new();
-        for result in fetch_results {
-            if let Some((idx, url, resp, rt)) = result {
-                // Script bodies: only the HTTP Content-Type charset matters
-                // (no in-band meta-charset for JS).
-                let code = crate::diting_net::decode_non_html(&resp.body, resp.content_type());
-                // #126: real per-script timing — only wire fetches carry a
-                // sample, and the blocking posture comes from the element
-                // itself (defer/async scripts don't block the parser).
-                if let Some((start_ms, dur_ms)) = rt {
-                    let s = all_to_execute.get(idx);
-                    script_timings.push(crate::diting_js::ops::ResourceTimingRecord {
-                        name: url.clone(),
-                        initiator: "script",
-                        start_epoch_ms: start_ms,
-                        duration_ms: dur_ms,
-                        status: resp.status,
-                        body_size: resp.body.len(),
-                        render_blocking: !s.is_some_and(|s| s.is_defer || s.is_async),
-                    });
-                }
-                fetched.insert(idx, (url, code, resp));
+        for (idx, url, resp, rt) in fetch_results.into_iter().flatten() {
+            // Script bodies: only the HTTP Content-Type charset matters
+            // (no in-band meta-charset for JS).
+            let code = crate::diting_net::decode_non_html(&resp.body, resp.content_type());
+            // #126: real per-script timing — only wire fetches carry a
+            // sample, and the blocking posture comes from the element
+            // itself (defer/async scripts don't block the parser).
+            if let Some((start_ms, dur_ms)) = rt {
+                let s = all_to_execute.get(idx);
+                script_timings.push(crate::diting_js::ops::ResourceTimingRecord {
+                    name: url.clone(),
+                    initiator: "script",
+                    start_epoch_ms: start_ms,
+                    duration_ms: dur_ms,
+                    status: resp.status,
+                    body_size: resp.body.len(),
+                    render_blocking: !s.is_some_and(|s| s.is_defer || s.is_async),
+                });
             }
+            fetched.insert(idx, (url, code, resp));
         }
         if let Some(js) = &mut self.js {
             js.push_resource_timings(script_timings);
