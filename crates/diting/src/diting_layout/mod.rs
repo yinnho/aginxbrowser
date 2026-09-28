@@ -3976,6 +3976,62 @@ fn append_pseudo_leaves(
     }
 }
 
+/// Whether an inline pseudo may merge into an adjacent pure-text run: the
+/// merged leaf carries the RUN's paint style, so the pseudo's computed text
+/// style must agree on every axis the merge would override (#172). A None
+/// axis is inherited from the host and equals the run's value by
+/// construction, so only explicitly diverging declarations unmerge.
+fn pseudo_text_style_matches(
+    p: &ComputedStyle,
+    run_color: [u8; 4],
+    run_font_size: f32,
+    run_bold: bool,
+    run_mono: bool,
+) -> bool {
+    p.color.is_none_or(|c| [c.0, c.1, c.2, c.3] == run_color)
+        && p.font_size.is_none_or(|f| (f - run_font_size).abs() < 0.01)
+        && p.font_weight.is_none_or(|w| (w >= 600) == run_bold)
+        && p.font_family
+            .as_deref()
+            .is_none_or(|f| crate::diting_css::wants_monospace(f) == run_mono)
+}
+
+/// Build one inline pseudo text leaf carrying the pseudo's OWN computed
+/// text style — #172's split path (the adjacent-run merge only fits a
+/// pseudo whose style matches the run). Same construction the standalone
+/// inline path has always used.
+fn pseudo_inline_run_leaf(
+    taffy_tree: &mut TaffyTree<TextLeaf>,
+    p: &ComputedStyle,
+    fonts: &FontBook,
+    content: &str,
+    ws: WhiteSpace,
+) -> Option<taffy::tree::NodeId> {
+    let fs = p.font_size.unwrap_or(crate::diting_css::DEFAULT_ROOT_FONT_SIZE);
+    let bold = p.font_weight.is_some_and(|w| w >= 600);
+    taffy_tree
+        .new_leaf_with_context(
+            Style::default(),
+            TextLeaf::Run {
+                text: content.to_string(),
+                font_size: fs,
+                bold,
+                color: p.color.map_or([0, 0, 0, 255], |c| [c.0, c.1, c.2, c.3]),
+                line_height: effective_line_height(fonts, p.line_height.as_ref(), fs, bold),
+                decorations: p.text_decoration_line.unwrap_or_default(),
+                baseline_shift: 0.0,
+                mono: p.font_family.as_deref().is_some_and(crate::diting_css::wants_monospace),
+                word_spacing: p.word_spacing.unwrap_or(0.0),
+                ws,
+                ellipsis: false,
+                tokens: std::cell::RefCell::new(None),
+                small_caps: p.font_variant_caps.unwrap_or(false),
+                han: p.lang.as_deref().and_then(text::han_slot_for_lang),
+            },
+        )
+        .ok()
+}
+
 /// Build one pseudo box and splice it into the host's child list; returns
 /// whether the list changed. Block-ish pseudos become leaves carrying the
 /// pseudo's taffy style — an EMPTY content box stays a plain style leaf so
@@ -3983,8 +4039,9 @@ fn append_pseudo_leaves(
 /// pseudos join the host's text: when the adjacent leaf is a pure-text run
 /// their texts merge onto one leaf, so `li:before { content: "• " }` shares
 /// the line with the label (Chrome's inline generated boxes take part in the
-/// host's first/last line box). The merged text takes the run's
-/// metrics/color — the v1 divergence.
+/// host's first/last line box). The merge only happens while the pseudo's
+/// own text style matches the run's (#172) — a diverging pseudo becomes its
+/// own leaf and paints in its declared style.
 fn pseudo_leaf(
     p: &ComputedStyle,
     taffy_tree: &mut TaffyTree<TextLeaf>,
@@ -4011,7 +4068,13 @@ fn pseudo_leaf(
                 return false;
             }
             // Merge into the adjacent pure-text run when there is one
-            // (first child for ::before, last for ::after).
+            // (first child for ::before, last for ::after) — but only when
+            // the pseudo's own text style agrees with the run's (#172): a
+            // merged leaf paints with the RUN's metrics and color, so
+            // `.row::before { content: "▸ "; color: accent }` used to lose
+            // its accent and paint in the host's color. A diverging pseudo
+            // becomes its own leaf spliced INTO the inline flow, so it
+            // still shares the host's line like Chrome's generated box.
             let adj_idx = if is_before { 0 } else { children.len().saturating_sub(1) };
             if let Some(&adj) = children.get(adj_idx) {
                 if let Some(TextLeaf::Run {
@@ -4031,65 +4094,86 @@ fn pseudo_leaf(
                     ..
                 }) = taffy_tree.get_node_context(adj)
                 {
-                    let merged = if is_before {
-                        format!("{}{}", content, text)
-                    } else {
-                        format!("{}{}", text, content)
-                    };
-                    let leaf = taffy_tree
-                        .new_leaf_with_context(
-                            Style::default(),
-                            TextLeaf::Run {
-                                text: merged,
-                                font_size: *font_size,
-                                bold: *bold,
-                                color: *color,
-                                line_height: *line_height,
-                                decorations: *decorations,
-                                baseline_shift: *baseline_shift,
-                                mono: *mono,
-                                word_spacing: *word_spacing,
-                                ws: *ws,
-                                ellipsis: *ellipsis,
-                                tokens: std::cell::RefCell::new(None),
-                                small_caps: *small_caps,
-                                han: *han,
-                            },
-                        )
-                        .ok();
-                    if let Some(leaf) = leaf {
-                        let _ = taffy_tree.remove(adj);
-                        children[adj_idx] = leaf;
-                        return true;
+                    let ws_run = *ws;
+                    if pseudo_text_style_matches(p, *color, *font_size, *bold, *mono) {
+                        let merged = if is_before {
+                            format!("{}{}", content, text)
+                        } else {
+                            format!("{}{}", text, content)
+                        };
+                        let leaf = taffy_tree
+                            .new_leaf_with_context(
+                                Style::default(),
+                                TextLeaf::Run {
+                                    text: merged,
+                                    font_size: *font_size,
+                                    bold: *bold,
+                                    color: *color,
+                                    line_height: *line_height,
+                                    decorations: *decorations,
+                                    baseline_shift: *baseline_shift,
+                                    mono: *mono,
+                                    word_spacing: *word_spacing,
+                                    ws: *ws,
+                                    ellipsis: *ellipsis,
+                                    tokens: std::cell::RefCell::new(None),
+                                    small_caps: *small_caps,
+                                    han: *han,
+                                },
+                            )
+                            .ok();
+                        if let Some(leaf) = leaf {
+                            let _ = taffy_tree.remove(adj);
+                            children[adj_idx] = leaf;
+                            return true;
+                        }
+                        return false;
+                    }
+                    // Style diverges — build the pseudo's own leaf and keep
+                    // it on the same line: when the neighbor is a mixed
+                    // inline run-wrapper splice into its boundary, else
+                    // (bare run) regroup [pseudo, run] into a wrapping flex
+                    // row at the run's slot. A bare sibling leaf would stack
+                    // as its own block line under a block host.
+                    if let Some(leaf) = pseudo_inline_run_leaf(taffy_tree, p, fonts, content, ws_run) {
+                        let wrapper_shape = taffy_tree.get_node_context(adj).is_none()
+                            && taffy_tree
+                                .style(adj)
+                                .is_ok_and(|s| s.display == Display::Flex && s.flex_direction == FlexDirection::Row)
+                            && taffy_tree
+                                .children(adj)
+                                .is_ok_and(|kids| !kids.is_empty());
+                        if wrapper_shape {
+                            let mut kids = taffy_tree.children(adj).unwrap_or_default().to_vec();
+                            if is_before {
+                                kids.insert(0, leaf);
+                            } else {
+                                kids.push(leaf);
+                            }
+                            let _ = taffy_tree.set_children(adj, &kids);
+                            return true;
+                        }
+                        let pair = if is_before { vec![leaf, adj] } else { vec![adj, leaf] };
+                        if let Ok(wrapper) = taffy_tree.new_with_children(run_wrapper_style(ws_run), &pair) {
+                            children[adj_idx] = wrapper;
+                            return true;
+                        }
                     }
                     return false;
                 }
             }
-            match taffy_tree.new_leaf_with_context(Style::default(), {
-                let fs = p.font_size.unwrap_or(crate::diting_css::DEFAULT_ROOT_FONT_SIZE);
-                let bold = p.font_weight.is_some_and(|w| w >= 600);
-                TextLeaf::Run {
-                    text: content.clone(),
-                    font_size: fs,
-                    bold,
-                    color: p.color.map_or([0, 0, 0, 255], |c| [c.0, c.1, c.2, c.3]),
-                    line_height: effective_line_height(fonts, p.line_height.as_ref(), fs, bold),
-                    decorations: p.text_decoration_line.unwrap_or_default(),
-                    baseline_shift: 0.0,
-                    mono: p.font_family.as_deref().is_some_and(crate::diting_css::wants_monospace),
-                    word_spacing: p.word_spacing.unwrap_or(0.0),
-                    ws: p.white_space.unwrap_or(WhiteSpace::Normal),
-                    ellipsis: false,
-                    tokens: std::cell::RefCell::new(None),
-                    small_caps: p.font_variant_caps.unwrap_or(false),
-                    han: p.lang.as_deref().and_then(text::han_slot_for_lang),
-                }
-            }) {
-                Ok(leaf) => {
+            match pseudo_inline_run_leaf(
+                taffy_tree,
+                p,
+                fonts,
+                content,
+                p.white_space.unwrap_or(WhiteSpace::Normal),
+            ) {
+                Some(leaf) => {
                     insert(leaf, children);
                     true
                 }
-                Err(_) => false,
+                None => false,
             }
         }
         _ => {

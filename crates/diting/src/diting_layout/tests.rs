@@ -1636,3 +1636,98 @@ mod text_align_block_children_tests {
         assert!(w < VW * 0.5, "table stays shrink-to-fit; got w={w}");
     }
 }
+
+mod pseudo_inline_style_tests {
+    // #172 (REQ template-pseudo verdict): an inline ::before/::after whose
+    // content merges into an adjacent pure-text run used to paint with the
+    // RUN's color/size — `.row::before { content: "▸ "; color: accent }`
+    // lost its accent entirely (0 accent pixels vs the real-element
+    // control). The merge is now conditional on the pseudo's own text style
+    // matching the run's; a diverging pseudo becomes its own leaf and keeps
+    // its declared style.
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::{compute_styles, layout_dom_with_paint_order_and_images, PaintItem};
+
+    const ACCENT: [u8; 4] = [255, 51, 102, 255];
+
+    fn text_items(sheet: &str, body: &str) -> Vec<PaintItem> {
+        let html = format!("<html><head><style>{sheet}</style></head><body style=\"margin:0\">{body}</body></html>");
+        let tree = parse_html(&html);
+        let rules = parse_stylesheet_for(sheet, (800.0, 600.0), CssMediaType::Screen);
+        let styles = compute_styles(&tree, &rules, (800.0, 600.0));
+        let (_, items, _, _, _, _) = layout_dom_with_paint_order_and_images(
+            &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
+        );
+        items
+    }
+
+    fn runs(items: &[PaintItem]) -> Vec<(String, [u8; 4], f32, f32)> {
+        items
+            .iter()
+            .filter_map(|it| match it {
+                PaintItem::Text { text, color, x, y, .. } => Some((text.clone(), *color, *x, *y)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn accent_pseudo_before_text_keeps_its_color() {
+        let items = text_items(
+            "#m::before { content: \"MARK \"; color: rgb(255,51,102) }",
+            r#"<div id="m">tail</div>"#,
+        );
+        let rs = runs(&items);
+        let mark = rs.iter().find(|(t, ..)| t.starts_with("MARK"));
+        let Some((_, color, _, _)) = mark else {
+            panic!("pseudo text not painted: {rs:?}");
+        };
+        assert_eq!(*color, ACCENT, "diverging pseudo must paint in its own color");
+        let tail = rs.iter().find(|(t, ..)| t.contains("tail"));
+        assert!(tail.is_some_and(|(_, c, _, _)| *c != ACCENT), "host text keeps the host color: {rs:?}");
+    }
+
+    #[test]
+    fn diverging_pseudo_shares_the_line_with_the_run() {
+        // The unmerged leaf must still sit on the host's first line — the
+        // chrome-shape `.q::before "> "` prefix hugs the following text.
+        let items = text_items(
+            "#m::before { content: \"MARK \"; color: rgb(255,51,102) }",
+            r#"<div id="m">tail</div>"#,
+        );
+        let rs = runs(&items);
+        let (mx, my) = rs.iter().find(|(t, ..)| t.starts_with("MARK")).map(|(_, _, x, y)| (*x, *y)).unwrap();
+        let (tx, ty) = rs.iter().find(|(t, ..)| t.contains("tail")).map(|(_, _, x, y)| (*x, *y)).unwrap();
+        assert!((my - ty).abs() < 1.0, "same line: mark y={my} tail y={ty}");
+        assert!(tx >= mx, "prefix precedes the run: mark x={mx} tail x={tx}");
+    }
+
+    #[test]
+    fn matching_pseudo_still_merges_into_the_run() {
+        // No declared text style → inherited → merge stays (one item, host
+        // color): the `li:before { content: "• " }` optimization survives.
+        let items = text_items(
+            "#m::before { content: \"• \" }",
+            r#"<div id="m">label</div>"#,
+        );
+        let rs = runs(&items);
+        assert!(
+            rs.iter().any(|(t, ..)| t.contains("• ") && t.contains("label")),
+            "undeclared pseudo still merges with the run: {rs:?}"
+        );
+    }
+
+    #[test]
+    fn accent_pseudo_after_text_keeps_its_color() {
+        let items = text_items(
+            "#m::after { content: \" TAIL\"; color: rgb(255,51,102) }",
+            r#"<div id="m">head</div>"#,
+        );
+        let rs = runs(&items);
+        assert!(
+            rs.iter().any(|(t, c, ..)| t.trim_start().starts_with("TAIL") && *c == ACCENT),
+            "::after must keep its accent too: {rs:?}"
+        );
+    }
+}
