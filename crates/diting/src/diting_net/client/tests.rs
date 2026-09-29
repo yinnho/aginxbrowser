@@ -871,6 +871,14 @@ async fn legacy_tls_never_retries_ssrf_gate_rejections() {
         !msg.contains("legacy TLS transport"),
         "SSRF denial must not fall through to the legacy stack, got: {msg}"
     );
+    // The NetError::Network denial carries the same opt-in hint as the JS
+    // face (obscura#1108 absorption).
+    assert!(
+        msg.contains("private/internal IP address")
+            && msg.contains("--allow-private-network")
+            && msg.contains("AGINXBROWSER_ALLOW_PRIVATE_NETWORK"),
+        "policy denial must name the opt-in, got: {msg}"
+    );
     std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
 }
 

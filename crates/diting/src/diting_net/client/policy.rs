@@ -199,16 +199,18 @@ pub fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), NetErr
             url::Host::Ipv4(ip) => {
                 if is_forbidden_ip(IpAddr::V4(ip)) {
                     return Err(NetError::Network(format!(
-                        "Access to private/internal IP address {} is not allowed",
-                        ip
+                        "Access to private/internal IP address {} is not allowed{}",
+                        ip,
+                        super::PRIVATE_NETWORK_HINT
                     )));
                 }
             }
             url::Host::Ipv6(ip) => {
                 if is_forbidden_ip(IpAddr::V6(ip)) {
                     return Err(NetError::Network(format!(
-                        "Access to private/internal IPv6 address {} is not allowed",
-                        ip
+                        "Access to private/internal IPv6 address {} is not allowed{}",
+                        ip,
+                        super::PRIVATE_NETWORK_HINT
                     )));
                 }
             }
@@ -220,8 +222,9 @@ pub fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), NetErr
                     || lower_domain == "::1"
                 {
                     return Err(NetError::Network(format!(
-                        "Access to localhost domain '{}' is not allowed",
-                        domain
+                        "Access to localhost domain '{}' is not allowed{}",
+                        domain,
+                        super::PRIVATE_NETWORK_HINT
                     )));
                 }
             }

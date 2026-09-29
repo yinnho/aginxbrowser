@@ -173,9 +173,10 @@ impl Resolve for SsrfGuardResolver {
             if !allow {
                 if let Some(bad) = addrs.iter().find(|sa| is_forbidden_ip(sa.ip())) {
                     return Err(format!(
-                        "SSRF blocked: '{}' resolves to forbidden address {}",
+                        "SSRF blocked: '{}' resolves to forbidden address {}{}",
                         host,
-                        bad.ip()
+                        bad.ip(),
+                        super::PRIVATE_NETWORK_HINT
                     )
                     .into());
                 }

@@ -7730,6 +7730,13 @@
             error.contains("private/internal IP address"),
             "event must carry the block reason, got: {error}"
         );
+        // obscura#1108 absorption: the denial names the opt-in so an
+        // operator hitting the deliberate gate learns the flag on the spot.
+        assert!(
+            error.contains("--allow-private-network")
+                && error.contains("AGINXBROWSER_ALLOW_PRIVATE_NETWORK"),
+            "denial must name the opt-in, got: {error}"
+        );
     }
 
     /// The punished-mtop shape: the response body arrives but carries no

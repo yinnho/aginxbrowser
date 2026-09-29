@@ -5990,16 +5990,18 @@ pub fn validate_fetch_url(url: &url::Url) -> Result<(), String> {
                 // is_forbidden_ip.
                 if crate::diting_net::client::is_forbidden_ip(std::net::IpAddr::V4(ip)) {
                     return Err(format!(
-                        "Access to private/internal IP address {} is not allowed",
-                        ip
+                        "Access to private/internal IP address {} is not allowed{}",
+                        ip,
+                        crate::diting_net::client::PRIVATE_NETWORK_HINT
                     ));
                 }
             }
             url::Host::Ipv6(ip) => {
                 if crate::diting_net::client::is_forbidden_ip(std::net::IpAddr::V6(ip)) {
                     return Err(format!(
-                        "Access to private/internal IPv6 address {} is not allowed",
-                        ip
+                        "Access to private/internal IPv6 address {} is not allowed{}",
+                        ip,
+                        crate::diting_net::client::PRIVATE_NETWORK_HINT
                     ));
                 }
             }
@@ -6011,8 +6013,9 @@ pub fn validate_fetch_url(url: &url::Url) -> Result<(), String> {
                     || lower_domain == "::1"
                 {
                     return Err(format!(
-                        "Access to localhost domain '{}' is not allowed",
-                        domain
+                        "Access to localhost domain '{}' is not allowed{}",
+                        domain,
+                        crate::diting_net::client::PRIVATE_NETWORK_HINT
                     ));
                 }
             }
