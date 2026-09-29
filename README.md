@@ -39,7 +39,7 @@ Existing "browser automation" was built for humans or for one-shot scraping — 
 | Sees (screenshots) | ✅ built-in diting rendering engine | Needs Chromium | ❌ | Needs Chromium |
 | Reads | markdown + js_extract + fetch receipts | DIY | markdown | DIY |
 | Writes documents | ✅ `render_markdown`: deterministic HTML + inline-SVG diagrams | ❌ | ❌ | ❌ |
-| Finds (search) | ✅ 17 engines, 7 categories, merged | ❌ | ❌ | ❌ |
+| Finds (search) | ✅ 20 engines, 7 categories, merged | ❌ | ❌ | ❌ |
 | Acts | indexed session interaction | DevTools API | ❌ | LLM-driven |
 | Remembers | ✅ local fetch/search cache (SQLite FTS5) | ❌ | crawl cache | ❌ |
 | Protocol | HTTP + native MCP + CDP | Node API | HTTP | Python |
@@ -87,7 +87,7 @@ The [local cache](#capabilities) builds on the same idea: search hits come back 
 ## Capabilities
 
 - **Tiered rendering**: static pages over plain HTTP (~100ms); V8 spins up only when JS rendering is needed (~1-2s) — 90% of the [bench](bench/README.md) page set served without spinning up V8 at all; every response reports which tier served it (`tier` field)
-- **Multi-engine meta-search**: general web (Baidu / Bing / Sogou / WeChat / Google / DuckDuckGo / Wikipedia), news (Bing News), code (Stack Overflow, GitHub, MDN), packages (npm, PyPI), academic (arXiv), AI models (Hugging Face) — 17 engines across 7 categories, queried concurrently, merged and deduplicated. Operators can plug a private Meilisearch index into the same `/search`. Search → read in one step
+- **Multi-engine meta-search**: general web (Baidu / Bing / Sogou / WeChat / DuckDuckGo / Wikipedia / Hacker News), news (Bing News), code (Stack Overflow, GitHub, MDN), packages (npm, PyPI, RubyGems), academic (arXiv, OpenAlex), AI models (Hugging Face) — 20 engines across 7 categories, queried concurrently, merged and deduplicated. Operators can plug a private Meilisearch index into the same `/search`. Search → read in one step
 - **Image search**: `categories=images` hits Baidu/Bing image indexes and returns direct binary `image_url` links (downloadable straight to jpg/png) plus `source_url` provenance
 - **Interactive sessions**: persistent browser sessions with indexed interaction (`state/click/input/scroll/eval`) — agents browse like humans do, and `session_export` turns what an agent figured out into a runnable curl replay script (zero model tokens on re-run) — or, with `format=json`, into a flow document (`flow_run` replays it server-side with `{{var}}` substitution, `wait`/`expect` gates and saved outputs; installed flows live in `workflow/<name>/flow.json`, dropped in without a rebuild). Session tools also cover the acting part: `session_viewport` simulates device viewports (media queries respond), `session_wait` blocks on a selector or predicate with a timeout, `session_screenshot` renders the live state, `session_console` replays the page's console ring, and `session_storage` exports/restores cookies plus localStorage for login hand-off
 - **Playback-link sniffer**: `session_network(filter=media)` extracts the m3u8/mp4/dash URLs a page's player *actually requested* at runtime — links found only in page HTML are often decoys, so the request log is the source of truth. `GET /session/{id}/har` exports the same traffic as HAR 1.2 (retained bodies included)
@@ -304,7 +304,7 @@ aginxbrowser/
     ├── config.rs            # BrowserConfig
     ├── cookie.rs            # CookieStore
     ├── error.rs             # Error types
-    ├── search/              # 17 native search engines, 7 categories
+    ├── search/              # 20 native search engines, 7 categories
     │   ├── mod.rs           #   SearchEngine trait, Registry, merge/dedupe, progressive backoff
     │   ├── baidu.rs         #   Baidu (JSON API, wreq stealth)
     │   ├── baidu_images.rs  #   Baidu Images (acjson API, images category)
@@ -314,15 +314,17 @@ aginxbrowser/
     │   ├── sogou.rs         #   Sogou web (HTML parsing, plain reqwest)
     │   ├── sogou_wechat.rs  #   Sogou WeChat (HTML parsing + /link resolution)
     │   ├── duckduckgo.rs    #   DuckDuckGo (html.duckduckgo.com, general; direct-first)
-    │   ├── google.rs        #   Google (HTML parsing, wreq stealth + proxy)
     │   ├── wikipedia.rs     #   Wikipedia (MediaWiki search API, general; direct-first/proxy-retry)
+    │   ├── hn.rs            #   Hacker News (Algolia API, general; time_range filters created_at)
     │   ├── stackexchange.rs #   Stack Overflow (SE API v2.3, code category)
     │   ├── mdn.rs           #   MDN Web Docs (v1 search API, code category only)
     │   ├── github_repos.rs  #   GitHub repos (api.github.com, code category)
     │   ├── arxiv.rs         #   arXiv (Atom API, academic category)
+    │   ├── openalex.rs      #   OpenAlex works (academic; DOI links, inverted-index abstracts)
     │   ├── huggingface.rs   #   HF Hub models/datasets/spaces (ai category)
     │   ├── npm.rs           #   npm packages (npms.io API, packages category)
     │   ├── pypi.rs          #   PyPI name resolution (JSON API, packages)
+    │   ├── rubygems.rs      #   RubyGems gems (packages; direct-first/proxy-retry)
     │   └── meilisearch.rs   #   Private-index adapter (env-configured)
     │
     ├── diting_dom/          # HTML parsing, DOM tree, CSS selectors
@@ -363,7 +365,7 @@ If your network can't reach the rusty_v8 CDN (build hangs with zero progress aft
 | `AGINXBROWSER_STEALTH` | enabled | `0` disables stealth (for diagnostics) |
 | `AGINXBROWSER_UA` | Linux Chrome145 | Spoofed User-Agent |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language header |
-| `AGINXBROWSER_PROXY` | none | Optional fallback proxy. Blocked-source engines (Google, Bing News, Hugging Face) connect directly first and fall through to this proxy only when the direct attempt fails — overseas deployments need no proxy at all; per-request `use_proxy:true` also routes fetch/search through it. Browser/session/CDP navigations to known-blocked domains (wikipedia.org, github.com, …) route through it automatically. Standard `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` are deliberately ignored by the engine (set them for other tools freely); startup logs a warning when it sees one |
+| `AGINXBROWSER_PROXY` | none | Optional fallback proxy. Blocked-source engines (Wikipedia, Bing News, Hugging Face, RubyGems) connect directly first and fall through to this proxy only when the direct attempt fails — overseas deployments need no proxy at all; per-request `use_proxy:true` also routes fetch/search through it. Browser/session/CDP navigations to known-blocked domains (wikipedia.org, github.com, …) route through it automatically. Standard `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` are deliberately ignored by the engine (set them for other tools freely); startup logs a warning when it sees one |
 | `AGINXBROWSER_NAV_CHAIN_LIMIT` | `10` | JS navigation-chain cap: documents a page may chain via `location`/form hops before navigation aborts. The count includes the requested document (10 = initial doc + 9 hops). Raise for legit long chains (SSO handover across providers); HTTP 3xx redirects are budgeted separately (20, per Fetch spec / browser parity) |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL, `0` disables |
 | `AGINXBROWSER_HONOR_ROBOTS` | unset | robots.txt is not consulted by default on `/fetch`, `/screenshot`, `/download` and MCP tools; set `1` to opt in (operator choice) |

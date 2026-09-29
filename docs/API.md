@@ -323,12 +323,15 @@ Native aggregated search with optional automatic content fetching. Agents go fro
 | baidu_images | images | Baidu Images `acjson` JSON |
 | bing_images | images | Bing Images `images/async` |
 | arxiv | academic | arXiv API (full-text matching — academic queries only, not the general pool) |
+| openalex | academic | OpenAlex works API — cross-publisher literature (DOI links, inverted-index abstracts); occasional anonymous 429s degrade to a skipped engine, arXiv still serves the category |
 | huggingface | general, ai | Hugging Face models search |
 | github | general, code | GitHub repository search |
 | stackexchange | general, code | StackExchange API |
 | mdn | code | MDN Web Docs v1 search API (code queries only — CJK fuzzy-match noise keeps it out of the general pool) |
 | npm | general, packages | npm registry |
 | pypi | general, packages | PyPI |
+| rubygems | packages | RubyGems registry (no-offset API — paged client-side; CN-blocked → direct-first/proxy-retry) |
+| hn | general | Hacker News via the Algolia API (story links with points/comment counts; `time_range` maps to a created_at filter; Ask-HN threads fall back to the HN item URL) |
 
 `meilisearch` additionally registers when `AGINXBROWSER_MEILI_URL` + `AGINXBROWSER_MEILI_INDEX` are set (private index). Google search is not included — it requires a proxy and steady CAPTCHA clearance from mainland China; use `duckduckgo`/`bing` instead.
 
@@ -1687,7 +1690,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `fetch` | Fetch a web page (tiered rendering, stealth, js_extract supported); injection stripping on by default (`sanitize: false` opts out) and `capture_xhr` returns the page's own API responses alongside the text |
 | `eval` | Execute JavaScript on the page (async/Promise supported) |
 | `click` | Click a page element (CSS selector) |
-| `search` | Multi-engine aggregated search (Baidu/Bing/Sogou/Sogou WeChat/Google) |
+| `search` | Multi-engine aggregated search (Baidu/Bing/Sogou/Sogou WeChat/DuckDuckGo/Wikipedia/Hacker News + code/packages/academic verticals) |
 | `download` | Stream a file to disk with SHA-256 and resume support |
 | `cache` | Query the local cache of fetched pages and past searches (full-text incl. CJK, full-content `get`, stats, filtered clear) |
 | `render_markdown` | Render markdown into a deterministic, self-contained HTML document; fenced `archify` blocks (typed diagram JSON — sequence / workflow / architecture / dataflow / lifecycle) become inline-SVG diagrams; `theme`/`preset`/`quality` (showcase audit) and optional `session_id` viewport grading |
