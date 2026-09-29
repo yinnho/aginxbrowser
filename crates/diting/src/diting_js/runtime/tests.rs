@@ -16440,6 +16440,52 @@ fn native_shim_on_interface_globals_does_not_break_internal_wrapping() {
     );
 }
 
+/// #191: listeners are DOM §2.9 callbacks — `{handleEvent}` object listeners
+/// are legal (github's webcomponents-era code registers four of them) and
+/// were blind `.call()`ed at dispatch, producing "h.call is not a function".
+/// The object form runs handleEvent with the LISTENER as `this`; null is a
+/// legal inert registration; primitives are WebIDL violations that throw at
+/// registration, exactly where Chrome throws them (message matches Chrome's).
+#[test]
+fn object_form_listeners_and_webidl_registration_gate() {
+    let mut rt = setup_runtime("<html><body><button id='b'>x</button></body></html>");
+    let js = r##"
+        const b = document.getElementById('b');
+        const log = [];
+        const objListener = { handleEvent(e) { log.push('obj:' + (this === objListener) + ':' + e.type); } };
+        b.addEventListener('click', function(e) { log.push('fn:' + e.type); });
+        b.addEventListener('click', objListener);
+        b.addEventListener('click', null);
+        b.click();
+        document.addEventListener('ping', objListener);
+        document.dispatchEvent(new Event('ping'));
+        window.addEventListener('pong', objListener);
+        window.dispatchEvent(new Event('pong'));
+        let threw = null;
+        try { b.addEventListener('click', 5); } catch (e) { threw = e && e.name; }
+        let wThrew = null;
+        try { window.addEventListener('message', 'str'); } catch (e) { wThrew = e && e.name; }
+        let dThrew = null;
+        try { document.addEventListener('click', true); } catch (e) { dThrew = e && e.name; }
+        ({ log, threw, wThrew, dThrew })
+    "##;
+    let v = rt.evaluate(js).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "log": [
+                "fn:click",
+                "obj:true:click",
+                "obj:true:ping",
+                "obj:true:pong"
+            ],
+            "threw": "TypeError",
+            "wThrew": "TypeError",
+            "dThrew": "TypeError"
+        })
+    );
+}
+
 /// #53: `indexedDB.open` used to resolve success immediately and never
 /// dispatch `onupgradeneeded`, so schema-installing openers (Dexie,
 /// localForage, Firebase) never settled their open promise and the app

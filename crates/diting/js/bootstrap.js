@@ -69,6 +69,7 @@ globalThis.__diting_reportUncaughtError = function(err, src) {
 };
 globalThis.__windowListeners = {};
 globalThis.addEventListener = function(type, fn) {
+  __listenerGate(fn);
   if (!globalThis.__windowListeners[type]) globalThis.__windowListeners[type] = [];
   globalThis.__windowListeners[type].push(fn);
 };
@@ -89,7 +90,7 @@ globalThis.dispatchEvent = function(event) {
   event.currentTarget = globalThis;
   event.eventPhase = 2;
   const handlers = globalThis.__windowListeners[event.type] || [];
-  for (const h of handlers) { try { h.call(globalThis, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); } }
+  for (const h of handlers) { try { _invokeListener(h, globalThis, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); } }
   return !event.defaultPrevented;
 };
 
@@ -236,6 +237,24 @@ function __lmap(t) {
   if (!m) { m = {}; __evtStore.set(t, m); }
   return m;
 }
+// DOM §2.9 listener protocol, shared by every event registry: a listener
+// is a function (invoked with the target as `this`) or an object with a
+// handleEvent method (invoked with the LISTENER itself as `this`) —
+// webcomponents-era pages register the object form. null/undefined are
+// legal no-op registrations. Blind .call() on the object form is where
+// github's 4× "h.call is not a function" came from (#191).
+function _invokeListener(h, target, event) {
+  if (typeof h === 'function') return h.call(target, event);
+  if (h != null && typeof h.handleEvent === 'function') return h.handleEvent(event);
+}
+// WebIDL binding gate: EventListener is a nullable callback — null (and
+// undefined) register as inert no-ops, anything non-object/non-function
+// throws at registration time, exactly where Chrome throws it.
+function __listenerGate(h) {
+  if (h != null && typeof h !== 'function' && typeof h !== 'object') {
+    throw new TypeError("Failed to execute 'addEventListener' on 'EventTarget': parameter 2 is not of type 'Object'.");
+  }
+}
 // (#31) Web IDL exposes public attributes on the PROTOTYPE as accessor pairs;
 // instances carry nothing (Object.keys(new WebSocket(...)) is [] in Chrome).
 // Constructors keep their plain `this.x = ...` writes — those route through
@@ -258,7 +277,7 @@ function __acc(C, names) {
 function __lboxProto(C) {
   Object.assign(C.prototype, {
     addEventListener(type, fn) {
-      if (typeof fn !== 'function') return;
+      __listenerGate(fn);
       let b = this._lbox.get(type);
       if (!b) { b = []; this._lbox.set(type, b); }
       b.push(fn);
@@ -272,7 +291,7 @@ function __lboxProto(C) {
     dispatchEvent(event) {
       const b = this._lbox.get(event && event.type);
       if (!b) return true;
-      for (const fn of b.slice()) { try { fn.call(this, event); } catch (e) {} }
+      for (const fn of b.slice()) { try { _invokeListener(fn, this, event); } catch (e) {} }
       return true;
     },
   });
@@ -3484,6 +3503,7 @@ class Element extends Node {
     }
   }
   addEventListener(type, handler, opts) {
+    __listenerGate(handler);
     // Animations already present in initial markup are unobservable through
     // the mutation hooks above — a listener registration is the practical
     // signal that this page cares, so scan once (capped) for candidates.
@@ -3589,13 +3609,13 @@ class Element extends Node {
     if (isOrigin) {
       const capHandlers = (_eventRegistryCap[this._nid] || {})[event.type] || [];
       for (const h of capHandlers) {
-        try { h.call(this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
+        try { _invokeListener(h, this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
         if (event._immediatePropagationStopped) break;
       }
     }
     const handlers = (_eventRegistry[this._nid] || {})[event.type] || [];
     for (const h of handlers) {
-      try { h.call(this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
+      try { _invokeListener(h, this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
       if (event._immediatePropagationStopped) break;
     }
     if (event.bubbles && !event._propagationStopped && this.parentNode) {
@@ -5886,7 +5906,7 @@ class Document extends Node {
   }
   createRange() { return new Range(); }
   addEventListener(type, fn, opts) {
-    if (typeof fn !== 'function') return;
+    __listenerGate(fn);
     // Capture listeners live in the shared capture registry keyed by _nid:
     // Element.dispatchEvent's capture walk reaches the document through the
     // parentNode chain, and looks listeners up there (#100).
@@ -5926,14 +5946,14 @@ class Document extends Node {
         const caps = (_eventRegistryCap[this._nid] || {})[event.type] || [];
         event.currentTarget = this;
         for (const h of caps.slice()) {
-          try { h.call(this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
+          try { _invokeListener(h, this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
         }
       }
     }
     const L = __evtStore.get(this);
     const handlers = ((L && L[event.type]) || []).slice();
     if (handlers.length) event.currentTarget = this;
-    for (const h of handlers) { try { h.call(this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); } }
+    for (const h of handlers) { try { _invokeListener(h, this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); } }
     return !event.defaultPrevented;
   }
   createTreeWalker(root, whatToShow, filter) {
@@ -7015,7 +7035,7 @@ class NetworkInformation {
   get ontypechange() { return this._ontypechange || null; }
   set ontypechange(v) { this._ontypechange = typeof v === "function" ? v : null; }
   addEventListener(type, listener) {
-    if (typeof listener !== "function") return;
+    __listenerGate(listener);
     const L = __lmap(this);
     (L[type] || (L[type] = [])).push(listener);
   }
@@ -7028,7 +7048,7 @@ class NetworkInformation {
     if (!event || !event.type) return true;
     const L = __evtStore.get(this);
     for (const listener of (L && L[event.type]) || []) {
-      try { listener.call(this, event); } catch (error) { console.error(error); }
+      try { _invokeListener(listener, this, event); } catch (error) { console.error(error); }
     }
     const handler = this["on" + event.type];
     if (typeof handler === "function") {
@@ -8230,6 +8250,7 @@ if (typeof Headers === "undefined") {
 // removeEventListener/dispatchEvent descriptors before falling back to XHR.prototype.
 class XMLHttpRequestEventTarget {
   addEventListener(type, handler) {
+    __listenerGate(handler);
     const L = __lmap(this);
     if (!L[type]) L[type] = [];
     L[type].push(handler);
@@ -8248,7 +8269,7 @@ class XMLHttpRequestEventTarget {
     const type = ev.type;
     const L = __evtStore.get(this);
     const handlers = (L && L[type]) || [];
-    for (const h of handlers) { try { h.call(this, ev); } catch (e) {} }
+    for (const h of handlers) { try { _invokeListener(h, this, ev); } catch (e) {} }
     const prop = 'on' + type;
     if (typeof this[prop] === 'function') {
       try { this[prop](ev); } catch (e) {}
@@ -8671,6 +8692,7 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
   }
 
   addEventListener(type, handler) {
+    __listenerGate(handler);
     const L = __lmap(this);
     if (!L[type]) L[type] = [];
     L[type].push(handler);
@@ -8693,7 +8715,7 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     const type = ev.type;
     const L = __evtStore.get(this);
     const handlers = (L && L[type]) || [];
-    for (const h of handlers) { try { h.call(this, ev); } catch (e) {} }
+    for (const h of handlers) { try { _invokeListener(h, this, ev); } catch (e) {} }
     const prop = 'on' + type;
     if (typeof this[prop] === 'function') {
       try { this[prop](ev); } catch (e) {}
@@ -8713,7 +8735,7 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     const event = { type, target: this, currentTarget: this, bubbles: false };
     const L = __evtStore.get(this);
     const handlers = (L && L[type]) || [];
-    for (const h of handlers) { try { h.call(this, event); } catch(e) {} }
+    for (const h of handlers) { try { _invokeListener(h, this, event); } catch(e) {} }
     const prop = 'on' + type;
     if (type !== 'readystatechange' && typeof this[prop] === 'function') {
       try { this[prop](event); } catch(e) {}
@@ -9374,7 +9396,8 @@ function _MediaQueryList(q) {
 _MediaQueryList.prototype.addListener = function (fn) { this.addEventListener('change', fn); };
 _MediaQueryList.prototype.removeListener = function (fn) { this.removeEventListener('change', fn); };
 _MediaQueryList.prototype.addEventListener = function (type, fn) {
-  if (type === 'change' && typeof fn === 'function' && this._change.indexOf(fn) < 0) this._change.push(fn);
+  __listenerGate(fn);
+  if (type === 'change' && fn != null && this._change.indexOf(fn) < 0) this._change.push(fn);
 };
 _MediaQueryList.prototype.removeEventListener = function (type, fn) {
   if (type !== 'change') return;
@@ -9384,7 +9407,7 @@ _MediaQueryList.prototype.removeEventListener = function (type, fn) {
 _MediaQueryList.prototype.dispatchEvent = function (ev) {
   const handlers = this._change.slice();
   if (typeof this.onchange === 'function') handlers.push(this.onchange);
-  for (const h of handlers) { try { h.call(this, ev); } catch (e) {} }
+  for (const h of handlers) { try { _invokeListener(h, this, ev); } catch (e) {} }
   return true;
 };
 if (typeof MediaQueryList === 'undefined') globalThis.MediaQueryList = _MediaQueryList;
@@ -13448,7 +13471,7 @@ class _IframeDocument {
   // no-ops), so `iframeDoc.addEventListener('DOMContentLoaded', ...)` and the
   // like silently did nothing (upstream #478).
   addEventListener(type, listener) {
-    if (typeof listener !== 'function') return;
+    __listenerGate(listener);
     const L = __lmap(this);
     const list = L[type] || (L[type] = []);
     if (!list.includes(listener)) list.push(listener);
@@ -13467,7 +13490,7 @@ class _IframeDocument {
     const list = L && L[type];
     if (list) {
       for (const listener of list.slice()) {
-        try { listener.call(this, event); } catch (error) { console.error(error); }
+        try { _invokeListener(listener, this, event); } catch (error) { console.error(error); }
       }
     }
     const handler = this['on' + type];
@@ -13572,6 +13595,7 @@ class _IframeWindow {
   requestAnimationFrame(fn) { return globalThis.requestAnimationFrame(fn); }
 
   addEventListener(type, fn) {
+    __listenerGate(fn);
     const L = __lmap(this);
     if (!L[type]) L[type] = [];
     L[type].push(fn);
@@ -13585,7 +13609,7 @@ class _IframeWindow {
   dispatchEvent(event) {
     const L = __evtStore.get(this);
     const handlers = (L && L[event?.type]) || [];
-    for (const h of handlers) { try { h.call(this, event); } catch(e) {} }
+    for (const h of handlers) { try { _invokeListener(h, this, event); } catch(e) {} }
     return true;
   }
 
@@ -14437,6 +14461,7 @@ class _SourceBufferList extends Array {
 // onupdate/onupdateend/onerror/onabort are standard IDL attributes.
 class _MseEventTarget {
   addEventListener(type, handler) {
+    __listenerGate(handler);
     const L = __lmap(this);
     (L[type] || (L[type] = [])).push(handler);
   }
@@ -14453,7 +14478,7 @@ class _MseEventTarget {
     ev.currentTarget = ev.currentTarget || this;
     const L = __evtStore.get(this);
     const handlers = (L && L[ev.type]) || [];
-    for (const h of handlers) { try { h.call(this, ev); } catch (e) {} }
+    for (const h of handlers) { try { _invokeListener(h, this, ev); } catch (e) {} }
     const prop = 'on' + ev.type;
     if (typeof this[prop] === 'function') {
       try { this[prop](ev); } catch (e) {}
@@ -14880,9 +14905,9 @@ globalThis.BaseAudioContext = class BaseAudioContext {
     this.listener={positionX:_audioParam(0),positionY:_audioParam(0),positionZ:_audioParam(0),forwardX:_audioParam(0),forwardY:_audioParam(0),forwardZ:_audioParam(-1),upX:_audioParam(0),upY:_audioParam(1),upZ:_audioParam(0),setPosition(){},setOrientation(){}}; }
   // BaseAudioContext is an EventTarget (detectors addEventListener("complete")
   // on OfflineAudioContext).
-  addEventListener(t, f) { if (typeof f === 'function') { const l = this._ls || (this._ls = {}); (l[t] || (l[t] = [])).push(f); } }
+  addEventListener(t, f) { __listenerGate(f); const l = this._ls || (this._ls = {}); (l[t] || (l[t] = [])).push(f); }
   removeEventListener(t, f) { const l = this._ls && this._ls[t]; if (l) { const i = l.indexOf(f); if (i >= 0) l.splice(i, 1); } }
-  dispatchEvent(ev) { const l = (this._ls && this._ls[ev.type]) || []; for (const f of l.slice()) { try { f.call(this, ev); } catch (e) {} } return true; }
+  dispatchEvent(ev) { const l = (this._ls && this._ls[ev.type]) || []; for (const f of l.slice()) { try { _invokeListener(f, this, ev); } catch (e) {} } return true; }
   createOscillator() { return _audioNode(this, {type:'sine',frequency:_audioParam(440),detune:_audioParam(0),start(){},stop(){},onended:null}); }
   createDynamicsCompressor() { return _audioNode(this, {threshold:_audioParam(_fp('compThreshold'),-100,0),knee:_audioParam(_fp('compKnee'),0,40),ratio:_audioParam(_fp('compRatio'),1,20),attack:_audioParam(0.003,0,1),release:_audioParam(0.25,0,1),reduction:0}); }
   createAnalyser() {
@@ -15934,6 +15959,7 @@ globalThis.Worker = class Worker {
   }
   terminate() { this._terminated = true; }
   addEventListener(type, fn) {
+    __listenerGate(fn);
     const L = __lmap(this);
     if (!L[type]) L[type] = [];
     L[type].push(fn);
@@ -16018,7 +16044,7 @@ function bootWorker(worker) {
             if (worker.onmessage) worker.onmessage(evt);
             const wl = __evtStore.get(worker);
             const handlers = (wl && wl['message']) || [];
-            for (const h of handlers) h(evt);
+            for (const h of handlers) _invokeListener(h, worker, evt);
           },
           addEventListener: (type, fn) => { workerSelf['on' + type] = fn; },
           removeEventListener: () => {},
@@ -16101,7 +16127,7 @@ function fireWorkerError(worker, err, listeners) {
   const evt = { message, filename: '', lineno: 0, colno: 0, error: err };
   const handlers = ((listeners && listeners['error']) || []).slice();
   if (worker.onerror) handlers.unshift(worker.onerror);
-  for (const h of handlers) { try { h(evt); } catch {} }
+  for (const h of handlers) { try { _invokeListener(h, worker, evt); } catch {} }
 }
 
 globalThis.__blobStore = globalThis.__blobStore || {};
@@ -17181,9 +17207,9 @@ if (typeof FileReader === 'undefined') {
     _fire(type) {
       const ev = { type: type, target: this, currentTarget: this, lengthComputable: false, loaded: 0, total: 0 };
       const h = this["on" + type]; if (typeof h === "function") { try { h.call(this, ev); } catch (e) {} }
-      const ls = __evtStore.get(this)?.[type]; if (ls) for (const fn of ls.slice()) { try { fn.call(this, ev); } catch (e) {} }
+      const ls = __evtStore.get(this)?.[type]; if (ls) for (const fn of ls.slice()) { try { _invokeListener(fn, this, ev); } catch (e) {} }
     }
-    addEventListener(t, fn) { if (typeof fn === "function") { const L = __lmap(this); (L[t] = L[t] || []).push(fn); } }
+    addEventListener(t, fn) { __listenerGate(fn); const L = __lmap(this); (L[t] = L[t] || []).push(fn); }
     removeEventListener(t, fn) { const ls = __evtStore.get(this)?.[t]; if (ls) { const i = ls.indexOf(fn); if (i >= 0) ls.splice(i, 1); } }
     dispatchEvent() { return true; }
   };
