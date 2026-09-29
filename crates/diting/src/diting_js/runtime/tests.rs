@@ -16946,6 +16946,111 @@ fn document_evaluate_xpath_subset() {
         assert_eq!(v["parsed"]["transparent"], serde_json::json!([0, 0, 0, 0]));
     }
 
+    /// #164: Path2D is a real path (SVG path-data constructor + command
+    /// API) and ctx.fill rasterizes it under the CTM; canvas.width reflects
+    /// the content attribute and resizes the live 2D buffer. qrcode.react
+    /// feature-detects addPath and draws whole QR modules as path data
+    /// through fill(new Path2D(d)) under ctx.scale() — the all-no-op stub
+    /// passed the detect and painted a blank canvas (taobao havana login).
+    #[tokio::test(flavor = "current_thread")]
+    async fn canvas_path2d_fill_rasterizes_under_transform() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"() => {
+                    const px = (g, x, y) => { const d = g.getImageData(x, y, 1, 1).data; return [d[0], d[1], d[2], d[3]]; };
+                    const out = {};
+                    // The #164 draw sequence: whole modules as SVG path data
+                    // through fill(new Path2D(d)) under ctx.scale().
+                    const c = document.createElement('canvas');
+                    c.width = 132; c.height = 132;
+                    const g = c.getContext('2d');
+                    g.scale(4, 4);
+                    g.fillStyle = '#ffffff';
+                    g.fillRect(0, 0, 33, 33);
+                    g.fillStyle = '#000000';
+                    g.fill(new Path2D('M4 4h1v1h-1zM6 4h1v1h-1z'));
+                    out.qrModule = px(g, 18, 18); // module (4,4) → device 16..32
+                    out.qrGap = px(g, 22, 18);    // module (5,4) absent → white bg
+                    out.detect = (() => { const p = new Path2D(); p.moveTo(0, 0); p.addPath(new Path2D()); return p instanceof Path2D; })();
+                    // Command-API path via the current-path form fill()
+                    const c4 = document.createElement('canvas');
+                    c4.width = 10; c4.height = 10;
+                    const g4 = c4.getContext('2d');
+                    g4.fillStyle = '#000000';
+                    g4.beginPath(); g4.moveTo(2, 2); g4.lineTo(8, 2); g4.lineTo(5, 8); g4.closePath(); g4.fill();
+                    out.cmdPath = px(g4, 5, 4);
+                    // nonzero fills nested same-winding squares; evenodd
+                    // carves the inner one into a hole.
+                    const nested = () => {
+                        const h = document.createElement('canvas');
+                        h.width = 20; h.height = 20;
+                        const gh = h.getContext('2d');
+                        gh.fillStyle = '#000000';
+                        return gh;
+                    };
+                    const gh1 = nested();
+                    gh1.fill(new Path2D('M2 2h16v16h-16z M6 6h8v8h-8z'));
+                    out.nonzeroInner = px(gh1, 10, 10);
+                    const gh2 = nested();
+                    gh2.fill(new Path2D('M2 2h16v16h-16z M6 6h8v8h-8z'), 'evenodd');
+                    out.evenoddHole = px(gh2, 10, 10);
+                    out.evenoddRing = px(gh2, 4, 10);
+                    // width/height are reflected IDL attributes (defaults
+                    // 300/150); a post-getContext write resizes the live
+                    // buffer and resets drawing state, like Chrome.
+                    const c2 = document.createElement('canvas');
+                    out.freshDefault = [c2.width, c2.height];
+                    const g2 = c2.getContext('2d');
+                    c2.width = 41; c2.height = 10;
+                    out.attrReflected = c2.getAttribute('width');
+                    g2.fillStyle = '#123456';
+                    g2.fillRect(0, 0, 41, 10);
+                    out.resizedCorner = px(g2, 40, 9);
+                    const url = c2.toDataURL();
+                    const bin = atob(url.slice(url.indexOf(',') + 1));
+                    out.ihdr = [(bin.charCodeAt(16) << 24 | bin.charCodeAt(17) << 16 | bin.charCodeAt(18) << 8 | bin.charCodeAt(19)) >>> 0,
+                                (bin.charCodeAt(20) << 24 | bin.charCodeAt(21) << 16 | bin.charCodeAt(22) << 8 | bin.charCodeAt(23)) >>> 0];
+                    c2.width = 8; // resize resets state
+                    g2.fillRect(0, 0, 8, 10);
+                    out.stateReset = px(g2, 4, 4);
+                    // Real CTM: translate(2,3)·rotate(90°)·scale(2,2) =
+                    // [0 2 -2 0 2 3]; save/restore snapshots the matrix.
+                    const g3 = document.createElement('canvas').getContext('2d');
+                    g3.translate(2, 3); g3.rotate(Math.PI / 2); g3.scale(2, 2);
+                    const t = g3.getTransform();
+                    g3.save(); g3.scale(5, 5); g3.restore();
+                    const t2 = g3.getTransform();
+                    const r = (x) => Math.round(x * 1000) / 1000;
+                    out.ctm = [r(t.a), r(t.b), r(t.c), r(t.d), r(t.e), r(t.f)];
+                    out.restored = [r(t2.a), r(t2.b), r(t2.c), r(t2.d), r(t2.e), r(t2.f)];
+                    return out;
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let v = result.value.unwrap();
+        assert_eq!(v["qrModule"], serde_json::json!([0, 0, 0, 255]), "Path2D SVG module pixel is black");
+        assert_eq!(v["qrGap"], serde_json::json!([255, 255, 255, 255]), "absent module stays background");
+        assert_eq!(v["detect"], serde_json::json!(true), "addPath feature detect still passes");
+        assert_eq!(v["cmdPath"], serde_json::json!([0, 0, 0, 255]), "command-API path fills via fill()");
+        assert_eq!(v["nonzeroInner"], serde_json::json!([0, 0, 0, 255]), "nonzero fills nested squares");
+        assert_eq!(v["evenoddHole"], serde_json::json!([0, 0, 0, 0]), "evenodd carves the inner hole");
+        assert_eq!(v["evenoddRing"], serde_json::json!([0, 0, 0, 255]), "evenodd ring stays filled");
+        assert_eq!(v["freshDefault"], serde_json::json!([300, 150]), "IDL defaults 300×150");
+        assert_eq!(v["attrReflected"], serde_json::json!("41"), "width write reflects to the attribute");
+        assert_eq!(v["resizedCorner"], serde_json::json!([18, 52, 86, 255]), "post-getContext write resizes the buffer");
+        assert_eq!(v["ihdr"], serde_json::json!([41, 10]), "PNG IHDR follows the resized buffer");
+        assert_eq!(v["stateReset"], serde_json::json!([0, 0, 0, 255]), "resize resets fillStyle to default");
+        assert_eq!(v["ctm"], serde_json::json!([0, 2, -2, 0, 2, 3]), "CTM compose translate·rotate·scale");
+        assert_eq!(v["restored"], serde_json::json!([0, 2, -2, 0, 2, 3]), "restore rewinds the matrix");
+    }
+
     /// #160 / obscura#1067: the deprecated IDL spellings — visibilityProperty
     /// / opacityProperty — answer the same as checkVisibilityCSS/checkOpacity.
     /// Playwright 1.25-era call sites pass the old names.

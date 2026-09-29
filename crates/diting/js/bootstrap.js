@@ -13548,7 +13548,31 @@ class _Canvas2D {
     this.globalAlpha = 1;
     this.globalCompositeOperation = 'source-over';
     this._stateStack = [];
+    // (#164) Real 2D transform + path state. The old stub no-opped every
+    // transform and every fill()/stroke() — qrcode.react feature-detects
+    // Path2D.addPath, then draws whole QR modules as path data through
+    // ctx.fill(new Path2D(d)) under ctx.scale(), which painted nothing.
+    this._m = [1, 0, 0, 1, 0, 0];
+    this._path2d = null;
     __hideOwn(this);
+  }
+  _resize(w, h) {
+    // (#164) canvas.width = n resizes the live buffer. Chrome also resets
+    // ALL drawing state on a dimension change; qrcode-react re-establishes
+    // scale/fillStyle after sizing, so the reset is safe and correct.
+    this._w = w;
+    this._h = h;
+    this._buf = new Uint8ClampedArray(w * h * 4);
+    this.fillStyle = '#000000';
+    this.strokeStyle = '#000000';
+    this.lineWidth = 1;
+    this.font = '10px sans-serif';
+    this.textAlign = 'start';
+    this.textBaseline = 'alphabetic';
+    this.globalAlpha = 1;
+    this._stateStack = [];
+    this._m = [1, 0, 0, 1, 0, 0];
+    this._path2d = null;
   }
   _parseColor(css) {
     if (typeof css !== 'string') css = String(css ?? '');
@@ -13629,32 +13653,52 @@ class _Canvas2D {
     this._buf[idx+3] = Math.min(255, Math.round(a * alpha + this._buf[idx+3] * (1 - alpha)));
   }
   fillRect(x, y, w, h) {
-    const [r,g,b,a] = this._parseColor(this.fillStyle);
+    const rgba = this._parseColor(this.fillStyle);
+    const m = this._m;
+    // (#164) Axis-aligned CTM (identity/translate/scale): transform the
+    // rect and run the tight integer loop. Rotated CTM falls to the
+    // polygon scanline raster. Identity reproduces the old pixel-exact
+    // behavior (pinned by canvas_fill_style_parses_css_color_grammar).
+    if (m[1] === 0 && m[2] === 0) {
+      const x0 = m[0]*x + m[4], x1 = m[0]*(x+w) + m[4];
+      const y0 = m[3]*y + m[5], y1 = m[3]*(y+h) + m[5];
+      this._fillRectRaw(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1-x0), Math.abs(y1-y0), rgba);
+    } else {
+      this._fillDevicePolys([[this._tp(x, y), this._tp(x+w, y), this._tp(x+w, y+h), this._tp(x, y+h)]], rgba);
+    }
+  }
+  _fillRectRaw(x, y, w, h, rgba) {
     x=Math.round(x); y=Math.round(y); w=Math.round(w); h=Math.round(h);
     for (let py = Math.max(0,y); py < Math.min(this._h, y+h); py++) {
       for (let px = Math.max(0,x); px < Math.min(this._w, x+w); px++) {
-        this._setPixel(px, py, r, g, b, a);
+        this._setPixel(px, py, rgba[0], rgba[1], rgba[2], rgba[3]);
       }
     }
   }
   clearRect(x, y, w, h) {
-    x=Math.round(x); y=Math.round(y); w=Math.round(w); h=Math.round(h);
-    for (let py = Math.max(0,y); py < Math.min(this._h, y+h); py++) {
-      for (let px = Math.max(0,x); px < Math.min(this._w, x+w); px++) {
-        const idx = (py * this._w + px) * 4;
-        this._buf[idx] = this._buf[idx+1] = this._buf[idx+2] = this._buf[idx+3] = 0;
+    const m = this._m;
+    if (m[1] === 0 && m[2] === 0) {
+      const x0 = m[0]*x + m[4], x1 = m[0]*(x+w) + m[4];
+      const y0 = m[3]*y + m[5], y1 = m[3]*(y+h) + m[5];
+      x = Math.round(Math.min(x0, x1)); y = Math.round(Math.min(y0, y1));
+      w = Math.round(Math.abs(x1-x0)); h = Math.round(Math.abs(y1-y0));
+      for (let py = Math.max(0,y); py < Math.min(this._h, y+h); py++) {
+        for (let px = Math.max(0,x); px < Math.min(this._w, x+w); px++) {
+          const idx = (py * this._w + px) * 4;
+          this._buf[idx] = this._buf[idx+1] = this._buf[idx+2] = this._buf[idx+3] = 0;
+        }
       }
     }
+    // Rotated clearRect: no-op (filling a rotated polygon with zeros needs
+    // a clear-mode scanline; nothing in the wild clears under rotation).
   }
   strokeRect(x, y, w, h) {
-    const [r,g,b,a] = this._parseColor(this.strokeStyle);
-    const lw = this.lineWidth;
-    for (let px = Math.round(x); px < Math.round(x+w); px++) {
-      for (let l = 0; l < lw; l++) { this._setPixel(px, Math.round(y)+l, r,g,b,a); this._setPixel(px, Math.round(y+h)-1-l, r,g,b,a); }
-    }
-    for (let py = Math.round(y); py < Math.round(y+h); py++) {
-      for (let l = 0; l < lw; l++) { this._setPixel(Math.round(x)+l, py, r,g,b,a); this._setPixel(Math.round(x+w)-1-l, py, r,g,b,a); }
-    }
+    // (#164) Stamp the four transformed edges — correct under any CTM;
+    // under identity it lands within a pixel of the old edge-loop.
+    const pts = [this._tp(x, y), this._tp(x+w, y), this._tp(x+w, y+h), this._tp(x, y+h)];
+    const rgba = this._parseColor(this.strokeStyle);
+    const rad = Math.max(1, Math.round(Math.max(1, this.lineWidth) / 2));
+    for (let i = 0; i < 4; i++) this._stampSeg(pts[i], pts[(i+1) % 4], rad, rgba);
   }
   // (#117) Anchor math for blitting a rasterized text tile (width/height/
   // baseline, RGBA8). alphabetic is the canvas default; the other baselines
@@ -13781,41 +13825,219 @@ class _Canvas2D {
   }
   createImageData(w, h) { return { data: new Uint8ClampedArray(w*h*4), width: w, height: h }; }
   drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh) {
-    if (img && img._ctx && img._ctx._buf) {
-      const src = img._ctx;
-      dx = dx ?? sx; dy = dy ?? sy; dw = dw ?? (sw ?? src._w); dh = dh ?? (sh ?? src._h);
-      for (let py = 0; py < dh; py++) {
-        for (let px = 0; px < dw; px++) {
-          const srcX = Math.floor((sx||0) + px * (sw||src._w) / dw);
-          const srcY = Math.floor((sy||0) + py * (sh||src._h) / dh);
-          if (srcX >= 0 && srcX < src._w && srcY >= 0 && srcY < src._h) {
-            const srcIdx = (srcY * src._w + srcX) * 4;
-            this._setPixel(dx+px, dy+py, src._buf[srcIdx], src._buf[srcIdx+1], src._buf[srcIdx+2], src._buf[srcIdx+3]);
-          }
+    if (!(img && img._ctx && img._ctx._buf)) return;
+    const src = img._ctx;
+    // (#164) Arg shuffles: 3-arg (dx,dy) and 5-arg (dx,dy,dw,dh) forms
+    // draw the whole source; 9-arg is the full source→dest mapping.
+    if (arguments.length < 9) {
+      dx = sx; dy = sy; dw = sw; dh = sh; // 3-arg: both undefined → whole src
+      sx = 0; sy = 0; sw = src._w; sh = src._h;
+    }
+    dw = dw ?? sw; dh = dh ?? sh;
+    const m = this._m;
+    if (m[1] !== 0 || m[2] !== 0) return; // rotated draw: out of scope
+    const Dx = m[0]*dx + m[4], Dy = m[3]*dy + m[5];
+    const Dw = Math.abs(m[0]*dw), Dh = Math.abs(m[3]*dh);
+    if (!(Dw > 0) || !(Dh > 0)) return;
+    const fx = sw / Dw, fy = sh / Dh;
+    const x0 = Math.round(Dx), y0 = Math.round(Dy);
+    for (let py = 0; py < Dh; py++) {
+      for (let px = 0; px < Dw; px++) {
+        const srcX = Math.floor(sx + px * fx), srcY = Math.floor(sy + py * fy);
+        if (srcX >= 0 && srcX < src._w && srcY >= 0 && srcY < src._h) {
+          const srcIdx = (srcY * src._w + srcX) * 4;
+          this._setPixel(x0 + px, y0 + py, src._buf[srcIdx], src._buf[srcIdx+1], src._buf[srcIdx+2], src._buf[srcIdx+3]);
         }
       }
     }
   }
-  beginPath() { this._path = []; }
-  closePath() {}
-  moveTo(x, y) { if (this._path) this._path.push({t:'M',x,y}); }
-  lineTo(x, y) { if (this._path) this._path.push({t:'L',x,y}); }
-  bezierCurveTo() {} quadraticCurveTo() {}
-  arc(x, y, r, s, e) { if (this._path) this._path.push({t:'A',x,y,r}); }
-  arcTo() {}
-  rect(x, y, w, h) { this.fillRect(x, y, w, h); }
-  fill() {}
-  stroke() {}
+  // ---- (#164) transforms: real CTM, user-space paths, scanline raster ----
+  _mul(o) {
+    const m = this._m;
+    this._m = [
+      m[0]*o[0] + m[2]*o[1],
+      m[1]*o[0] + m[3]*o[1],
+      m[0]*o[2] + m[2]*o[3],
+      m[1]*o[2] + m[3]*o[3],
+      m[0]*o[4] + m[2]*o[5] + m[4],
+      m[1]*o[4] + m[3]*o[5] + m[5],
+    ];
+  }
+  _tp(x, y) {
+    const m = this._m;
+    return [m[0]*x + m[2]*y + m[4], m[1]*x + m[3]*y + m[5]];
+  }
+  _inv(x, y) {
+    const m = this._m, det = m[0]*m[3] - m[1]*m[2];
+    if (!det) return [x, y];
+    return [
+      (m[3]*(x - m[4]) - m[2]*(y - m[5])) / det,
+      (m[0]*(y - m[5]) - m[1]*(x - m[4])) / det,
+    ];
+  }
+  translate(x, y) { this._mul([1, 0, 0, 1, x, y]); }
+  scale(x, y) { if (arguments.length < 2) y = x; this._mul([x, 0, 0, y, 0, 0]); }
+  rotate(a) { const c = Math.cos(a), s = Math.sin(a); this._mul([c, s, -s, c, 0, 0]); }
+  transform(a, b, c, d, e, f) { this._mul([a, b, c, d, e, f]); }
+  setTransform(a, b, c, d, e, f) {
+    this._m = (arguments.length >= 6) ? [a, b, c, d, e, f] : [1, 0, 0, 1, 0, 0];
+  }
+  resetTransform() { this._m = [1, 0, 0, 1, 0, 0]; }
+  getTransform() {
+    const m = this._m;
+    return { a: m[0], b: m[1], c: m[2], d: m[3], e: m[4], f: m[5] };
+  }
+  _p2d() { if (!this._path2d) this._path2d = new Path2D(); return this._path2d; }
+  beginPath() { this._path2d = new Path2D(); }
+  moveTo(x, y) { this._p2d().moveTo(x, y); }
+  lineTo(x, y) { this._p2d().lineTo(x, y); }
+  closePath() { this._p2d().closePath(); }
+  bezierCurveTo(a, b, c, d, e, f) { this._p2d().bezierCurveTo(a, b, c, d, e, f); }
+  quadraticCurveTo(a, b, c, d) { this._p2d().quadraticCurveTo(a, b, c, d); }
+  arc(x, y, r, s, e, ccw) { this._p2d().arc(x, y, r, s, e, ccw); }
+  arcTo(x1, y1, x2, y2, r) { this._p2d().arcTo(x1, y1, x2, y2, r); }
+  ellipse(x, y, rx, ry, rot, s, e, ccw) { this._p2d().ellipse(x, y, rx, ry, rot, s, e, ccw); }
+  rect(x, y, w, h) { this._p2d().rect(x, y, w, h); }
+  // Scanline polygon rasterizer with nonzero winding (default) and
+  // even-odd. Fill closes open subpaths implicitly, like Chrome.
+  _fillDevicePolys(polys, rgba, rule) {
+    const edges = [];
+    let ylo = Infinity, yhi = -Infinity;
+    const push = (x1, y1, x2, y2) => {
+      if (y1 === y2) return;
+      edges.push([x1, y1, x2, y2]);
+      if (y1 < ylo) ylo = y1;
+      if (y1 > yhi) yhi = y1;
+      if (y2 < ylo) ylo = y2;
+      if (y2 > yhi) yhi = y2;
+    };
+    for (const pts of polys) {
+      if (!pts || pts.length < 2) continue;
+      let p = pts[0];
+      for (let i = 1; i < pts.length; i++) { push(p[0], p[1], pts[i][0], pts[i][1]); p = pts[i]; }
+      push(p[0], p[1], pts[0][0], pts[0][1]);
+    }
+    if (!edges.length) return;
+    const evenodd = rule === 'evenodd';
+    const py0 = Math.max(0, Math.floor(ylo)), py1 = Math.min(this._h - 1, Math.ceil(yhi));
+    for (let py = py0; py <= py1; py++) {
+      const yc = py + 0.5;
+      const evs = [];
+      for (const e of edges) {
+        if ((e[1] <= yc && yc < e[3]) || (e[3] <= yc && yc < e[1])) {
+          const t = (yc - e[1]) / (e[3] - e[1]);
+          evs.push([e[0] + t * (e[2] - e[0]), e[3] > e[1] ? 1 : -1]);
+        }
+      }
+      if (!evs.length) continue;
+      evs.sort((a, b) => a[0] - b[0]);
+      let wind = 0, span = 0, open = false;
+      for (const ev of evs) {
+        wind += ev[1];
+        const inside = evenodd ? (wind % 2 !== 0) : wind !== 0;
+        if (inside && !open) { span = ev[0]; open = true; }
+        else if (!inside && open) {
+          const px0 = Math.max(0, Math.ceil(span - 0.5));
+          const px1 = Math.min(this._w, Math.ceil(ev[0] - 0.5));
+          for (let px = px0; px < px1; px++) this._setPixel(px, py, rgba[0], rgba[1], rgba[2], rgba[3]);
+          open = false;
+        }
+      }
+    }
+  }
+  fill(path, rule) {
+    if (typeof path === 'string') { rule = path; path = undefined; }
+    const subs = (path && path._subs) ? path._subs : this._p2d()._subs;
+    const polys = [];
+    for (const s of subs) {
+      if (!s || s.p.length < 2) continue;
+      const pts = new Array(s.p.length);
+      for (let i = 0; i < s.p.length; i++) pts[i] = this._tp(s.p[i][0], s.p[i][1]);
+      polys.push(pts);
+    }
+    this._fillDevicePolys(polys, this._parseColor(this.fillStyle), rule);
+  }
+  // Stroke = square pen stamps along the transformed polylines. lineWidth
+  // < 1 clamps to 1 device px (Chrome never strokes sub-pixel-thin).
+  stroke(path) {
+    const subs = (path && path._subs) ? path._subs : this._p2d()._subs;
+    const rgba = this._parseColor(this.strokeStyle);
+    const rad = Math.max(1, Math.round(Math.max(1, this.lineWidth) / 2));
+    for (const s of subs) {
+      if (!s || s.p.length < 2) continue;
+      const pts = s.p.map((p) => this._tp(p[0], p[1]));
+      for (let i = 0; i + 1 < pts.length; i++) this._stampSeg(pts[i], pts[i+1], rad, rgba);
+      if (s.c) this._stampSeg(pts[pts.length-1], pts[0], rad, rgba);
+    }
+  }
+  _stampSeg(p, q, rad, rgba) {
+    const dx = q[0] - p[0], dy = q[1] - p[1];
+    const steps = Math.max(1, Math.ceil((Math.abs(dx) + Math.abs(dy)) * 2));
+    for (let i = 0; i <= steps; i++) {
+      const x = p[0] + dx * i / steps, y = p[1] + dy * i / steps;
+      for (let oy = -rad; oy <= rad; oy++) {
+        for (let ox = -rad; ox <= rad; ox++) {
+          this._setPixel(x + ox, y + oy, rgba[0], rgba[1], rgba[2], rgba[3]);
+        }
+      }
+    }
+  }
   clip() {}
-  save() { this._stateStack.push({fillStyle: this.fillStyle, strokeStyle: this.strokeStyle, globalAlpha: this.globalAlpha, font: this.font, lineWidth: this.lineWidth}); }
-  restore() { const s = this._stateStack.pop(); if (s) Object.assign(this, s); }
-  translate() {} rotate() {} scale() {}
-  setTransform() {} resetTransform() {} transform() {}
+  isPointInPath(a, b, c) {
+    let path = null, x, y, rule;
+    if (a && a._subs) { path = a; x = b; y = c; } else { x = a; y = b; rule = c; }
+    const [ux, uy] = this._inv(x, y);
+    const subs = (path || this._p2d())._subs;
+    const evenodd = rule === 'evenodd';
+    let wind = 0;
+    for (const s of subs) {
+      if (!s || s.p.length < 2) continue;
+      for (let i = 0, j = s.p.length - 1; i < s.p.length; j = i++) {
+        const yi = s.p[i][1], yj = s.p[j][1];
+        if ((yi > uy) !== (yj > uy)) {
+          const xint = s.p[j][0] + (uy - yj) * (s.p[i][0] - s.p[j][0]) / (yi - yj);
+          if (ux < xint) wind += evenodd ? 1 : (yi > yj ? 1 : -1);
+        }
+      }
+    }
+    return evenodd ? (wind % 2 !== 0) : wind !== 0;
+  }
+  isPointInStroke(a, b) {
+    const path = (a && a._subs) ? a : null;
+    const x = path ? b : a, y = path ? undefined : b;
+    if (y === undefined) return false;
+    const [ux, uy] = this._inv(x, y);
+    const subs = (path || this._p2d())._subs;
+    const tol = Math.max(0.5, this.lineWidth / 2);
+    for (const s of subs) {
+      if (!s || s.p.length < 2) continue;
+      const n = s.c ? s.p.length : s.p.length - 1;
+      for (let i = 0; i < n; i++) {
+        const p1 = s.p[i], p2 = s.p[(i+1) % s.p.length];
+        const dx = p2[0]-p1[0], dy = p2[1]-p1[1];
+        const len2 = dx*dx + dy*dy;
+        const t = len2 ? Math.max(0, Math.min(1, ((ux-p1[0])*dx + (uy-p1[1])*dy) / len2)) : 0;
+        const px = p1[0] + dx*t, py = p1[1] + dy*t;
+        if (Math.hypot(ux - px, uy - py) <= tol) return true;
+      }
+    }
+    return false;
+  }
+  save() {
+    this._stateStack.push({
+      fillStyle: this.fillStyle, strokeStyle: this.strokeStyle,
+      globalAlpha: this.globalAlpha, font: this.font, lineWidth: this.lineWidth,
+      textAlign: this.textAlign, textBaseline: this.textBaseline,
+      _m: this._m.slice(),
+    });
+  }
+  restore() {
+    const s = this._stateStack.pop();
+    if (s) { const m = s._m; Object.assign(this, s); this._m = m; }
+  }
   createLinearGradient(x0,y0,x1,y1) { return { addColorStop(){}, _x0:x0,_y0:y0,_x1:x1,_y1:y1 }; }
   createRadialGradient() { return { addColorStop(){} }; }
   createPattern() { return {}; }
-  isPointInPath() { return false; }
-  isPointInStroke() { return false; }
 }
 
 // (#117) Canvas-only methods live on HTMLCanvasElement.prototype in Chrome —
@@ -13823,6 +14045,20 @@ class _Canvas2D {
 // was true and every non-canvas element answered getContext. Both are bot
 // tells; canvas elements still resolve them through the prototype chain.
 HTMLCanvasElement.prototype.getContext = function getContext(type) {
+  // (#164) width/height were plain own data properties (parser/JS writes
+  // never reflected to the content attribute). Fold any pre-ctx write into
+  // the attribute so the prototype accessors installed below see one truth
+  // from here on, then drop the own property so they take over.
+  for (const dim of ['width', 'height']) {
+    const d = Object.getOwnPropertyDescriptor(this, dim);
+    if (d && 'value' in d && d.configurable) {
+      let v = Math.floor(Number(d.value));
+      if (!Number.isFinite(v) || v < 0) v = 0;
+      if (v > 32767) v = 32767;
+      this.setAttribute(dim, String(v));
+      delete this[dim];
+    }
+  }
   if (type === '2d') {
     if (!this._ctx) {
       __def(this, '_ctx', new _Canvas2D(this));
@@ -13922,6 +14158,34 @@ HTMLCanvasElement.prototype.toBlob = function(cb, type, q) {
   }
   cb(new Blob(['']));
 };
+// (#164) canvas.width/height are reflected IDL attributes (default 300/150,
+// Chrome cap 32767) that also resize the live 2D buffer. qrcode.react sizes
+// the canvas AFTER first paint (s.height = s.width = n*g) — with the old
+// stored-property stub the element grew but the drawing surface stayed at
+// the getContext-time snapshot.
+(function() {
+  for (const dim of ['width', 'height']) {
+    const fallback = dim === 'width' ? 300 : 150;
+    Object.defineProperty(HTMLCanvasElement.prototype, dim, {
+      configurable: true,
+      get() {
+        const v = parseInt(this.getAttribute(dim), 10);
+        return (Number.isFinite(v) && v >= 0) ? v : fallback;
+      },
+      set(v) {
+        v = Math.floor(Number(v));
+        if (!Number.isFinite(v) || v < 0) v = 0;
+        if (v > 32767) v = 32767;
+        this.setAttribute(dim, String(v));
+        const ctx = this._ctx;
+        if (ctx && ctx._resize) {
+          ctx._resize(dim === 'width' ? v : this.width,
+                      dim === 'height' ? v : this.height);
+        }
+      },
+    });
+  }
+})();
 // Chrome desktop media support matrix — WorkOS Radar's mediaMime collector
 // probes audio/video elements with canPlayType over a fixed codec list and
 // hashes the non-empty answers (real Chrome: 8 of 9).
@@ -17082,7 +17346,213 @@ if (typeof OffscreenCanvas === 'undefined') {
 }
 
 if (typeof Path2D === 'undefined') {
-  globalThis.Path2D = class Path2D { constructor(){} moveTo(){} lineTo(){} arc(){} rect(){} closePath(){} addPath(){} };
+  // (#164) A real Path2D: subpaths in user space, built through the
+  // command API or the SVG path-data constructor (new Path2D('M0 0h8v8…')).
+  // qrcode.react feature-detects addPath, then hands whole QR modules to
+  // ctx.fill(new Path2D(d)) — the old all-no-op stub made the detect pass
+  // and the fill paint nothing (blank QR canvas on taobao havana login).
+  globalThis.Path2D = class Path2D {
+    constructor(d) {
+      this._subs = [];   // [{p: [[x,y],…], c: closed}]
+      this._cur = null;
+      this._cx = 0; this._cy = 0;    // current point
+      this._sx = 0; this._sy = 0;    // subpath start (Z returns here)
+      this._lc = null; this._lct = null; // last control point + its kind (S/T reflection)
+      __hideOwn(this);
+      if (typeof d === 'string' && d) this._svg(d);
+    }
+    moveTo(x, y) {
+      this._cur = { p: [[x, y]], c: false };
+      this._subs.push(this._cur);
+      this._cx = this._sx = x; this._cy = this._sy = y;
+      this._lc = null; this._lct = null;
+    }
+    lineTo(x, y) {
+      if (!this._cur) this.moveTo(this._cx, this._cy);
+      this._cur.p.push([x, y]);
+      this._cx = x; this._cy = y;
+      this._lc = null; this._lct = null;
+    }
+    closePath() {
+      if (this._cur) { this._cur.c = true; this._cur = null; }
+      this._cx = this._sx; this._cy = this._sy;
+      this._lc = null; this._lct = null;
+    }
+    rect(x, y, w, h) {
+      this.moveTo(x, y);
+      this.lineTo(x + w, y); this.lineTo(x + w, y + h); this.lineTo(x, y + h);
+      this.closePath();
+    }
+    bezierCurveTo(c1x, c1y, c2x, c2y, x, y) {
+      if (!this._cur) this.moveTo(this._cx, this._cy);
+      const x0 = this._cx, y0 = this._cy;
+      for (let i = 1; i <= 16; i++) {
+        const t = i / 16, u = 1 - t;
+        this._cur.p.push([
+          u*u*u*x0 + 3*u*u*t*c1x + 3*u*t*t*c2x + t*t*t*x,
+          u*u*u*y0 + 3*u*u*t*c1y + 3*u*t*t*c2y + t*t*t*y,
+        ]);
+      }
+      this._cx = x; this._cy = y;
+      this._lc = [c2x, c2y]; this._lct = 'c';
+    }
+    quadraticCurveTo(cx, cy, x, y) {
+      if (!this._cur) this.moveTo(this._cx, this._cy);
+      const x0 = this._cx, y0 = this._cy;
+      for (let i = 1; i <= 16; i++) {
+        const t = i / 16, u = 1 - t;
+        this._cur.p.push([
+          u*u*x0 + 2*u*t*cx + t*t*x,
+          u*u*y0 + 2*u*t*cy + t*t*y,
+        ]);
+      }
+      this._cx = x; this._cy = y;
+      this._lc = [cx, cy]; this._lct = 'q';
+    }
+    arc(x, y, r, start, end, ccw) { this._ellipse(x, y, r, r, 0, start, end, ccw); }
+    ellipse(x, y, rx, ry, rot, start, end, ccw) { this._ellipse(x, y, rx, ry, rot, start, end, ccw); }
+    _ellipse(x, y, rx, ry, rot, start, end, ccw) {
+      rx = Math.abs(rx) || 0; ry = Math.abs(ry) || 0;
+      start = start || 0; end = end || 0;
+      let sweep = end - start;
+      const TAU = Math.PI * 2;
+      if (!ccw) { while (sweep < 0) sweep += TAU; if (sweep > TAU) sweep = TAU; if (sweep === 0 && (rx || ry)) sweep = TAU; }
+      else { while (sweep > 0) sweep -= TAU; if (sweep < -TAU) sweep = -TAU; if (sweep === 0 && (rx || ry)) sweep = -TAU; }
+      if (!rx || !ry) { this.lineTo(x, y); return; }
+      const n = Math.max(8, Math.ceil(Math.abs(sweep) / (Math.PI / 32)));
+      const cosR = Math.cos(rot || 0), sinR = Math.sin(rot || 0);
+      const P = (a) => {
+        const ex = rx * Math.cos(a), ey = ry * Math.sin(a);
+        return [x + ex * cosR - ey * sinR, y + ex * sinR + ey * cosR];
+      };
+      if (!this._cur) { const p0 = P(start); this.moveTo(p0[0], p0[1]); }
+      for (let i = 1; i <= n; i++) {
+        const p = P(start + sweep * i / n);
+        if (!this._cur) this.moveTo(p[0], p[1]); else this._cur.p.push(p);
+        this._cx = p[0]; this._cy = p[1];
+      }
+      this._lc = null; this._lct = null;
+    }
+    // Standard tangent-arc: line from the current point to the tangent
+    // start, then the arc to the tangent end (spec: no trailing line to
+    // the (x2,y2) corner — the next path op draws that).
+    arcTo(x1, y1, x2, y2, r) {
+      if (!(r >= 0)) throw new RangeError('IndexSizeError');
+      const x0 = this._cx, y0 = this._cy;
+      if (r === 0 || (x0 === x1 && y0 === y1) || (x1 === x2 && y1 === y2) ||
+          (x1 - x0) * (y2 - y1) - (x2 - x1) * (y1 - y0) === 0) {
+        this.lineTo(x1, y1); return;
+      }
+      const d1 = Math.hypot(x1 - x0, y1 - y0), d2 = Math.hypot(x2 - x1, y2 - y1);
+      if (!d1 || !d2) { this.lineTo(x1, y1); return; }
+      const ux1 = (x1 - x0) / d1, uy1 = (y1 - y0) / d1;
+      const ux2 = (x2 - x1) / d2, uy2 = (y2 - y1) / d2;
+      const th = Math.acos(Math.max(-1, Math.min(1, ux1 * ux2 + uy1 * uy2)));
+      const L = r / Math.tan(th / 2);
+      const ax = x1 - ux1 * L, ay = y1 - uy1 * L;
+      const bx = x1 + ux2 * L, by = y1 + uy2 * L;
+      this.lineTo(ax, ay);
+      const cross = ux1 * uy2 - uy1 * ux2;
+      this._ellipse(x1, y1, r, r, 0, Math.atan2(ay - y1, ax - x1), Math.atan2(by - y1, bx - x1), cross < 0);
+      this._cx = bx; this._cy = by;
+    }
+    addPath(path, m) {
+      if (!path || !path._subs) return;
+      const xf = m
+        ? (Array.isArray(m) ? m : [m.a ?? 1, m.b ?? 0, m.c ?? 0, m.d ?? 1, m.e ?? 0, m.f ?? 0])
+        : null;
+      for (const s of path._subs) {
+        const p = xf
+          ? s.p.map((pt) => [xf[0]*pt[0] + xf[2]*pt[1] + xf[4], xf[1]*pt[0] + xf[3]*pt[1] + xf[5]])
+          : s.p.map((pt) => [pt[0], pt[1]]);
+        this._subs.push({ p, c: s.c });
+      }
+      this._cur = null;
+    }
+    // SVG path data (https://www.w3.org/TR/SVG11/paths.html#PathData) —
+    // every command letter, implicit repeats (M→L after the first pair),
+    // relative forms, H/V shorthands, and S/T control-point reflection.
+    _svg(d) {
+      const toks = d.match(/[MmZzLlHhVvCcSsQqTtAa]|[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?/g) || [];
+      let i = 0, cmd = '', pairs = 0;
+      const num = () => { const v = parseFloat(toks[i++]); return isFinite(v) ? v : 0; };
+      while (i < toks.length) {
+        if (/[MmZzLlHhVvCcSsQqTtAa]/.test(toks[i])) {
+          cmd = toks[i++]; pairs = 0;
+          if (cmd === 'Z' || cmd === 'z') { this.closePath(); continue; }
+        }
+        const rel = cmd === cmd.toLowerCase();
+        const C = cmd.toUpperCase();
+        if (C === 'M' || C === 'L') {
+          const x = num() + (rel ? this._cx : 0), y = num() + (rel ? this._cy : 0);
+          if (C === 'M' && pairs === 0) this.moveTo(x, y); else this.lineTo(x, y);
+          pairs++;
+        } else if (C === 'H') {
+          this.lineTo(num() + (rel ? this._cx : 0), this._cy);
+        } else if (C === 'V') {
+          this.lineTo(this._cx, num() + (rel ? this._cy : 0));
+        } else if (C === 'C') {
+          const c1x = num() + (rel ? this._cx : 0), c1y = num() + (rel ? this._cy : 0);
+          const c2x = num() + (rel ? this._cx : 0), c2y = num() + (rel ? this._cy : 0);
+          const x = num() + (rel ? this._cx : 0), y = num() + (rel ? this._cy : 0);
+          this.bezierCurveTo(c1x, c1y, c2x, c2y, x, y);
+        } else if (C === 'S') {
+          const lc = (this._lct === 'c' && this._lc) ? [2*this._cx - this._lc[0], 2*this._cy - this._lc[1]] : [this._cx, this._cy];
+          const c2x = num() + (rel ? this._cx : 0), c2y = num() + (rel ? this._cy : 0);
+          const x = num() + (rel ? this._cx : 0), y = num() + (rel ? this._cy : 0);
+          this.bezierCurveTo(lc[0], lc[1], c2x, c2y, x, y);
+        } else if (C === 'Q') {
+          const cx = num() + (rel ? this._cx : 0), cy = num() + (rel ? this._cy : 0);
+          const x = num() + (rel ? this._cx : 0), y = num() + (rel ? this._cy : 0);
+          this.quadraticCurveTo(cx, cy, x, y);
+        } else if (C === 'T') {
+          const lc = (this._lct === 'q' && this._lc) ? [2*this._cx - this._lc[0], 2*this._cy - this._lc[1]] : [this._cx, this._cy];
+          const x = num() + (rel ? this._cx : 0), y = num() + (rel ? this._cy : 0);
+          this.quadraticCurveTo(lc[0], lc[1], x, y);
+        } else if (C === 'A') {
+          const rx = num(), ry = num(), rot = num(), laf = num(), sf = num();
+          const x2 = num() + (rel ? this._cx : 0), y2 = num() + (rel ? this._cy : 0);
+          this._svgArc(rx, ry, rot, laf, sf, x2, y2);
+        } else {
+          i++; // unknown letter: skip
+        }
+      }
+    }
+    // Endpoint→center arc parameterization (SVG spec appendix F.6.5).
+    _svgArc(rx, ry, rotDeg, laf, sf, x2, y2) {
+      const x1 = this._cx, y1 = this._cy;
+      if (!rx || !ry || (x1 === x2 && y1 === y2)) { this.lineTo(x2, y2); return; }
+      rx = Math.abs(rx); ry = Math.abs(ry);
+      const phi = rotDeg * Math.PI / 180, cph = Math.cos(phi), sph = Math.sin(phi);
+      const dx2 = (x1 - x2) / 2, dy2 = (y1 - y2) / 2;
+      const x1p = cph * dx2 + sph * dy2, y1p = -sph * dx2 + cph * dy2;
+      const lam = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+      if (lam > 1) { const s = Math.sqrt(lam); rx *= s; ry *= s; }
+      const den = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
+      let co = den ? Math.sqrt(Math.max(0, (rx * rx * ry * ry - den) / den)) : 0;
+      if (laf === sf) co = -co;
+      const cxp = co * rx * y1p / ry, cyp = -co * ry * x1p / rx;
+      const cx = cph * cxp - sph * cyp + (x1 + x2) / 2;
+      const cy = sph * cxp + cph * cyp + (y1 + y2) / 2;
+      const ang = (ux, uy, vx, vy) => {
+        const dot = ux * vx + uy * vy;
+        const len = Math.sqrt((ux*ux + uy*uy) * (vx*vx + vy*vy)) || 1;
+        let a = Math.acos(Math.max(-1, Math.min(1, dot / len)));
+        if (ux * vy - uy * vx < 0) a = -a;
+        return a;
+      };
+      const a1 = ang(1, 0, (x1p - cxp) / rx, (y1p - cyp) / ry);
+      let da = ang((x1p - cxp) / rx, (y1p - cyp) / ry, (-x1p - cxp) / rx, (-y1p - cyp) / ry);
+      if (!sf && da > 0) da -= Math.PI * 2;
+      if (sf && da < 0) da += Math.PI * 2;
+      if (!this._cur) {
+        const px = cx + rx * Math.cos(a1) * cph - ry * Math.sin(a1) * sph;
+        const py = cy + rx * Math.cos(a1) * sph + ry * Math.sin(a1) * cph;
+        this.moveTo(px, py);
+      }
+      this._ellipse(cx, cy, rx, ry, phi, a1, a1 + da, !sf);
+    }
+  };
 }
 
 if (typeof ImageBitmap === 'undefined') {
