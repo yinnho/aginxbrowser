@@ -6388,20 +6388,22 @@ const _tagInterfaces = new Map();
 const _svgTagInterfaces = new Map();
 function _elementClassFor(nid) {
   const tag = _domParse("tag_name", nid);
-  if (tag === "FORM" && globalThis.HTMLFormElement) return globalThis.HTMLFormElement;
+  if (tag === "FORM" && _HTMLFormElementNative) return _HTMLFormElementNative;
   // Rust reports HTML tags uppercase and XML-namespace tags in source case
   // (tag_name's convention), so a lowercase first letter means a non-HTML
   // namespace: confirm SVG (MathML falls to the default), then route through
   // the SVG table. The HTML hot path pays nothing extra.
   if (typeof tag === "string" && tag && tag[0] === tag[0].toLowerCase()) {
     if (_domParse("namespace_uri", nid) === "http://www.w3.org/2000/svg") {
-      return _svgTagInterfaces.get(tag) || globalThis.SVGElement || Element;
+      return _svgTagInterfaces.get(tag) || _SVGElementNative || Element;
     }
-    return globalThis.HTMLElement || Element;
+    return _HTMLElementNative || Element;
   }
   const C = typeof tag === "string" ? _tagInterfaces.get(tag.toLowerCase()) : null;
   if (C) return C;
-  return globalThis.HTMLElement || Element;
+  // #184: the bootstrap-time class, never the page-mutable global — a
+  // polyfill's HTMLElement shim would otherwise swallow the nid.
+  return _HTMLElementNative || Element;
 }
 // (#167) HTMLDocument is the document's concrete interface: Chrome's chain
 // is document → HTMLDocument.prototype → Document.prototype, with
@@ -6429,7 +6431,7 @@ function _wrap(nid) {
   if (_cache.has(nid)) return _cache.get(nid);
   const t = +_dom("node_type", nid);
   let n;
-  if (t === 1) { const C = _elementClassFor(nid); n = new C(nid); if (C === globalThis.HTMLFormElement) n = new Proxy(n, _formNamedProxy); }
+  if (t === 1) { const C = _elementClassFor(nid); n = new C(nid); if (C === _HTMLFormElementNative) n = new Proxy(n, _formNamedProxy); }
   else if (t === 3) n = new Text(nid);
   else if (t === 8) n = new Comment(nid);
   else if (t === 9) n = new HTMLDocument(nid);
@@ -6444,7 +6446,7 @@ function _wrapEl(nid) {
   const el = new C(nid);
   // The cache holds the form's Proxy (not the raw wrapper) so identity is
   // stable across every lookup path.
-  const n = C === globalThis.HTMLFormElement ? new Proxy(el, _formNamedProxy) : el;
+  const n = C === _HTMLFormElementNative ? new Proxy(el, _formNamedProxy) : el;
   _cache.set(nid, n);
   return n;
 }
@@ -12793,6 +12795,22 @@ globalThis.__diting_tabNavigate = function (shift) {
 // bare aliases made every node instanceof SVGSVGElement and constructor.name
 // read "Element".
 globalThis.SVGElement = class SVGElement extends globalThis.HTMLElement {};
+
+// (#184) Pages may legally replace the interface globals — the
+// webcomponents-era HTMLElement "native shim"
+// (`function(){return Reflect.construct(e,[],this.constructor)}`) is the
+// canonical shape, and github.com installs one. That shim forwards NO
+// constructor arguments, so once the global is swapped, `_wrapEl` routing
+// through it constructs the gate with `undefined` and every wrapper mint
+// for an unknown/custom tag throws "Failed to construct 'HTMLElement':
+// Illegal constructor" (github's hydration retried it hundreds of times).
+// Real Chrome never consults the global for its internal wrappers, and
+// neither do we: internal wrapping binds the bootstrap-time classes.
+// `var` (not const) so the hoisted `_elementClassFor`/`_wrap` can never
+// hit a TDZ — pre-assignment calls fall to `Element` via the `||` guards.
+var _HTMLElementNative = globalThis.HTMLElement;
+var _HTMLFormElementNative = globalThis.HTMLFormElement;
+var _SVGElementNative = globalThis.SVGElement;
 // Chrome exposes `viewBox` on the fit-to-viewbox SVG elements (svg, marker,
 // pattern, view) as an animated rect — never undefined on those elements, and
 // an all-zero baseVal when the attribute is absent or malformed. Export and

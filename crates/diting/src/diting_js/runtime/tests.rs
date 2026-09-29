@@ -16384,6 +16384,62 @@ fn custom_elements_unregistered_construction_still_throws() {
     assert_eq!(v, serde_json::json!({ "direct": "TypeError", "sub": "TypeError" }));
 }
 
+/// #184: pages may legally replace the interface globals — the
+/// webcomponents-era HTMLElement "native shim"
+/// (`function(){return Reflect.construct(orig,[],this.constructor)}`, which
+/// forwards NO constructor arguments) is the canonical shape, and github.com
+/// installs one. Once the global was swapped, internal wrapping that routed
+/// through the live global (`_elementClassFor`'s fallback → `new C(nid)`)
+/// constructed the authorization gate with `undefined`, and every wrapper
+/// mint for a custom/unknown tag threw "Illegal constructor" — github's
+/// hydration retried it hundreds of times per page load. Real Chrome never
+/// consults the global for its internal C++ wrappers; internal wrapping now
+/// binds the bootstrap-time classes, and the page-mutable globals serve
+/// page code only.
+#[test]
+fn native_shim_on_interface_globals_does_not_break_internal_wrapping() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    let js = r##"
+        const NativeHTMLElement = HTMLElement;
+        const NativeForm = HTMLFormElement;
+        // The canonical native-shim shape github installs (verified live on
+        // the 86quan engine: window.HTMLElement.src was exactly this).
+        window.HTMLElement = function HTMLElement() {
+          return Reflect.construct(NativeHTMLElement, [], this.constructor);
+        };
+        window.HTMLElement.prototype = NativeHTMLElement.prototype;
+        window.HTMLFormElement = function HTMLFormElement() {
+          return Reflect.construct(NativeForm, [], this.constructor);
+        };
+        window.HTMLFormElement.prototype = NativeForm.prototype;
+        // innerHTML builds raw nids; the first querySelectorAll/getElementById
+        // mints the wrappers, exercising _elementClassFor's fallback path.
+        document.body.innerHTML = '<x-issue184 id="x"></x-issue184>' +
+            '<form id="f" action="#"><input name="q" value="v"></form>';
+        const all = document.querySelectorAll('x-issue184');
+        const byId = document.getElementById('x');
+        const form = document.querySelector('#f');
+        ({
+          found: all.length === 1,
+          tagName: all[0].tagName,
+          identity: all[0] === byId,
+          formTag: form.tagName,
+          namedAccess: form.q !== undefined && form.q.value === 'v'
+        })
+    "##;
+    let v = rt.evaluate(js).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "found": true,
+            "tagName": "X-ISSUE184",
+            "identity": true,
+            "formTag": "FORM",
+            "namedAccess": true
+        })
+    );
+}
+
 /// #53: `indexedDB.open` used to resolve success immediately and never
 /// dispatch `onupgradeneeded`, so schema-installing openers (Dexie,
 /// localForage, Firebase) never settled their open promise and the app
