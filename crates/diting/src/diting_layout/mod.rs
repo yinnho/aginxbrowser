@@ -150,6 +150,62 @@ fn effective_line_height(
     }
 }
 
+/// Whether `cid` acts as an in-flow block-level ELEMENT child toward its
+/// parent — the trigger half of the block-in-inline split (CSS2.1
+/// §9.2.1.1). An inline child that itself carries a block child counts
+/// too: it blockifies (see [`blockifies_for_block_child`]) and therefore
+/// presents block-level outward, which is how the spec's split propagates
+/// through nested inlines. Replaced children never trigger — they stay
+/// atomic run members either way (Chrome does not split an inline around
+/// an inline-level replaced box). Floats and out-of-flow boxes are
+/// excluded v1: they ride the float-zone/reparent machinery, not the split.
+fn block_level_child(
+    tree: &DomTree,
+    cid: NodeId,
+    styles: &HashMap<NodeId, ComputedStyle>,
+) -> bool {
+    if tree.with_node(cid, |n| n.is_text()).unwrap_or(false) {
+        return false;
+    }
+    let tag = tree
+        .with_node(cid, |n| n.as_element().map(|e| e.local.to_string()))
+        .flatten()
+        .unwrap_or_default();
+    if is_replaced_tag(&tag) {
+        return false;
+    }
+    let Some(cs) = styles.get(&cid) else { return false };
+    if matches!(cs.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed)) || cs.float_side.is_some() {
+        return false;
+    }
+    match cs.display {
+        // Unset display follows the same Block default the attach sites use.
+        None | Some(CssDisplay::Block) | Some(CssDisplay::Flex) | Some(CssDisplay::Grid)
+        | Some(CssDisplay::Table) => true,
+        Some(CssDisplay::Inline) => blockifies_for_block_child(tree, cid, styles),
+        _ => false,
+    }
+}
+
+/// Whether an inline element has an in-flow block-level element child —
+/// the block-in-inline shape. The spec answer splits the inline into
+/// anonymous blocks around it; our approximation blockifies the element
+/// whole (element granularity, one box). Left as the IFC flex-row
+/// stand-in, the block child becomes a shrink-to-fit ROW item: the
+/// shobserver export pages (#186) had ARTICLE inside inline A#source
+/// measure itself to 1092px inside a 740px .container and clip the
+/// article's right edge off-viewport.
+fn blockifies_for_block_child(
+    tree: &DomTree,
+    id: NodeId,
+    styles: &HashMap<NodeId, ComputedStyle>,
+) -> bool {
+    if styles.get(&id).and_then(|s| s.display) != Some(CssDisplay::Inline) {
+        return false;
+    }
+    render_children(tree, id).into_iter().any(|cid| block_level_child(tree, cid, styles))
+}
+
 /// Map a computed style onto a taffy style. Mirrors upstream `to_taffy_style`
 /// for the modeled subset, including the block→flex-column promotion that
 /// stands in for text alignment in a block formatting context.
@@ -2281,7 +2337,12 @@ fn build_normal_sibling(
         }
         return;
     }
-    if is_text || (inline_level && !atomic_container && !out_of_flow) {
+    if is_text
+        || (inline_level
+            && !atomic_container
+            && !out_of_flow
+            && !blockifies_for_block_child(tree, child, styles))
+    {
         // Text and flattenable inlines become their own measured run here:
         // single-segment runs are the overwhelmingly common case at
         // zone boundaries, and build_word_leaves + the run wrapper reproduce
@@ -2854,7 +2915,7 @@ fn build_flow_column(
             if let Some(sub) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta) {
                 run.push(RunSeg::Nodes(vec![sub]));
             }
-        } else if inline_level && !out_of_flow {
+        } else if inline_level && !out_of_flow && !blockifies_for_block_child(tree, child, styles) {
             let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta);
             if let Some(sub) = sub {
                 let mut sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
@@ -4300,6 +4361,19 @@ fn build_element_inner(
     if style.display == Some(CssDisplay::None) {
         return None;
     }
+    // #186 block-in-inline: an inline with an in-flow block-level child is
+    // blockified whole (§9.2.1.1's anonymous split, approximated at element
+    // granularity) so the block child fills the container width as a BFC
+    // sibling instead of becoming a shrink-to-fit row item. The parent-side
+    // attach decisions consult the same predicate so this element is NOT
+    // flattened into a run.
+    let style = if style.display == Some(CssDisplay::Inline) && blockifies_for_block_child(tree, id, styles) {
+        let mut blockified = style;
+        blockified.display = Some(CssDisplay::Block);
+        blockified
+    } else {
+        style
+    };
     let tag = tree
         .with_node(id, |n| n.as_element().map(|e| e.local.to_string()))
         .flatten()
@@ -5072,7 +5146,11 @@ fn build_element_inner(
             if let Some(sub) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta) {
                 run.push(RunSeg::Nodes(vec![sub]));
             }
-        } else if inline_level && !atomic_container && !out_of_flow {
+        } else if inline_level
+            && !atomic_container
+            && !out_of_flow
+            && !blockifies_for_block_child(tree, child, styles)
+        {
             // A plain inline wrapper flattens into the enclosing run (upstream
             // is_flattenable_inline): the words wrap at the real block level.
             let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta);

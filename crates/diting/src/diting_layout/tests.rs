@@ -1559,6 +1559,90 @@ mod inline_block_interior_tests {
     }
 }
 
+mod block_in_inline_tests {
+    // #186: an inline element with an in-flow block-level child is
+    // blockified whole — the approximation of CSS2.1 §9.2.1.1's anonymous
+    // split. Left on the IFC flex-row stand-in the block child became a
+    // shrink-to-fit row item: shobserver export pages had ARTICLE inside
+    // inline A#source self-measure 1092px inside a 740px .container,
+    // clipping the article's right edge off-viewport.
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::{compute_styles, layout_dom};
+
+    const VW: f32 = 1280.0;
+
+    fn rect(html: &str, sheet: &str, sel: &str) -> (f32, f32, f32, f32) {
+        let tree = parse_html(html);
+        let rules = parse_stylesheet_for(sheet, (VW, 800.0), CssMediaType::Screen);
+        let styles = compute_styles(&tree, &rules, (VW, 800.0));
+        let rects = layout_dom(&tree, &styles, &crate::diting_fonts::font_book(), VW, 800.0);
+        let id = tree.query_selector(sel).unwrap().unwrap();
+        let r = rects.get(&id).unwrap();
+        (r.x, r.y, r.width, r.height)
+    }
+
+    #[test]
+    fn block_child_of_inline_fills_container() {
+        // The #186 shape: fixed-width container, default-inline anchor
+        // wrapper, block article inside. The article must take the
+        // container's content width, not its own shrink-to-fit measure.
+        let (_x, _y, w, _h) = rect(
+            r#"<html><body><div id="container" style="width: 740px">
+                <a id="source"><article id="art"><p id="p">很长很长很长很长很长很长很长很长很长很长</p></article></a>
+            </div></body></html>"#,
+            "body { margin: 0 }",
+            "#art",
+        );
+        assert!((w - 740.0).abs() <= 1.0, "article must fill the 740px container; got w={w}");
+    }
+
+    #[test]
+    fn nested_inline_chain_propagates() {
+        // The split propagates outward through nested inlines (§9.2.1.1):
+        // the intermediate inline also blockifies, so the block still fills.
+        let (_x, _y, w, _h) = rect(
+            r#"<html><body><div id="w" style="width: 600px">
+                <span id="outer"><a id="inner"><div id="blk">内容</div></a></span>
+            </div></body></html>"#,
+            "body { margin: 0 }",
+            "#blk",
+        );
+        assert!((w - 600.0).abs() <= 1.0, "nested inline chain must not shrink the block; got w={w}");
+    }
+
+    #[test]
+    fn text_only_inline_stays_flattened() {
+        // Regression guard: a plain inline with only text keeps the old
+        // flatten-into-run behavior — it must NOT become a 750px block.
+        let (_x, _y, w, _h) = rect(
+            r#"<html><body><div id="row" style="width: 750px">word <span id="s">短文本</span> tail</div></body></html>"#,
+            "body { margin: 0 }",
+            "#s",
+        );
+        assert!(w < 200.0, "text-only inline stays inline; got w={w}");
+    }
+
+    #[test]
+    fn inline_img_link_does_not_trigger() {
+        // A replaced child never triggers the split (Chrome keeps inline
+        // img atomic in the line): the classic image link stays a run
+        // member instead of turning into a full-width block.
+        let (_ax, _ay, aw, _ah) = rect(
+            r#"<html><body><div id="row" style="width: 750px">go <a id="lnk"><img id="im" style="width: 40px; height: 20px" src="about:blank"></a> next</div></body></html>"#,
+            "body { margin: 0 }",
+            "#lnk",
+        );
+        assert!(aw < 100.0, "image link must stay inline; got w={aw}");
+        let (_ix, _iy, iw, ih) = rect(
+            r#"<html><body><div id="row" style="width: 750px">go <a id="lnk"><img id="im" style="width: 40px; height: 20px" src="about:blank"></a> next</div></body></html>"#,
+            "body { margin: 0 }",
+            "#im",
+        );
+        assert!((iw - 40.0).abs() <= 1.0 && (ih - 20.0).abs() <= 1.0, "img keeps its authored box; got {iw}x{ih}");
+    }
+}
+
 mod text_align_block_children_tests {
     // #169: `text-align: center` aligns the INLINE content only — block-level
     // children still fill the container width (§10.3.3). The flex-column
