@@ -8,7 +8,7 @@ Measures, per page of the fixed set in pages.txt:
 
 Scenarios:
   tier1   POST /fetch {"render_tier": "http"}     — plain HTTP + convert
-  tier2   POST /fetch {"render_tier": "obscura"}  — full V8 browser render
+  tier2   POST /fetch {"render_tier": "browser"} — full V8 browser render
   auto    POST /fetch (default)                   — records tier hit-rate
   chrome  headless Chrome --dump-dom + tag-strip  — the heavyweight baseline
 
@@ -119,9 +119,12 @@ def fetch(base, url, tier=None, max_chars=200_000):
         headers={"Content-Type": "application/json"},
     )
     started = time.monotonic()
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        data = json.loads(resp.read())
-    return time.monotonic() - started, data
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read())
+        return time.monotonic() - started, data
+    except Exception as e:  # transient 5xx / network — the bench records, not dies
+        return time.monotonic() - started, {"error": str(e)}
 
 
 def chrome_dump(url, profile_dir, hard_cap=90):
@@ -213,7 +216,7 @@ def main():
             sys.exit("server did not come up")
 
         # Warmup (V8 snapshot etc.) — excluded from results.
-        fetch(base, "https://example.com", tier="obscura", max_chars=500)
+        fetch(base, "https://example.com", tier="browser", max_chars=500)
 
         server_rss = RssSampler(["aginxbrowser"])
         server_rss.start()
@@ -223,11 +226,14 @@ def main():
             for url in urls:
                 for scen in scenarios:
                     if scen in ("tier1", "tier2", "auto"):
-                        tier = {"tier1": "http", "tier2": "obscura"}.get(scen)
+                        tier = {"tier1": "http", "tier2": "browser"}.get(scen)
                         elapsed, data = fetch(base, url, tier=tier)
                         wall_ms = int(elapsed * 1000)
-                        out_chars = len(data.get("content", ""))
-                        served = data.get("tier") or "?"
+                        if "error" in data:
+                            out_chars, served = 0, "error"
+                        else:
+                            out_chars = len(data.get("content", ""))
+                            served = data.get("tier") or "?"
                         row = (scen, url, rnd, wall_ms, out_chars, served, "")
                     else:  # chrome
                         profile = f"/tmp/agx-bench-profile-{rnd}"

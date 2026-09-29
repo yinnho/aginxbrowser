@@ -5,6 +5,31 @@ total cost is what the browser burns (time, memory) times what the model burns
 (tokens reading the output). AginxBrowser is the token half — this bench
 measures both sides.
 
+## Results (2026-09-29, v0.5.21, same machine, degraded-network day)
+
+Re-run after 30+ fix batches, on a day when the network was visibly worse
+(crates.io was bot-walled for every engine — plain curl gets a 403, cold
+Chrome never resolved the challenge inside its 90 s cap — and several CDNs
+were slow). Both engines inflated together; the ratio is the finding.
+
+20 pages × 2 rounds × 4 scenarios. Raw: [`results/run-darwin-2026-09-29.tsv`](results/).
+
+| scenario | p50 | p95 | mean output chars | ≈tokens | notes |
+|---|---|---|---|---|---|
+| `tier1` forced plain HTTP | 1 686 ms | 21.8 s | 15 513 | ~3.9k | 1 transient 5xx row |
+| `tier2` forced V8 render | 8.0 s | 30.0 s | 8 533 | ~2.1k | 1 transient 5xx row |
+| `auto` (shipped default) | **2 192 ms** | 18.2 s | 14 874 | ~3.7k | tier1 hit 35/40 (87%) |
+| headless Chrome `--dump-dom` | 11 854 ms | 90 s | 8 500 | ~2.1k | 4/40 loads produced no DOM; peak RSS **1 753 MB per page** (p50) |
+
+**aginxbrowser server peak RSS across the entire run (all scenarios): 468 MB.**
+
+Headlines on the bad day: **5.4× faster** p50 (2 192 vs 11 854 ms), **~4×
+less memory** (468 MB whole-run for one process vs 1 753 MB per Chrome page).
+The 468 MB is also an honest data point about ourselves: it's 2× the 08-28
+figure (227 MB) — slower network holds fetch buffers longer, and v0.5.9 →
+v0.5.21 grew the binary's surface (search engines, accounts, video). Watch
+it, don't hide it.
+
 ## Results (2026-08-28, Apple Silicon macOS, CN-routed network)
 
 20 pages × 2 rounds × 4 scenarios, sequential, cold Chrome profile per page.

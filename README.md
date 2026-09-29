@@ -28,7 +28,7 @@ One binary, zero dependencies, instant service. HTTP API + native MCP + CDP — 
 
 ## Why Agents Need Their Own Browser
 
-Measured against headless Chrome on the same 20 pages, same network ([bench](bench/README.md), 2026-08-28): **7.6× faster** to agent-usable text (p50 532 ms vs 4 053 ms), **~10× less memory** (227 MB for the whole process vs ~2.1 GB per Chrome page), and 0 hard failures where Chrome's `--dump-dom` produced no DOM on 5 of 40 loads. An agent's total cost is browser efficiency × model efficiency — this is the browser half.
+Measured against headless Chrome on the same 20 pages, same network ([bench](bench/README.md), 2026-08-28): **7.6× faster** to agent-usable text (p50 532 ms vs 4 053 ms), **~10× less memory** (227 MB for the whole process vs ~2.1 GB per Chrome page), and 0 hard failures where Chrome's `--dump-dom` produced no DOM on 5 of 40 loads. Re-run on v0.5.21 (2026-09-29) on a degraded-network day held the ratio — 5.4× p50, 468 MB whole-run vs 1.75 GB per page — both raw TSVs are committed. An agent's total cost is browser efficiency × model efficiency — this is the browser half.
 
 Existing "browser automation" was built for humans or for one-shot scraping — not for agents:
 
