@@ -5530,10 +5530,22 @@ async fn fetch_url_walk(
             .unwrap_or("");
 
         if !cors_response_allows(credentials, &page_origin, allowed, allow_credentials) {
-            let error = if credentials == FetchCredentials::Include {
-                format!("CORS error: credentialed request requires Access-Control-Allow-Origin '{}' and Access-Control-Allow-Credentials 'true'", page_origin)
+            // #163 diagnosability: when the response arrived from a different
+            // URL than the one the script asked for, say so — a same-origin
+            // request that the server bounced to a cross-origin host reads
+            // as "engine misjudged a same-origin fetch" otherwise. Chrome
+            // names the redirect too; the no-redirect message stays
+            // byte-identical (pinned by fetch_honors_request_credentials_
+            // across_origins).
+            let redirect_note = if current_url != url.as_str() {
+                format!(" (after redirect to '{}')", current_url)
             } else {
-                format!("CORS error: Origin '{}' not in Access-Control-Allow-Origin '{}'", page_origin, allowed)
+                String::new()
+            };
+            let error = if credentials == FetchCredentials::Include {
+                format!("CORS error: credentialed request requires Access-Control-Allow-Origin '{}' and Access-Control-Allow-Credentials 'true'{}", page_origin, redirect_note)
+            } else {
+                format!("CORS error: Origin '{}' not in Access-Control-Allow-Origin '{}'{}", page_origin, allowed, redirect_note)
             };
             deps.failures.push((current_url.clone(), current_method.as_str().to_string(), error.clone()));
             return Ok(FetchWalkOutcome {

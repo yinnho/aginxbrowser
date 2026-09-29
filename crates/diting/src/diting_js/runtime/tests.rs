@@ -9783,6 +9783,117 @@
         assert!(jar.get_cookie_header(&b_url).split("; ").any(|c| c == "b=1"));
     }
 
+    /// #163: a same-origin credentialed fetch whose endpoint 302s to a
+    /// cross-origin host without CORS headers must fail (Chrome parity — the
+    /// response is cross-origin-tainted and unauthorized), and the error must
+    /// NAME the redirect target so the failure can't read as "engine
+    /// misjudged a same-origin request". The bounce host authorizing the
+    /// origin (ACAO + ACAC) makes the same flow succeed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn same_origin_credentialed_fetch_redirected_cross_origin_names_bounce_host() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        use std::io::{Read, Write};
+
+        // Deny host: 200, no CORS headers.
+        let listener_deny = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_deny = listener_deny.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener_deny.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nno").unwrap();
+        });
+
+        // Allow host: echoes the request's Origin back with credentials
+        // consent — the standard "authorized bounce" shape.
+        let listener_allow = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_allow = listener_allow.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener_allow.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+            let origin = req
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("origin:"))
+                .map(|l| l[7..].trim().to_string())
+                .unwrap_or_default();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\naccess-control-allow-origin: {origin}\r\naccess-control-allow-credentials: true\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+        });
+
+        // Page origin A: both endpoints redirect cross-origin, by path.
+        let listener_a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_a = listener_a.local_addr().unwrap().port();
+        let (redirect_tx, redirect_rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener_a.accept() else { return };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let path = req.split_whitespace().nth(1).unwrap_or("").to_string();
+                redirect_tx.send(path.clone()).unwrap();
+                let location = if path.contains("bounce-deny") {
+                    format!("http://127.0.0.1:{port_deny}/bounced")
+                } else {
+                    format!("http://127.0.0.1:{port_allow}/ok")
+                };
+                let resp = format!(
+                    "HTTP/1.1 302 Found\r\nlocation: {location}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                );
+                stream.write_all(resp.as_bytes()).unwrap();
+            }
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{port_a}/page"));
+        let script = r#"async (pa, pd) => {
+            const A = "http://127.0.0.1:" + pa;
+            const out = [];
+            try {
+                const r = await fetch(A + "/bounce-deny", { credentials: "include" });
+                out.push("deny:" + r.status);
+            } catch (e) {
+                out.push("deny:" + (e && e.message));
+            }
+            try {
+                const r = await fetch(A + "/bounce-allow", { credentials: "include" });
+                out.push("allow:" + r.status);
+            } catch (e) {
+                out.push("allow:" + (e && e.message));
+            }
+            return out.join("|");
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(
+                script,
+                None,
+                &[
+                    serde_json::json!({ "value": port_a }),
+                    serde_json::json!({ "value": port_deny }),
+                ],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let got = result.value.unwrap().as_str().unwrap_or_default().to_string();
+        let expected_deny = format!(
+            "deny:Failed to fetch: CORS error: credentialed request requires Access-Control-Allow-Origin 'http://127.0.0.1:{port_a}' and Access-Control-Allow-Credentials 'true' (after redirect to 'http://127.0.0.1:{port_deny}/bounced')"
+        );
+        assert_eq!(got, format!("{expected_deny}|allow:200"), "got: {got}");
+        assert_eq!(
+            redirect_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(),
+            "/bounce-deny"
+        );
+    }
+
     /// Setting innerHTML on the <html> element parses in the "before head"
     /// insertion mode, which synthesizes head and body. The importer must keep
     /// both; it previously returned the synthesized body and dropped the head
