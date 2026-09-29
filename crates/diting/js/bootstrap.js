@@ -12421,8 +12421,8 @@ globalThis.HTMLElement = {
 // above; _elementClassFor routes by tagName through _tagInterfaces, and
 // hasInstance stays as a second opinion so wrappers built before this
 // block (or cross-realm objects) still classify by tag.
-function _htmlInterface(name, tags, attrs) {
-  const C = { [name]: class extends globalThis.HTMLElement {
+function _htmlInterface(name, tags, attrs, Base) {
+  const C = { [name]: class extends (Base || globalThis.HTMLElement) {
     constructor(nid) {
       if (typeof nid !== "number") {
         throw new DOMException("Failed to construct '" + name + "': Illegal constructor.", "TypeError");
@@ -12672,8 +12672,25 @@ globalThis.HTMLTableCaptionElement = _htmlInterface('HTMLTableCaptionElement', [
 globalThis.HTMLOptGroupElement = _htmlInterface('HTMLOptGroupElement', ['optgroup']);
 globalThis.HTMLIFrameElement = _htmlInterface('HTMLIFrameElement', ['iframe']);
 globalThis.HTMLCanvasElement = _htmlInterface('HTMLCanvasElement', ['canvas']);
-globalThis.HTMLVideoElement = _htmlInterface('HTMLVideoElement', ['video']);
-globalThis.HTMLAudioElement = _htmlInterface('HTMLAudioElement', ['audio']);
+// HTMLMediaElement — Chrome's abstract layer for every media-state face
+// (paused/readyState/duration/play/…). #190: that face used to sit on
+// Element.prototype, so EVERY element answered `readyState === 0`; baidu's
+// sbase `assetOnload` gate — `/loaded|complete|undefined/.test(node.readyState)`,
+// written when script elements had no readyState at all — never opened, and
+// every dynamically-loaded superman component timed out 10s in. Defined by
+// hand rather than `_htmlInterface`: an interface with no tags would install
+// a Symbol.hasInstance that answers false for everything, and
+// `video instanceof HTMLMediaElement` must ride the real prototype chain.
+globalThis.HTMLMediaElement = class HTMLMediaElement extends globalThis.HTMLElement {
+  constructor(nid) {
+    if (typeof nid !== "number") {
+      throw new DOMException("Failed to construct 'HTMLMediaElement': Illegal constructor.", "TypeError");
+    }
+    super(nid);
+  }
+};
+globalThis.HTMLVideoElement = _htmlInterface('HTMLVideoElement', ['video'], null, globalThis.HTMLMediaElement);
+globalThis.HTMLAudioElement = _htmlInterface('HTMLAudioElement', ['audio'], null, globalThis.HTMLMediaElement);
 globalThis.HTMLScriptElement = _htmlInterface('HTMLScriptElement', ['script']);
 globalThis.HTMLStyleElement = _htmlInterface('HTMLStyleElement', ['style']);
 globalThis.HTMLLinkElement = _htmlInterface('HTMLLinkElement', ['link']);
@@ -14759,10 +14776,12 @@ _markNative(globalThis.MediaSource);
 _markNative(globalThis.MediaSource.isTypeSupported);
 globalThis.WebKitMediaSource = globalThis.MediaSource;
 
-// Media element state — the mount path reads these off the <video> the
-// player just created; `video.play()` returning undefined (players do
+// Media element state — lives on HTMLMediaElement.prototype (Chrome's home
+// for it) so generic elements stop answering media questions: the mount path
+// still reads these off the <video> the player just created through
+// inheritance; `video.play()` returning undefined (players do
 // `video.play().catch(...)`) crashed init on bilibili before these.
-Object.defineProperties(Element.prototype, {
+Object.defineProperties(HTMLMediaElement.prototype, {
   paused: { configurable: true, get() { return this._playing !== true; } },
   ended: { configurable: true, get() { return false; } },
   seeking: { configurable: true, get() { return false; } },
@@ -14782,11 +14801,11 @@ Object.defineProperties(Element.prototype, {
 // HTMLMediaElement readiness/network constants — Chrome exposes them on
 // instances (players write `video.readyState === video.HAVE_ENOUGH_DATA`);
 // keep them non-enumerable like native.
-Object.defineProperties(Element.prototype, {
+Object.defineProperties(HTMLMediaElement.prototype, {
   HAVE_NOTHING: { value: 0 }, HAVE_METADATA: { value: 1 }, HAVE_CURRENT_DATA: { value: 2 }, HAVE_FUTURE_DATA: { value: 3 }, HAVE_ENOUGH_DATA: { value: 4 },
   NETWORK_EMPTY: { value: 0 }, NETWORK_IDLE: { value: 1 }, NETWORK_LOADING: { value: 2 }, NETWORK_NO_SOURCE: { value: 3 },
 });
-Element.prototype.play = function() {
+HTMLMediaElement.prototype.play = function() {
   const wasPaused = this._playing !== true;
   __def(this, '_playing', true);
   if (wasPaused) {
@@ -14796,17 +14815,17 @@ Element.prototype.play = function() {
   }
   return Promise.resolve();
 };
-Element.prototype.pause = function() {
+HTMLMediaElement.prototype.pause = function() {
   const wasPlaying = this._playing === true;
   this._playing = false;
   if (wasPlaying) {
     setTimeout(() => { try { this.dispatchEvent(new Event('pause')); } catch (_) {} }, 0);
   }
 };
-Element.prototype.load = function() {};
-_markNative(Element.prototype.play);
-_markNative(Element.prototype.pause);
-_markNative(Element.prototype.load);
+HTMLMediaElement.prototype.load = function() {};
+_markNative(HTMLMediaElement.prototype.play);
+_markNative(HTMLMediaElement.prototype.pause);
+_markNative(HTMLMediaElement.prototype.load);
 
 _markNative(HTMLCanvasElement.prototype.getContext);
 _markNative(HTMLCanvasElement.prototype.toDataURL);

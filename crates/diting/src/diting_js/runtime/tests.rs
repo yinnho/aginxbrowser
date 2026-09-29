@@ -16540,6 +16540,64 @@ fn performance_entry_constructors_exposed() {
     );
 }
 
+/// #190: the media-state face (paused/readyState/duration/play/…) used to
+/// sit on Element.prototype, so EVERY element answered `readyState === 0`.
+/// Baidu's sbase assetOnload gates its load callback on
+/// `/loaded|complete|undefined/.test(node.readyState)` — written for
+/// browsers where script elements have no readyState — so every
+/// dynamically-loaded superman component timed out 10s in and the feed fell
+/// back to default ordering. Chrome keeps the whole face on
+/// HTMLMediaElement.prototype; script/div answer undefined again.
+#[test]
+fn media_face_lives_on_htmlmediaelement_not_element() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    let js = r##"
+        const v = document.createElement('video');
+        const a = document.createElement('audio');
+        const s = document.createElement('script');
+        const d = document.createElement('div');
+        let ctorThrew = null;
+        try { new HTMLMediaElement(); } catch (e) { ctorThrew = e.name; }
+        ({
+            hasMedia: typeof HTMLMediaElement,
+            vInstanceOfMedia: v instanceof HTMLMediaElement,
+            aInstanceOfMedia: a instanceof HTMLMediaElement,
+            protoParent: Object.getPrototypeOf(HTMLVideoElement.prototype) === HTMLMediaElement.prototype,
+            scriptReadyState: String(s.readyState),
+            // The exact gate baidu's loader tests — undefined must open it.
+            scriptGateOpen: /loaded|complete|undefined/.test(String(s.readyState)),
+            divPaused: String(d.paused),
+            readyStateInElementProto: 'readyState' in Element.prototype,
+            videoPaused: v.paused,
+            videoReadyState: v.readyState,
+            videoHaveEnough: v.HAVE_ENOUGH_DATA,
+            videoPlayType: typeof v.play,
+            videoCtorName: v.constructor.name,
+            ctorThrew
+        })
+    "##;
+    let v = rt.evaluate(js).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "hasMedia": "function",
+            "vInstanceOfMedia": true,
+            "aInstanceOfMedia": true,
+            "protoParent": true,
+            "scriptReadyState": "undefined",
+            "scriptGateOpen": true,
+            "divPaused": "undefined",
+            "readyStateInElementProto": false,
+            "videoPaused": true,
+            "videoReadyState": 0,
+            "videoHaveEnough": 4,
+            "videoPlayType": "function",
+            "videoCtorName": "HTMLVideoElement",
+            "ctorThrew": "TypeError"
+        })
+    );
+}
+
 /// #53: `indexedDB.open` used to resolve success immediately and never
 /// dispatch `onupgradeneeded`, so schema-installing openers (Dexie,
 /// localForage, Firebase) never settled their open promise and the app
