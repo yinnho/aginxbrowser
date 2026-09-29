@@ -443,8 +443,14 @@ pub(crate) async fn click_handler(Json(req): Json<ClickRequest>) -> Result<impl 
     robots::assert_allowed(&req.url)
         .await
         .map_err(AppError::Forbidden)?;
-    let resp = spawn_blocking(move || do_click(req)).await?;
-    Ok((StatusCode::OK, Json(resp?)))
+    let resp = spawn_blocking(move || do_click(req)).await??;
+    // Redirect hops (#175): the page navigated on its own — the effective
+    // URL must clear the same gate. No hops observable here (session
+    // navigations), so the final URL is the check.
+    robots::assert_allowed(&resp.url)
+        .await
+        .map_err(AppError::Forbidden)?;
+    Ok((StatusCode::OK, Json(resp)))
 }
 
 pub(crate) async fn eval_handler(Json(req): Json<EvalRequest>) -> Result<impl IntoResponse, AppError> {
@@ -453,8 +459,13 @@ pub(crate) async fn eval_handler(Json(req): Json<EvalRequest>) -> Result<impl In
     robots::assert_allowed(&req.url)
         .await
         .map_err(AppError::Forbidden)?;
-    let resp = spawn_blocking(move || do_eval(req)).await?;
-    Ok((StatusCode::OK, Json(resp?)))
+    let resp = spawn_blocking(move || do_eval(req)).await??;
+    // Redirect hops (#175), including script-driven navigation: the drained
+    // effective URL is where the script ran, so it clears the gate too.
+    robots::assert_allowed(&resp.url)
+        .await
+        .map_err(AppError::Forbidden)?;
+    Ok((StatusCode::OK, Json(resp)))
 }
 
 pub(crate) async fn search_handler(Json(req): Json<SearchRequest>) -> Result<impl IntoResponse, AppError> {

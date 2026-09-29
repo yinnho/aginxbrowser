@@ -386,6 +386,15 @@ fn to_taffy_style(style: &ComputedStyle, pct_h_resolves: bool) -> Style {
     if let Some(fs) = style.flex_shrink {
         s.flex_shrink = fs;
     }
+    // #176: a float never shrinks. Floats are reified as items of synthetic
+    // flex rows (the float zone machinery); with the flow column's
+    // content-based flex-basis, wide flow content would proportionally
+    // squeeze the float — CSS floats keep their computed width and the
+    // wrapping content adjusts instead. Deliberately overrides an author-set
+    // flex-shrink: inside the synthetic row the float semantics win.
+    if style.float_side.is_some() {
+        s.flex_shrink = 0.0;
+    }
     // flex-basis/gap carry %: taffy's percent matches CSS —
     // flex-basis resolves against the container main-axis inner size, gap
     // against the per-axis container size — so it passes through and
@@ -4793,7 +4802,14 @@ fn build_element_inner(
                     display: Display::Block,
                     flex_grow: 1.0,
                     flex_shrink: 1.0,
-                    flex_basis: Dimension::length(0.0),
+                    // #176: content-based, not zero — a zero hypothetical
+                    // main size makes every intrinsic-width read (an abspos
+                    // shrink-to-fit container's measure) size the float row
+                    // to the float alone, dropping the flow content's width.
+                    // Definite-width geometry is unchanged: grow fills the
+                    // leftover either way, and with the float/rail at shrink
+                    // 0 all shrinkage lands here.
+                    flex_basis: Dimension::auto(),
                     min_size: Size { width: LengthPercentageAuto::length(0.0), height: LengthPercentageAuto::auto() },
                     ..Default::default()
                 };
@@ -4804,6 +4820,11 @@ fn build_element_inner(
                     Style {
                         display: Display::Flex,
                         flex_direction: FlexDirection::Column,
+                        // #176: the rail holds floats and never shrinks —
+                        // with the flow column's content-based flex-basis,
+                        // negative free space in the row must compress the
+                        // column (wrapping), not the floats' widths.
+                        flex_shrink: 0.0,
                         // Inline-end alignment: every float hugs the rail's
                         // outer edge (right floats hug right).
                         align_items: Some(if float_right { AlignItems::FLEX_END } else { AlignItems::FLEX_START }),
@@ -4914,7 +4935,14 @@ fn build_element_inner(
                     display: Display::Block,
                     flex_grow: 1.0,
                     flex_shrink: 1.0,
-                    flex_basis: Dimension::length(0.0),
+                    // #176: content-based, not zero — a zero hypothetical
+                    // main size makes every intrinsic-width read (an abspos
+                    // shrink-to-fit container's measure) size the float row
+                    // to the float alone, dropping the flow content's width.
+                    // Definite-width geometry is unchanged: grow fills the
+                    // leftover either way, and with the float/rail at shrink
+                    // 0 all shrinkage lands here.
+                    flex_basis: Dimension::auto(),
                     min_size: Size { width: LengthPercentageAuto::length(0.0), height: LengthPercentageAuto::auto() },
                     ..Default::default()
                 },

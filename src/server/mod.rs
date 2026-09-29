@@ -491,7 +491,7 @@ fn fetch_url_text_with_cookies(
     wait_secs: u64,
     max_chars: usize,
     cookies: &[String],
-) -> Result<(String, bool)> {
+) -> Result<(String, bool, String)> {
     let cookies = cookies.to_vec(); // Clone so the closure owns the data.
     run_on_local_runtime(move |_rt| {
         Box::pin(async move {
@@ -542,7 +542,10 @@ fn fetch_url_text_with_cookies(
             } else {
                 (content, false)
             };
-            Ok((content, truncated))
+            // The post-redirect effective URL rides along so the caller can
+            // run the robots re-check (#175) on its own async runtime — the
+            // robots cache lock belongs to the axum runtime, not this one.
+            Ok((content, truncated, final_url))
         })
     })
 }
@@ -1391,7 +1394,15 @@ async fn do_search_with_registry(
                 .await
                 .map_err(|e| SearchError::Other(format!("fetch task panicked: {e}")))?;
             match res {
-                Ok((content, truncated)) => {
+                Ok((content, truncated, final_url)) => {
+                    // Redirect-hop re-check (#175): a result whose fetch
+                    // redirected onto a robots-disallowed page keeps its
+                    // entry but loses the body — same posture as the
+                    // pre-fetch item gate above.
+                    if let Err(reason) = crate::robots::assert_allowed(&final_url).await {
+                        items[i].fetch_error = Some(reason);
+                        continue;
+                    }
                     items[i].content = Some(content);
                     items[i].content_truncated = truncated;
                 }

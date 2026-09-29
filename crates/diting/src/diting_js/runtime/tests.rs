@@ -698,6 +698,51 @@
         );
     }
 
+    /// #177: `link.rev` and `meta.scheme` — the obsolete-but-reflected
+    /// DOMString twins (HTML spec keeps them as [Reflect] on the per-tag
+    /// interfaces). Legacy link-directory readers walk `link.rev`; the
+    /// pre-fix answer (`undefined`) breaks them; Chrome answers `""` when
+    /// the attribute is absent and round-trips get/set through the content
+    /// attribute.
+    #[test]
+    fn link_rev_and_meta_scheme_reflect() {
+        let mut rt = setup_runtime("<html><body><div id='t'>x</div></body></html>");
+        let out = rt.evaluate(r#"
+            var link = document.createElement('link');
+            link.setAttribute('rev', 'made');
+            var revViaGetter = link.rev;
+            link.rev = 'friend';
+            var revViaSetter = link.getAttribute('rev');
+            var meta = document.createElement('meta');
+            meta.setAttribute('scheme', 'ISBN');
+            var schemeViaGetter = meta.scheme;
+            meta.scheme = 'DOI';
+            var schemeViaSetter = meta.getAttribute('scheme');
+            return JSON.stringify({
+                faces: [
+                    Object.keys(HTMLLinkElement.prototype).indexOf('rev') >= 0,
+                    Object.keys(HTMLMetaElement.prototype).indexOf('scheme') >= 0,
+                ],
+                rev: [revViaGetter, revViaSetter],
+                scheme: [schemeViaGetter, schemeViaSetter],
+                blank: [document.createElement('link').rev,
+                        document.createElement('meta').scheme],
+                divRev: document.createElement('div').rev,
+            });
+        "#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        assert_eq!(v["faces"], serde_json::json!([true, true]),
+            "rev lives on HTMLLinkElement.prototype, scheme on HTMLMetaElement.prototype");
+        assert_eq!(v["rev"], serde_json::json!(["made", "friend"]),
+            "link.rev get/set round-trips through the content attribute");
+        assert_eq!(v["scheme"], serde_json::json!(["ISBN", "DOI"]),
+            "meta.scheme get/set round-trips through the content attribute");
+        assert_eq!(v["blank"], serde_json::json!(["", ""]),
+            "absent attribute reflects the empty string, not undefined");
+        assert_eq!(v["divRev"], serde_json::Value::Null,
+            "rev stays off the generic element face");
+    }
+
     #[test]
     fn reflected_body_color_and_table_family() {
         let mut rt = setup_runtime(

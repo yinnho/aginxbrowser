@@ -117,11 +117,18 @@ when the script needs prior page state or a login, use session_eval.",
         };
 
         match tokio::task::spawn_blocking(move || do_eval(req)).await {
-            Ok(Ok(resp)) => json!({
-                "url": resp.url,
-                "result": resp.result
-            })
-            .to_string(),
+            Ok(Ok(resp)) => {
+                // Redirect hops (#175): the drained effective URL is where the
+                // script ran — clear the same gate the requested URL did.
+                if let Err(e) = crate::robots::assert_allowed(&resp.url).await {
+                    return json!({ "error": e }).to_string();
+                }
+                json!({
+                    "url": resp.url,
+                    "result": resp.result
+                })
+                .to_string()
+            }
             Ok(Err(e)) => json!({ "error": format!("{}", e) }).to_string(),
             Err(e) => json!({ "error": format!("task panicked: {}", e) }).to_string(),
         }
@@ -178,21 +185,27 @@ server. Returns base64 MP4 \
                 burn_subtitles: params.burn_subtitles,
             };
             return match tokio::task::spawn_blocking(move || crate::server::do_video(req)).await {
-                Ok(Ok(resp)) => json!({
-                    "url": resp.url,
-                    "title": resp.title,
-                    "frames": resp.frames,
-                    "timeline_secs": resp.timeline_secs,
-                    "duration_secs": resp.duration_secs,
-                    "width": resp.width,
-                    "height": resp.height,
-                    "video_base64": resp.video_base64,
-                    "has_audio": resp.has_audio,
-                    "has_subtitles": resp.has_subtitles,
-                    "burned_subtitles": resp.burned_subtitles,
-                    "format": resp.format,
-                })
-                .to_string(),
+                Ok(Ok(resp)) => {
+                    // Redirect hops (#175) — see the fetch tool's walk check.
+                    if let Err(e) = crate::robots::assert_allowed(&resp.url).await {
+                        return json!({ "error": e }).to_string();
+                    }
+                    json!({
+                        "url": resp.url,
+                        "title": resp.title,
+                        "frames": resp.frames,
+                        "timeline_secs": resp.timeline_secs,
+                        "duration_secs": resp.duration_secs,
+                        "width": resp.width,
+                        "height": resp.height,
+                        "video_base64": resp.video_base64,
+                        "has_audio": resp.has_audio,
+                        "has_subtitles": resp.has_subtitles,
+                        "burned_subtitles": resp.burned_subtitles,
+                        "format": resp.format,
+                    })
+                    .to_string()
+                }
                 Ok(Err(e)) => json!({ "error": format!("{e:#}") }).to_string(),
                 Err(e) => json!({ "error": format!("task panicked: {e}") }).to_string(),
             };
@@ -234,19 +247,25 @@ section keeps its own height). Returns page count and packaging.",
                 tls_fingerprint: params.tls_fingerprint,
             };
             return match tokio::task::spawn_blocking(move || crate::server::do_pdf(req)).await {
-                Ok(Ok(resp)) => json!({
-                    "url": resp.url,
-                    "title": resp.title,
-                    "pages": resp.pages,
-                    "width": resp.width,
-                    "height": resp.height,
-                    "pdf_base64": resp.pdf_base64,
-                    "pages_base64": resp.pages_base64,
-                    "pptx_base64": resp.pptx_base64,
-                    "docx_base64": resp.docx_base64,
-                    "format": resp.format,
-                })
-                .to_string(),
+                Ok(Ok(resp)) => {
+                    // Redirect hops (#175) — see the fetch tool's walk check.
+                    if let Err(e) = crate::robots::assert_allowed(&resp.url).await {
+                        return json!({ "error": e }).to_string();
+                    }
+                    json!({
+                        "url": resp.url,
+                        "title": resp.title,
+                        "pages": resp.pages,
+                        "width": resp.width,
+                        "height": resp.height,
+                        "pdf_base64": resp.pdf_base64,
+                        "pages_base64": resp.pages_base64,
+                        "pptx_base64": resp.pptx_base64,
+                        "docx_base64": resp.docx_base64,
+                        "format": resp.format,
+                    })
+                    .to_string()
+                }
                 Ok(Err(e)) => json!({ "error": format!("{e:#}") }).to_string(),
                 Err(e) => json!({ "error": format!("task panicked: {e}") }).to_string(),
             };
@@ -281,12 +300,19 @@ interaction on a shared page use session_click instead.",
         };
 
         match tokio::task::spawn_blocking(move || do_click(req)).await {
-            Ok(Ok(resp)) => json!({
-                "url": resp.url,
-                "clicked": resp.clicked,
-                "text_after": resp.text_after
-            })
-            .to_string(),
+            Ok(Ok(resp)) => {
+                // Redirect hops (#175): the click may have navigated — the
+                // effective URL clears the same gate the requested one did.
+                if let Err(e) = crate::robots::assert_allowed(&resp.url).await {
+                    return json!({ "error": e }).to_string();
+                }
+                json!({
+                    "url": resp.url,
+                    "clicked": resp.clicked,
+                    "text_after": resp.text_after
+                })
+                .to_string()
+            }
             Ok(Err(e)) => json!({ "error": format!("{}", e) }).to_string(),
             Err(e) => json!({ "error": format!("task panicked: {}", e) }).to_string(),
         }

@@ -1848,3 +1848,108 @@ mod pseudo_empty_box_tests {
         );
     }
 }
+
+mod abspos_float_shrink_tests {
+    // #176: a shrink-to-fit container (abspos auto-width, a floated box)
+    // holding a float + text must size to float + text on one line, not to
+    // the float alone. The synthetic float row's flow column carried
+    // flex-basis 0 — a zero hypothetical main size — so every intrinsic
+    // width read measured the row to the float's width (150 vs Chrome's
+    // 188 = float 150 + "hello" 38). The float:left container shape was
+    // already correct (it rides the run machinery's own sizing); these
+    // tests pin both so the fix can't drift either way.
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::{compute_styles, layout_dom};
+
+    const VW: f32 = 1280.0;
+
+    fn rect(html: &str, sheet: &str, sel: &str) -> (f32, f32, f32, f32) {
+        let tree = parse_html(html);
+        let rules = parse_stylesheet_for(sheet, (VW, 800.0), CssMediaType::Screen);
+        let styles = compute_styles(&tree, &rules, (VW, 800.0));
+        let rects = layout_dom(&tree, &styles, &crate::diting_fonts::font_book(), VW, 800.0);
+        let id = tree.query_selector(sel).unwrap().unwrap();
+        let r = rects.get(&id).unwrap();
+        (r.x, r.y, r.width, r.height)
+    }
+
+    const BODY: &str = r#"<html><body><div id="stage"><div id="box" class="fit">
+        <div id="f" style="float: left; width: 150px; height: 40px"></div>hello
+    </div></div></body></html>"#;
+
+    #[test]
+    fn abspos_sizes_float_plus_text() {
+        // Chrome: the abs box shrink-to-fits to 188 (float 150 + text 38 on
+        // one line). The bug measured the synthetic row to 150 — the flow
+        // column's flex-basis 0 contributed nothing to the intrinsic read.
+        let (_x, _y, w, _h) = rect(
+            BODY,
+            "body { margin: 0 } #stage { position: relative; width: 400px; height: 200px }\
+             #box { position: absolute; left: 0; top: 0 }",
+            "#box",
+        );
+        assert!(
+            w > 160.0 && w < 220.0,
+            "abspos shrink-to-fit must cover float + text on one line (~188); got w={w}"
+        );
+    }
+
+    #[test]
+    fn floated_container_keeps_float_plus_text() {
+        // The sibling shape that already worked (the floated container rides
+        // the run machinery's own shrink-to-fit): same band, pinned so the
+        // fix can't regress it.
+        let (_x, _y, w, _h) = rect(
+            BODY,
+            "body { margin: 0 } #stage { width: 400px }\
+             #box { float: left }",
+            "#box",
+        );
+        assert!(
+            w > 160.0 && w < 220.0,
+            "floated shrink-to-fit must cover float + text on one line (~188); got w={w}"
+        );
+    }
+
+    #[test]
+    fn abspos_float_only_stays_float_width() {
+        // No text: the shrink-to-fit box is exactly the float — guards
+        // against an over-widening fix (e.g. a stray stretch to the stage).
+        let (_x, _y, w, _h) = rect(
+            r#"<html><body><div id="stage"><div id="box">
+                <div id="f" style="float: left; width: 150px; height: 40px"></div>
+            </div></div></body></html>"#,
+            "body { margin: 0 } #stage { position: relative; width: 400px; height: 200px }\
+             #box { position: absolute; left: 0; top: 0 }",
+            "#box",
+        );
+        assert!(
+            (w - 150.0).abs() <= 1.0,
+            "float-only shrink-to-fit is the float's width; got w={w}"
+        );
+    }
+
+    #[test]
+    fn static_wide_content_never_squeezes_float() {
+        // Definite-width parent (400px): the flow column wraps beside the
+        // float; the float NEVER shrinks no matter how wide the column's
+        // content is (CSS floats keep their computed width). With the fix's
+        // content-based flex-basis on the column this is exactly the
+        // regression the float/rail flex-shrink 0 rules hold shut.
+        let (_x, _y, w, _h) = rect(
+            r#"<html><body><div id="host">
+                <div id="f" style="float: left; width: 150px; height: 40px"></div>
+                hello world this line is deliberately wide enough to overflow the
+                two hundred fifty pixels left beside the float so the flex row
+                runs out of free space and shrink would engage if allowed
+            </div></body></html>"#,
+            "body { margin: 0 } #host { width: 400px }",
+            "#f",
+        );
+        assert!(
+            (w - 150.0).abs() <= 0.5,
+            "a float keeps its computed width beside wide flow content; got w={w}"
+        );
+    }
+}

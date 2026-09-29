@@ -99,6 +99,9 @@ pub async fn do_download(req: DownloadRequest) -> Result<DownloadResponse> {
     // the final response headers (including Content-Disposition) before
     // touching disk. The first body is a plain un-ranged GET.
     let mut current = start_url.clone();
+    // Intermediate hop URLs, for the robots re-check below (#175) — same
+    // semantics as the engine Response.redirected_from the /fetch walk reads.
+    let mut robots_hops: Vec<String> = Vec::new();
     let mut resp = None;
     for _ in 0..=MAX_REDIRECTS {
         let mut builder = rc.get(current.as_str());
@@ -119,6 +122,7 @@ pub async fn do_download(req: DownloadRequest) -> Result<DownloadResponse> {
                 let next = current.join(loc)?;
                 ensure_http_scheme(&next)?;
                 validate_url(&next, false)?;
+                robots_hops.push(current.to_string());
                 current = next;
                 continue;
             }
@@ -128,6 +132,12 @@ pub async fn do_download(req: DownloadRequest) -> Result<DownloadResponse> {
         break;
     }
     let resp = resp.ok_or_else(|| anyhow!("too many redirects (> {})", MAX_REDIRECTS))?;
+    // Robots is decided per fetched URL (#175) — a redirect from an allowed
+    // host onto a disallowed one must not land bytes on disk. Runs before
+    // the body streams; no-op unless the operator opted in.
+    crate::robots::assert_allowed_walk(current.as_str(), &robots_hops)
+        .await
+        .map_err(anyhow::Error::msg)?;
 
     let status = resp.status();
     if !(status == reqwest::StatusCode::OK || status == reqwest::StatusCode::PARTIAL_CONTENT) {

@@ -135,6 +135,23 @@ impl CacheState {
 static CACHE: LazyLock<tokio::sync::Mutex<CacheState>> =
     LazyLock::new(|| tokio::sync::Mutex::new(CacheState::default()));
 
+/// Post-fetch re-check for redirect-following faces (#175): robots is
+/// decided per fetched URL, but `assert_allowed` at the handler only saw
+/// the URL the caller asked for. A walk can land on — or hop through — a
+/// host/path whose own robots.txt disallows, and the disallowed content
+/// came back inside a success response. `final_url` is the response's
+/// effective URL; `hops` are the intermediate redirect URLs the face can
+/// observe (empty on the browser tier — the final-URL check still closes
+/// the leak there). The final URL is checked first because that is where
+/// the content came from. No-op unless the operator opted in, like every
+/// robots check here.
+pub async fn assert_allowed_walk(final_url: &str, hops: &[String]) -> Result<(), String> {
+    for url in std::iter::once(final_url).chain(hops.iter().map(String::as_str)) {
+        assert_allowed(url).await?;
+    }
+    Ok(())
+}
+
 /// Err(reason) when robots.txt disallows fetching `url`. Only runs at all
 /// when the operator opted in (see [`honor_env`]).
 ///
@@ -751,5 +768,48 @@ mod tests {
         s.insert("https://a.example".to_string(), Policy::DenyAll("refused".into()));
         assert_eq!(s.map.len(), 1, "same key re-inserts, never duplicates");
         assert!(matches!(s.map["https://a.example"].policy, Policy::DenyAll(_)));
+    }
+
+    // #175: the redirect-hop walk. assert_allowed at the handler saw only
+    // the URL the caller asked for; the response's own redirect trail could
+    // land on — or hop through — a robots-disallowed host with the content
+    // riding inside a success response. The walk checks the final URL first
+    // (that is where the content came from), then every observed hop. Pinned
+    // network-free with unparsable URLs, the same trick as the
+    // gate-position test above: honor-on + garbage input errors, and the
+    // error names WHICH entry refused.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the env lock must span the awaits — that IS the serialization
+    async fn walk_checks_final_first_then_every_hop() {
+        static HONOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _env = HONOR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Gate off (default): the whole walk is a no-op, garbage included.
+        unsafe { std::env::remove_var("AGINXBROWSER_HONOR_ROBOTS") };
+        assert!(assert_allowed_walk(":::not a url", &[]).await.is_ok());
+
+        unsafe { std::env::set_var("AGINXBROWSER_HONOR_ROBOTS", "1") };
+        // A garbage final URL is refused outright.
+        assert!(assert_allowed_walk(":::final", &[":::hop".to_string()])
+            .await
+            .is_err());
+        // A private (exempt) final still walks the hops — the hop is what
+        // errors here.
+        assert!(
+            assert_allowed_walk("http://localhost/page", &[":::hop".to_string()])
+                .await
+                .is_err(),
+            "hops are walked, not just the final"
+        );
+        // Clean private entries the whole way: allowed, no request made.
+        assert!(
+            assert_allowed_walk(
+                "http://localhost/landed",
+                &["http://localhost:8080/hop".to_string()]
+            )
+            .await
+            .is_ok()
+        );
+        unsafe { std::env::remove_var("AGINXBROWSER_HONOR_ROBOTS") };
     }
 }

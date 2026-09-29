@@ -366,6 +366,14 @@ pub async fn smart_fetch(req: crate::FetchRequest) -> Result<FetchResponse, anyh
         {
             Ok(Some(resp)) => {
                 tracing::info!("smart_fetch: Tier 1 (HTTP) succeeded for {}", req.url);
+                // Redirect hops (#175): robots is decided per fetched URL, so
+                // the walk's final URL (and every observable hop) must pass
+                // the same gate the requested URL passed at the handler — a
+                // redirect from an allowed host onto a disallowed one used
+                // to hand the disallowed content back with a 200.
+                crate::robots::assert_allowed_walk(&resp.url, &resp.redirected_from)
+                    .await
+                    .map_err(anyhow::Error::msg)?;
                 return Ok(resp);
             }
             Ok(None) => {
@@ -394,6 +402,15 @@ pub async fn smart_fetch(req: crate::FetchRequest) -> Result<FetchResponse, anyh
     // run_on_local_runtime directly from an async context panics).
     tracing::info!("smart_fetch: Tier 2 (browser) for {}", req.url);
     match tokio::task::spawn_blocking(move || crate::server::do_fetch(req)).await {
+        // Same redirect-hop re-check as Tier 1 (#175). The browser tier
+        // reports no hops, but `resp.url` is the post-redirect effective URL,
+        // which is where the content came from.
+        Ok(Ok(resp)) => {
+            crate::robots::assert_allowed_walk(&resp.url, &resp.redirected_from)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            Ok(resp)
+        }
         Ok(res) => res,
         Err(e) => Err(anyhow::anyhow!("Tier 2 fetch task panicked: {}", e)),
     }

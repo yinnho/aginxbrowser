@@ -3201,6 +3201,34 @@ class Element extends Node {
                (ns === "http://www.w3.org/1999/xhtml" && (ln === "a" || ln === "area" || ln === "link"));
     if (ok) this.setAttribute("rel", v);
   }
+  // `rev` reflection (#177) — the obsolete-but-reflected twin of rel, same
+  // element set and same plain-DOMString shape as Chrome. Legacy SEO markup
+  // readers walk link.rev; undefined (the pre-fix answer) breaks them.
+  get rev() {
+    const ns = this.namespaceURI, ln = this.localName;
+    const ok = (ns === "http://www.w3.org/2000/svg" && ln === "a") ||
+               (ns === "http://www.w3.org/1999/xhtml" && (ln === "a" || ln === "area" || ln === "link"));
+    if (!ok) return undefined;
+    return this.getAttribute("rev") || "";
+  }
+  set rev(v) {
+    const ns = this.namespaceURI, ln = this.localName;
+    const ok = (ns === "http://www.w3.org/2000/svg" && ln === "a") ||
+               (ns === "http://www.w3.org/1999/xhtml" && (ln === "a" || ln === "area" || ln === "link"));
+    if (ok) this.setAttribute("rev", v);
+  }
+  // `scheme` reflection (#177, HTMLMetaElement.scheme) — same obsolete-
+  // reflected-DOMString family as rev, mirroring the meta arm of `content`
+  // above.
+  get scheme() {
+    if (this.localName !== 'meta') return undefined;
+    return this.getAttribute('scheme') || '';
+  }
+  set scheme(v) {
+    if (this.localName === 'meta') {
+      this.setAttribute('scheme', v == null ? '' : String(v));
+    }
+  }
   get sandbox() {
     if (this.namespaceURI !== "http://www.w3.org/1999/xhtml" || this.localName !== "iframe") return undefined;
     if (!this._sandboxList) __def(this, '_sandboxList', new DOMTokenList(this, "sandbox", SANDBOX_SUPPORTED));
@@ -12658,7 +12686,7 @@ globalThis.HTMLDialogElement = _htmlInterface('HTMLDialogElement', ['dialog']);
 // and bootstrap-internal reads are untouched.
 {
   const _interfaceProps = {
-    HTMLAnchorElement: ['href', 'hash', 'host', 'hostname', 'origin', 'password', 'pathname', 'port', 'protocol', 'search', 'username', 'rel', 'relList', 'type', 'name'],
+    HTMLAnchorElement: ['href', 'hash', 'host', 'hostname', 'origin', 'password', 'pathname', 'port', 'protocol', 'search', 'username', 'rel', 'rev', 'relList', 'type', 'name'],
     HTMLImageElement: ['src', 'sizes'],
     HTMLInputElement: ['checked', 'indeterminate', 'value', 'files', 'form', 'disabled', 'name', 'type', 'placeholder', 'max', 'min', 'step', 'multiple', 'size', 'maxLength', 'minLength', 'valueAsDate', 'valueAsNumber'],
     HTMLSelectElement: ['selectedIndex', 'selectedOptions', 'options', 'value', 'form', 'disabled', 'name', 'type', 'multiple'],
@@ -12668,9 +12696,9 @@ globalThis.HTMLDialogElement = _htmlInterface('HTMLDialogElement', ['dialog']);
     HTMLTableElement: ['caption', 'rows', 'tBodies', 'tFoot', 'tHead'],
     HTMLTableRowElement: ['cells', 'rowIndex', 'sectionRowIndex'],
     HTMLTableCellElement: ['cellIndex'],
-    HTMLLinkElement: ['rel', 'relList', 'sizes', 'disabled', 'sheet'],
+    HTMLLinkElement: ['rel', 'rev', 'relList', 'sizes', 'disabled', 'sheet'],
     HTMLStyleElement: ['sheet'],
-    HTMLMetaElement: ['content'],
+    HTMLMetaElement: ['content', 'scheme'],
     HTMLLabelElement: ['htmlFor', 'form'],
     HTMLIFrameElement: ['sandbox', 'contentDocument', 'contentWindow', 'src'],
     HTMLDialogElement: ['open', 'returnValue', 'closedBy'],

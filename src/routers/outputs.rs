@@ -363,6 +363,11 @@ pub(crate) async fn screenshot_handler(
     // V8 (deno_core) holds !Send state, so drive the whole capture on a
     // current-thread runtime on a blocking thread — same pattern as do_eval.
     let resp = spawn_blocking(move || server::do_screenshot(req)).await??;
+    // Redirect hops (#175): the render followed redirects itself; the
+    // effective URL (resp.url) must clear the same gate the requested one did.
+    robots::assert_allowed(&resp.url)
+        .await
+        .map_err(AppError::Forbidden)?;
     Ok((StatusCode::OK, Json(resp)))
 }
 
@@ -375,6 +380,10 @@ pub(crate) async fn video_handler(Json(req): Json<VideoRequest>) -> Result<impl 
         .await
         .map_err(AppError::Forbidden)?;
     let resp = spawn_blocking(move || server::do_video(req)).await??;
+    // Redirect hops (#175) — see screenshot_handler.
+    robots::assert_allowed(&resp.url)
+        .await
+        .map_err(AppError::Forbidden)?;
     Ok((StatusCode::OK, Json(resp)))
 }
 
@@ -386,6 +395,10 @@ pub(crate) async fn pdf_handler(Json(req): Json<PdfRequest>) -> Result<impl Into
         .await
         .map_err(AppError::Forbidden)?;
     let resp = spawn_blocking(move || server::do_pdf(req)).await??;
+    // Redirect hops (#175) — see screenshot_handler.
+    robots::assert_allowed(&resp.url)
+        .await
+        .map_err(AppError::Forbidden)?;
     Ok((StatusCode::OK, Json(resp)))
 }
 

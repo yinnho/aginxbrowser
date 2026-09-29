@@ -164,6 +164,14 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
             // Stance gate (crate::rate) must surface as 429, not the generic
             // catch-all — the status IS part of the message.
             AppError::TooManyRequests(msg)
+        } else if msg.starts_with("robots.txt ") {
+            // Robots denials from the redirect-hop re-check inside smart_fetch
+            // (#175) travel as anyhow strings; the prefix is the type. Same
+            // Forbidden the pre-fetch gate gives — and matched BEFORE the
+            // connect/dns arms because a DenyAll reason embeds transport
+            // error text ("unreachable (dns ... )") that would otherwise
+            // reclassify a policy answer as a gateway error.
+            AppError::Forbidden(msg)
         } else if msg.contains("timeout") || msg.contains("timed out") {
             AppError::GatewayTimeout(msg)
         } else if msg.contains("resolve") || msg.contains("connect") || msg.contains("dns") {
