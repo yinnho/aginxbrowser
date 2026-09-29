@@ -1,16 +1,13 @@
 use async_trait::async_trait;
 
-use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError, strip_tags};
+use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError};
 
-/// Bing News via the RSS output format (`format=RSS`) — the same route
-/// SearXNG's bing_news engine effectively serves when HTML scraping breaks.
-///
-/// Connectivity is auto-sensed per request, not bound at startup: direct
-/// first; on a geo-redirect (www.bing.com → cn.bing.com, which kills the
-/// news vertical) or a transport failure, retry once through
-/// AGINXBROWSER_PROXY when configured. Overseas deployments connect
-/// directly with no proxy at all; CN deployments set it once and blocked
-/// targets fall through automatically.
+/// Bing News via the infinite-scroll AJAX fragment — the route SearXNG's
+/// bing_news engine has served since it abandoned `format=RSS`. The RSS
+/// output is retired: `/news/search?q=…&format=RSS` 302s to the portal
+/// from every exit we can observe (#178), and the whole news vertical is
+/// geo-walled from CN IPs (even `cn.bing.com/news` 302s to `/`), so the
+/// proxy retry below is the load-bearing path on CN deployments.
 pub struct BingNewsEngine;
 
 impl BingNewsEngine {
@@ -59,260 +56,193 @@ impl SearchEngine for BingNewsEngine {
         query: &str,
         params: SearchParams,
     ) -> Result<Vec<RawSearchResult>, SearchEngineError> {
-        // RSS pages are ~10 items; first= is 1-based item offset.
-        let first = (params.pageno.max(1) - 1) * 10 + 1;
+        // SearXNG's request shape: 10 items per page, `first` is the 1-based
+        // item offset and SFX the 0-based page echo.
+        let page = params.pageno.saturating_sub(1);
         let url = format!(
-            "https://www.bing.com/news/search?q={}&format=RSS&first={}",
+            "https://www.bing.com/news/infinitescrollajax?q={}&InfiniteScroll=1&first={}&SFX={}&form=PTFTNR&setlang={}",
             urlencoding::encode(query),
-            first,
+            page * 10 + 1,
+            page,
+            urlencoding::encode(&params.language),
         );
+        // time_range rides the server-side `qft` freshness window (same
+        // mapping as SearXNG): day is "last hour" (interval 4) because Bing's
+        // last-day and last-week lists barely differ; there is no year
+        // window, month covers it.
+        let url = match params.time_range {
+            Some(super::SearchTimeRange::Day) => format!("{url}&qft=interval%3D%224%22"),
+            Some(super::SearchTimeRange::Week) => format!("{url}&qft=interval%3D%227%22"),
+            Some(super::SearchTimeRange::Month | super::SearchTimeRange::Year) => {
+                format!("{url}&qft=interval%3D%229%22")
+            }
+            None => url,
+        };
 
-        // Direct first. The CN geo-302 chain lands on an HTML portal page —
-        // an HTTP-level success transport errors can't flag. body_ok makes
-        // the helper retry through the proxy whenever the direct body isn't
-        // RSS (the blocked-target signature for this engine).
-        fn is_rss(body: &str) -> bool {
-            body.contains("<rss") || body.contains("<item>")
+        // The fragment is bare HTML — a page of `div.newsitem` cards, no
+        // page chrome. The CN geo-302 lands on the portal home instead, an
+        // HTTP-level success transport errors can't flag; body_ok makes the
+        // helper retry through the proxy whenever the direct body isn't a
+        // news fragment (the blocked-target signature for this engine).
+        fn is_fragment(body: &str) -> bool {
+            body.contains("newsitem")
         }
         let body =
-            super::get_direct_first_if(&url, BN_HEADERS, Self::proxied_client, is_rss).await?;
-        // time_range: the RSS route has no server-side freshness param, but
-        // every item carries a pubDate — filter client-side (v0.3.1 Windows
-        // report P2-6: intraday agents need "today only").
-        let cutoff = params
-            .time_range
-            .map(|tr| tr.cutoff_epoch(std::time::SystemTime::now()));
-        parse_bing_news_rss(&body, cutoff)
+            super::get_direct_first_if(&url, BN_HEADERS, Self::proxied_client, is_fragment).await?;
+        parse_bing_news_fragment(&body)
     }
 }
 
-/// Minimal RSS reader: <item><title/link/description/pubDate>. Flat enough
-/// that string scanning beats an XML crate dependency. Items dated before
-/// `cutoff` (when set) are dropped; undated items are kept — we don't hide
-/// what we can't date.
-fn parse_bing_news_rss(
+/// Parse the infinitescrollajax fragment: `div.newsitem` cards carrying
+/// `a.title` (link), `div.snippet` (text), and a source bar whose
+/// aria-labelled spans name the publisher and age — folded into the snippet
+/// the way the RSS engine folded pubDate.
+fn parse_bing_news_fragment(
     body: &str,
-    cutoff: Option<u64>,
 ) -> Result<Vec<RawSearchResult>, SearchEngineError> {
-    if !body.contains("<rss") && !body.contains("<item>") {
-        return Err(SearchEngineError::Transient(
-            "bing news response is not RSS".into(),
-        ));
-    }
+    let document = scraper::Html::parse_document(body);
 
+    let item_selector = scraper::Selector::parse("div.newsitem")
+        .map_err(|e| SearchEngineError::Transient(format!("selector parse: {e}")))?;
+    let link_selector = scraper::Selector::parse("a.title")
+        .map_err(|e| SearchEngineError::Transient(format!("selector parse: {e}")))?;
+    let snippet_selector = scraper::Selector::parse("div.snippet")
+        .map_err(|e| SearchEngineError::Transient(format!("selector parse: {e}")))?;
+    // Bing's source bar class varies (source / t_source); substring-match the
+    // class attribute the way SearXNG's contains(@class, "source") does.
+    let source_selector = scraper::Selector::parse("div[class*='source']")
+        .map_err(|e| SearchEngineError::Transient(format!("selector parse: {e}")))?;
+
+    let items: Vec<_> = document.select(&item_selector).collect();
+    let total = items.len().max(1) as f64;
     let mut results = Vec::new();
-    for item_xml in body.split("<item>").skip(1) {
-        let item_xml = match item_xml.split("</item>").next() {
-            Some(x) => x,
+
+    for (i, item) in items.iter().enumerate() {
+        let link_el = match item.select(&link_selector).next() {
+            Some(el) => el,
             None => continue,
         };
-        let title = unescape(tag_text(item_xml, "title"));
-        let link = tag_text(item_xml, "link");
-        if title.is_empty() || link.is_empty() {
+        let title: String = link_el.text().collect::<String>().trim().to_string();
+        let url = link_el.value().attr("href").unwrap_or("").to_string();
+        if title.is_empty() || url.is_empty() {
             continue;
         }
-        let pub_date = tag_text(item_xml, "pubDate");
-        if let Some(cutoff) = cutoff {
-            if let Some(epoch) = rfc822_epoch(&pub_date) {
-                if epoch < cutoff {
-                    continue;
+
+        let snippet: String = item
+            .select(&snippet_selector)
+            .next()
+            .map(|s| s.text().collect::<String>().trim().to_string())
+            .unwrap_or_default();
+
+        // Source metadata: the first aria-labelled span in the source bar
+        // (publisher / age) plus the link's data-author, SearXNG's pair.
+        let mut metadata: Vec<String> = Vec::new();
+        if let Some(source) = item.select(&source_selector).next() {
+            let label_sel = scraper::Selector::parse("span[aria-label]")
+                .map_err(|e| SearchEngineError::Transient(format!("selector parse: {e}")))?;
+            if let Some(span) = source.select(&label_sel).next() {
+                let label = span
+                    .value()
+                    .attr("aria-label")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                if !label.is_empty() {
+                    metadata.push(label);
                 }
             }
         }
-        let description = unescape(tag_text(item_xml, "description"));
-        // Strip residual HTML tags from the description snippet.
-        let description = strip_tags(&description);
-        let pub_date = tag_text(item_xml, "pubDate");
+        if let Some(author) = link_el.value().attr("data-author") {
+            let author = author.trim();
+            if !author.is_empty() {
+                metadata.push(author.to_string());
+            }
+        }
 
-        let snippet = if pub_date.is_empty() {
-            description
+        let snippet = if metadata.is_empty() {
+            snippet
         } else {
-            format!("{} ({})", description, pub_date)
+            format!("{} ({})", snippet, metadata.join(" | "))
         };
 
         results.push(RawSearchResult {
             title,
-            url: link,
+            url,
             snippet,
             engine: "bing_news".into(),
-            score: 0.0,
+            score: total - i as f64,
             cookies: Vec::new(),
             js_extract_result: None,
             image: None,
         });
     }
-    let total = results.len().max(1) as f64;
-    for (i, r) in results.iter_mut().enumerate() {
-        r.score = total - i as f64;
-    }
     Ok(results)
-}
-
-/// RFC 822 date ("Tue, 25 Aug 2026 08:00:00 GMT" | "+0800") → epoch seconds.
-/// Days-from-civil algorithm (Howard Hinnant's), enough for a freshness
-/// cutoff without pulling a date crate in.
-fn rfc822_epoch(s: &str) -> Option<u64> {
-    let s = s.trim();
-    // "Tue, 25 Aug 2026 08:00:00 GMT" — drop the weekday prefix if present.
-    let body = match s.find(',') {
-        Some(i) => s[i + 1..].trim(),
-        None => s,
-    };
-    let parts: Vec<&str> = body.split_whitespace().collect();
-    if parts.len() < 4 {
-        return None;
-    }
-    let day: i64 = parts[0].parse().ok()?;
-    let month = match parts[1] {
-        "Jan" => 1,
-        "Feb" => 2,
-        "Mar" => 3,
-        "Apr" => 4,
-        "May" => 5,
-        "Jun" => 6,
-        "Jul" => 7,
-        "Aug" => 8,
-        "Sep" => 9,
-        "Oct" => 10,
-        "Nov" => 11,
-        "Dec" => 12,
-        _ => return None,
-    };
-    let year: i64 = parts[2].parse().ok()?;
-    let hms: Vec<u32> = parts[3].split(':').filter_map(|p| p.parse().ok()).collect();
-    if hms.len() != 3 {
-        return None;
-    }
-    let zone = parts.get(4).copied().unwrap_or("GMT");
-    let offset_secs: i64 = if zone == "GMT" || zone == "UTC" || zone == "Z" {
-        0
-    } else if let Some(stripped) = zone.strip_prefix(['+', '-']) {
-        let sign = if zone.starts_with('-') { -1 } else { 1 };
-        let hh: i64 = stripped.get(..2).and_then(|p| p.parse().ok()).unwrap_or(0);
-        let mm: i64 = stripped.get(2..).and_then(|p| p.parse().ok()).unwrap_or(0);
-        sign * (hh * 3600 + mm * 60)
-    } else {
-        0 // Unrecognized zone names (EST…): treat as UTC, the cutoff is coarse anyway.
-    };
-
-    // Days from civil.
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    let secs = days * 86_400 + hms[0] as i64 * 3600 + hms[1] as i64 * 60 + hms[2] as i64;
-    Some((secs - offset_secs).max(0) as u64)
-}
-
-fn tag_text(xml: &str, tag: &str) -> String {
-    let open = format!("<{}>", tag);
-    let close = format!("</{}>", tag);
-    match xml.find(&open) {
-        Some(start) => {
-            let rest = &xml[start + open.len()..];
-            match rest.find(&close) {
-                Some(end) => rest[..end].trim().to_string(),
-                None => String::new(),
-            }
-        }
-        None => {
-            // Self-closing / attribute-carrying form: <tag ...>content</tag>
-            let open_attr = format!("<{} ", tag);
-            match xml.find(&open_attr) {
-                Some(start) => {
-                    let rest = &xml[start..];
-                    match rest.find('>').and_then(|gt| rest[gt + 1..].find(&close).map(|e| gt + 1 + e)) {
-                        Some(end) => {
-                            let inner_start = rest.find('>').unwrap() + 1;
-                            rest[inner_start..end].trim().to_string()
-                        }
-                        None => String::new(),
-                    }
-                }
-                None => String::new(),
-            }
-        }
-    }
-}
-
-fn unescape(s: String) -> String {
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&amp;", "&")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_bing_news_rss, rfc822_epoch, strip_tags};
+    use super::parse_bing_news_fragment;
 
-    const SAMPLE: &str = r#"<?xml version="1.0"?><rss version="2.0"><channel>
-<item>
-  <title>Rust 2.0 roadmap published</title>
-  <link>https://example.com/rust-roadmap</link>
-  <description>The core team &lt;b&gt;outlined&lt;/b&gt; plans for 2026.</description>
-  <pubDate>Tue, 25 Aug 2026 08:00:00 GMT</pubDate>
-</item>
-<item>
-  <title>no-link item</title>
-  <description>skipped</description>
-</item>
-</channel></rss>"#;
+    // Mirrors the real infinitescrollajax fragment (verified through a live
+    // proxy exit, 2026-09-29): `div.news-card.newsitem.cardcommon` carrying
+    // a source bar (publisher + aria-labelled age), then the `a.title`
+    // anchor wrapping an <h2>, then `div.snippet`.
+    const FRAGMENT: &str = r#"<div class="news-card newsitem cardcommon"
+    url="https://www.forbes.com/sites/monicamercuri/2025/05/02/rust-roadmap"
+    data-title="Rust 2.0 roadmap published" data-author="Forbes"
+    title="Rust 2.0 roadmap published">
+  <div class="t_row">
+    <div class="source set_top" style="height:16px">
+      <div class="caption_img nositelink"><img title="Forbes" width="44" height="16" src="/th?id=OJ.vi0&amp;pid=news" class="pubimg"/></div>
+      <div style="margin-top: 2px"><span><span class="news-separator"></span></span><span tabindex="0" aria-label="9/3/2026">25d</span></div>
+    </div>
+    <a target="_blank" class="title" data-artpy="0" data-author="Polygon on MSN" href="https://www.msn.com/en-us/news/other/rust-roadmap/ar-AA2bxPBh" h="ID=news,5076.1"><h2 class=" ns_hd_h2">Rust 2.0 roadmap published</h2></a>
+    <div class="snippet" title="The core team outlined plans for 2026.">The core team outlined plans for 2026.</div>
+  </div>
+</div>
+<div class="news-card newsitem cardcommon">
+  <a target="_blank" class="title" data-author="The Register" href="https://example.com/second"><h2>Second headline</h2></a>
+  <div class="snippet">No source bar on this one.</div>
+</div>
+<div class="newsitem"><div class="snippet">no title link — skipped</div></div>"#;
 
     #[test]
-    fn parses_rss_items_with_clean_snippets() {
-        let results = parse_bing_news_rss(SAMPLE, None).unwrap();
-        assert_eq!(results.len(), 1);
+    fn parses_fragment_items_with_source_metadata() {
+        let results = parse_bing_news_fragment(FRAGMENT).unwrap();
+        assert_eq!(results.len(), 2);
+        // Title comes from the <h2> inside the a.title anchor; URL from its
+        // href (attributes in any order, matching the real markup).
         assert_eq!(results[0].title, "Rust 2.0 roadmap published");
-        assert_eq!(results[0].url, "https://example.com/rust-roadmap");
-        assert_eq!(results[0].snippet, "The core team outlined plans for 2026. (Tue, 25 Aug 2026 08:00:00 GMT)");
-        assert_eq!(results[0].score, 1.0);
+        assert_eq!(
+            results[0].url,
+            "https://www.msn.com/en-us/news/other/rust-roadmap/ar-AA2bxPBh"
+        );
+        // Metadata pair, SearXNG's picks: the source bar's first
+        // aria-labelled span (the date) + the anchor's data-author (the
+        // syndication host — not the newsitem div's own data-author).
+        assert_eq!(
+            results[0].snippet,
+            "The core team outlined plans for 2026. (9/3/2026 | Polygon on MSN)"
+        );
+        // Score descends with rank.
+        assert!(results[0].score > results[1].score);
         assert_eq!(results[0].engine, "bing_news");
     }
 
     #[test]
-    fn non_rss_body_is_transient_error() {
-        assert!(parse_bing_news_rss("<html>portal</html>", None).is_err());
+    fn item_without_source_bar_keeps_bare_snippet() {
+        let results = parse_bing_news_fragment(FRAGMENT).unwrap();
+        // No source bar, but the anchor carries data-author — the other half
+        // of SearXNG's metadata pair.
+        assert_eq!(results[1].snippet, "No source bar on this one. (The Register)");
     }
 
     #[test]
-    fn rfc822_epoch_matches_known_instants() {
-        // 1787644800 = 2026-08-25T08:00:00Z (verified with `date -u -r`).
-        assert_eq!(rfc822_epoch("Tue, 25 Aug 2026 08:00:00 GMT"), Some(1_787_644_800));
-        assert_eq!(rfc822_epoch("Thu, 01 Jan 1970 00:00:00 GMT"), Some(0));
-        // Zone offset shifts the instant the other way.
-        assert_eq!(
-            rfc822_epoch("Tue, 25 Aug 2026 16:00:00 +0800"),
-            Some(1_787_644_800)
-        );
-        // Junk is None, not a wrong date.
-        assert_eq!(rfc822_epoch("not a date"), None);
-    }
-
-    #[test]
-    fn time_range_cutoff_drops_old_keeps_undated() {
-        // 1787644800 = 2026-08-25T08:00:00Z, the SAMPLE item's date.
-        let results = parse_bing_news_rss(SAMPLE, Some(1_787_644_800)).unwrap();
-        assert_eq!(results.len(), 1, "item dated exactly at the cutoff is kept");
-
-        let results = parse_bing_news_rss(SAMPLE, Some(1_787_644_801)).unwrap();
-        assert!(results.is_empty(), "item one second past the cutoff is dropped");
-
-        // The no-link item carries no date — an undated item survives any cutoff
-        // once it has a link (we don't hide what we can't date).
-        let undated = r#"<?xml version="1.0"?><rss version="2.0"><channel>
-<item><title>undated</title><link>https://example.com/u</link><description>d</description></item>
-</channel></rss>"#;
-        let results = parse_bing_news_rss(undated, Some(9_999_999_999)).unwrap();
-        assert_eq!(results.len(), 1);
-    }
-
-    #[test]
-    fn strip_tags_removes_markup() {
-        assert_eq!(strip_tags("<b>bold</b> plain"), "bold plain");
+    fn portal_page_is_empty_not_error() {
+        // A portal/interstitial that happens to pass body_ok upstream still
+        // parses to zero items here — the engine reports "no results", not a
+        // parse crash, so /doctor shows it as healthy-but-empty.
+        let results = parse_bing_news_fragment("<html><body>portal</body></html>").unwrap();
+        assert!(results.is_empty());
     }
 }

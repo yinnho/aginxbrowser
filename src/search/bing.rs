@@ -133,10 +133,14 @@ fn unwrap_bing_url(raw: &str) -> String {
         return raw.to_string();
     }
 
-    // Base64url decode the part after "a1".
-    let b64 = &u_val[2..];
+    // Base64url decode the part after "a1". Bing emits UNPADDED base64url —
+    // SearXNG's bing.py re-pads before decoding (`encoded += "=" *
+    // (-len(encoded) % 4)`) — and the padded URL_SAFE engine rejects every
+    // such input (#180), so strip any trailing '=' and decode NO_PAD, which
+    // tolerates both padded and unpadded forms.
+    let b64 = u_val[2..].trim_end_matches('=');
 
-    match base64::engine::general_purpose::URL_SAFE.decode(b64) {
+    match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b64) {
         Ok(bytes) => match String::from_utf8(bytes) {
             Ok(decoded) => {
                 // The decoded string may contain a URL directly or may have
@@ -150,5 +154,56 @@ fn unwrap_bing_url(raw: &str) -> String {
             Err(_) => raw.to_string(),
         },
         Err(_) => raw.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unwrap_bing_url;
+    use base64::Engine;
+
+    #[test]
+    fn plain_urls_pass_through() {
+        assert_eq!(
+            unwrap_bing_url("https://example.com/page"),
+            "https://example.com/page"
+        );
+    }
+
+    // #180: Bing's u=a1 payloads are unpadded base64url — the padded
+    // URL_SAFE engine rejected them all, so every wrapped result stayed
+    // wrapped. Pinned with both the unpadded shape (what Bing sends) and a
+    // padded one (tolerated, not required).
+    #[test]
+    fn unwraps_unpadded_base64url_redirect() {
+        let target = "https://example.com/rust-roadmap";
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(target);
+        assert!(
+            !encoded.contains('='),
+            "fixture must be the unpadded shape bing emits"
+        );
+        let wrapped = format!("https://www.bing.com/ck/a?!&u=a1{encoded}&nto=1");
+        assert_eq!(unwrap_bing_url(&wrapped), target);
+    }
+
+    #[test]
+    fn unwraps_padded_base64url_redirect() {
+        let target = "https://example.com/a";
+        let encoded = base64::engine::general_purpose::URL_SAFE.encode(target);
+        let wrapped = format!("https://www.bing.com/ck/a?!&u=a1{encoded}&nto=1");
+        assert_eq!(unwrap_bing_url(&wrapped), target);
+    }
+
+    #[test]
+    fn non_a1_or_non_http_payloads_stay_wrapped() {
+        // u= without the a1 prefix is not a base64url URL wrapper.
+        assert_eq!(
+            unwrap_bing_url("https://www.bing.com/ck/a?u=bm90LWEx&nto=1"),
+            "https://www.bing.com/ck/a?u=bm90LWEx&nto=1"
+        );
+        // A decoded non-URL payload falls back to the wrapper.
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("not a url");
+        let wrapped = format!("https://www.bing.com/ck/a?!&u=a1{encoded}");
+        assert_eq!(unwrap_bing_url(&wrapped), wrapped);
     }
 }

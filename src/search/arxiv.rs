@@ -3,8 +3,11 @@ use async_trait::async_trait;
 use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError};
 
 /// arXiv via the export.arxiv.org Atom API (free, no key). "academic"
-/// category source. The API caps page size at 100 and paginates by
-/// startIndex; we request 10 to match the other engines.
+/// category only — NOT general (#179): the API is full-text matching, so a
+/// general query word-hits random papers (measured: "searxng" surfacing
+/// quantum-memory abstracts). The other verticals (npm/pypi/github/…) match
+/// name spaces and stay in general; arXiv's precision does not. SearXNG's
+/// taxonomy agrees: arxiv is science-only, never general.
 pub struct ArxivEngine {
     client: reqwest::Client,
 }
@@ -24,7 +27,7 @@ impl SearchEngine for ArxivEngine {
     }
 
     fn categories(&self) -> &[&str] {
-        &["general", "academic"]
+        &["academic"]
     }
 
     async fn search(

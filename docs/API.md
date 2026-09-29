@@ -305,7 +305,7 @@ Native aggregated search with optional automatic content fetching. Agents go fro
 | wait_secs | u64 | | `3` | Seconds to wait for JS rendering per page while fetching content |
 | use_proxy | bool | | `false` | Whether to route content fetching through a proxy (overseas sites) |
 | engines | string[] | | `[]` | Restrict to these engine names (e.g. `["baidu"]`). Empty = all engines serving `categories`. Unknown names → 400 with the valid list |
-| time_range | string | | — | Freshness window: `day` / `week` / `month` / `year`. Honored by engines with dated results (bing_news filters by pubDate); others ignore it. Invalid values → 400 |
+| time_range | string | | — | Freshness window: `day` / `week` / `month` / `year`. Honored by engines with dated results (bing_news passes a server-side freshness window); others ignore it. Invalid values → 400 |
 
 > Unknown request fields are rejected with a 400 — a typo'd parameter name (`count`, `limit`, `num`) fails loudly instead of being silently ignored.
 
@@ -318,10 +318,10 @@ Native aggregated search with optional automatic content fetching. Agents go fro
 | sogou | general | Sogou web search |
 | sogou_wechat | general, news | Sogou WeChat article search |
 | duckduckgo | general | DuckDuckGo HTML (stealth fingerprint) |
-| bing_news | general, news | Bing News RSS; honors `time_range` by pubDate |
+| bing_news | general, news | Bing News infinite-scroll fragment; `time_range` via server-side freshness window |
 | baidu_images | images | Baidu Images `acjson` JSON |
 | bing_images | images | Bing Images `images/async` |
-| arxiv | general, academic | arXiv API |
+| arxiv | academic | arXiv API (full-text matching — academic queries only, not the general pool) |
 | huggingface | general, ai | Hugging Face models search |
 | github | general, code | GitHub repository search |
 | stackexchange | general, code | StackExchange API |

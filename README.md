@@ -310,7 +310,7 @@ aginxbrowser/
     │   ├── baidu_images.rs  #   Baidu Images (acjson API, images category)
     │   ├── bing.rs          #   Bing (HTML parsing, plain reqwest)
     │   ├── bing_images.rs   #   Bing Images (images/async endpoint, images category)
-    │   ├── bing_news.rs     #   Bing News RSS (news category; proxy-first)
+    │   ├── bing_news.rs     #   Bing News infinite-scroll fragment (news category; direct-first/proxy-retry)
     │   ├── sogou.rs         #   Sogou web (HTML parsing, plain reqwest)
     │   ├── sogou_wechat.rs  #   Sogou WeChat (HTML parsing + /link resolution)
     │   ├── duckduckgo.rs    #   DuckDuckGo (html.duckduckgo.com, general; direct-first)

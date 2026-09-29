@@ -49,22 +49,6 @@ impl SearchTimeRange {
             _ => None,
         }
     }
-
-    /// Cutoff as epoch seconds relative to `now`.
-    pub fn cutoff_epoch(&self, now: std::time::SystemTime) -> u64 {
-        const DAY: u64 = 86_400;
-        let back = match self {
-            Self::Day => DAY,
-            Self::Week => 7 * DAY,
-            Self::Month => 30 * DAY,
-            Self::Year => 365 * DAY,
-        };
-        let now_epoch = now
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        now_epoch.saturating_sub(back)
-    }
 }
 
 /// Parameters passed from the /search API request, adapted for engine use.
@@ -650,7 +634,7 @@ pub fn html_unescape(s: &str) -> String {
 /// Build a plain reqwest client suitable for search (no auto-redirect, 15s timeout).
 /// Strip inline markup (`<em>` highlights and friends) from a text run
 /// lifted out of SERP HTML or embedded JSON. Shared by the engines that
-/// read highlight-tagged snippets (bing_news, baidu).
+/// read highlight-tagged snippets (baidu, and friends).
 pub(crate) fn strip_tags(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut in_tag = false;
