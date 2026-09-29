@@ -3442,6 +3442,60 @@
             .position(|w| w == needle)
     }
 
+    /// #171: removing a `<style>` element must drop its rules from the next
+    /// style resolution. The collected css bytes change with the removal, so
+    /// the match cache's css key rotates and a fresh full match runs — but
+    /// the contract is behavioral: computed color falls back the moment the
+    /// sheet's element leaves the document, whether it left by removeChild,
+    /// by clearing innerHTML, or by being detached and re-added (the
+    /// re-add must restyle, proving the removal truly dropped the hits).
+    #[cfg(feature = "screenshot")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn style_element_removal_drops_its_rules() {
+        let mut rt = setup_runtime(
+            "<html><head></head><body><div id=\"x\">t</div><div id=\"y\">u</div></body></html>",
+        );
+        let out = rt
+            .evaluate(
+                r#"(() => {
+                    const cs = (id) => getComputedStyle(document.getElementById(id)).color;
+                    const mk = (sel) => {
+                        const s = document.createElement('style');
+                        s.textContent = sel + '{color:rgb(255, 0, 0)}';
+                        document.head.appendChild(s);
+                        return s;
+                    };
+                    const a = mk('#x');
+                    const before = cs('x');
+                    a.parentNode.removeChild(a);
+                    const afterRemove = cs('x');
+                    const b = mk('#y');
+                    const beforeClear = cs('y');
+                    document.head.innerHTML = '';
+                    const afterClear = cs('y');
+                    const c = mk('#x');
+                    const reAddedBefore = cs('x');
+                    c.parentNode.removeChild(c);
+                    document.head.appendChild(c);
+                    const reAdded = cs('x');
+                    return {before, afterRemove, beforeClear, afterClear, reAddedBefore, reAdded};
+                })()"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            out,
+            serde_json::json!({
+                "before": "rgb(255, 0, 0)",
+                "afterRemove": "rgb(0, 0, 0)",
+                "beforeClear": "rgb(255, 0, 0)",
+                "afterClear": "rgb(0, 0, 0)",
+                "reAddedBefore": "rgb(255, 0, 0)",
+                "reAdded": "rgb(255, 0, 0)",
+            })
+        );
+    }
+
     /// #121: HTMLStyleElement.sheet. CKEditor's appendStyleText returns
     /// `styleEl.sheet` and its wysiwyg editable setup reads `.ownerNode`
     /// off that sheet — an undefined sheet killed the whole editor mount
