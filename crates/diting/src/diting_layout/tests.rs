@@ -1731,3 +1731,120 @@ mod pseudo_inline_style_tests {
         );
     }
 }
+
+mod pseudo_empty_box_tests {
+    // #172: an EMPTY-content pseudo (content:"" carrying only background/
+    // gradient decoration — the overlay idiom) generated a layout leaf but
+    // nothing in paint claimed it: no DOM id → the walk's background
+    // emission never ran → zero pixels. The leaf is now tagged
+    // TextLeaf::Pseudo (host id + side) and paint claims the pseudo's own
+    // decoration layers; abspos/fixed position blockifies the display so
+    // the undeclared-display overlay shape survives at all.
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::{compute_styles, layout_dom_with_paint_order_and_images, paint, PaintItem, Rect};
+
+    fn render(sheet: &str, body: &str) -> (Vec<PaintItem>, paint::Canvas) {
+        let html = format!(
+            "<html><head><style>{sheet}</style></head><body style=\"margin:0\">{body}</body></html>"
+        );
+        let tree = parse_html(&html);
+        let rules = parse_stylesheet_for(sheet, (800.0, 600.0), CssMediaType::Screen);
+        let styles = compute_styles(&tree, &rules, (800.0, 600.0));
+        let (_, items, ..) = layout_dom_with_paint_order_and_images(
+            &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
+        );
+        let mut canvas = paint::Canvas::new_transparent(800, 600);
+        paint::execute(&items, &crate::diting_fonts::font_book(), &mut canvas);
+        (items, canvas)
+    }
+
+    fn solid_bgs(items: &[PaintItem]) -> Vec<(Rect, [u8; 4])> {
+        items
+            .iter()
+            .filter_map(|it| match it {
+                PaintItem::Bg { rect, color, .. } => Some((*rect, *color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn empty_block_pseudo_background_paints() {
+        // The classic in-flow shape: a display:block empty ::before bar
+        // (underline/divider idiom) — layout box existed, paint ignored it.
+        let (items, _) = render(
+            "#m::before { content: \"\"; display: block; height: 8px; background: rgb(10,20,30) }",
+            r#"<div id="m" style="height:40px">x</div>"#,
+        );
+        let bars = solid_bgs(&items);
+        let Some((r, c)) = bars.iter().find(|(r, _)| r.height == 8.0) else {
+            panic!("empty block pseudo background not painted: {bars:?}");
+        };
+        assert_eq!(*c, [10, 20, 30, 255], "bar keeps the pseudo's own color");
+        assert!(r.width > 700.0, "block bar fills the container: {r:?}");
+    }
+
+    #[test]
+    fn absolute_overlay_pseudo_stretches_to_containing_block() {
+        // The overlay idiom from the issue: content:"" + position:absolute
+        // + inset:0 + gradient, NO display declared — CSS blockifies, the
+        // box stretches to the containing block (the positioned .wrap).
+        let (items, _) = render(
+            ".wrap { position: relative; width: 400px; height: 300px; background: rgb(5,5,5) }\
+             .wrap::before { content: \"\"; position: absolute; inset: 0;\
+                             background: linear-gradient(rgba(255,0,0,0.5), rgba(0,0,255,0.5)) }",
+            r#"<div class="wrap">t</div>"#,
+        );
+        let grads: Vec<&PaintItem> = items
+            .iter()
+            .filter(|it| matches!(it, PaintItem::BgGradient { .. }))
+            .collect();
+        let Some(&PaintItem::BgGradient { rect, .. }) = grads.iter().find(|it| match it {
+            PaintItem::BgGradient { rect, .. } => {
+                (rect.width - 400.0).abs() < 1.0 && (rect.height - 300.0).abs() < 1.0
+            }
+            _ => false,
+        }) else {
+            panic!("absolute overlay gradient not painted: {items:?}");
+        };
+        assert!(
+            (rect.width - 400.0).abs() < 1.0 && (rect.height - 300.0).abs() < 1.0,
+            "overlay stretches to the containing block: {rect:?}"
+        );
+    }
+
+    #[test]
+    fn overlay_pseudo_inks_canvas_pixels() {
+        // End-to-end through the rasterizer: a solid absolute overlay over
+        // half the wrap must ink those pixels (the issue's 0px symptom).
+        let (_, canvas) = render(
+            ".wrap { position: relative; width: 200px; height: 100px }\
+             .wrap::before { content: \"\"; position: absolute; left: 100px; top: 0;\
+                             width: 100px; height: 100px; background: rgb(200,0,0) }",
+            r#"<div class="wrap"></div>"#,
+        );
+        let px = |x: usize, y: usize| {
+            let i = (y * canvas.width + x) * 4;
+            canvas.data[i..i + 4].to_vec()
+        };
+        assert_eq!(px(150, 50), vec![200, 0, 0, 255], "right half inked by the overlay");
+        assert_eq!(px(50, 50), vec![0, 0, 0, 0], "left half untouched");
+    }
+
+    #[test]
+    fn inline_empty_pseudo_still_paints_nothing() {
+        // Chrome-faithful: a truly inline empty pseudo generates an empty
+        // inline box — no line box, no ink. The empty-content gate in the
+        // inline branch keeps returning false.
+        let (items, _) = render(
+            "#m::before { content: \"\"; background: rgb(9,9,9) }",
+            r#"<div id="m">label</div>"#,
+        );
+        assert!(
+            !items.iter().any(|it| matches!(it, PaintItem::Bg { .. } | PaintItem::BgGradient { .. })),
+            "inline empty pseudo paints nothing: {:?}",
+            solid_bgs(&items)
+        );
+    }
+}

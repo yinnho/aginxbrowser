@@ -122,6 +122,12 @@ enum TextLeaf {
     /// box — gBCR/offsetHeight stay element-sized while the container line
     /// gains the descent below the atom.
     Replaced { strut_descent: f32 },
+    /// An EMPTY-content pseudo box (::before/::after with `content:""` —
+    /// background-only decoration: overlays, bars, clearfixes). The leaf
+    /// has no DOM id of its own, so it carries its HOST's DOM id plus
+    /// which pseudo it is; the paint walk claims the pseudo's own
+    /// background layers from the host's styles entry (#172).
+    Pseudo { host: NodeId, before: bool },
 }
 
 /// Used line height for a text run: the element's declared `line-height`
@@ -566,7 +572,7 @@ fn resolve_sizing_keywords(
                     let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han);
                     measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws)
                 }
-                Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | None => {
+                Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | Some(TextLeaf::Pseudo { .. }) | None => {
                     taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)
                 }
             }
@@ -3584,7 +3590,7 @@ fn build_table(
                     let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han);
                     measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws)
                 }
-                Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | None => {
+                Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | Some(TextLeaf::Pseudo { .. }) | None => {
                     taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)
                 }
             }
@@ -3605,7 +3611,7 @@ fn build_table(
                     let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han);
                     measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws)
                 }
-                Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | None => {
+                Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | Some(TextLeaf::Pseudo { .. }) | None => {
                     taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)
                 }
             }
@@ -3939,6 +3945,24 @@ fn build_element(
     Some(node)
 }
 
+/// The ComputedStyle of a [`TextLeaf::Pseudo`] leaf — resolved through its
+/// HOST's styles entry, the `before` flag picking which side of the pair.
+/// Any other node returns None.
+fn pseudo_leaf_style<'a>(
+    taffy_tree: &TaffyTree<TextLeaf>,
+    styles: &'a HashMap<NodeId, ComputedStyle>,
+    node: taffy::tree::NodeId,
+) -> Option<&'a ComputedStyle> {
+    match taffy_tree.get_node_context(node) {
+        Some(TextLeaf::Pseudo { host, before }) => styles
+            .get(host)?
+            .pseudos
+            .as_deref()
+            .and_then(|pair| if *before { pair.before.as_ref() } else { pair.after.as_ref() }),
+        _ => None,
+    }
+}
+
 /// ::before/::after boxes for a host whose taffy node was just built
 /// (generated-content v1). The pseudo computed styles ride the host's entry
 /// in `styles` (cascade side: pseudo_styles); here they become leaves spliced
@@ -3966,10 +3990,10 @@ fn append_pseudo_leaves(
         taffy_tree.children(node).unwrap_or_default().to_vec();
     let mut changed = false;
     if let Some(before) = &pair.before {
-        changed |= pseudo_leaf(before, taffy_tree, &mut children, fonts, true);
+        changed |= pseudo_leaf(id, before, taffy_tree, &mut children, fonts, true);
     }
     if let Some(after) = &pair.after {
-        changed |= pseudo_leaf(after, taffy_tree, &mut children, fonts, false);
+        changed |= pseudo_leaf(id, after, taffy_tree, &mut children, fonts, false);
     }
     if changed {
         let _ = taffy_tree.set_children(node, &children);
@@ -4035,7 +4059,8 @@ fn pseudo_inline_run_leaf(
 /// Build one pseudo box and splice it into the host's child list; returns
 /// whether the list changed. Block-ish pseudos become leaves carrying the
 /// pseudo's taffy style — an EMPTY content box stays a plain style leaf so
-/// padding/border/background/height survive (the clearfix shape). Inline
+/// padding/border/background/height survive (the clearfix shape), tagged
+/// `TextLeaf::Pseudo` so paint claims its background (#172). Inline
 /// pseudos join the host's text: when the adjacent leaf is a pure-text run
 /// their texts merge onto one leaf, so `li:before { content: "• " }` shares
 /// the line with the label (Chrome's inline generated boxes take part in the
@@ -4043,6 +4068,7 @@ fn pseudo_inline_run_leaf(
 /// own text style matches the run's (#172) — a diverging pseudo becomes its
 /// own leaf and paints in its declared style.
 fn pseudo_leaf(
+    host: NodeId,
     p: &ComputedStyle,
     taffy_tree: &mut TaffyTree<TextLeaf>,
     children: &mut Vec<taffy::tree::NodeId>,
@@ -4055,6 +4081,20 @@ fn pseudo_leaf(
     let Some(crate::diting_css::ContentValue::Str(content)) = &p.content else {
         return false;
     };
+    // CSS display-change: absolute/fixed positioning blockifies the pseudo
+    // — the overlay idiom `::before { content:""; position:absolute;
+    // inset:0 }` declares no display at all, and Chrome generates a block
+    // box for it. Without this the None display falls into the inline
+    // branch, whose empty-content gate drops the box entirely (#172).
+    let effective_display = match p.position {
+        Some(crate::diting_css::PositionMode::Absolute)
+        | Some(crate::diting_css::PositionMode::Fixed)
+            if matches!(p.display, None | Some(CssDisplay::Inline)) =>
+        {
+            Some(CssDisplay::Block)
+        }
+        _ => p.display,
+    };
     let insert = |leaf: taffy::tree::NodeId, children: &mut Vec<taffy::tree::NodeId>| {
         if is_before {
             children.insert(0, leaf);
@@ -4062,7 +4102,7 @@ fn pseudo_leaf(
             children.push(leaf);
         }
     };
-    match p.display {
+    match effective_display {
         None | Some(CssDisplay::Inline) => {
             if content.trim().is_empty() {
                 return false;
@@ -4182,7 +4222,15 @@ fn pseudo_leaf(
             // keep percent passthrough (the pre-fold behavior).
             let taffy_style = to_taffy_style(p, true);
             let leaf = if content.trim().is_empty() {
-                taffy_tree.new_leaf(taffy_style).ok()
+                // The empty decoration box (#172): a tagged leaf, so the
+                // paint walk can find the pseudo's own ComputedStyle
+                // through the host and paint its background layers.
+                taffy_tree
+                    .new_leaf_with_context(
+                        taffy_style,
+                        TextLeaf::Pseudo { host, before: is_before },
+                    )
+                    .ok()
             } else {
                 taffy_tree
                     .new_leaf_with_context(
@@ -5525,7 +5573,9 @@ fn subtree_last_baseline(
             *best = Some(best.map_or(b, |x: f32| x.max(b)));
             return;
         }
-        None => {}
+        // A pseudo box is textless (#172): its children (none) hold no
+        // baseline, the bottom-edge fallback applies.
+        Some(TextLeaf::Pseudo { .. }) | None => {}
     }
     for child in taffy_tree.children(node).unwrap_or_default() {
         let Ok(cl) = taffy_tree.layout(child) else { continue };
@@ -5632,7 +5682,9 @@ fn item_baseline(
                 - baseline_shift
         }
         Some(TextLeaf::Replaced { strut_descent }) => height - strut_descent,
-        None => {
+        // A pseudo box is textless (#172): bottom-edge fallback, same as a
+        // textless box.
+        Some(TextLeaf::Pseudo { .. }) | None => {
             if let Some(b) = first_baselines.get(&child) {
                 return *b;
             }
@@ -6080,7 +6132,7 @@ pub fn layout_solve_rooted(
             }
             // Word leaves keep their style-driven sizing (batch 4d only
             // added paint context — zero layout change).
-            Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | None => {
+            Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | Some(TextLeaf::Pseudo { .. }) | None => {
                 taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)
             }
         }
@@ -7638,6 +7690,127 @@ pub fn layout_collect(
                     scroll_span = Some((*dom_id, items.len()));
                 }
             }
+        } else if taffy_tree
+            .get_node_context(node)
+            .is_some_and(|l| matches!(l, TextLeaf::Pseudo { .. }))
+        {
+            // An empty-content pseudo box (#172): the leaf has no DOM id,
+            // its ComputedStyle rides the HOST's styles entry — claim the
+            // pseudo's own decoration layers (background, gradient,
+            // shadows, border). No host-keyed bookkeeping: rects/
+            // paint_order/clip stay element-side, a pseudo generates no
+            // DOM box.
+            if let Some(ps) = pseudo_leaf_style(taffy_tree, styles, node) {
+                let alpha = alpha * ps.opacity.unwrap_or(1.0);
+                let rect =
+                    Rect { x: abs.0, y: abs.1, width: layout.size.width, height: layout.size.height };
+                // Same prebake split as the element path: geometry maps
+                // through the accumulated affine when diagonal, stays in
+                // local coordinates under a SetXf bracket.
+                let prebake = xf.is_diagonal();
+                let bg_rect = if prebake { xf.map_rect(rect) } else { rect };
+                let res = |l: &crate::diting_css::Length, basis: f32| match l {
+                    crate::diting_css::Length::Px(v) => *v,
+                    crate::diting_css::Length::Percent(p) => p * basis / 100.0,
+                    crate::diting_css::Length::Calc { percent, .. } => percent * basis / 100.0,
+                    crate::diting_css::Length::Auto
+                    | crate::diting_css::Length::MinContent
+                    | crate::diting_css::Length::MaxContent
+                    | crate::diting_css::Length::FitContent => 0.0,
+                };
+                let radii: [(f32, f32); 4] = ps
+                    .corner_radii
+                    .as_ref()
+                    .map(|corners| {
+                        let rs = std::array::from_fn(|i| {
+                            if prebake {
+                                (res(&corners[i].0, rect.width) * xf.a, res(&corners[i].1, rect.height) * xf.d)
+                            } else {
+                                (res(&corners[i].0, rect.width), res(&corners[i].1, rect.height))
+                            }
+                        });
+                        clamp_corner_radii(rs, bg_rect.width, bg_rect.height)
+                    })
+                    .unwrap_or([(0.0, 0.0); 4]);
+                if alpha > 0.0 && rect.width > 0.0 && rect.height > 0.0 {
+                    if let Some(blur) = ps.backdrop_blur.filter(|b| *b > 0.0) {
+                        items.push(PaintItem::BackdropFilter { rect: bg_rect, radii, blur });
+                    }
+                    if let Some(shadows) = ps.box_shadow.as_ref() {
+                        for sh in shadows.iter().rev().filter(|sh| !sh.inset) {
+                            items.push(PaintItem::BoxShadow {
+                                rect: bg_rect,
+                                color: with_alpha([sh.color.0, sh.color.1, sh.color.2, sh.color.3], alpha),
+                                radii,
+                                dx: sh.dx,
+                                dy: sh.dy,
+                                blur: sh.blur,
+                                spread: sh.spread,
+                                inset: false,
+                            });
+                        }
+                    }
+                    if let Some(c) = ps.background_color.filter(|c| c.3 != 0) {
+                        let color = with_alpha([c.0, c.1, c.2, c.3], alpha);
+                        let uniform = radii.iter().all(|r| *r == radii[0]);
+                        if uniform {
+                            items.push(PaintItem::Bg { rect: bg_rect, color, radius: radii[0].0 });
+                        } else {
+                            items.push(PaintItem::BgCorner { rect: bg_rect, color, radii });
+                        }
+                    }
+                    // An EMPTY box has no glyphs — background-clip:text
+                    // degrades to painting the box (Chrome never generates
+                    // the pseudo without content text to fill).
+                    if let Some(g) = ps
+                        .background_image
+                        .as_deref()
+                        .and_then(crate::diting_css::parse_linear_gradient)
+                    {
+                        let stops = g
+                            .stops
+                            .iter()
+                            .map(|(p, c)| (*p, with_alpha([c.0, c.1, c.2, c.3], alpha)))
+                            .collect();
+                        items.push(PaintItem::BgGradient { rect: bg_rect, stops, css_deg: g.css_deg, radii });
+                    }
+                    if let Some(shadows) = ps.box_shadow.as_ref() {
+                        for sh in shadows.iter().rev().filter(|sh| sh.inset) {
+                            items.push(PaintItem::BoxShadow {
+                                rect: bg_rect,
+                                color: with_alpha([sh.color.0, sh.color.1, sh.color.2, sh.color.3], alpha),
+                                radii,
+                                dx: sh.dx,
+                                dy: sh.dy,
+                                blur: sh.blur,
+                                spread: sh.spread,
+                                inset: true,
+                            });
+                        }
+                    }
+                }
+                // Border outside the alpha/size guard, same stance as the
+                // element path; currentColor falls back to the pseudo's
+                // inherited color.
+                if ps.border_style.is_some() {
+                    let style = ps;
+                    let (kx, ky) = if prebake { (xf.a, xf.d) } else { (1.0, 1.0) };
+                    let widths = [
+                        side_px(style.border_width.top) * ky,
+                        side_px(style.border_width.right) * kx,
+                        side_px(style.border_width.bottom) * ky,
+                        side_px(style.border_width.left) * kx,
+                    ];
+                    if widths.iter().any(|w| *w > 0.0) {
+                        let color = style
+                            .border_color
+                            .or(style.color)
+                            .map(|c| with_alpha([c.0, c.1, c.2, c.3], alpha))
+                            .unwrap_or([0, 0, 0, 255]);
+                        items.push(PaintItem::Border { rect: bg_rect, widths, color, radii });
+                    }
+                }
+            }
         }
         // background-clip: text attach: the inherited fill lands only while
         // this leaf still paints in the space the gradient was captured in
@@ -7879,7 +8052,14 @@ pub fn layout_collect(
         // z>0 children this non-barrier frame defers up to the barrier.
         let mut pending: Vec<ZEscape> = Vec::new();
         for (i, &child) in children.iter().enumerate() {
-            let child_style = node_map.get(&child).and_then(|d| styles.get(d));
+            let child_style = node_map
+                .get(&child)
+                .and_then(|d| styles.get(d))
+                // A pseudo box leaf classifies by its own ComputedStyle
+                // (#172): a positioned overlay ::before joins the
+                // positioned band and out-paints in-flow content, like
+                // Chrome's generated box.
+                .or_else(|| pseudo_leaf_style(taffy_tree, styles, child));
             // Sticky counts as positioned here (CSS App. E step 8): a stuck
             // overlay must out-paint — and so out-rank in elementFromPoint,
             // which sorts by this order — any later static sibling whose tall
