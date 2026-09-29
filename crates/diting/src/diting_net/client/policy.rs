@@ -8,6 +8,12 @@ use url::Url;
 use super::ssrf::is_forbidden_ip;
 use super::NetError;
 
+/// Appended to every private/loopback SSRF denial so the operator learns the
+/// opt-in on the spot (obscura#1108 absorption): the block is deliberate,
+/// not an engine failure.
+pub(crate) const PRIVATE_NETWORK_HINT: &str =
+    " (allow with --allow-private-network / AGINXBROWSER_ALLOW_PRIVATE_NETWORK)";
+
 /// Process-wide opt-in via env var. Older flow that issue #4 introduced. The
 /// new `--allow-private-network` CLI flag (issue #33) sets a per-client field
 /// that is OR'd with this so existing scripts and Docker setups that pin the
@@ -201,7 +207,7 @@ pub fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), NetErr
                     return Err(NetError::Network(format!(
                         "Access to private/internal IP address {} is not allowed{}",
                         ip,
-                        super::PRIVATE_NETWORK_HINT
+                        PRIVATE_NETWORK_HINT
                     )));
                 }
             }
@@ -210,7 +216,7 @@ pub fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), NetErr
                     return Err(NetError::Network(format!(
                         "Access to private/internal IPv6 address {} is not allowed{}",
                         ip,
-                        super::PRIVATE_NETWORK_HINT
+                        PRIVATE_NETWORK_HINT
                     )));
                 }
             }
@@ -224,7 +230,7 @@ pub fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), NetErr
                     return Err(NetError::Network(format!(
                         "Access to localhost domain '{}' is not allowed{}",
                         domain,
-                        super::PRIVATE_NETWORK_HINT
+                        PRIVATE_NETWORK_HINT
                     )));
                 }
             }

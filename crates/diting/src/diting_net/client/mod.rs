@@ -10,7 +10,7 @@ use url::Url;
 
 use crate::diting_net::cookies::CookieJar;
 
-mod policy;
+pub(crate) mod policy;
 mod ssrf;
 
 pub use policy::{
@@ -21,12 +21,6 @@ pub use policy::{
 pub(crate) use policy::custom_cert_store_requested;
 
 pub use ssrf::{is_forbidden_ip, SsrfGuardResolver};
-
-/// Appended to every private/loopback SSRF denial so the operator learns the
-/// opt-in on the spot (obscura#1108 absorption): the block is deliberate,
-/// not an engine failure.
-pub(crate) const PRIVATE_NETWORK_HINT: &str =
-    " (allow with --allow-private-network / AGINXBROWSER_ALLOW_PRIVATE_NETWORK)";
 
 /// A script-initiated fetch()/XHR currently flying (one entry per redirect
 /// hop, mirroring the `in_flight` counter). Exists so a caller whose eval

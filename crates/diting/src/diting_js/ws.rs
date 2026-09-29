@@ -214,7 +214,7 @@ impl WsConnectJob {
                     return Err(format!(
                         "SSRF blocked: '{}' resolves only to forbidden addresses{}",
                         self.host,
-                        crate::diting_net::client::PRIVATE_NETWORK_HINT
+                        crate::diting_net::client::policy::PRIVATE_NETWORK_HINT
                     ))
                 }
             }

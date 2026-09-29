@@ -176,7 +176,7 @@ impl Resolve for SsrfGuardResolver {
                         "SSRF blocked: '{}' resolves to forbidden address {}{}",
                         host,
                         bad.ip(),
-                        super::PRIVATE_NETWORK_HINT
+                        super::policy::PRIVATE_NETWORK_HINT
                     )
                     .into());
                 }
