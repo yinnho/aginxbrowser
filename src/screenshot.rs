@@ -269,17 +269,22 @@ pub async fn prefetch_render_resources(
     map
 }
 
-/// `scale` renders 1:1 CSS px (retina resample lands with the canvas
-/// upscale batch). `full_page` tracks content height from the laid-out
-/// rects, capped at 16000 like the Blitz path; a `selector` crop is an
-/// RGBA window copy out of the full-page canvas (no PNG round-trip).
+/// `scale` is the device pixel ratio (#185): the canvas is allocated at
+/// width·scale × page_h·scale and the item stream folds the scale in via
+/// [`diting::diting_layout::paint::scale_items`], so edges, gradients and
+/// glyphs rasterize at device resolution (Retina/HiDPI sharp) instead of
+/// nearest-neighboring a 1× bitmap up. CSS geometry is untouched — rects
+/// and crop math stay CSS px. `full_page` tracks content height from the
+/// laid-out rects, capped at 16000 CSS px like the Blitz path; a `selector`
+/// crop is an RGBA window copy out of the full-page canvas (no PNG
+/// round-trip).
 #[allow(clippy::too_many_arguments)]
 pub fn render_html_to_png_diting(
     html: &str,
     base_url: &str, // stylesheet hrefs AND relative img srcs resolve against it
     width: u32,
     height: u32,
-    _scale: f32,
+    scale: f32,
     full_page: bool,
     selector: Option<&str>,
     selector_all: bool,
@@ -290,6 +295,8 @@ pub fn render_html_to_png_diting(
     if html.is_empty() {
         anyhow::bail!("render_html_to_png_diting: empty HTML (page content() returned nothing - navigation may have failed)");
     }
+    // Garbage scales render 1:1 rather than allocating a nonsense bitmap.
+    let scale = if scale.is_finite() && (1.0..=3.0).contains(&scale) { scale } else { 1.0 };
 
     let tree = diting::diting_dom::tree_sink::parse_html(html);
 
@@ -425,17 +432,30 @@ pub fn render_html_to_png_diting(
         Some((_, cy, _, ch)) => page_h.max(cy + ch),
         None => page_h,
     }
-    .max(1.0) as usize;
-    let canvas_w = width.max(1) as usize;
-    let mut canvas = paint::Canvas::new_filled(canvas_w, canvas_h, [255, 255, 255, 255]);
-    paint::execute(&items, &fonts, &mut canvas);
+    .max(1.0);
+    let canvas_w = width.max(1) as f32;
+    let mut canvas = paint::Canvas::new_filled(
+        (canvas_w * scale) as usize,
+        (canvas_h * scale) as usize,
+        [255, 255, 255, 255],
+    );
+    // DPR (#185): fold the scale into the item stream — the pixel loops and
+    // the text rasterizer then resolve at device resolution directly.
+    if (scale - 1.0).abs() > f32::EPSILON {
+        let scaled = paint::scale_items(&items, scale);
+        paint::execute(&scaled, &fonts, &mut canvas);
+    } else {
+        paint::execute(&items, &fonts, &mut canvas);
+    }
 
+    // Crop math is CSS px on the incoming rects — the canvas is device px
+    // under scale, so the window maps through the same factor.
     let (out_w, out_h, buffer): (u32, u32, Vec<u8>) = match crop {
         Some((cx, cy, cw, ch)) => {
-            let (x0, y0) = (cx.max(0.0) as usize, cy.max(0.0) as usize);
+            let (x0, y0) = ((cx.max(0.0) * scale) as usize, (cy.max(0.0) * scale) as usize);
             let (x1, y1) = (
-                (x0 + cw as usize).min(canvas.width),
-                (y0 + ch as usize).min(canvas.height),
+                (x0 + (cw * scale) as usize).min(canvas.width),
+                (y0 + (ch * scale) as usize).min(canvas.height),
             );
             let (w, h) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
             let mut out = Vec::with_capacity(w * h * 4);

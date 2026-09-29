@@ -747,6 +747,7 @@ async fn exec_step(
                     full_page: a.get("full_page").and_then(|v| v.as_bool()).unwrap_or(false),
                     selector: a.get("selector").and_then(|v| v.as_str()).map(String::from),
                     selector_all: a.get("selector_all").and_then(|v| v.as_bool()).unwrap_or(false),
+                    dpr: a.get("dpr").and_then(|v| v.as_f64()).map(|v| v as f32),
                     reply,
                 })
                 .await
@@ -1018,6 +1019,7 @@ async fn fail_receipt(
             full_page: false,
             selector: None,
             selector_all: false,
+            dpr: None,
             reply,
         })
         .await

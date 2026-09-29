@@ -1816,6 +1816,153 @@ pub fn execute(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas) {
     execute_band(items, fonts, out, 0.0, 0.0);
 }
 
+/// Fold a device-pixel-ratio scale into the item stream (#185): the caller
+/// allocates the canvas at `vw·s × vh·s` and passes `dx·s, dy·s` to
+/// [`execute_band`]; this pass multiplies every page-space geometry field by
+/// `s`, so the pixel loops resolve edges and gradients at device resolution
+/// and text re-shapes at the scaled font params instead of nearest-neighboring
+/// a 1× bitmap up (the DPR bug's blurry face). `Text` DROPS its wrap-token
+/// memo — the memo only matches unscaled shaping, the same rule the
+/// collect-time diagonal fold follows. Items inside a `SetXf` bracket are
+/// LOCAL coordinates: the bracket matrix alone takes the scale (S·M — execute
+/// then folds the band shift into e/f as usual), scaling the locals too would
+/// double-apply. `SetXfCanvas` regions are canvas-space and scale normally.
+pub fn scale_items(items: &[PaintItem], s: f32) -> Vec<PaintItem> {
+    if (s - 1.0).abs() < f32::EPSILON {
+        return items.to_vec();
+    }
+    // Suffixed `_s` because the pattern-bound field names (`rect`,
+    // `radii`) shadow any plain-named helper inside the arms.
+    fn rect_s(r: &mut Rect, s: f32) {
+        r.x *= s;
+        r.y *= s;
+        r.width *= s;
+        r.height *= s;
+    }
+    fn radii_s(rs: &mut [(f32, f32); 4], s: f32) {
+        for (rx, ry) in rs.iter_mut() {
+            *rx *= s;
+            *ry *= s;
+        }
+    }
+    let mut out = Vec::with_capacity(items.len());
+    // One entry per open bracket: true = local-coordinate span (scale rides
+    // the matrix, item fields stay raw). SetXfCanvas hijacks the top bracket
+    // into a canvas-space span.
+    let mut stack: Vec<bool> = Vec::new();
+    for item in items {
+        let mut it = item.clone();
+        match &mut it {
+            PaintItem::SetXf { xf } => {
+                for v in xf.iter_mut() {
+                    *v *= s;
+                }
+                stack.push(true);
+            }
+            PaintItem::SetXfCanvas => {
+                if let Some(top) = stack.last_mut() {
+                    *top = false;
+                } else {
+                    stack.push(false);
+                }
+            }
+            PaintItem::ClearXf => {
+                stack.pop();
+            }
+            _ if stack.last().copied().unwrap_or(false) => {}
+            PaintItem::Bg { rect, radius, .. } => {
+                rect_s(rect, s);
+                *radius *= s;
+            }
+            PaintItem::BgCorner { rect, radii, .. } => {
+                rect_s(rect, s);
+                radii_s(radii, s);
+            }
+            PaintItem::BoxShadow { rect, radii, dx, dy, blur, spread, .. } => {
+                rect_s(rect, s);
+                radii_s(radii, s);
+                *dx *= s;
+                *dy *= s;
+                *blur *= s;
+                *spread *= s;
+            }
+            PaintItem::BackdropFilter { rect, radii, blur } => {
+                rect_s(rect, s);
+                radii_s(radii, s);
+                *blur *= s;
+            }
+            PaintItem::BgGradient { rect, radii, .. } => {
+                rect_s(rect, s);
+                radii_s(radii, s);
+            }
+            PaintItem::Image { rect, paint_rect, .. } => {
+                rect_s(rect, s);
+                rect_s(paint_rect, s);
+            }
+            PaintItem::Replaced { rect, alt, .. } => {
+                rect_s(rect, s);
+                if let Some((_, font_size, _, line_height, _)) = alt {
+                    *font_size *= s;
+                    *line_height *= s;
+                }
+            }
+            PaintItem::Svg { rect, .. } => rect_s(rect, s),
+            PaintItem::Clip { rect } => rect_s(rect, s),
+            PaintItem::ClipRounded { rect, radii } => {
+                rect_s(rect, s);
+                radii_s(radii, s);
+            }
+            PaintItem::PopClip => {}
+            PaintItem::Border { rect, widths, radii, .. } => {
+                rect_s(rect, s);
+                for w in widths.iter_mut() {
+                    *w *= s;
+                }
+                radii_s(radii, s);
+            }
+            PaintItem::Text {
+                font_size,
+                line_height,
+                x,
+                y,
+                wrap_at,
+                gradient,
+                word_spacing,
+                truncate_at,
+                tokens,
+                text_shadow,
+                ..
+            } => {
+                *font_size *= s;
+                *line_height *= s;
+                *x *= s;
+                *y *= s;
+                *wrap_at *= s;
+                *word_spacing *= s;
+                if let Some(limit) = truncate_at {
+                    *limit *= s;
+                }
+                // Scaled font params no longer match the leaf's measure-time
+                // shaping — the paint re-shapes (same posture as the
+                // collect-time diagonal fold).
+                *tokens = None;
+                if let Some(g) = gradient.as_mut() {
+                    rect_s(&mut g.area, s);
+                }
+                if let Some(shadows) = text_shadow.as_mut() {
+                    for sh in shadows.iter_mut() {
+                        sh.dx *= s;
+                        sh.dy *= s;
+                        sh.blur *= s;
+                    }
+                }
+            }
+        }
+        out.push(it);
+    }
+    out
+}
+
 /// Scale a straight-alpha color's alpha channel (animation batch A): the
 /// pipeline composites straight-alpha source-over, so a group opacity folds
 /// into item colors directly.

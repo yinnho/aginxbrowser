@@ -913,6 +913,7 @@ session_viewport + session_screenshot shows the responsive layout. Returns \
                 full_page: params.full_page,
                 selector: params.selector.clone(),
                 selector_all: params.selector_all,
+                dpr: params.dpr,
                 reply,
             })
             .await

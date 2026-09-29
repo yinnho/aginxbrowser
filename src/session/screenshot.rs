@@ -1,7 +1,16 @@
 //! The session Screenshot command's body. Split from the manager loop —
 //! ARCHITECTURE.md §6 P2 god-file ratchet (#86). Closes over only the
-//! page and its five request parameters.
+//! page and its six request parameters.
 use crate::page::Page;
+
+/// #185: clamp a requested device-pixel ratio. 1.0..=3.0 covers every
+/// shipping display (1x desktop, 1.5/2x laptop, 3x phone); outside that or
+/// non-finite falls back to 1× rather than allocating a 10× bitmap.
+fn resolve_dpr(dpr: Option<f32>) -> f32 {
+    dpr.filter(|d| d.is_finite())
+        .map(|d| d.clamp(1.0, 3.0))
+        .unwrap_or(1.0)
+}
 
 /// The no-argument default is the hosted live page's frame poll: it paints
 /// the LIVE tree's viewport band. The serialized re-parse below drops
@@ -10,6 +19,7 @@ use crate::page::Page;
 /// NodeData::Element::live_value, which a re-parse of page.content()
 /// cannot see. Any explicit size/full_page/selector request keeps the
 /// re-parse path unchanged.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn screenshot(
     page: &mut Page,
     width: Option<u32>,
@@ -17,8 +27,10 @@ pub(super) async fn screenshot(
     full_page: bool,
     selector: Option<&str>,
     selector_all: bool,
+    dpr: Option<f32>,
 ) -> Result<String, String> {
     let url = page.url();
+    let scale = resolve_dpr(dpr);
     // Default to the live viewport so a session_viewport override is what
     // the pixels show, not the render default.
     let vw = page.evaluate_with_timeout("innerWidth", crate::page::INTERACTION_EVAL_TIMEOUT);
@@ -35,7 +47,16 @@ pub(super) async fn screenshot(
         };
         let (sx, sy) = (num("scrollX"), num("scrollY"));
         let vp = (w as f32, h as f32);
-        if let Some((frame, missing)) = page.inner.viewport_band_frame(sx, sy, vp) {
+        // DPR (#185): rasterize the band at device resolution — the frame
+        // comes back w·scale × h·scale device px, sharp on Retina/HiDPI.
+        let grab = |scale: f32| {
+            if (scale - 1.0).abs() < f32::EPSILON {
+                page.inner.viewport_band_frame(sx, sy, vp)
+            } else {
+                page.inner.viewport_band_frame_dpr(sx, sy, vp, scale)
+            }
+        };
+        if let Some((frame, missing)) = grab(scale) {
             // Lazily fetch the images the band found missing and repaint
             // once — a frame with placeholders beats a stall (same deal as
             // the video pump).
@@ -43,10 +64,7 @@ pub(super) async fn screenshot(
                 frame
             } else {
                 page.inner.fetch_band_images(missing).await;
-                page.inner
-                    .viewport_band_frame(sx, sy, vp)
-                    .map(|(f, _)| f)
-                    .unwrap_or(frame)
+                grab(scale).map(|(f, _)| f).unwrap_or(frame)
             };
             band_png = crate::pages::png_of(frame.width, frame.height, &frame.rgba)
                 .ok()
@@ -73,7 +91,7 @@ pub(super) async fn screenshot(
             &url,
             w,
             h,
-            1.0,
+            scale,
             full_page,
             selector,
             selector_all,

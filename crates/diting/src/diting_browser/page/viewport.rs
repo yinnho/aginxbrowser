@@ -224,6 +224,24 @@ impl Page {
         js.with_state(|st| crate::diting_js::ops::band_frame(st, scroll_x, scroll_y, viewport))
     }
 
+    /// DPR variant of [`Self::viewport_band_frame`] (#185): the returned
+    /// frame's bitmap is `viewport·scale` device pixels, rasterized at device
+    /// resolution (Retina/HiDPI screenshots). The frame's `dx`/`dy` and
+    /// `content_size` stay CSS px — scroll semantics, not bitmap geometry.
+    #[cfg(feature = "screenshot")]
+    pub fn viewport_band_frame_dpr(
+        &self,
+        scroll_x: f32,
+        scroll_y: f32,
+        viewport: (f32, f32),
+        scale: f32,
+    ) -> Option<(crate::diting_js::ops::BandFrame, Vec<String>)> {
+        let js = self.js.as_ref()?;
+        js.with_state(|st| {
+            crate::diting_js::ops::band_frame_scaled(st, scroll_x, scroll_y, viewport, scale)
+        })
+    }
+
     /// Same band frame but also collecting the PDF text layer (vector-text
     /// batch): `frame.text_ops` carries the band-local glyph ops and the
     /// raster pass skips those items.

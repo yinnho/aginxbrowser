@@ -1256,7 +1256,7 @@ fn session_thread(
                             let _ = reply.send(Ok(har.to_string()));
                         }
 
-                        SessionCommand::Screenshot { width, height, full_page, selector, selector_all, reply } => {
+                        SessionCommand::Screenshot { width, height, full_page, selector, selector_all, dpr, reply } => {
                             #[cfg(feature = "screenshot")]
                             {
                                 let result = super::screenshot::screenshot(
@@ -1266,6 +1266,7 @@ fn session_thread(
                                     full_page,
                                     selector.as_deref(),
                                     selector_all,
+                                    dpr,
                                 )
                                 .await;
                                 let _ = reply.send(result);

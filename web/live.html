@@ -270,9 +270,15 @@ function stopLoops() {
 async function grabFrame() {
   const t0 = performance.now();
   try {
-    const r = await (await j(`/session/${encodeURIComponent(state.session)}/screenshot`, {})).json();
+    // Render at the display's device ratio (#185): the bitmap comes back
+    // width·dpr tall·dpr (sharp on Retina); the img is displayed at its CSS
+    // size and every coordinate below stays CSS px.
+    const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    const r = await (await j(`/session/${encodeURIComponent(state.session)}/screenshot`, { dpr })).json();
     state.img.src = "data:image/" + (r.format || "png") + ";base64," + r.image_base64;
-    state.natW = r.width; state.natH = r.height;
+    state.img.style.width = (r.width / dpr) + "px";
+    state.img.style.height = (r.height / dpr) + "px";
+    state.natW = r.width / dpr; state.natH = r.height / dpr;
     state.frameMs = Math.round(performance.now() - t0);
     state.frames++; state.errStreak = 0;
     state.lastFrameAt = Date.now();

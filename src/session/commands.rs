@@ -195,13 +195,17 @@ pub enum SessionCommand {
     /// inputs, evals included — to a PNG through the diting pipeline.
     /// Read-only, so not recorded in the action log. Width/height default
     /// to the session's live viewport (a session_viewport override shows up
-    /// in the pixels). Reply is a JSON string with image_base64.
+    /// in the pixels). `dpr` (#185) rasterizes at device resolution — the
+    /// bitmap comes back width·dpr tall·dpr with CSS geometry intact; a
+    /// render-only knob, page JS still sees window.devicePixelRatio 1.
+    /// Reply is a JSON string with image_base64.
     Screenshot {
         width: Option<u32>,
         height: Option<u32>,
         full_page: bool,
         selector: Option<String>,
         selector_all: bool,
+        dpr: Option<f32>,
         reply: oneshot::Sender<Result<String, String>>,
     },
     /// Poll until a CSS selector matches or a JS predicate turns truthy,

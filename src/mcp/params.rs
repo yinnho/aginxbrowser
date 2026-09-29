@@ -480,6 +480,10 @@ pub struct SessionScreenshotParams {
     /// With selector, capture every match (default: first match only)
     #[serde(default)]
     pub selector_all: bool,
+    /// Device pixel ratio (#185): rasterize at device resolution (Retina/HiDPI
+    /// sharp) — the bitmap comes back width·dpr × height·dpr with CSS geometry
+    /// intact. Clamped to 1.0..=3.0 (default: 1.0)
+    pub dpr: Option<f32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]

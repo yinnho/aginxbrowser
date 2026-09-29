@@ -2950,7 +2950,8 @@ mod ecdsa;
 pub use band::BandFrame;
 #[cfg(feature = "screenshot")]
 pub(crate) use band::{
-    band_frame, band_frame_cut, band_frame_cut_with_text, band_frame_with_text,
+    band_frame, band_frame_cut, band_frame_cut_with_text, band_frame_scaled,
+    band_frame_with_text,
 };
 pub(crate) use canvas::op_canvas_png;
 #[cfg(feature = "screenshot")]

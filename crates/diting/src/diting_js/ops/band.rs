@@ -40,7 +40,24 @@ pub(crate) fn band_frame(
     scroll_y: f32,
     viewport: (f32, f32),
 ) -> Option<(BandFrame, Vec<String>)> {
-    band_frame_inner(gs, scroll_x, scroll_y, viewport, false, false)
+    band_frame_inner(gs, scroll_x, scroll_y, viewport, false, false, 1.0)
+}
+
+/// DPR variant of [`band_frame`] (#185): the raster canvas is allocated at
+/// `viewport·scale` device pixels and the item stream folds the scale in via
+/// [`crate::diting_layout::paint::scale_items`], so edges, gradients and
+/// glyphs resolve at device resolution instead of upscaling a 1× bitmap.
+/// `dx`/`dy`/`content_size` on the frame stay CSS px — they are scroll
+/// semantics, not bitmap geometry.
+#[cfg(feature = "screenshot")]
+pub(crate) fn band_frame_scaled(
+    gs: &JsState,
+    scroll_x: f32,
+    scroll_y: f32,
+    viewport: (f32, f32),
+    scale: f32,
+) -> Option<(BandFrame, Vec<String>)> {
+    band_frame_inner(gs, scroll_x, scroll_y, viewport, false, false, scale)
 }
 
 /// Same band paint but ALSO collects the PDF text layer (vector-text batch):
@@ -54,7 +71,7 @@ pub(crate) fn band_frame_with_text(
     scroll_y: f32,
     viewport: (f32, f32),
 ) -> Option<(BandFrame, Vec<String>)> {
-    band_frame_inner(gs, scroll_x, scroll_y, viewport, true, false)
+    band_frame_inner(gs, scroll_x, scroll_y, viewport, true, false, 1.0)
 }
 
 /// Page-cut variant for the print/slides pumps (#60): `(x, y)` is a
@@ -72,7 +89,7 @@ pub(crate) fn band_frame_cut(
     y: f32,
     viewport: (f32, f32),
 ) -> Option<(BandFrame, Vec<String>)> {
-    band_frame_inner(gs, x, y, viewport, false, true)
+    band_frame_inner(gs, x, y, viewport, false, true, 1.0)
 }
 
 /// [`band_frame_cut`] with the PDF text layer collected (see
@@ -84,7 +101,7 @@ pub(crate) fn band_frame_cut_with_text(
     y: f32,
     viewport: (f32, f32),
 ) -> Option<(BandFrame, Vec<String>)> {
-    band_frame_inner(gs, x, y, viewport, true, true)
+    band_frame_inner(gs, x, y, viewport, true, true, 1.0)
 }
 
 #[cfg(feature = "screenshot")]
@@ -95,6 +112,7 @@ fn band_frame_inner(
     viewport: (f32, f32),
     collect_text: bool,
     cut: bool,
+    scale: f32,
 ) -> Option<(BandFrame, Vec<String>)> {
     gs.band_paints.set(gs.band_paints.get() + 1);
     let dom = gs.dom.as_ref()?;
@@ -232,8 +250,15 @@ fn band_frame_inner(
         }
     }
 
-    let mut canvas =
-        crate::diting_layout::paint::Canvas::new_filled(vw as usize, vh as usize, [255, 255, 255, 255]);
+    // DPR (#185): the vector-text/PDF branch always stays at 1× — its glyph
+    // ops are page-space vectors the PDF layer redraws, where device pixels
+    // are meaningless. Guard garbage scales the same defensive way.
+    let scale = if collect_text || !scale.is_finite() || scale <= 0.0 { 1.0 } else { scale };
+    let mut canvas = crate::diting_layout::paint::Canvas::new_filled(
+        (vw * scale) as usize,
+        (vh * scale) as usize,
+        [255, 255, 255, 255],
+    );
     let fonts = crate::diting_fonts::font_book();
     // Vector-text collect: the items the PDF layer will redraw as glyphs drop
     // out of the raster pass (painting both would double the antialiasing).
@@ -254,7 +279,7 @@ fn band_frame_inner(
         // (with a font-size margin) so each PDF page carries only its own
         // text instead of the whole document shifted off-page.
         let band_top = dy;
-        let band_bottom = dy + canvas.height as f32;
+        let band_bottom = dy + vh;
         ops.retain(|op| match op {
             crate::diting_layout::paint::PdfOp::Line(l) => l.glyphs.iter().any(|g| {
                 g.y > band_top - l.font_size * 1.5 && g.y < band_bottom + l.font_size
@@ -263,6 +288,9 @@ fn band_frame_inner(
         });
         crate::diting_layout::paint::pdf_ops_translate(&mut ops, dx, dy);
         text_ops = ops;
+    } else if (scale - 1.0).abs() > f32::EPSILON {
+        let scaled = crate::diting_layout::paint::scale_items(items, scale);
+        crate::diting_layout::paint::execute_band(&scaled, &fonts, &mut canvas, dx * scale, dy * scale);
     } else {
         crate::diting_layout::paint::execute_band(items, &fonts, &mut canvas, dx, dy);
     }

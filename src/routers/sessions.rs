@@ -173,6 +173,9 @@ pub struct SessionScreenshotRequest {
     pub selector: Option<String>,
     #[serde(default)]
     pub selector_all: bool,
+    /// Device pixel ratio (#185): rasterize at device resolution, bitmap
+    /// comes back width·dpr × height·dpr. Clamped to 1.0..=3.0.
+    pub dpr: Option<f32>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -993,6 +996,7 @@ pub(crate) async fn session_screenshot_handler(
             full_page: req.full_page,
             selector: req.selector.clone(),
             selector_all: req.selector_all,
+            dpr: req.dpr,
             reply,
         })
         .await

@@ -1344,6 +1344,7 @@
                 full_page: false,
                 selector: None,
                 selector_all: false,
+                dpr: None,
                 reply,
             })
             .await
@@ -1404,6 +1405,7 @@
                     full_page: false,
                     selector: None,
                     selector_all: false,
+                    dpr: None,
                     reply,
                 })
                 .await

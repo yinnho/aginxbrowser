@@ -2037,3 +2037,134 @@ mod abspos_float_shrink_tests {
         );
     }
 }
+
+/// #185 (DPR): [`paint::scale_items`] folds a device-pixel ratio into the
+/// item stream. Page-space geometry scales, text drops its wrap-token memo
+/// (the memo only matches unscaled shaping), `SetXf` brackets take the
+/// scale on the MATRIX while their local-span items stay raw, and a scaled
+/// execute inks the right device pixels.
+#[cfg(test)]
+mod dpr_scale_items_tests {
+    use crate::diting_layout::{paint, PaintItem};
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    fn collect(sheet: &str, body: &str) -> Vec<PaintItem> {
+        let html = format!(
+            "<html><head><style>{sheet}</style></head><body style=\"margin:0\">{body}</body></html>"
+        );
+        let tree = parse_html(&html);
+        let rules = parse_stylesheet_for(sheet, (200.0, 100.0), CssMediaType::Screen);
+        let styles = crate::diting_layout::compute_styles(&tree, &rules, (200.0, 100.0));
+        let (_, items, ..) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+            &tree, &styles, &crate::diting_fonts::font_book(), 200.0, 100.0, None, None,
+        );
+        items
+    }
+
+    #[test]
+    fn page_space_geometry_scales_and_text_drops_tokens() {
+        // A real collected stream: bg box + an underlined run (underline
+        // forces the run leaf so it carries the token memo unscaled).
+        let items = collect(
+            "#b { width: 50px; height: 10px; background: rgb(1,2,3) }\
+             p { font-size: 16px; text-decoration: underline; width: 180px }",
+            r#"<div id="b"></div><p>一段需要折行的中文文本内容比较长一些</p>"#,
+        );
+        let scaled = paint::scale_items(&items, 2.0);
+        let bg = scaled.iter().find_map(|it| match it {
+            PaintItem::Bg { rect, color, .. } if *color == [1, 2, 3, 255] => Some(*rect),
+            _ => None,
+        });
+        let Some(r) = bg else { panic!("bg missing: {scaled:?}") };
+        assert_eq!((r.width, r.height), (100.0, 20.0), "box doubles");
+        let (_text, fs, lh, wrap, tokens) = scaled
+            .iter()
+            .find_map(|it| match it {
+                PaintItem::Text { text, font_size, line_height, wrap_at, tokens, .. }
+                    if text.contains("折行") =>
+                {
+                    Some((text.clone(), *font_size, *line_height, *wrap_at, tokens.is_some()))
+                }
+                _ => None,
+            })
+            .unwrap();
+        // The run's own unscaled params, read from the same stream, are the
+        // expected values — the test must not hardcode the font metrics.
+        let (fs0, lh0, wrap0) = items
+            .iter()
+            .find_map(|it| match it {
+                PaintItem::Text { text, font_size, line_height, wrap_at, .. }
+                    if text.contains("折行") =>
+                {
+                    Some((*font_size, *line_height, *wrap_at))
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(fs, fs0 * 2.0, "font_size doubles");
+        assert_eq!(lh, lh0 * 2.0, "line_height doubles");
+        assert_eq!(wrap, wrap0 * 2.0, "wrap_at doubles");
+        assert!(!tokens, "scaled run drops the wrap-token memo");
+        // Identity scale is a faithful copy.
+        assert_eq!(
+            paint::scale_items(&items, 1.0).len(),
+            items.len(),
+            "identity scale returns the same stream"
+        );
+    }
+
+    #[test]
+    fn setxf_bracket_scales_matrix_not_locals() {
+        // Synthetic stream mirroring sticky_tests: a local Bg inside a
+        // rotation bracket. S·M means all six matrix components double and
+        // the LOCAL geometry stays raw — scaling both would double-apply.
+        let items = vec![
+            PaintItem::Bg {
+                rect: crate::diting_layout::Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 },
+                color: [0, 0, 0, 255],
+                radius: 0.0,
+            },
+            PaintItem::SetXf { xf: [2.0, 0.3, 0.0, 2.0, 50.0, 60.0] },
+            PaintItem::Bg {
+                rect: crate::diting_layout::Rect { x: 10.0, y: 20.0, width: 5.0, height: 5.0 },
+                color: [0, 0, 0, 255],
+                radius: 0.0,
+            },
+            PaintItem::ClearXf,
+            PaintItem::Bg {
+                rect: crate::diting_layout::Rect { x: 30.0, y: 30.0, width: 10.0, height: 10.0 },
+                color: [0, 0, 0, 255],
+                radius: 0.0,
+            },
+        ];
+        let out = paint::scale_items(&items, 2.0);
+        let PaintItem::SetXf { xf } = &out[1] else { panic!("bracket survived") };
+        assert_eq!(*xf, [4.0, 0.6, 0.0, 4.0, 100.0, 120.0], "matrix takes the scale");
+        let PaintItem::Bg { rect, .. } = &out[2] else { panic!() };
+        assert_eq!((rect.x, rect.y, rect.width, rect.height), (10.0, 20.0, 5.0, 5.0), "locals raw");
+        let PaintItem::Bg { rect, .. } = &out[4] else { panic!() };
+        assert_eq!((rect.x, rect.width), (60.0, 20.0), "after ClearXf page space scales again");
+    }
+
+    #[test]
+    fn scaled_execute_inks_device_pixels() {
+        // End-to-end: a 50px box at x=100 on a 200px page, executed at 2×
+        // onto a 400px canvas inks the doubled window and nothing else.
+        let items = collect(
+            "#b { position: absolute; left: 100px; top: 0; width: 50px; height: 40px; background: rgb(200,0,0) }",
+            r#"<div id="b"></div>"#,
+        );
+        let scaled = paint::scale_items(&items, 2.0);
+        let mut canvas = paint::Canvas::new_transparent(400, 200);
+        paint::execute(&scaled, &crate::diting_fonts::font_book(), &mut canvas);
+        let px = |x: usize, y: usize| {
+            let i = (y * canvas.width + x) * 4;
+            canvas.data[i..i + 4].to_vec()
+        };
+        // left:100 × 50 wide → device window [200, 300).
+        assert_eq!(px(250, 20), vec![200, 0, 0, 255], "box center at device 2x");
+        assert_eq!(px(199, 20), vec![0, 0, 0, 0], "just left of the doubled edge");
+        assert_eq!(px(300, 20), vec![0, 0, 0, 0], "just right of it");
+    }
+}
