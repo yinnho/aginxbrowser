@@ -4357,7 +4357,17 @@ fn build_element_inner(
     run_wrappers: &mut Vec<taffy::tree::NodeId>,
     meta: &mut TableBuildMeta,
 ) -> Option<taffy::tree::NodeId> {
-    let style = styles.get(&id).cloned().unwrap_or_default();
+    // #187: an element missing from the styles map used to fall to
+    // ComputedStyle::default(), whose display is None ≠ Some(None) — the
+    // gate below passed and raw-text elements (<style>/<script>) laid
+    // their text as visible runs (baidu homepage's injected styles
+    // surfaced as body text at the top-left). A coverage gap now renders
+    // hidden: a blank box beats leaked CSS text. The author-override path
+    // (an explicit display present in the map) is untouched.
+    let style = match styles.get(&id) {
+        Some(s) => s.clone(),
+        None => return None,
+    };
     if style.display == Some(CssDisplay::None) {
         return None;
     }

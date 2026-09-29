@@ -1,5 +1,64 @@
 // Colocated contract suite — split out of the god file (ratchet).
 #[cfg(test)]
+mod style_text_leak_tests {
+    // #187: the baidu homepage's <style> raw CSS rendered as body text at
+    // the top-left (browser86 M0 sighting, twice on different days). The
+    // render gate matched ONLY Some(Display::None); an element missing from
+    // the styles map fell to ComputedStyle::default() — display None ≠
+    // Some(None) — and built, laying its raw text as a visible run. The
+    // gate now hides uncovered elements outright; these pin both halves.
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::*;
+
+    // A <style> under a VISIBLE parent (body) — the coverage-gap hazard
+    // shape. A head-hosted style is masked by head's own display:none entry,
+    // so the dropped-entry divergence only shows on this placement.
+    const HTML: &str = r#"<html><body><style id="leak">body { margin: 0 }</style><p id="p">hello</p></body></html>"#;
+
+    fn text_items(drop_selector: Option<&str>) -> Vec<String> {
+        let tree = parse_html(HTML);
+        let rules = parse_stylesheet_for("", (800.0, 600.0), CssMediaType::Screen);
+        let mut styles = compute_styles(&tree, &rules, (1280.0, 720.0));
+        if let Some(sel) = drop_selector {
+            let id = tree.query_selector(sel).unwrap().unwrap();
+            styles.remove(&id);
+        }
+        let (_, items, _, _, _, _) = layout_dom_with_paint_order_and_images(
+            &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
+        );
+        items
+            .iter()
+            .filter_map(|it| match it {
+                PaintItem::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn full_coverage_never_paints_style_text() {
+        let texts = text_items(None);
+        assert!(texts.iter().any(|t| t.contains("hello")), "body text renders: {texts:?}");
+        assert!(!texts.iter().any(|t| t.contains("margin")), "UA display:none keeps style text out of paint");
+    }
+
+    #[test]
+    fn styles_map_miss_hides_the_element_instead_of_leaking_its_text() {
+        // The exact leak shape: every element cascaded except the style
+        // one (any coverage gap — walk root, epoch edge, future element
+        // kind). The missing element must paint nothing while the covered
+        // rest of the page keeps rendering.
+        let texts = text_items(Some("#leak"));
+        assert!(texts.iter().any(|t| t.contains("hello")), "covered elements keep rendering: {texts:?}");
+        assert!(
+            !texts.iter().any(|t| t.contains("margin") || t.contains("body")),
+            "a styles-map miss must not paint the raw CSS text"
+        );
+    }
+}
+
+#[cfg(test)]
 mod q_quote_tests {
     use crate::diting_layout::q_quote_pair;
 
