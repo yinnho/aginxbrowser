@@ -16486,6 +16486,60 @@ fn object_form_listeners_and_webidl_registration_gate() {
     );
 }
 
+/// #192: the four Performance* entry constructors Chrome exposes — github's
+/// analytics references PerformanceNavigationTiming as a bare global, which
+/// used to be a ReferenceError. Mark is page-constructible (startTime
+/// defaults 0, never reads the clock); Nav/Paint/Measure mint only through
+/// the internal token (page construction throws Illegal constructor), and
+/// every entry handed out by the buffer is an instance of the right class.
+#[test]
+fn performance_entry_constructors_exposed() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    let js = r##"
+        performance.mark('m1');
+        performance.measure('d1', 'm1');
+        const ctorMark = new PerformanceMark('ctor-mark', { startTime: 5, detail: { a: 1 } });
+        let navThrew = null, paintThrew = null, measureThrew = null;
+        try { new PerformanceNavigationTiming(); } catch (e) { navThrew = e.name; }
+        try { new PerformancePaintTiming(); } catch (e) { paintThrew = e.name; }
+        try { new PerformanceMeasure(); } catch (e) { measureThrew = e.name; }
+        ({
+            navType: typeof PerformanceNavigationTiming,
+            paintType: typeof PerformancePaintTiming,
+            markType: typeof PerformanceMark,
+            measureType: typeof PerformanceMeasure,
+            navInstance: performance.getEntriesByType('navigation')[0] instanceof PerformanceNavigationTiming,
+            paintInstance: performance.getEntriesByType('paint').every(p => p instanceof PerformancePaintTiming),
+            markInstance: performance.getEntriesByName('m1', 'mark')[0] instanceof PerformanceMark,
+            measureInstance: performance.getEntriesByName('d1', 'measure')[0] instanceof PerformanceMeasure,
+            ctorMarkStart: ctorMark.startTime,
+            ctorMarkDetail: ctorMark.detail.a,
+            entryDetailNull: performance.getEntriesByName('m1', 'mark')[0].detail,
+            navThrew, paintThrew, measureThrew
+        })
+    "##;
+    let v = rt.evaluate(js).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "navType": "function",
+            "paintType": "function",
+            "markType": "function",
+            "measureType": "function",
+            "navInstance": true,
+            "paintInstance": true,
+            "markInstance": true,
+            "measureInstance": true,
+            "ctorMarkStart": 5,
+            "ctorMarkDetail": 1,
+            "entryDetailNull": null,
+            "navThrew": "TypeError",
+            "paintThrew": "TypeError",
+            "measureThrew": "TypeError"
+        })
+    );
+}
+
 /// #53: `indexedDB.open` used to resolve success immediately and never
 /// dispatch `onupgradeneeded`, so schema-installing openers (Dexie,
 /// localForage, Firebase) never settled their open promise and the app

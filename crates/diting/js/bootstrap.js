@@ -11534,6 +11534,8 @@ class PerformanceEntry {
   get entryType() { return this._peType; }
   get startTime() { return this._peStart; }
   get duration() { return this._peDur; }
+  // #192: Chrome carries detail on the prototype (null when never set).
+  get detail() { return this._peDetail; }
   toJSON() {
     const o = { name: this._peName, entryType: this._peType,
                 startTime: this._peStart, duration: this._peDur };
@@ -11579,6 +11581,47 @@ globalThis.PerformanceResourceTiming = class PerformanceResourceTiming extends P
   }
 };
 _markNativeProto(globalThis.PerformanceResourceTiming.prototype);
+// #192: the remaining four entry constructors Chrome exposes. Mark is
+// page-constructible (startTime defaults 0 — construction never reads the
+// clock); the other three mint only through the shared internal token and
+// throw Illegal constructor from page code, the same posture as
+// PerformanceResourceTiming above. github's analytics references
+// PerformanceNavigationTiming as a bare global — the old "don't expose the
+// constructor so detectors can't diff descriptors" stance turned that into a
+// ReferenceError, which costs far more than a diffable prototype ever did.
+globalThis.PerformanceMark = class PerformanceMark extends PerformanceEntry {
+  constructor(name, options) {
+    const o = options || {};
+    const t = typeof o.startTime === 'number' && isFinite(o.startTime) ? o.startTime : 0;
+    super(String(name), 'mark', t, 0);
+    if ('detail' in o) this._peDetail = o.detail;
+    __hideOwn(this);
+  }
+};
+_markNativeProto(globalThis.PerformanceMark.prototype);
+globalThis.PerformanceMeasure = class PerformanceMeasure extends PerformanceEntry {
+  constructor(name, startTime, duration, tok) {
+    if (tok !== _RT_INTERNAL) throw new TypeError("Illegal constructor");
+    super(String(name), 'measure', startTime, duration);
+  }
+};
+_markNativeProto(globalThis.PerformanceMeasure.prototype);
+globalThis.PerformancePaintTiming = class PerformancePaintTiming extends PerformanceEntry {
+  constructor(name, startTime, tok) {
+    if (tok !== _RT_INTERNAL) throw new TypeError("Illegal constructor");
+    super(String(name), 'paint', startTime, 0);
+  }
+};
+_markNativeProto(globalThis.PerformancePaintTiming.prototype);
+globalThis.PerformanceNavigationTiming = class PerformanceNavigationTiming extends PerformanceEntry {
+  constructor(name, duration, extra, tok) {
+    if (tok !== _RT_INTERNAL) throw new TypeError("Illegal constructor");
+    super(String(name), 'navigation', 0, duration);
+    // Level-2 fields stay own data props — the existing _navTiming posture.
+    Object.assign(this, extra);
+  }
+};
+_markNativeProto(globalThis.PerformanceNavigationTiming.prototype);
 globalThis.PerformanceServerTiming = class PerformanceServerTiming extends PerformanceEntry {
   constructor() { throw new TypeError("Illegal constructor"); }
   get serverTimingName() { return this._peName; }
@@ -11632,8 +11675,11 @@ class _Performance {
     }
     const o = options || {};
     const t = typeof o.startTime === 'number' && isFinite(o.startTime) ? o.startTime : this.now();
-    const e = new PerformanceEntry(String(name), 'mark', t, 0);
-    if ('detail' in o) e._peDetail = o.detail;
+    // mark() stamps the clock when startTime is absent; the constructor
+    // alone defaults it to 0 — Chrome keeps the two paths distinct too.
+    const opts = (typeof o.startTime === 'number' && isFinite(o.startTime))
+      ? o : Object.assign({}, o, { startTime: t });
+    const e = new PerformanceMark(String(name), opts);
     this._marks.push(e);
     if (this._marks.length > 500) this._marks.shift();
     return e;
@@ -11662,7 +11708,7 @@ class _Performance {
       }
     }
     // Chrome allows a negative duration when end < start; keep that.
-    const e = new PerformanceEntry(String(name), 'measure', startTime, endTime - startTime);
+    const e = new PerformanceMeasure(String(name), startTime, endTime - startTime, _RT_INTERNAL);
     this._measures.push(e);
     if (this._measures.length > 500) this._measures.shift();
     return e;
@@ -11686,9 +11732,6 @@ class _Performance {
     if (!nav0) return null;
     const rel = (v) => (typeof v === 'number' && v > 0 ? Math.max(0, v - nav0) : 0);
     const loadEnd = t.loadEventEnd || t.navigationStart;
-    const e = new PerformanceEntry(
-      (globalThis.location && globalThis.location.href) || '',
-      'navigation', 0, Math.max(0, loadEnd - nav0));
     const extra = {
       initiatorType: 'navigation', nextHopProtocol: '',
       type: 'navigate', redirectCount: 0,
@@ -11705,7 +11748,9 @@ class _Performance {
       domComplete: rel(t.domComplete),
       loadEventStart: rel(t.loadEventStart), loadEventEnd: rel(t.loadEventEnd),
     };
-    Object.assign(e, extra);
+    const e = new globalThis.PerformanceNavigationTiming(
+      (globalThis.location && globalThis.location.href) || '',
+      Math.max(0, loadEnd - nav0), extra, _RT_INTERNAL);
     e.toJSON = function() {
       return Object.assign(PerformanceEntry.prototype.toJSON.call(this), extra);
     };
@@ -11723,8 +11768,8 @@ class _Performance {
     const fp = Math.max(1, Math.floor(dcl * (0.55 + _fpRand(644) * 0.25)));
     const fcp = Math.max(fp + 1, Math.floor(dcl * (0.78 + _fpRand(645) * 0.2)));
     this._paintEntries = [
-      new PerformanceEntry('first-paint', 'paint', fp, 0),
-      new PerformanceEntry('first-contentful-paint', 'paint', fcp, 0),
+      new globalThis.PerformancePaintTiming('first-paint', fp, _RT_INTERNAL),
+      new globalThis.PerformancePaintTiming('first-contentful-paint', fcp, _RT_INTERNAL),
     ];
     __hideOwn(this);
     return this._paintEntries;
