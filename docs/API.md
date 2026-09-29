@@ -318,6 +318,7 @@ Native aggregated search with optional automatic content fetching. Agents go fro
 | sogou | general | Sogou web search |
 | sogou_wechat | general, news | Sogou WeChat article search |
 | duckduckgo | general | DuckDuckGo HTML (stealth fingerprint) |
+| wikipedia | general | Wikipedia MediaWiki search API (language edition follows `language`; CN-blocked → direct-first/proxy-retry) |
 | bing_news | general, news | Bing News infinite-scroll fragment; `time_range` via server-side freshness window |
 | baidu_images | images | Baidu Images `acjson` JSON |
 | bing_images | images | Bing Images `images/async` |
@@ -325,6 +326,7 @@ Native aggregated search with optional automatic content fetching. Agents go fro
 | huggingface | general, ai | Hugging Face models search |
 | github | general, code | GitHub repository search |
 | stackexchange | general, code | StackExchange API |
+| mdn | code | MDN Web Docs v1 search API (code queries only — CJK fuzzy-match noise keeps it out of the general pool) |
 | npm | general, packages | npm registry |
 | pypi | general, packages | PyPI |
 

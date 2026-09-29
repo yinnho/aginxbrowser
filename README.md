@@ -39,7 +39,7 @@ Existing "browser automation" was built for humans or for one-shot scraping — 
 | Sees (screenshots) | ✅ built-in diting rendering engine | Needs Chromium | ❌ | Needs Chromium |
 | Reads | markdown + js_extract + fetch receipts | DIY | markdown | DIY |
 | Writes documents | ✅ `render_markdown`: deterministic HTML + inline-SVG diagrams | ❌ | ❌ | ❌ |
-| Finds (search) | ✅ 15 engines, 7 categories, merged | ❌ | ❌ | ❌ |
+| Finds (search) | ✅ 17 engines, 7 categories, merged | ❌ | ❌ | ❌ |
 | Acts | indexed session interaction | DevTools API | ❌ | LLM-driven |
 | Remembers | ✅ local fetch/search cache (SQLite FTS5) | ❌ | crawl cache | ❌ |
 | Protocol | HTTP + native MCP + CDP | Node API | HTTP | Python |
@@ -87,7 +87,7 @@ The [local cache](#capabilities) builds on the same idea: search hits come back 
 ## Capabilities
 
 - **Tiered rendering**: static pages over plain HTTP (~100ms); V8 spins up only when JS rendering is needed (~1-2s) — 90% of the [bench](bench/README.md) page set served without spinning up V8 at all; every response reports which tier served it (`tier` field)
-- **Multi-engine meta-search**: general web (Baidu / Bing / Sogou / WeChat / Google / DuckDuckGo), news (Bing News), code (Stack Overflow, GitHub), packages (npm, PyPI), academic (arXiv), AI models (Hugging Face) — 15 engines across 7 categories, queried concurrently, merged and deduplicated. Operators can plug a private Meilisearch index into the same `/search`. Search → read in one step
+- **Multi-engine meta-search**: general web (Baidu / Bing / Sogou / WeChat / Google / DuckDuckGo / Wikipedia), news (Bing News), code (Stack Overflow, GitHub, MDN), packages (npm, PyPI), academic (arXiv), AI models (Hugging Face) — 17 engines across 7 categories, queried concurrently, merged and deduplicated. Operators can plug a private Meilisearch index into the same `/search`. Search → read in one step
 - **Image search**: `categories=images` hits Baidu/Bing image indexes and returns direct binary `image_url` links (downloadable straight to jpg/png) plus `source_url` provenance
 - **Interactive sessions**: persistent browser sessions with indexed interaction (`state/click/input/scroll/eval`) — agents browse like humans do, and `session_export` turns what an agent figured out into a runnable curl replay script (zero model tokens on re-run) — or, with `format=json`, into a flow document (`flow_run` replays it server-side with `{{var}}` substitution, `wait`/`expect` gates and saved outputs; installed flows live in `workflow/<name>/flow.json`, dropped in without a rebuild). Session tools also cover the acting part: `session_viewport` simulates device viewports (media queries respond), `session_wait` blocks on a selector or predicate with a timeout, `session_screenshot` renders the live state, `session_console` replays the page's console ring, and `session_storage` exports/restores cookies plus localStorage for login hand-off
 - **Playback-link sniffer**: `session_network(filter=media)` extracts the m3u8/mp4/dash URLs a page's player *actually requested* at runtime — links found only in page HTML are often decoys, so the request log is the source of truth. `GET /session/{id}/har` exports the same traffic as HAR 1.2 (retained bodies included)
@@ -304,7 +304,7 @@ aginxbrowser/
     ├── config.rs            # BrowserConfig
     ├── cookie.rs            # CookieStore
     ├── error.rs             # Error types
-    ├── search/              # 15 native search engines, 7 categories
+    ├── search/              # 17 native search engines, 7 categories
     │   ├── mod.rs           #   SearchEngine trait, Registry, merge/dedupe, progressive backoff
     │   ├── baidu.rs         #   Baidu (JSON API, wreq stealth)
     │   ├── baidu_images.rs  #   Baidu Images (acjson API, images category)
@@ -315,7 +315,9 @@ aginxbrowser/
     │   ├── sogou_wechat.rs  #   Sogou WeChat (HTML parsing + /link resolution)
     │   ├── duckduckgo.rs    #   DuckDuckGo (html.duckduckgo.com, general; direct-first)
     │   ├── google.rs        #   Google (HTML parsing, wreq stealth + proxy)
+    │   ├── wikipedia.rs     #   Wikipedia (MediaWiki search API, general; direct-first/proxy-retry)
     │   ├── stackexchange.rs #   Stack Overflow (SE API v2.3, code category)
+    │   ├── mdn.rs           #   MDN Web Docs (v1 search API, code category only)
     │   ├── github_repos.rs  #   GitHub repos (api.github.com, code category)
     │   ├── arxiv.rs         #   arXiv (Atom API, academic category)
     │   ├── huggingface.rs   #   HF Hub models/datasets/spaces (ai category)

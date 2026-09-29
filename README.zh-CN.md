@@ -39,7 +39,7 @@
 | 看得见（截图） | ✅ 内置 diting 渲染引擎 | 需 Chromium | ❌ | 需 Chromium |
 | 读得懂 | markdown + js_extract + fetch 回执 | 要自己写 | markdown | 要自己写 |
 | 写得出文档 | ✅ `render_markdown`：确定性 HTML + 内联 SVG 图 | ❌ | ❌ | ❌ |
-| 找得到（搜索） | ✅ 15 引擎 7 分类聚合 | ❌ | ❌ | ❌ |
+| 找得到（搜索） | ✅ 17 引擎 7 分类聚合 | ❌ | ❌ | ❌ |
 | 操得了 | session 索引化交互 | DevTools API | ❌ | LLM 驱动 |
 | 记得住 | ✅ 本地 fetch/搜索缓存（SQLite FTS5） | ❌ | 爬虫缓存 | ❌ |
 | 协议 | HTTP + MCP 原生 + CDP | Node API | HTTP | Python |
@@ -87,7 +87,7 @@ Agent 是照着浏览器说的话行事的，所以响应里要写清楚实际�
 ## 核心能力
 
 - **分层渲染**：静态页面纯 HTTP 直取（~100ms），需要 JS 渲染才启动 V8（~1-2s）——[bench](bench/README.md) 页面集里 90% 根本不用拉起 V8；每次响应带 `tier` 字段说明走的哪层
-- **多引擎聚合搜索**：通用网页（百度/Bing/搜狗/搜狗微信/Google/DuckDuckGo）、新闻（Bing News）、代码（Stack Overflow/GitHub）、包（npm/PyPI）、学术（arXiv）、AI 模型（Hugging Face）——15 引擎 7 分类，并发查询、合并去重；运维还可把私有 Meilisearch 索引接入同一 `/search`。Agent 一步完成"搜→读"
+- **多引擎聚合搜索**：通用网页（百度/Bing/搜狗/搜狗微信/Google/DuckDuckGo/维基百科）、新闻（Bing News）、代码（Stack Overflow/GitHub/MDN）、包（npm/PyPI）、学术（arXiv）、AI 模型（Hugging Face）——17 引擎 7 分类，并发查询、合并去重；运维还可把私有 Meilisearch 索引接入同一 `/search`。Agent 一步完成"搜→读"
 - **图片搜索**：`categories=images` 接百度图片/必应图片，返回 `image_url` 二进制直链（可直接下成 jpg/png）+ `source_url` 溯源
 - **交互式 Session**：持久化浏览器会话，索引化交互（state/click/input/scroll/eval），Agent 像人一样浏览；`session_export` 把 Agent 摸索出来的操作导出成能直接跑的 curl 回放脚本，重放零模型 token；`format=json` 则导出成 flow 文档（`flow_run` 服务端复跑：`{{var}}` 替换、`wait`/`expect` 设门、`save` 收产出；装好的 flow 放在 `workflow/<name>/flow.json`，丢目录进去即部署，不用重编）。操作面也补齐了：`session_viewport` 模拟设备视口（media query 会响应）、`session_wait` 按 selector/谓词带超时等待、`session_screenshot` 截会话当前状态、`session_console` 回放页面 console 环形日志、`session_storage` 导出/恢复 cookie + localStorage 方便交接登录态
 - **播放链接嗅探**：`session_network(filter=media)` 从页面播放器运行时真正发出的请求里挖 m3u8/mp4/dash 链接——写在 HTML 里的播放地址多半是诱饵，请求日志才是真相。`GET /session/{id}/har` 把同一份流量导出成 HAR 1.2（含已保留的响应体）
@@ -304,18 +304,20 @@ aginxbrowser/
     ├── config.rs            # BrowserConfig
     ├── cookie.rs            # CookieStore
     ├── error.rs             # Error 类型
-    ├── search/              # 15 个原生搜索引擎，7 个分类
+    ├── search/              # 17 个原生搜索引擎，7 个分类
     │   ├── mod.rs           #   SearchEngine trait、Registry、合并去重、渐进退避
     │   ├── baidu.rs         #   百度（JSON API，wreq stealth）
     │   ├── baidu_images.rs  #   百度图片（acjson API，images 类）
     │   ├── bing.rs          #   Bing（HTML 解析，plain reqwest）
     │   ├── bing_images.rs   #   必应图片（images/async 端点，images 类）
-    │   ├── bing_news.rs     #   必应新闻 RSS（news 类；走代理）
+    │   ├── bing_news.rs     #   必应新闻滚动片段（news 类；直连优先/代理重试）
     │   ├── sogou.rs         #   搜狗通用（HTML 解析，plain reqwest）
     │   ├── sogou_wechat.rs  #   搜狗微信（HTML 解析 + /link 解析）
     │   ├── duckduckgo.rs    #   DuckDuckGo（html.duckduckgo.com，general 类；直连优先）
     │   ├── google.rs        #   Google（HTML 解析，wreq stealth + proxy）
+    │   ├── wikipedia.rs     #   维基百科（MediaWiki 搜索 API，general 类；直连优先/代理重试）
     │   ├── stackexchange.rs #   Stack Overflow（SE API v2.3，code 类）
+    │   ├── mdn.rs           #   MDN Web 文档（v1 搜索 API，仅 code 类）
     │   ├── github_repos.rs  #   GitHub 仓库（api.github.com，code 类）
     │   ├── arxiv.rs         #   arXiv（Atom API，academic 类）
     │   ├── huggingface.rs   #   HF 模型/数据集/Spaces（ai 类）

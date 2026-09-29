@@ -7,12 +7,14 @@ pub mod duckduckgo;
 pub mod github_repos;
 pub mod arxiv;
 pub mod huggingface;
+pub mod mdn;
 pub mod meilisearch;
 pub mod npm;
 pub mod pypi;
 pub mod sogou;
 pub mod sogou_wechat;
 pub mod stackexchange;
+pub mod wikipedia;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -176,7 +178,9 @@ impl SearchEngineRegistry {
         registry.register(sogou::SogouEngine::new());
         registry.register(sogou_wechat::SogouWechatEngine::new());
         registry.register(duckduckgo::DuckDuckGoEngine::new());
+        registry.register(wikipedia::WikipediaEngine::new());
         registry.register(stackexchange::StackExchangeEngine::new());
+        registry.register(mdn::MdnEngine::new());
         registry.register(github_repos::GithubEngine::new());
         registry.register(arxiv::ArxivEngine::new());
         registry.register(bing_news::BingNewsEngine::new());
@@ -655,6 +659,41 @@ pub fn build_plain_client(timeout_secs: u64) -> reqwest::Client {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("failed to build reqwest client for search")
+}
+
+/// Build a reqwest client through `AGINXBROWSER_PROXY` — the proxy-retry leg
+/// of [`get_direct_first_if`]. Returns None when no proxy is configured.
+/// Shared by every direct-first engine (bing_news, duckduckgo, wikipedia,
+/// huggingface).
+pub(crate) fn proxied_plain_client() -> Option<reqwest::Client> {
+    crate::config::proxy_from_env().map(|proxy| {
+        let proxy_str = normalize_socks5h(&proxy);
+        let mut builder = diting::diting_net::client::reqwest_builder_no_env_proxy()
+            .timeout(Duration::from_secs(12))
+            .redirect(reqwest::redirect::Policy::none());
+        match reqwest::Proxy::all(&proxy_str) {
+            Ok(p) => builder = builder.proxy(p),
+            Err(e) => tracing::warn!("search: proxy scheme rejected: {}", e),
+        }
+        builder
+            .build()
+            .expect("failed to build proxied reqwest client for search")
+    })
+}
+
+/// socks5:// resolves the TARGET hostname locally — on a walled box that
+/// fails before the proxy is ever reached — so rewrite to socks5h:// and let
+/// the proxy resolve. The scheme prefix is 9 bytes ("socks5://"); the
+/// original `format!("socks5h{}", &proxy[7..])` off-by-one produced
+/// `socks5h//host:port` (no colon), whose empty hostname surfaces only as
+/// "nodename nor servname provided" DNS errors deep in the connect chain —
+/// every engine's proxy-retry leg silently broken for socks5:// operators
+/// (socks5h:// operators, like the hosted instance, never saw it).
+fn normalize_socks5h(proxy: &str) -> String {
+    match proxy.strip_prefix("socks5://") {
+        Some(rest) => format!("socks5h://{rest}"),
+        None => proxy.to_string(),
+    }
 }
 
 /// Build a stealth wreq client. Returns None if the "stealth" feature is not
@@ -1265,5 +1304,24 @@ mod tests {
             DIRECT_FAILS_CAP,
             map.len()
         );
+    }
+
+    // ---- socks5 → socks5h normalization (proxy-retry leg) ----
+
+    #[test]
+    fn socks5_rewrites_to_socks5h_with_colon_intact() {
+        // The old off-by-one produced "socks5h//h:1080" — empty hostname,
+        // silent DNS failure in the connect chain.
+        assert_eq!(
+            normalize_socks5h("socks5://h.example:1080"),
+            "socks5h://h.example:1080"
+        );
+    }
+
+    #[test]
+    fn non_socks5_schemes_pass_through() {
+        assert_eq!(normalize_socks5h("socks5h://h:1080"), "socks5h://h:1080");
+        assert_eq!(normalize_socks5h("http://h:8080"), "http://h:8080");
+        assert_eq!(normalize_socks5h("https://h:8443"), "https://h:8443");
     }
 }

@@ -14,26 +14,6 @@ impl BingNewsEngine {
     pub fn new() -> Self {
         BingNewsEngine
     }
-
-    fn proxied_client() -> Option<reqwest::Client> {
-        crate::config::proxy_from_env().map(|proxy| {
-            let proxy_str = if proxy.starts_with("socks5://") && !proxy.starts_with("socks5h://") {
-                format!("socks5h{}", &proxy[7..])
-            } else {
-                proxy
-            };
-            let mut builder = diting::diting_net::client::reqwest_builder_no_env_proxy()
-                .timeout(std::time::Duration::from_secs(12))
-                .redirect(reqwest::redirect::Policy::none());
-            match reqwest::Proxy::all(&proxy_str) {
-                Ok(p) => builder = builder.proxy(p),
-                Err(e) => tracing::warn!("bing_news proxy '{}' ignored: {}", proxy_str, e),
-            }
-            builder
-                .build()
-                .expect("failed to build proxied reqwest client for bing_news")
-        })
-    }
 }
 
 const BN_HEADERS: &[(&str, &str)] = &[(
@@ -88,7 +68,7 @@ impl SearchEngine for BingNewsEngine {
             body.contains("newsitem")
         }
         let body =
-            super::get_direct_first_if(&url, BN_HEADERS, Self::proxied_client, is_fragment).await?;
+            super::get_direct_first_if(&url, BN_HEADERS, super::proxied_plain_client, is_fragment).await?;
         parse_bing_news_fragment(&body)
     }
 }

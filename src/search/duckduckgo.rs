@@ -34,27 +34,6 @@ impl DuckDuckGoEngine {
         }
     }
 
-    #[cfg(not(feature = "stealth"))]
-    fn proxied_client() -> Option<reqwest::Client> {
-        crate::config::proxy_from_env().map(|proxy| {
-            let proxy_str = if proxy.starts_with("socks5://") && !proxy.starts_with("socks5h://") {
-                format!("socks5h{}", &proxy[7..])
-            } else {
-                proxy
-            };
-            let mut builder = diting::diting_net::client::reqwest_builder_no_env_proxy()
-                .timeout(std::time::Duration::from_secs(12))
-                .redirect(reqwest::redirect::Policy::none());
-            match reqwest::Proxy::all(&proxy_str) {
-                Ok(p) => builder = builder.proxy(p),
-                Err(e) => tracing::warn!("duckduckgo proxy '{}' ignored: {}", proxy_str, e),
-            }
-            builder
-                .build()
-                .expect("failed to build proxied reqwest client for duckduckgo")
-        })
-    }
-
     /// Direct first (stealth Chrome fingerprint); a body without result
     /// anchors falls through to the proxied attempt. A flagged exit IP still
     /// returns a real 200 DDG page — the returned body is unvalidated so the
@@ -111,7 +90,8 @@ impl DuckDuckGoEngine {
 
     #[cfg(not(feature = "stealth"))]
     async fn fetch_results_html(&self, url: &str) -> Result<String, SearchEngineError> {
-        super::get_direct_first_if(url, DDG_HEADERS, Self::proxied_client, has_results).await
+        super::get_direct_first_if(url, DDG_HEADERS, super::proxied_plain_client, has_results)
+            .await
     }
 }
 

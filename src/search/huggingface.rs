@@ -28,26 +28,6 @@ impl HuggingFaceEngine {
             endpoint: endpoint.to_string(),
         }
     }
-
-    fn proxied_client() -> Option<reqwest::Client> {
-        crate::config::proxy_from_env().map(|proxy| {
-            let proxy_str = if proxy.starts_with("socks5://") && !proxy.starts_with("socks5h://") {
-                format!("socks5h{}", &proxy[7..])
-            } else {
-                proxy
-            };
-            let mut builder = diting::diting_net::client::reqwest_builder_no_env_proxy()
-                .timeout(std::time::Duration::from_secs(12))
-                .redirect(reqwest::redirect::Policy::none());
-            match reqwest::Proxy::all(&proxy_str) {
-                Ok(p) => builder = builder.proxy(p),
-                Err(e) => tracing::warn!("huggingface proxy '{}' ignored: {}", proxy_str, e),
-            }
-            builder
-                .build()
-                .expect("failed to build proxied reqwest client for huggingface")
-        })
-    }
 }
 
 const HF_HEADERS: &[(&str, &str)] = &[
@@ -88,7 +68,7 @@ impl SearchEngine for HuggingFaceEngine {
             urlencoding::encode(query),
         );
 
-        let body = super::get_direct_first(&url, HF_HEADERS, Self::proxied_client).await?;
+        let body = super::get_direct_first(&url, HF_HEADERS, super::proxied_plain_client).await?;
         parse_huggingface_json(&body, &self.endpoint)
     }
 }
