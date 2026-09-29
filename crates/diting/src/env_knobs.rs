@@ -36,6 +36,7 @@ pub fn should_auto_proxy(url: &str) -> bool {
     const BLOCKED_DOMAINS: &[&str] = &[
         "github.com",
         "githubusercontent.com",
+        "githubassets.com",
         "github.io",
         "google.com",
         "google.co.jp",
@@ -187,6 +188,9 @@ mod tests {
         assert!(should_auto_proxy("https://en.wikipedia.org/wiki/Rust"));
         assert!(should_auto_proxy("https://wikipedia.org/"));
         assert!(should_auto_proxy("https://raw.githubusercontent.com/x/y"));
+        // github's static bundle host — a page whose HTML proxied but whose
+        // JS/CSS went direct arrives scriptless, same as the twimg case.
+        assert!(should_auto_proxy("https://github.githubassets.com/assets/some-bundle.js"));
         // Twitter's CDN: every x.com page load pulls scripts/images from
         // abs.twimg.com/pbs.twimg.com — a page whose HTML proxied but whose
         // CDN assets went direct arrives scriptless.
