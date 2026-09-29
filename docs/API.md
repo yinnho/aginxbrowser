@@ -51,7 +51,7 @@ Response:
   "v8": "15.0.274.2",
   "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
   "tls": "chrome145",
-  "capabilities": { "screenshot": true, "stealth": true, "captcha_solver": false }
+  "capabilities": { "screenshot": true, "stealth": true, "captcha_solver": false, "ffmpeg": { "version": "8.1.1" } }
 }
 ```
 

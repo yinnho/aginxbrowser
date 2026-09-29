@@ -845,6 +845,10 @@ async fn doctor_handler(Query(params): Query<DoctorParams>) -> impl IntoResponse
         "screenshot": cfg!(feature = "screenshot"),
         "stealth": cfg!(feature = "stealth"),
         "captcha_solver": std::env::var("CAPTCHA_SOLVER_API_KEY").is_ok(),
+        // /video's one external dependency, visible here too (the agent-browser
+        // #2011 lesson: a doctor silent about ffmpeg reads healthy on a box
+        // where every recording dies with EPIPE). Null = not probed.
+        "ffmpeg": doctor_cli::ffmpeg_probe_json(),
         // The product stance, visible where agents and operators look first.
         "robots_honored": std::env::var("AGINXBROWSER_HONOR_ROBOTS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))

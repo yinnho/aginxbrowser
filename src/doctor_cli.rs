@@ -93,6 +93,63 @@ fn fonts_check() -> Check {
     check(Status::Warn, "fonts", "screenshot feature off — no bundled fonts, /screenshot unavailable")
 }
 
+/// Pull the version token out of `ffmpeg -version`'s first line
+/// ("ffmpeg version 7.1.1 Copyright ..." → "7.1.1"; distro suffixes like
+/// "4.4.2-0ubuntu0.22.04.1" survive). Pure half, unit-tested.
+fn ffmpeg_version_word(first_line: &str) -> Option<&str> {
+    let after = first_line.split("version ").nth(1)?;
+    after.split_whitespace().next()
+}
+
+/// `/video` + `render_video` pipe frames into an external ffmpeg — the only
+/// capability with an external binary dependency. The agent-browser #2011
+/// lesson: a doctor that stays silent about ffmpeg reports "healthy" on a
+/// box where every recording dies with EPIPE. Missing ffmpeg is a warning,
+/// not a failure — everything except video keeps working, and systemd
+/// shouldn't gate startup on it.
+fn ffmpeg_check() -> Check {
+    match std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            let head = String::from_utf8_lossy(&out.stdout);
+            let first = head.lines().next().unwrap_or("");
+            let detail = match ffmpeg_version_word(first) {
+                Some(v) => format!("ffmpeg {v} on PATH — /video ready"),
+                None => format!("ffmpeg on PATH — /video ready ({})", first.chars().take(60).collect::<String>()),
+            };
+            check(Status::Ok, "ffmpeg", detail)
+        }
+        _ => check(
+            Status::Warn,
+            "ffmpeg",
+            "not found on PATH — /video and render_video cannot produce MP4s; \
+             all other capabilities unaffected (brew install ffmpeg / apt install ffmpeg)",
+        ),
+    }
+}
+
+/// The `/doctor` HTTP face of [`ffmpeg_check`]: `null` when absent (with the
+/// reason), `{"version": ".."}` when found. Same one-shot `ffmpeg -version`
+/// probe, shaped for agents deciding whether to call `render_video`.
+pub fn ffmpeg_probe_json() -> serde_json::Value {
+    match std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            let first = String::from_utf8_lossy(&out.stdout);
+            let first = first.lines().next().unwrap_or("");
+            match ffmpeg_version_word(first) {
+                Some(v) => serde_json::json!({ "version": v }),
+                None => serde_json::Value::Null,
+            }
+        }
+        _ => serde_json::Value::Null,
+    }
+}
+
 fn env_checks() -> Vec<Check> {
     let mut out = Vec::new();
     let bind = std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".into());
@@ -196,7 +253,7 @@ pub fn render(checks: &[Check]) -> String {
 
 /// Entry point from main's arg dispatch. Returns the process exit code.
 pub async fn run() -> i32 {
-    let mut checks = vec![features_check(), fonts_check(), robots_check()];
+    let mut checks = vec![features_check(), fonts_check(), ffmpeg_check(), robots_check()];
     checks.extend(env_checks());
     checks.push(egress_check().await);
     let code = if checks.iter().any(|c| c.status == Status::Fail) { 1 } else { 0 };
@@ -237,5 +294,32 @@ mod tests {
     #[cfg(feature = "screenshot")]
     fn bundled_fonts_ink() {
         assert_eq!(fonts_check().status, Status::Ok);
+    }
+
+    #[test]
+    fn ffmpeg_version_word_extracts_token() {
+        assert_eq!(
+            ffmpeg_version_word("ffmpeg version 7.1.1 Copyright (c) 2000-2025 the FFmpeg developers"),
+            Some("7.1.1")
+        );
+        // Distro builds carry package suffixes — keep the whole token.
+        assert_eq!(
+            ffmpeg_version_word("ffmpeg version 4.4.2-0ubuntu0.22.04.1 Copyright ..."),
+            Some("4.4.2-0ubuntu0.22.04.1")
+        );
+        // Non-standard first lines (static builds sometimes brand differently).
+        assert_eq!(ffmpeg_version_word("ffmpeg version n7.1-latest"), Some("n7.1-latest"));
+        assert_eq!(ffmpeg_version_word("garbage with no marker"), None);
+        assert_eq!(ffmpeg_version_word(""), None);
+    }
+
+    #[test]
+    fn ffmpeg_check_reports_at_least_warn() {
+        // The check runs the real PATH: found → Ok with the version named,
+        // missing → Warn naming /video as the only casualty. Either way the
+        // doctor no longer stays silent about the one external dependency.
+        let c = ffmpeg_check();
+        assert!(matches!(c.status, Status::Ok | Status::Warn));
+        assert!(c.detail.contains("video"), "{}", c.detail);
     }
 }
