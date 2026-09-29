@@ -26,6 +26,9 @@ fn insert_text_js(text: &str) -> String {
             }}\
             var ins = {text};\
             var v = t.value || '';\
+            // A date/time input composes off its in-flight draft, not the
+            // (sanitized-to-'') DOM value — agent-browser#2000 absorption.
+            if (globalThis.__diting_dateDraftBase) v = globalThis.__diting_dateDraftBase(t, v);\
             var s = t.selectionStart, e = t.selectionEnd;\
             if (s == null) {{\
                 globalThis.__diting_setFieldValue(t, 'value', v + ins);\
@@ -59,6 +62,8 @@ const BACKSPACE_JS: &str = "(function() {\
     var t = document.activeElement;\
     if (!t || (t.localName !== 'input' && t.localName !== 'textarea')) return;\
     var v = t.value || '';\
+    // Date/time inputs keep their partial in the draft (see insert_text_js).
+    if (globalThis.__diting_dateDraftBase) v = globalThis.__diting_dateDraftBase(t, v);\
     var s = t.selectionStart, e = t.selectionEnd;\
     if (s == null) {\
         globalThis.__diting_setFieldValue(t, 'value', v.slice(0, cut(v, v.length)));\

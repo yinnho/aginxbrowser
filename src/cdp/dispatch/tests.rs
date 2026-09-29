@@ -1094,6 +1094,134 @@
         );
     }
 
+    // agent-browser#2000 absorption: the date/time input family runs HTML
+    // value sanitization — the DOM value only ever holds a complete valid
+    // string ('' otherwise, including the attribute default), and typing
+    // composes through the engine-side draft until the string validates
+    // (the engine-side equivalent of Chrome's segmented editor: a partial
+    // is invisible in .value but Backspace still cuts it).
+    #[tokio::test(flavor = "current_thread")]
+    async fn date_input_value_sanitizes_and_typing_composes() {
+        let mut ctx = CdpContext::new_with_options(None, false);
+        let page_id = create_page(&mut ctx);
+        let session_id = "sess-date-value".to_string();
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let nav = CdpRequest {
+            id: 1,
+            method: "Page.navigate".to_string(),
+            params: json!({
+                "url": "data:text/html,<input id=t type=date><input id=j type=date value=junk><input id=dt type=datetime-local>"
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&nav, &mut ctx).await.error.is_none());
+
+        // One probe pins the whole value face: garbage/Feb-30 store '',
+        // a valid value lands, the attribute default sanitizes, and a
+        // datetime-local normalizes (space separator → T, :00 dropped).
+        let probe = CdpRequest {
+            id: 2,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "(function(){var t=document.getElementById('t');t.value='2026-02-30';var a=t.value;t.value='2026-01-02';var b=t.value;t.value='garbage';var c=t.value;var j=document.getElementById('j').value;var d=document.getElementById('dt');d.value='2026-01-02 03:04:00';return [a,b,c,j,d.value].join('|');})()",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&probe, &mut ctx).await;
+        assert!(resp.error.is_none(), "evaluate failed: {:?}", resp.error);
+        let value = resp.result.expect("result")["result"]["value"]
+            .as_str()
+            .expect("string value")
+            .to_string();
+        assert_eq!(
+            value, "|2026-01-02|||2026-01-02T03:04",
+            "sanitize set, attribute default, and datetime-local normalization"
+        );
+
+        // Focus and type "2026-01-02" one char at a time through the CDP
+        // insertText funnel. Halfway the value must still be '' while the
+        // draft holds the partial.
+        let focus = CdpRequest {
+            id: 3,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "(function(){var t=document.getElementById('t');t.value='';t.focus();return 'ok';})()",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&focus, &mut ctx).await.error.is_none());
+
+        let mut next_id = 4;
+        for ch in ["2", "0", "2", "6", "-", "0", "1", "-", "0"] {
+            let req = CdpRequest {
+                id: next_id,
+                method: "Input.insertText".to_string(),
+                params: json!({ "text": ch }),
+                session_id: Some(session_id.clone()),
+            };
+            next_id += 1;
+            assert!(dispatch(&req, &mut ctx).await.error.is_none());
+        }
+
+        let mid = CdpRequest {
+            id: next_id,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "document.getElementById('t').value + '|' + globalThis.__diting_dateDraftBase(document.getElementById('t'), '')",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        next_id += 1;
+        let resp = dispatch(&mid, &mut ctx).await;
+        assert!(resp.error.is_none());
+        let result = resp.result.expect("result");
+        let value = result["result"]["value"].as_str().expect("string value");
+        assert_eq!(
+            value, "|2026-01-0",
+            "the partial is invisible in .value but rides the draft"
+        );
+
+        // Backspace cuts from the DRAFT (not from ''), then the retyped
+        // day completes the date and it lands in .value.
+        let bs = CdpRequest {
+            id: next_id,
+            method: "Input.dispatchKeyEvent".to_string(),
+            params: json!({ "type": "keyDown", "key": "Backspace" }),
+            session_id: Some(session_id.clone()),
+        };
+        next_id += 1;
+        assert!(dispatch(&bs, &mut ctx).await.error.is_none());
+        let rest = CdpRequest {
+            id: next_id,
+            method: "Input.insertText".to_string(),
+            params: json!({ "text": "02" }),
+            session_id: Some(session_id.clone()),
+        };
+        assert!(dispatch(&rest, &mut ctx).await.error.is_none());
+
+        let final_probe = CdpRequest {
+            id: 99,
+            method: "Runtime.evaluate".to_string(),
+            params: json!({
+                "expression": "document.getElementById('t').value + '|' + globalThis.__diting_dateDraftBase(document.getElementById('t'), '')",
+                "returnByValue": true,
+            }),
+            session_id: Some(session_id.clone()),
+        };
+        let resp = dispatch(&final_probe, &mut ctx).await;
+        assert!(resp.error.is_none());
+        let result = resp.result.expect("result");
+        let value = result["result"]["value"].as_str().expect("string value");
+        assert_eq!(
+            value, "2026-01-02|",
+            "the completed date lands in .value and the draft clears"
+        );
+    }
+
     // Backspace deletes a whole code point (obscura#1005 same lineage,
     // issue #24): with the caret after an astral character the unit at the
     // cut is a trail surrogate, and removing just it would strand the lead
