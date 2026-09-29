@@ -20,7 +20,7 @@ pub use policy::{
 #[cfg(feature = "stealth")]
 pub(crate) use policy::custom_cert_store_requested;
 
-pub use ssrf::{is_forbidden_ip, SsrfGuardResolver};
+pub use ssrf::{is_forbidden_base, is_forbidden_ip, SsrfGuardResolver};
 
 /// A script-initiated fetch()/XHR currently flying (one entry per redirect
 /// hop, mirroring the `in_flight` counter). Exists so a caller whose eval

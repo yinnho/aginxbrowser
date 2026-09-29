@@ -516,25 +516,23 @@ fn rule_matches(pattern: &str, target: &str) -> bool {
 }
 
 /// Loopback, RFC1918, link-local, and .local/.internal names are the
-/// operator's own turf — no robots ceremony for them.
+/// operator's own turf — no robots ceremony for them. Literal IPs (IPv6
+/// brackets included — `Url::host_str()` keeps them and `IpAddr::parse`
+/// rejects them, which is how every bracketed literal used to slip past)
+/// delegate to the engine's deny-set, so embedded-IPv6 wrappers around a
+/// private v4 (::ffff:127.0.0.1, 6to4, NAT64…) are caught too.
 pub(crate) fn is_private_host(host: &str) -> bool {
     let h = host.trim_end_matches('.').to_ascii_lowercase();
     if h == "localhost" || h.ends_with(".local") || h.ends_with(".internal") {
         return true;
     }
-    let ip = match h.parse::<std::net::IpAddr>() {
-        Ok(ip) => ip,
-        Err(_) => return false,
-    };
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            let o = v4.octets();
-            o[0] == 127 || o[0] == 10 || (o[0] == 172 && (16..=31).contains(&o[1])) || (o[0] == 192 && o[1] == 168) || (o[0] == 169 && o[1] == 254)
-        }
-        std::net::IpAddr::V6(v6) => {
-            let s = v6.segments();
-            v6.is_loopback() || (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80
-        }
+    let literal = h
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(&h);
+    match literal.parse::<std::net::IpAddr>() {
+        Ok(ip) => diting::diting_net::client::is_forbidden_base(ip),
+        Err(_) => false,
     }
 }
 
@@ -642,10 +640,22 @@ mod tests {
         assert!(is_private_host("10.1.2.3"));
         assert!(is_private_host("192.168.1.1"));
         assert!(is_private_host("172.16.0.5"));
-        assert!(is_private_host("[::1]".trim_matches(|c| c == '[' || c == ']')));
+        // Bracketed IPv6 exactly as Url::host_str() hands it over — the
+        // pre-fix code parse-failed these to false (the old test masked the
+        // gap by stripping the brackets itself).
+        assert!(is_private_host("[::1]"));
+        assert!(is_private_host("[fe80::1]"));
+        assert!(is_private_host("[fd00::1]"));
+        // Embedded-IPv6 wrappers around private v4 targets, caught by the
+        // engine deny-set we delegate to (6to4 169.254.169.254 / NAT64
+        // 127.0.0.1 / IPv4-mapped loopback).
+        assert!(is_private_host("[::ffff:127.0.0.1]"));
+        assert!(is_private_host("[64:ff9b::7f00:1]"));
+        assert!(is_private_host("[2002:a9fe:a9fe::]"));
         assert!(is_private_host("printer.local"));
         assert!(!is_private_host("example.com"));
         assert!(!is_private_host("8.8.8.8"));
+        assert!(!is_private_host("[2606:4700::1111]"));
     }
 
     #[test]

@@ -32,7 +32,11 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
 /// obfuscated client) must individually clear the deny-set + allowlist, so
 /// a CIDR that opens the client obfuscates to a public address and the
 /// whole form stays blocked (deliberate — fail closed).
-fn is_forbidden_base(ip: IpAddr) -> bool {
+///
+/// Public (not just crate): the root crate's robots/rate "operator turf"
+/// predicate (`is_private_host`) delegates here so the two never drift —
+/// a wrapper form closed here stays closed there.
+pub fn is_forbidden_base(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();
