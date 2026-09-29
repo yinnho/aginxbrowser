@@ -17051,6 +17051,58 @@ fn document_evaluate_xpath_subset() {
         assert_eq!(v["restored"], serde_json::json!([0, 2, -2, 0, 2, 3]), "restore rewinds the matrix");
     }
 
+    /// #170: RTCPeerConnection is a branded WebIDL interface — a bare call
+    /// throws Chrome's DOM TypeError (not V8's class-constructor text), the
+    /// brand is [object RTCPeerConnection], and the whole RTC orbit carries
+    /// its own Symbol.toStringTag. The AWSC collection on the punish page
+    /// sniffs both faces; a plain ES class answers [object Object] + V8 raw
+    /// message.
+    #[test]
+    fn rtc_peer_connection_face_matches_chrome() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let out = rt
+            .evaluate(
+                r#"(() => {
+                    const out = {};
+                    try { RTCPeerConnection(); out.bareCall = 'no-throw'; }
+                    catch (e) { out.bareCall = e instanceof TypeError ? e.message : ('wrong:' + e); }
+                    const pc = new RTCPeerConnection();
+                    out.brand = Object.prototype.toString.call(pc);
+                    out.instanceof = pc instanceof RTCPeerConnection;
+                    out.ctorName = pc.constructor.name;
+                    out.subclass = (() => {
+                        class X extends RTCPeerConnection { tag() { return 'x'; } }
+                        const x = new X();
+                        return x instanceof X && x instanceof RTCPeerConnection && x.tag() === 'x';
+                    })();
+                    out.webkitBrand = Object.prototype.toString.call(new webkitRTCPeerConnection());
+                    out.orbitTags = ['RTCSessionDescription', 'RTCDataChannel', 'RTCStatsReport', 'RTCRtpTransceiver']
+                        .map((n) => globalThis[n].prototype[Symbol.toStringTag]);
+                    try { new RTCDataChannel(); out.dataChannelCtor = 'no-throw'; }
+                    catch (e) { out.dataChannelCtor = e.message; }
+                    return JSON.stringify(out);
+                })()"#,
+            )
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        assert_eq!(
+            v["bareCall"],
+            serde_json::json!("Failed to construct 'RTCPeerConnection': Please use the 'new' operator, this DOM object constructor cannot be called as a function."),
+            "bare call throws Chrome's DOM TypeError"
+        );
+        assert_eq!(v["brand"], serde_json::json!("[object RTCPeerConnection]"), "toString brand");
+        assert_eq!(v["instanceof"], serde_json::json!(true), "instanceof through the wrapper");
+        assert_eq!(v["ctorName"], serde_json::json!("RTCPeerConnection"), "constructor.name stays the interface name");
+        assert_eq!(v["subclass"], serde_json::json!(true), "extends still constructs through Reflect.construct");
+        assert_eq!(v["webkitBrand"], serde_json::json!("[object RTCPeerConnection]"), "webkit alias carries the brand");
+        assert_eq!(
+            v["orbitTags"],
+            serde_json::json!(["RTCSessionDescription", "RTCDataChannel", "RTCStatsReport", "RTCRtpTransceiver"]),
+            "RTC orbit carries per-interface tags"
+        );
+        assert_eq!(v["dataChannelCtor"], serde_json::json!("Illegal constructor"), "satellite stubs still throw Illegal constructor");
+    }
+
     /// #160 / obscura#1067: the deprecated IDL spellings — visibilityProperty
     /// / opacityProperty — answer the same as checkVisibilityCSS/checkOpacity.
     /// Playwright 1.25-era call sites pass the old names.

@@ -14921,7 +14921,14 @@ globalThis.SpeechSynthesisUtterance = class SpeechSynthesisUtterance { construct
 
 globalThis.MediaStream = class MediaStream { constructor(){this.id='';this.active=true;} getTracks(){return [];} getAudioTracks(){return [];} getVideoTracks(){return [];} addTrack(){} removeTrack(){} clone(){return new MediaStream();} };
 globalThis.MediaStreamTrack = class MediaStreamTrack { constructor(){this.kind='';this.enabled=true;this.readyState='live';} stop(){} clone(){return new MediaStreamTrack();} };
-globalThis.RTCPeerConnection = class RTCPeerConnection {
+// (#170) RTCPeerConnection is a WebIDL interface in Chrome: a bare call
+// throws the DOM TypeError (not V8's class-constructor text), and
+// Object.prototype.toString brands instances [object RTCPeerConnection]
+// via Symbol.toStringTag. The AWSC collection on the 1688/taobao punish
+// page walks both — a plain ES class answers V8's raw message and
+// [object Object], a distinguishable JS-env signal. Same pattern family
+// as the CSSStyleDeclaration branding (059015a).
+const __RTCPCImpl = class RTCPeerConnection {
   constructor(){this.localDescription=null;this.remoteDescription=null;this.iceConnectionState='new';this.iceGatheringState='new';this.signalingState='stable';this.connectionState='new';}
   createOffer(){return Promise.resolve({type:'offer',sdp:''});}
   createAnswer(){return Promise.resolve({type:'answer',sdp:''});}
@@ -14933,6 +14940,13 @@ globalThis.RTCPeerConnection = class RTCPeerConnection {
   addEventListener(){} removeEventListener(){}
   getStats(){return Promise.resolve(new Map());}
 };
+globalThis.RTCPeerConnection = function RTCPeerConnection() {
+  if (!new.target) {
+    throw new TypeError("Failed to construct 'RTCPeerConnection': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+  }
+  return Reflect.construct(__RTCPCImpl, arguments, new.target);
+};
+globalThis.RTCPeerConnection.prototype = __RTCPCImpl.prototype;
 globalThis.RTCSessionDescription = class RTCSessionDescription { constructor(d){this.type=d?.type;this.sdp=d?.sdp;} };
 globalThis.RTCIceCandidate = class RTCIceCandidate { constructor(d){this.candidate=d?.candidate||'';} };
 // RTC satellite interfaces — DataDome-class audits walk the whole RTCPeerConnection
@@ -14994,6 +15008,15 @@ globalThis.RTCRtpTransceiver = class RTCRtpTransceiver {
   stop() {}
 };
 globalThis.webkitRTCPeerConnection = globalThis.RTCPeerConnection;
+// (#170) The same brand across the whole RTC orbit — Chrome answers
+// [object RTCDataChannel] / [object RTCSessionDescription] / … for every
+// interface here; a class-without-tag reads as [object Object].
+for (const __n of ['RTCPeerConnection','RTCSessionDescription','RTCIceCandidate','RTCDataChannel','RTCDtlsTransport','RTCSctpTransport','RTCStatsReport','RTCEncodedAudioFrame','RTCError','RTCPeerConnectionIceErrorEvent','RTCTrackEvent','RTCRtpTransceiver']) {
+  const __k = globalThis[__n];
+  if (__k && __k.prototype && !__k.prototype[Symbol.toStringTag]) {
+    Object.defineProperty(__k.prototype, Symbol.toStringTag, { value: __n, enumerable: false, writable: false, configurable: true });
+  }
+}
 
 // IndexedDB shim with spec-shaped open/upgrade semantics (#53). Storage and
 // auth libraries (Dexie, localForage, Firebase, Supabase) gate their whole
