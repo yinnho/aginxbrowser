@@ -379,6 +379,27 @@ globalThis.__diting_rangeMouseDown = globalThis.__diting_rangeMouseDown || funct
     globalThis.__diting_range_down = { el: t, old: old };
   } catch (_e) {}
 };
+// Chrome's Enter default action on a non-textarea control (#194): an
+// activation-behavior element (button/link/checkbox…) gets its click — a
+// focused type=button must not submit; any other input inside a form runs
+// the form's implicit submission, requestSubmit first (validation + the
+// cancelable submit event a page listener can veto) with submit() as the
+// fallback. Callers gate on the keydown/keypress pair not being
+// preventDefault'ed, like Chrome — a chat input that swallows Enter to
+// send via XHR stays unsubmitted. The CDP Input.dispatchKeyEvent path
+// (cdp/domains/input.rs) carries an inline twin of this logic.
+globalThis.__diting_enterDefault = globalThis.__diting_enterDefault || function(t) {
+  try {
+    if (!t || !t.localName || t.localName === 'textarea') return;
+    var ln = t.localName;
+    var ty = (ln === 'input') ? String(t.type || 'text').toLowerCase() : '';
+    var activatable = ln === 'button' || ln === 'a' || ln === 'area'
+      || (ln === 'input' && ['button','submit','reset','image','checkbox','radio','file'].indexOf(ty) >= 0);
+    if (activatable) { t.click(); return; }
+    var form = t.form || (t.closest && t.closest('form'));
+    if (form) { if (typeof form.requestSubmit === 'function') { form.requestSubmit(); } else { form.submit(); } }
+  } catch (_e) {}
+};
 // Real input hit-testing descends into child frames; elementFromPoint stops
 // at the iframe element (its spec contract). Returns {el, x, y} with the
 // coordinates translated into the deepest frame's own viewport (iframe-doc
@@ -1088,8 +1109,16 @@ pub(super) fn input_by_index(
     let nid = *element_map
         .get(&index)
         .ok_or_else(|| format!("invalid index: {}", index))?;
-    // Escape single quotes in text.
-    let escaped = text.replace('\\', "\\\\").replace('\'', "\\'");
+    // The Enter default action rides in INPUT_HELPERS; "type + Enter" on a
+    // fresh session has no earlier click to have injected them, so the fill
+    // path injects its own (idempotent, one evaluate).
+    page.evaluate_with_timeout(INPUT_HELPERS, crate::page::INTERACTION_EVAL_TIMEOUT);
+    // #194: the text rides as a serde_json string literal. Raw interpolation
+    // into a single-quoted JS literal turned any newline/quote/backslash into
+    // a SyntaxError — the script never ran, and the parse fallback answered a
+    // mute `filled:false`. "Type + Enter" payloads (text ending in \n) are
+    // the common agent gesture, so the whole path read as broken.
+    let text_lit = serde_json::to_string(text).expect("str serialization is infallible");
     // Act-side re-check (issue #46), same frame as the fill: a detached,
     // disabled, or readonly control answers `filled:false` with a named
     // reason instead of silently writing a value nobody will read back.
@@ -1113,27 +1142,42 @@ pub(super) fn input_by_index(
         // single trailing change. The tail blurs like a human leaving the
         // field — React pages that commit in onBlur (tmall's SKU suggest,
         // #100) never see their value land without it.
+        //
+        // #194: a `\n` in the text types as the Enter key (key 'Enter',
+        // keyCode 13) — the encoding browser86's FieldEditor uses for
+        // "submit". Chrome's default action differs by tag: a textarea keeps
+        // the newline in its value; an <input> stays single-line and its
+        // form submits implicitly (page Enter listeners run first — before
+        // the tail blur, so listener-driven submits survive #100's blur; the
+        // implicit requestSubmit runs after keypress, vetoable by
+        // preventDefault on the key or submit events, like Chrome). `\r`
+        // never lands: Chrome doesn't insert it.
         format!(
-            r#"(function() {{ var el = globalThis._wrap && globalThis._wrap({nid}); if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {{ {guard} el.focus(); {set_value} var text = '{text}'; var cur = ''; for (var i = 0; i < text.length; i++) {{ var ch = text[i]; var kc = ch.charCodeAt(0); var kev = function(t) {{ return new KeyboardEvent(t, {{key: ch, keyCode: kc, which: kc, bubbles: true}}); }}; el.dispatchEvent(kev('keydown')); if (p && p.set) p.set.call(el, cur + ch); else el.value = cur + ch; cur = cur + ch; el.dispatchEvent(new Event('input', {{bubbles: true}})); el.dispatchEvent(kev('keypress')); el.dispatchEvent(kev('keyup')); }} el.dispatchEvent(new Event('change', {{bubbles: true}})); el.blur(); return JSON.stringify({{filled: true, tag: el.tagName.toLowerCase(), id: el.id || '', name: el.getAttribute('name') || '', value: el.value}}); }} return '{{"filled":false}}'; }})()"#,
+            r#"(function() {{ var el = globalThis._wrap && globalThis._wrap({nid}); if (!el) return '{{"filled":false,"reason":"no-element"}}'; if (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA') return '{{"filled":false,"reason":"wrong-tag"}}'; {guard} el.focus(); {set_value} var text = {text}; var cur = ''; for (var i = 0; i < text.length; i++) {{ var ch = text[i]; if (ch === '\r') continue; var enter = ch === '\n'; var key = enter ? 'Enter' : ch; var kc = enter ? 13 : ch.charCodeAt(0); var kev = function(t) {{ return new KeyboardEvent(t, {{key: key, keyCode: kc, which: kc, bubbles: true, cancelable: true}}); }}; var kd = el.dispatchEvent(kev('keydown')); if (!enter || el.tagName === 'TEXTAREA') {{ if (p && p.set) p.set.call(el, cur + ch); else el.value = cur + ch; cur = cur + ch; el.dispatchEvent(new Event('input', {{bubbles: true}})); }} var kp = el.dispatchEvent(kev('keypress')); if (enter && el.tagName !== 'TEXTAREA' && kd && kp && globalThis.__diting_enterDefault) globalThis.__diting_enterDefault(el); el.dispatchEvent(kev('keyup')); }} el.dispatchEvent(new Event('change', {{bubbles: true}})); el.blur(); return JSON.stringify({{filled: true, tag: el.tagName.toLowerCase(), id: el.id || '', name: el.getAttribute('name') || '', value: el.value}}); }})()"#,
             nid = nid,
             guard = guard,
             set_value = set_value,
-            text = escaped,
+            text = text_lit,
         )
     } else {
         format!(
-            r#"(function() {{ var el = globalThis._wrap && globalThis._wrap({nid}); if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {{ {guard} el.focus(); {set_value} if (p && p.set) p.set.call(el, '{text}'); else el.value = '{text}'; el.dispatchEvent(new Event('input', {{bubbles: true}})); el.dispatchEvent(new Event('change', {{bubbles: true}})); return JSON.stringify({{filled: true, tag: el.tagName.toLowerCase(), id: el.id || '', name: el.getAttribute('name') || '', value: el.value}}); }} return '{{"filled":false}}'; }})()"#,
+            r#"(function() {{ var el = globalThis._wrap && globalThis._wrap({nid}); if (!el) return '{{"filled":false,"reason":"no-element"}}'; if (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA') return '{{"filled":false,"reason":"wrong-tag"}}'; {guard} el.focus(); {set_value} if (p && p.set) p.set.call(el, {text}); else el.value = {text}; el.dispatchEvent(new Event('input', {{bubbles: true}})); el.dispatchEvent(new Event('change', {{bubbles: true}})); return JSON.stringify({{filled: true, tag: el.tagName.toLowerCase(), id: el.id || '', name: el.getAttribute('name') || '', value: el.value}}); }})()"#,
             nid = nid,
             guard = guard,
             set_value = set_value,
-            text = escaped,
+            text = text_lit,
         )
     };
     let result = page.evaluate_with_timeout(&js_body, crate::page::INTERACTION_EVAL_TIMEOUT);
+    // Null / unparseable = the script didn't run or returned nothing
+    // parseable (an exception, or the watchdog terminating a runaway
+    // handler). Say so instead of a bare false — #194's debugging detour
+    // started exactly here: three different failures used to share one
+    // mute value that read as "element_map desynced".
     let parsed = result
         .as_str()
         .and_then(|s| serde_json::from_str::<Value>(s).ok())
-        .unwrap_or_else(|| serde_json::json!({"filled": false}));
+        .unwrap_or_else(|| serde_json::json!({"filled": false, "reason": "script-error"}));
     Ok(parsed)
 }
 

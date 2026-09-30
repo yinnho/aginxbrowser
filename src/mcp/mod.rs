@@ -742,9 +742,15 @@ selections and captcha sliders that only track while the pointer travels.",
         description = "Type text into an input/textarea element by its index (from session_state \
 output), focusing it and dispatching input/change events. events:\"full\" is the complete human \
 typing gesture: per-character keydown/keypress/input/keyup cycles, trailing change, then blur — \
-the tail blur commits on forms that save in onBlur (React capture listeners, #100). \
-A disabled, readonly, or detached field answers `filled:false` with a `reason` instead of a silent \
-write. Hidden inputs are legitimate targets and are filled normally.",
+the tail blur commits on forms that save in onBlur (React capture listeners, #100). In full mode \
+a newline in the text types as the Enter key (key:'Enter', keyCode 13 — \"type + Enter submit\"): \
+a textarea keeps the newline in its value, a single-line input stays single-line, the page's \
+Enter listeners fire before the blur, and if the key wasn't canceled the input's form submits \
+implicitly (Chrome's default action; preventDefault on the key or submit events vetoes it, so \
+chat inputs that swallow Enter stay unsubmitted). Any characters — newlines, quotes, backslashes \
+— ride through as-is. A refused fill answers filled:false with a reason (readonly/disabled/\
+detached/no-element/wrong-tag/script-error) instead of a silent write. Hidden inputs are \
+legitimate targets and are filled normally.",
         annotations(title = "Session Input")
     )]
     async fn session_input(&self, Parameters(params): Parameters<SessionInputParams>) -> String {

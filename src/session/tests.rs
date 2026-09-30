@@ -715,6 +715,152 @@
         );
     }
 
+    /// #194: text carrying newlines/quotes/backslashes used to break the fill
+    /// script's string literal — the whole IIFE was a SyntaxError and the
+    /// fallback answered a mute `filled:false`. The "type + Enter" payload
+    /// (text ending in \n, the encoding browser86's FieldEditor uses) never
+    /// landed at all. Enter must now type as a real Enter key: a textarea
+    /// keeps the newline in its value, an input stays single-line, and an
+    /// input in a form gets Chrome's implicit submission — gated on the key
+    /// events not being preventDefault'ed.
+    #[tokio::test]
+    async fn input_carries_special_characters_and_enter() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /p",
+            "<html><body><textarea id='ta'></textarea><input id='in'>\
+             <form id='f' action='#'><input id='insub'><input id='swallow'></form>\
+             <input id='plain'>\
+             <script>window.enterKeydowns = 0; window.submitCount = 0; \
+             document.addEventListener('keydown', \
+             function(e){ if (e.key === 'Enter') window.enterKeydowns++; }); \
+             document.getElementById('f').addEventListener('submit', \
+             function(e){ e.preventDefault(); window.submitCount++; }); \
+             document.getElementById('swallow').addEventListener('keydown', \
+             function(e){ if (e.key === 'Enter') e.preventDefault(); });</script>\
+             </body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/p")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        let state = mgr
+            .send(&sid, |reply| SessionCommand::State { reply })
+            .await
+            .unwrap();
+        let ta = state_index_of(&state, "ta");
+        let inp = state_index_of(&state, "in");
+        let insub = state_index_of(&state, "insub");
+        let swallow = state_index_of(&state, "swallow");
+        let plain = state_index_of(&state, "plain");
+
+        // Simple path: every character class that used to break the literal.
+        let tricky = "line1\nline2 \"quoted\" 'single' \\ tail";
+        let resp = mgr
+            .send(&sid, |reply| SessionCommand::Input {
+                index: plain,
+                text: tricky.to_string(),
+                full_events: false,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp["filled"], true, "special chars must fill: {resp}");
+        assert_eq!(resp["value"], tricky);
+
+        // Full path on a textarea: the trailing \n types as Enter and the
+        // newline lands in the value (Chrome's default action).
+        let resp = mgr
+            .send(&sid, |reply| SessionCommand::Input {
+                index: ta,
+                text: "hello\n".to_string(),
+                full_events: true,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp["filled"], true, "textarea Enter fill: {resp}");
+        assert_eq!(resp["value"], "hello\n");
+
+        // Full path on a single-line input: Enter fires the key but appends
+        // nothing — the value keeps the text without the newline.
+        let resp = mgr
+            .send(&sid, |reply| SessionCommand::Input {
+                index: inp,
+                text: "86浏览器\n".to_string(),
+                full_events: true,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp["filled"], true, "input Enter fill: {resp}");
+        assert_eq!(resp["value"], "86浏览器");
+
+        // Enter inside a form runs Chrome's implicit submission (#194): the
+        // keydown/keypress pair wasn't canceled, so requestSubmit fires the
+        // form's submit event (the listener vetoes the navigation itself).
+        let resp = mgr
+            .send(&sid, |reply| SessionCommand::Input {
+                index: insub,
+                text: "query\n".to_string(),
+                full_events: true,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp["filled"], true, "form input Enter fill: {resp}");
+        assert_eq!(resp["value"], "query");
+
+        // A preventDefault'ed Enter must NOT submit — the chat-input shape,
+        // where the page swallows the key to send via XHR instead.
+        let resp = mgr
+            .send(&sid, |reply| SessionCommand::Input {
+                index: swallow,
+                text: "hi\n".to_string(),
+                full_events: true,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp["filled"], true, "swallowed Enter fill: {resp}");
+        assert_eq!(resp["value"], "hi");
+
+        let count = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "window.submitCount".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "implicit submit fired once; the vetoed Enter stayed unsubmitted");
+
+        let enters = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "window.enterKeydowns".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(enters, 4, "every Enter dispatched as a real key event");
+
+        assert!(
+            mgr.close_and_wait(&sid).await,
+            "session thread must ack close"
+        );
+    }
+
     #[tokio::test]
     async fn viewport_command_pins_viewport_across_navigation() {
         let _net = crate::server::test_util::net_env_guard();

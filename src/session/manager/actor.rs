@@ -458,10 +458,22 @@ pub(super) fn session_thread(
 
                         SessionCommand::Input { index, text, full_events, reply } => {
                             let result = input_by_index(&mut page, &element_map, index, &text, full_events);
+                            // A filled Enter can submit the form implicitly
+                            // (#194) and a change listener can navigate by
+                            // itself — drain the queued navigation so the
+                            // next command sees the landing page, same
+                            // contract as the click path.
+                            let filled = result
+                                .as_ref()
+                                .map(|v| v.get("filled").and_then(Value::as_bool).unwrap_or(false))
+                                .unwrap_or(false);
+                            if filled {
+                                let _ = page.process_pending_navigation().await;
+                            }
                             recorder.push(RecordedAction::Input {
                                 index,
                                 text,
-                                ok: result.as_ref().map(|v| v.get("filled").and_then(Value::as_bool).unwrap_or(false)).unwrap_or(false),
+                                ok: filled,
                             });
                             let _ = reply.send(result);
                         }
