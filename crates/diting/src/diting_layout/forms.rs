@@ -114,7 +114,9 @@ fn paint_select_arrow(out: &mut Canvas, x: i64, y: i64, w: i64, h: i64, alpha: f
 /// — and a select's arrow in its reserved right zone. The shell only
 /// paints while `fill` is set (the author styled no background of their
 /// own — their bg/border already read as the box). Works in whatever
-/// coordinate space `out` is in, like [`paint_form_widget`].
+/// coordinate space `out` is in, like [`paint_form_widget`]. `rtl`
+/// (#188-3, blitz#981) anchors Input/Textarea value lines at the RIGHT
+/// edge; Select/Button stay physical.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn paint_form_control(
     out: &mut Canvas,
@@ -128,6 +130,7 @@ pub(super) fn paint_form_control(
     fonts: &FontBook,
     alpha: f32,
     caret: Option<(usize, [u8; 4])>,
+    rtl: bool,
 ) {
     if w <= 0 || h <= 0 {
         return;
@@ -175,7 +178,13 @@ pub(super) fn paint_form_control(
         FormRun::Textarea => (x as f32 + 2.0, y as f32 + 2.0),
         _ => (x as f32 + 2.0, y as f32 + (h as f32 - line_height) / 2.0),
     };
-    if !text.trim().is_empty() {
+    // #188-3 (blitz#981): an RTL text-entry control anchors every value
+    // line at the RIGHT edge — an RTL paragraph's start side. Same-direction
+    // content lands exactly; no UAX #9 reordering happens, so a mixed run
+    // keeps logical order. Select/Button keep their physical anchoring.
+    if rtl && matches!(form, FormRun::Input | FormRun::Textarea) {
+        paint_rtl_value(out, x, y, w, h, ty, text, font_size, bold, line_height, color, fonts, alpha);
+    } else if !text.trim().is_empty() {
         let r = fonts.rasterize_wrapped(
             text,
             font_size,
@@ -240,9 +249,22 @@ pub(super) fn paint_form_control(
             }
             // Input never wraps in Chrome (the text scrolls); the engine
             // has no text scroll, so a caret that wrapped past the first
-            // line clamps to the right padding — the deterministic
-            // stand-in. Every bar clamps into the field regardless.
-            let bar_x = if form == FormRun::Input && line > 0 {
+            // line clamps to the scroll edge's padding — the RIGHT side in
+            // LTR, the LEFT side in RTL (the mirror base below rides the
+            // same right-anchored line the ink paints on). Every bar clamps
+            // into the field regardless.
+            let line_w = lines
+                .get(line)
+                .map(|l| l.token_idx.iter().map(|&ti| tokens[ti].width).sum::<f32>())
+                .unwrap_or(0.0);
+            let rx = x as f32 + w as f32 - 2.0;
+            let bar_x = if rtl {
+                if form == FormRun::Input && line > 0 {
+                    x as f32 + 2.0
+                } else {
+                    rx - line_w + x_before
+                }
+            } else if form == FormRun::Input && line > 0 {
                 x as f32 + w as f32 - 3.0
             } else {
                 tx + x_before
@@ -258,4 +280,58 @@ pub(super) fn paint_form_control(
             out.pop_clip();
         }
     }
+}
+
+/// Per-line right anchoring for an RTL control value (#188-3, blitz#981):
+/// the same token/wrap walk the caret rides, one line rasterized at a time
+/// with its END edge at the field's right padding — the mirror of the
+/// rasterize_wrapped single blit at `x + 2`. Called only for Input/Textarea
+/// with `direction: rtl`; no UAX #9 reordering, so tokens keep logical
+/// order (mixed runs lay out LTR-tagged, just right-anchored).
+#[allow(clippy::too_many_arguments)]
+fn paint_rtl_value(
+    out: &mut Canvas,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+    ty: f32,
+    text: &str,
+    font_size: f32,
+    bold: bool,
+    line_height: f32,
+    color: [u8; 4],
+    fonts: &FontBook,
+    alpha: f32,
+) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let wrap_at = (w - 4).max(1) as f32;
+    let tokens = tokens_of(text, font_size, bold, fonts, false, 0.0, WhiteSpace::Normal, false, None);
+    let lines = greedy_wrap(&tokens, Some(wrap_at), WhiteSpace::Normal);
+    let rx = x as f32 + w as f32 - 2.0;
+    out.push_clip(x + 1, y + 1, x + w - 1, y + h - 1);
+    for (li, l) in lines.iter().enumerate() {
+        let mut line_text = String::new();
+        let mut line_w = 0.0f32;
+        for &ti in &l.token_idx {
+            line_text.push_str(&tokens[ti].text);
+            line_w += tokens[ti].width;
+        }
+        if line_text.is_empty() {
+            continue;
+        }
+        let r = fonts.rasterize(
+            &line_text,
+            font_size,
+            bold,
+            alpha_color(color, alpha),
+            line_height,
+            false,
+            None,
+        );
+        out.blit_text(&r, (rx - line_w).round() as i64, (ty + li as f32 * line_height + r.top).round() as i64);
+    }
+    out.pop_clip();
 }

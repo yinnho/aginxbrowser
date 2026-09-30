@@ -814,14 +814,16 @@ mod cross_check {
         cs.font_size = Some(style.get_font().font_size.used_size.0.px());
         cs.font_weight = Some(style.get_font().font_weight.value() as u16);
 
+        // #188-3: start/end map FAITHFULLY now — both sides keep the logical
+        // keyword in computed style and resolve at consume time, so the
+        // cross-check compares like with like (direction itself stays
+        // unmapped: stylo's writing-mode face has no slot here).
         cs.text_align = match style.clone_text_align() {
-            TextAlignKeyword::Start | TextAlignKeyword::Left | TextAlignKeyword::MozLeft => {
-                Some(TextAlign::Left)
-            }
+            TextAlignKeyword::Start => Some(TextAlign::Start),
+            TextAlignKeyword::Left | TextAlignKeyword::MozLeft => Some(TextAlign::Left),
             TextAlignKeyword::Center | TextAlignKeyword::MozCenter => Some(TextAlign::Center),
-            TextAlignKeyword::End | TextAlignKeyword::Right | TextAlignKeyword::MozRight => {
-                Some(TextAlign::Right)
-            }
+            TextAlignKeyword::End => Some(TextAlign::End),
+            TextAlignKeyword::Right | TextAlignKeyword::MozRight => Some(TextAlign::Right),
             _ => None,
         };
         Some(cs)

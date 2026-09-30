@@ -2374,3 +2374,172 @@ mod dpr_scale_items_tests {
         assert_eq!(px(300, 20), vec![0, 0, 0, 0], "just right of it");
     }
 }
+
+/// #188-3 (blitz#981): the `direction` property + `dir` attribute face.
+/// `direction: rtl` now parses and inherits; `dir` fills the same slot as a
+/// presentational hint BELOW author declarations (author `direction: ltr`
+/// beats `dir="rtl"`); `dir="auto"` takes HTML's first-strong rule with the
+/// control's value for input/textarea; and at consume time a start/undeclared
+/// alignment on an rtl block right-aligns its inline content like Chrome.
+/// No UAX #9 reordering — same-direction content lands exactly, mixed runs
+/// keep logical order.
+#[cfg(test)]
+mod direction_rtl_tests {
+    use crate::diting_layout::*;
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType, TextAlign, TextDirection};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    fn styles_for(
+        sheet: &str,
+        body: &str,
+    ) -> (
+        crate::diting_dom::tree::DomTree,
+        std::collections::HashMap<crate::diting_dom::tree::NodeId, crate::diting_css::ComputedStyle>,
+    ) {
+        let html = format!("<html><body>{body}</body></html>");
+        let tree = parse_html(&html);
+        let rules = parse_stylesheet_for(sheet, (800.0, 600.0), CssMediaType::Screen);
+        let styles = compute_styles(&tree, &rules, (800.0, 600.0));
+        (tree, styles)
+    }
+
+    #[test]
+    fn direction_parses_and_inherits() {
+        let (tree, styles) = styles_for(
+            "#p { direction: rtl }",
+            r#"<div id="p"><div id="kid">text</div></div>"#,
+        );
+        let p = tree.query_selector("#p").unwrap().unwrap();
+        let kid = tree.query_selector("#kid").unwrap().unwrap();
+        assert_eq!(styles[&p].direction, Some(TextDirection::Rtl));
+        // Inherited down the subtree as Some(Rtl) — never "unset".
+        assert_eq!(styles[&kid].direction, Some(TextDirection::Rtl));
+        // An ltr declaration parses too, and undeclared stays None (= ltr).
+        let (tree, styles) = styles_for(
+            "#e { direction: ltr }",
+            r#"<div id="e">x</div><div id="u">y</div>"#,
+        );
+        assert_eq!(styles[&tree.query_selector("#e").unwrap().unwrap()].direction, Some(TextDirection::Ltr));
+        assert_eq!(styles[&tree.query_selector("#u").unwrap().unwrap()].direction, None);
+    }
+
+    #[test]
+    fn dir_attribute_hint_sits_below_author_css() {
+        // The hint fills the slot; an author declaration beats it.
+        let (tree, styles) = styles_for(
+            "#w { direction: ltr }",
+            r#"<div id="h" dir="rtl">x</div><div id="w" dir="rtl">y</div>"#,
+        );
+        assert_eq!(styles[&tree.query_selector("#h").unwrap().unwrap()].direction, Some(TextDirection::Rtl));
+        assert_eq!(styles[&tree.query_selector("#w").unwrap().unwrap()].direction, Some(TextDirection::Ltr));
+    }
+
+    #[test]
+    fn dir_auto_takes_first_strong() {
+        // input's value attribute is the candidate text for the control's
+        // own dir=auto (HTML §4.10.5); a plain element uses its content.
+        let (tree, styles) = styles_for(
+            "",
+            r#"<input id="ar" dir="auto" value="مرحبا">
+               <input id="la" dir="auto" value="hello">
+               <div id="t" dir="auto">سلام</div>
+               <div id="n" dir="auto">123</div>"#,
+        );
+        assert_eq!(styles[&tree.query_selector("#ar").unwrap().unwrap()].direction, Some(TextDirection::Rtl));
+        assert_eq!(
+            styles[&tree.query_selector("#la").unwrap().unwrap()].direction,
+            Some(TextDirection::Ltr),
+            "first strong Latin resolves ltr (Chrome's computed direction for dir=auto)"
+        );
+        assert_eq!(styles[&tree.query_selector("#t").unwrap().unwrap()].direction, Some(TextDirection::Rtl));
+        assert_eq!(
+            styles[&tree.query_selector("#n").unwrap().unwrap()].direction,
+            None,
+            "no strong character leaves the slot unset (= ltr initial)"
+        );
+    }
+
+    fn text_x(sheet: &str, body: &str, needle: &str) -> f32 {
+        let (tree, styles) = styles_for(sheet, body);
+        let (_, items, ..) = layout_dom_with_paint_order_and_images(
+            &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
+        );
+        items
+            .iter()
+            .find_map(|it| match it {
+                PaintItem::Text { text, x, .. } if text.contains(needle) => Some(*x),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no text item for {needle:?}"))
+    }
+
+    #[test]
+    fn rtl_block_right_aligns_its_runs() {
+        // An rtl block with NO text-align right-aligns its inline content —
+        // the undeclared initial IS start (css-text-3), and start flips
+        // against the element's own base direction, exactly like Chrome.
+        let right = text_x("#p { direction: rtl; width: 400px }", r#"<div id="p">hi</div>"#, "hi");
+        assert!(right > 300.0, "rtl run must hug the right edge; x={right}");
+        let left = text_x("#p { width: 400px }", r#"<div id="p">hi</div>"#, "hi");
+        assert!(left < 50.0, "ltr undeclared stays flush left (no-promote fast path); x={left}");
+    }
+
+    #[test]
+    fn logical_start_end_flip_by_direction() {
+        // text-align: end under rtl lands LEFT; start under rtl lands RIGHT.
+        // Computed style keeps the logical keyword (Chrome reports start/end
+        // verbatim) — resolution happens at consume time only.
+        let end_left = text_x(
+            "#p { direction: rtl; text-align: end; width: 400px }",
+            r#"<div id="p">hi</div>"#, "hi",
+        );
+        assert!(end_left < 50.0, "end under rtl = physical left; x={end_left}");
+        let start_right = text_x(
+            "#p { direction: rtl; text-align: start; width: 400px }",
+            r#"<div id="p">hi</div>"#, "hi",
+        );
+        assert!(start_right > 300.0, "start under rtl = physical right; x={start_right}");
+        let (tree, styles) = styles_for("#p { text-align: end }", r#"<div id="p">x</div>"#);
+        let p = tree.query_selector("#p").unwrap().unwrap();
+        assert_eq!(styles[&p].text_align, Some(TextAlign::End), "computed style keeps the logical keyword");
+    }
+
+    /// Paint-level: an RTL input anchors its value at the RIGHT edge of the
+    /// field — the mirror of the LTR left inset. Ink column positions are
+    /// measured on the executed canvas (dark pixels only; the field's
+    /// 118-gray border and white fill are excluded by the threshold).
+    #[test]
+    fn rtl_input_anchors_value_at_right_edge() {
+        let ink_span = |dir: &str| -> (f32, f32) {
+            let body = format!(r#"<input id="i" dir="{dir}" value="hello" style="width: 150px">"#);
+            let html = format!("<html><body style=\"margin:0\">{body}</body></html>");
+            let tree = parse_html(&html);
+            let rules = parse_stylesheet_for("", (200.0, 100.0), CssMediaType::Screen);
+            let styles = compute_styles(&tree, &rules, (200.0, 100.0));
+            let (_, items, ..) = layout_dom_with_paint_order_and_images(
+                &tree, &styles, &crate::diting_fonts::font_book(), 200.0, 100.0, None, None,
+            );
+            let mut canvas = paint::Canvas::new_transparent(200, 100);
+            paint::execute(&items, &crate::diting_fonts::font_book(), &mut canvas);
+            let mut lo = f32::MAX;
+            let mut hi = f32::MIN;
+            for y in 0..canvas.height {
+                for x in 0..canvas.width {
+                    let i = (y * canvas.width + x) * 4;
+                    let (r, g, b, a) = (canvas.data[i], canvas.data[i + 1], canvas.data[i + 2], canvas.data[i + 3]);
+                    if a == 255 && r < 100 && g < 100 && b < 100 {
+                        lo = lo.min(x as f32);
+                        hi = hi.max(x as f32);
+                    }
+                }
+            }
+            assert!(lo <= hi, "no ink at all for dir={dir}");
+            (lo, hi)
+        };
+        let (lo_ltr, _) = ink_span("ltr");
+        let (lo_rtl, hi_rtl) = ink_span("rtl");
+        assert!(lo_ltr < 15.0, "ltr value hugs the left inset; lo={lo_ltr}");
+        assert!(lo_rtl > 60.0, "rtl value must be right-anchored, not left; lo={lo_rtl}");
+        assert!(hi_rtl > 120.0, "rtl ink reaches near the right edge; hi={hi_rtl}");
+    }
+}

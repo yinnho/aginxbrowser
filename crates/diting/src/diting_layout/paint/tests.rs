@@ -363,6 +363,7 @@ fn band_dy_zero_matches_execute() {
             widget: None,
             form: None,
             caret: None,
+            form_rtl: false,
         },
         PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None, ws: WhiteSpace::Normal, text_shadow: None, small_caps: false, han: None },
     ];
@@ -470,6 +471,7 @@ fn form_widgets_paint_checked_state() {
         alpha: 1.0,
         form: None,
         caret: None,
+        form_rtl: false,
     };
     // Interior pixel classes: field is white, border gray, ink near-black.
     let field = [255, 255, 255, 255];
@@ -533,6 +535,7 @@ fn form_widget_paint_range_slider() {
         alpha: 1.0,
         form: None,
         caret: None,
+        form_rtl: false,
     };
     // Track x ∈ [11, 117), cy = 12; fraction 0.25 parks the thumb
     // center at 11 + round(106 × 0.25) = 38.
@@ -569,6 +572,7 @@ fn form_controls_pad_center_and_arrow() {
         alpha: 1.0,
         form,
         caret: None,
+        form_rtl: false,
     };
     // Ink bbox over the whole canvas, three channels dark (the green bg
     // and the gray ring/arrow both sit at or above 80).
@@ -631,6 +635,7 @@ fn form_controls_pad_center_and_arrow() {
         alpha: 1.0,
         form: Some(super::super::FormRun::Textarea),
         caret: None,
+        form_rtl: false,
     };
     execute(&[tall], &fonts, &mut c);
     let (_x0, y0, _x1, y1) = ink_bbox(&c).expect("textarea run ink");
@@ -681,6 +686,7 @@ fn caret_paints_bar_at_offset() {
         alpha: 1.0,
         form: Some(super::super::FormRun::Input),
         caret,
+        form_rtl: false,
     };
     let ink = [0u8, 0, 0, 255];
     // The single dark column and its y extent: the white run keeps the
@@ -743,6 +749,7 @@ fn caret_paints_bar_at_offset() {
         alpha: 1.0,
         form: Some(super::super::FormRun::Textarea),
         caret: Some((5, ink)),
+        form_rtl: false,
     };
     let mut c = Canvas::new_filled(60, 62, [0, 255, 0, 255]);
     execute(&[tall], &fonts, &mut c);

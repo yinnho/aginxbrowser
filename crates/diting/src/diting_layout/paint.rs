@@ -2262,7 +2262,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     out.pop_clip();
                 }
             }
-            PaintItem::Replaced { rect, alt, fill_placeholder, widget, form, alpha, caret } => {
+            PaintItem::Replaced { rect, alt, fill_placeholder, widget, form, alpha, caret, form_rtl } => {
                 if out.xf().is_some() {
                     // Rasterize the placeholder + alt into a transparent
                     // LOCAL scratch at raw metrics (the bracket maps the
@@ -2290,7 +2290,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     } else if let Some(form) = form {
                         paint_form_control(
                             &mut scratch, 0, 0, w as i64, h as i64, alt.as_ref(), *form,
-                            *fill_placeholder, fonts, *alpha, *caret,
+                            *fill_placeholder, fonts, *alpha, *caret, *form_rtl,
                         );
                     } else {
                         if *fill_placeholder {
@@ -2337,7 +2337,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     } else if let Some(form) = form {
                         paint_form_control(
                             out, x, y, w, h, alt.as_ref(), *form, *fill_placeholder, fonts, *alpha,
-                            *caret,
+                            *caret, *form_rtl,
                         );
                     } else {
                         if *fill_placeholder && w > 0 && h > 0 {

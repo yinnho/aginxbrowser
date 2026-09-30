@@ -32,7 +32,8 @@ use taffy::prelude::*;
 use crate::diting_css::{
     AlignMode, ComputedStyle, Display as CssDisplay, FlexDirection as CssFlexDirection,
     FlexWrapMode, GridTrack, JustifyMode, ObjectFit, ObjectPositionPart, Overflow, PositionMode,
-    TextAlign, TextDecorations, TextOverflow, TextShadow, TextTransform, WhiteSpace,
+    TextAlign, TextDecorations, TextDirection, TextOverflow, TextShadow, TextTransform,
+    WhiteSpace,
 };
 use crate::diting_dom::tree::{DomTree, NodeId};
 
@@ -222,8 +223,12 @@ fn to_taffy_style(style: &ComputedStyle, pct_h_resolves: bool) -> Style {
     // Cells join the promote: `td { text-align: center }` is everywhere in
     // HTML-email-era markup. So do inline-blocks: text-align inside them
     // aligns the interior's inline content the same way (§9.4.2).
+    // Logical alignment resolves physical here (#188-3, blitz#981) — an rtl
+    // block with no text-align right-aligns its inline content like Chrome;
+    // ltr pages resolve to Left and keep the no-promote fast path.
+    let text_align = style.physical_text_align();
     let promote = matches!(display, CssDisplay::Block | CssDisplay::TableCell | CssDisplay::InlineBlock)
-        && matches!(style.text_align, Some(TextAlign::Center) | Some(TextAlign::Right));
+        && matches!(text_align, Some(TextAlign::Center) | Some(TextAlign::Right));
     s.display = match display {
         CssDisplay::Block if promote => Display::Flex,
         CssDisplay::TableCell if promote => Display::Flex,
@@ -253,7 +258,7 @@ fn to_taffy_style(style: &ComputedStyle, pct_h_resolves: bool) -> Style {
     };
     if promote {
         s.flex_direction = FlexDirection::Column;
-        s.align_items = match style.text_align {
+        s.align_items = match text_align {
             Some(TextAlign::Center) => Some(AlignItems::CENTER),
             Some(TextAlign::Right) => Some(AlignItems::FLEX_END),
             _ => None,
@@ -5345,6 +5350,12 @@ pub enum PaintItem {
         /// the whole condition is evaluated here. Deterministic always-on
         /// (no blink) — a screenshot must show it.
         caret: Option<(usize, [u8; 4])>,
+        /// RTL value anchoring (#188-3, blitz#981): the control's base
+        /// direction resolved at collect time — an Input/Textarea whose
+        /// direction is rtl anchors each value line at the RIGHT edge (an
+        /// RTL paragraph's start side). Select/Button stay physical; runs
+        /// keep logical order (no UAX #9 reordering).
+        form_rtl: bool,
     },
     /// A compiled svg subtree painted into its replaced box (svg v1): the
     /// op list is in viewBox user units with group transforms pre-flattened
@@ -7785,6 +7796,11 @@ pub fn layout_collect(
                     } else {
                         alt
                     };
+                    // RTL value anchoring (#188-3, blitz#981): resolved at
+                    // collect time like the caret (paint keeps no tree
+                    // access); Select/Button stay physical.
+                    let form_rtl = matches!(form, Some(FormRun::Input) | Some(FormRun::Textarea))
+                        && styles.get(dom_id).is_some_and(|s| s.direction == Some(TextDirection::Rtl));
                     items.push(PaintItem::Replaced {
                         rect: bg_rect,
                         alt,
@@ -7793,6 +7809,7 @@ pub fn layout_collect(
                         widget,
                         form,
                         caret,
+                        form_rtl,
                     });
                 }
             }

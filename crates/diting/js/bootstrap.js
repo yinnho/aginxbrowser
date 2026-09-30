@@ -5681,6 +5681,12 @@ class Document extends Node {
   }
   get URL() { return _domParse("document_url") ?? ""; }
   get documentURI() { return this.URL; }
+  // #188-3: document.dir reflects the html element's dir (HTML §3.2.6 —
+  // "the dir attribute on the html element" is the document-level one).
+  // el.dir already reflects/updates the attribute, which the CSS hint arm
+  // consumes, so delegating is both the spec shape and the wired path.
+  get dir() { return this.documentElement.dir; }
+  set dir(v) { this.documentElement.dir = v; }
   // URL of the document that initiated this navigation; empty for direct
   // automation navigations. Computed by the navigation layer per
   // strict-origin-when-cross-origin (upstream edb1785).

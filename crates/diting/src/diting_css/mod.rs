@@ -1149,6 +1149,11 @@ pub struct ComputedStyle {
     /// overflowing inline content. `None` = `clip`.
     pub text_overflow: Option<TextOverflow>,
     pub text_align: Option<TextAlign>,
+    /// Inline base direction (#188-3, blitz#981): `direction: ltr|rtl`,
+    /// inherited; the `dir` attribute hint fills the same slot below author
+    /// declarations. `None` = ltr (the initial value), never "unset" —
+    /// an inherited rtl survives as Some(Rtl) down the subtree.
+    pub direction: Option<TextDirection>,
     /// Per-axis overflow (css-overflow-3). `None` = not declared (visible
     /// initial); the `overflow` shorthand writes both axes, so it clobbers
     /// prior longhands the way a real shorthand does. The §3.1 pair rule
@@ -2243,6 +2248,20 @@ impl Transform2D {
 /// honest alternative is dropping the declaration, which is worse).
 /// translate lands outermost and just adds.
 impl ComputedStyle {
+    /// Consume-time physical alignment (#188-3, blitz#981): start/end —
+    /// and the undeclared initial, which IS start (css-text-3) — resolve
+    /// against the element's own base direction. The computed style keeps
+    /// the logical keyword (Chrome reports start/end verbatim); only
+    /// layout's consume sites (to_taffy_style) call this.
+    pub fn physical_text_align(&self) -> Option<TextAlign> {
+        let rtl = self.direction == Some(TextDirection::Rtl);
+        match self.text_align {
+            Some(TextAlign::Start) | None => Some(if rtl { TextAlign::Right } else { TextAlign::Left }),
+            Some(TextAlign::End) => Some(if rtl { TextAlign::Left } else { TextAlign::Right }),
+            other => other,
+        }
+    }
+
     pub fn effective_transform(&self) -> Option<Transform2D> {
         let has_ind = self.translate_prop.is_some()
             || self.rotate_prop.is_some()
@@ -3393,6 +3412,23 @@ pub enum TextAlign {
     Left,
     Center,
     Right,
+    /// Logical edges (css-text-3): resolved against the element's own
+    /// [`TextDirection`] at consume time. `Start` is also the property's
+    /// initial value, so an undeclared text-align rides the same
+    /// resolution (#188-3).
+    Start,
+    End,
+}
+
+/// CSS Writing Modes §2.1: the inline base direction (`direction`),
+/// inherited. Consumed faces (#188-3, blitz#981): logical text-align
+/// resolution and RTL anchoring of text-entry control values. No UAX #9
+/// glyph reordering happens — same-direction content lands exactly, mixed
+/// runs keep logical order; `unicode-bidi` is not modeled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextDirection {
+    Ltr,
+    Rtl,
 }
 
 /// `text-transform` case mapping (CSS Text §6.1) — rendering-only; the DOM
@@ -4551,9 +4587,19 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             .is_some(),
         "text-align" => {
             style.text_align = match v {
-                "left" | "start" => Some(TextAlign::Left),
+                "left" => Some(TextAlign::Left),
+                "start" => Some(TextAlign::Start),
                 "center" => Some(TextAlign::Center),
-                "right" | "end" => Some(TextAlign::Right),
+                "right" => Some(TextAlign::Right),
+                "end" => Some(TextAlign::End),
+                _ => return false,
+            };
+            true
+        }
+        "direction" => {
+            style.direction = match v {
+                "ltr" => Some(TextDirection::Ltr),
+                "rtl" => Some(TextDirection::Rtl),
                 _ => return false,
             };
             true
@@ -6288,6 +6334,50 @@ struct CascadeCandidate<'a> {
 /// rules (already filtered by the caller's selector matching), and the parent
 /// style. This keeps the module decoupled from any particular matching
 /// strategy while still locking ordering semantics.
+/// `dir="auto"` directionality (#188-3, HTML §3.2.6): the first character
+/// with a strong bidi class decides — an R/AL script (Hebrew, Arabic)
+/// means rtl, an L script (Latin/Greek/Cyrillic) means ltr. The candidate
+/// text is the control's value for input/textarea (live mirror first, then
+/// the parsed default), else the element's text content. Weak characters
+/// (digits, punctuation, whitespace) never decide; no strong character at
+/// all falls back to ltr.
+fn first_strong_direction(
+    tree: &diting_dom::tree::DomTree,
+    node_id: diting_dom::tree::NodeId,
+    tag: &str,
+) -> Option<TextDirection> {
+    let candidate = if matches!(tag, "input" | "textarea") {
+        tree.with_node(node_id, |n| {
+            n.live_value()
+                .map(|v| v.to_string())
+                .or_else(|| n.get_attribute("value").map(|v| v.to_string()))
+        })
+        .flatten()
+        .unwrap_or_default()
+    } else {
+        tree.text_content(node_id)
+    };
+    candidate.chars().find_map(strong_dir_of_char)
+}
+
+/// The bidi-class coarse half first-strong resolution needs: strong L vs
+/// strong R/AL by script block. Everything else (digits, punctuation,
+/// CJK — script-dependent under full UAX #9, but never decisive under the
+/// HTML rule) reads neutral here.
+fn strong_dir_of_char(c: char) -> Option<TextDirection> {
+    match c {
+        // L: Latin (+extended), Greek, Cyrillic.
+        'A'..='Z' | 'a'..='z' | '\u{00C0}'..='\u{024F}' | '\u{0370}'..='\u{03FF}'
+        | '\u{0400}'..='\u{04FF}' => Some(TextDirection::Ltr),
+        // R/AL: Hebrew, Arabic (+supplement/presentation forms), Syriac.
+        '\u{0590}'..='\u{05FF}' | '\u{0600}'..='\u{06FF}' | '\u{0700}'..='\u{077F}'
+        | '\u{FB1D}'..='\u{FB4F}' | '\u{FB50}'..='\u{FDFF}' | '\u{FE70}'..='\u{FEFF}' => {
+            Some(TextDirection::Rtl)
+        }
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn cascade_element(
     tag: &str,
@@ -6333,6 +6423,9 @@ pub fn cascade_element(
         // inherited value — a th stays centered inside a text-align:right
         // ancestor, matching every browser UA sheet.
         style.text_align = style.text_align.or(parent.text_align);
+        // direction inherits the same way (#188-3): an ancestor's rtl
+        // flows down until an element declares its own.
+        style.direction = style.direction.or(parent.direction);
         // Number keeps its multiplier for descendants (spec computed value);
         // Px inherits as absolute px — both copy straight through.
         style.line_height = parent.line_height;
@@ -6551,6 +6644,28 @@ pub fn cascade_element(
             .unwrap_or(false);
         if attr_nw {
             style.white_space = Some(WhiteSpace::Nowrap);
+        }
+    }
+    // dir attribute (#188-3, blitz#981), global-attribute arm of the hint
+    // family: the content attribute maps to the direction property (HTML
+    // "the dir attribute"), slotting below every author declaration like
+    // the hints above — `dir="rtl"` loses to an author `direction: ltr`.
+    // `auto` resolves by the HTML first-strong rule: the control's value
+    // for input/textarea, else the element's text content.
+    if let Some(dir) = tree
+        .with_node(node_id, |n| {
+            n.get_attribute("dir").map(|v| v.trim().to_ascii_lowercase())
+        })
+        .flatten()
+    {
+        let resolved = match dir.as_str() {
+            "ltr" => Some(TextDirection::Ltr),
+            "rtl" => Some(TextDirection::Rtl),
+            "auto" => first_strong_direction(tree, node_id, tag),
+            _ => None,
+        };
+        if resolved.is_some() {
+            style.direction = resolved;
         }
     }
     // Author declarations in two passes (CSS 2.1 §6.4.1). Normal pass:

@@ -3045,6 +3045,7 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "font-size",
     "font-weight",
     "text-align",
+    "direction",
     "line-height",
     "word-spacing",
     "text-transform",
@@ -3355,7 +3356,21 @@ fn computed_style_value(
             match s.text_align {
                 Some(TextAlign::Center) => "center",
                 Some(TextAlign::Right) => "right",
-                _ => "left",
+                // #188-3: start/end stay LOGICAL in the computed style —
+                // Chrome reports them verbatim (measured: undeclared
+                // reports "start" too, the css-text-3 initial value);
+                // consume-time resolution flips the painted side, not
+                // this face.
+                Some(TextAlign::Start) | None => "start",
+                Some(TextAlign::End) => "end",
+                Some(TextAlign::Left) => "left",
+            }
+            .into(),
+        ),
+        "direction" => Some(
+            match s.direction {
+                Some(crate::diting_css::TextDirection::Rtl) => "rtl",
+                _ => "ltr",
             }
             .into(),
         ),
