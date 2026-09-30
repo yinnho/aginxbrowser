@@ -1163,6 +1163,17 @@ pub struct ComputedStyle {
     /// addresses inline content (upstream keeps them distinct too).
     pub justify_content: Option<JustifyMode>,
     pub align_items: Option<AlignMode>,
+    /// Item-side self-alignment (#188-2, blitz#977): `align-self` and
+    /// `justify-self` on the item. `None` = auto/normal/unset — defer to the
+    /// container's items-level default. Consumed by the out-of-flow
+    /// static-position pass (an abspos box is "the sole item of its flow
+    /// parent", so its own self-alignment resolves there); in-flow items
+    /// ride the container's `align_items`/`justify_content` as before.
+    pub align_self: Option<AlignMode>,
+    pub justify_self: Option<JustifyMode>,
+    /// `justify-items` on a grid container — the inline-axis default an
+    /// item's `justify-self: auto` falls back to. Flexbox ignores it.
+    pub justify_items: Option<JustifyMode>,
     pub flex_grow: Option<f32>,
     pub flex_shrink: Option<f32>,
     /// Length-percentage (`auto` stays None — the initial value).
@@ -2083,12 +2094,40 @@ pub enum JustifyMode {
     SpaceEvenly,
 }
 
+impl JustifyMode {
+    /// Static-position offset along a justify axis (grid inline axis). The
+    /// distributed <space-*> values only apply BETWEEN multiple items; a
+    /// sole out-of-flow static item treats them as center, which is also
+    /// where they land in Chrome for a single-item area.
+    pub fn static_offset(self, free: f32) -> f32 {
+        match self {
+            JustifyMode::FlexStart | JustifyMode::SpaceBetween => 0.0,
+            JustifyMode::Center | JustifyMode::SpaceAround | JustifyMode::SpaceEvenly => free / 2.0,
+            JustifyMode::FlexEnd => free,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlignMode {
     Stretch,
     FlexStart,
     Center,
     FlexEnd,
+}
+
+impl AlignMode {
+    /// Static-position offset along an align axis (flex cross axis, grid
+    /// block axis): stretch/flex-start park at the start edge — with auto
+    /// insets and a definite size the box never stretches (CSS2 §10.3.7),
+    /// so stretch degenerates to start.
+    pub fn static_offset(self, free: f32) -> f32 {
+        match self {
+            AlignMode::Stretch | AlignMode::FlexStart => 0.0,
+            AlignMode::Center => free / 2.0,
+            AlignMode::FlexEnd => free,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -4960,6 +4999,60 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 "flex-start" | "start" => Some(AlignMode::FlexStart),
                 "center" => Some(AlignMode::Center),
                 "flex-end" | "end" => Some(AlignMode::FlexEnd),
+                _ => return false,
+            };
+            true
+        }
+        // Item-side self-alignment (#188-2, blitz#977). `auto`/`normal`
+        // defer to the container (stored as None); `safe `/`unsafe `
+        // prefixes drop (alignment subjects only, they don't move the
+        // static position for our purposes). `baseline` on a sole
+        // out-of-flow item pins to its start edge — FlexStart is the
+        // measurable approximation.
+        "align-self" => {
+            let v = v
+                .strip_prefix("safe ")
+                .or_else(|| v.strip_prefix("unsafe "))
+                .unwrap_or(v);
+            style.align_self = match v {
+                "auto" | "normal" => None,
+                "stretch" => Some(AlignMode::Stretch),
+                "flex-start" | "start" | "self-start" | "baseline" | "first baseline" => {
+                    Some(AlignMode::FlexStart)
+                }
+                "center" => Some(AlignMode::Center),
+                "flex-end" | "end" | "self-end" | "last baseline" => Some(AlignMode::FlexEnd),
+                _ => return false,
+            };
+            true
+        }
+        // JustifyMode has no Stretch variant: with auto insets and a
+        // definite size the box doesn't stretch anyway (CSS2 §10.3.7), so
+        // `stretch` behaving as start is the documented approximation.
+        "justify-self" => {
+            let v = v
+                .strip_prefix("safe ")
+                .or_else(|| v.strip_prefix("unsafe "))
+                .unwrap_or(v);
+            style.justify_self = match v {
+                "auto" | "normal" => None,
+                "start" | "left" | "self-start" | "stretch" => Some(JustifyMode::FlexStart),
+                "center" => Some(JustifyMode::Center),
+                "end" | "right" | "self-end" => Some(JustifyMode::FlexEnd),
+                _ => return false,
+            };
+            true
+        }
+        "justify-items" => {
+            let v = v
+                .strip_prefix("safe ")
+                .or_else(|| v.strip_prefix("unsafe "))
+                .unwrap_or(v);
+            style.justify_items = match v {
+                "auto" | "normal" | "legacy" => None,
+                "start" | "left" | "stretch" | "legacy left" => Some(JustifyMode::FlexStart),
+                "center" | "legacy center" => Some(JustifyMode::Center),
+                "end" | "right" | "legacy right" => Some(JustifyMode::FlexEnd),
                 _ => return false,
             };
             true

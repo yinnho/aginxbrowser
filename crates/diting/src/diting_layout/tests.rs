@@ -277,6 +277,153 @@ mod reparent_anchoring_tests {
         assert_at(&rects, 200.0, 100.0, 38.0, 40.0);
         assert_at(&rects, 40.0, 20.0, 23.0, 45.0);
     }
+
+    // (the probe that diagnosed #188-2 lived here print-only; its matrix is
+    // now pinned in abspos_self_align_tests below)
+}
+
+/// #188-2 (blitz#977): an out-of-flow box's own self-alignment at its
+/// static position. CSS resolves the static position of an abspos child as
+/// "the sole item of its flow parent" (css-flexbox §4.1; css-grid §9.2: a
+/// grid area spanning the container's content edges), so the child's
+/// align-self/justify-self must resolve against the parent's content box —
+/// taffy (pre-OofItemStyle) never consulted them: flex kept the container's
+/// align-items only, grid placed abspos children at (0,0) on every axis.
+/// The correction pass runs after the static-position harvest; these pin
+/// the whole Chrome-parity matrix.
+#[cfg(test)]
+mod abspos_self_align_tests {
+    use crate::diting_layout::*;
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    fn abs_at(sheet: &str) -> (f32, f32) {
+        let html = r#"<html><body><div id="c"><div id="abs"></div></div></body></html>"#;
+        let tree = parse_html(html);
+        let rules = parse_stylesheet_for(sheet, (800.0, 600.0), CssMediaType::Screen);
+        let styles = compute_styles(&tree, &rules, (1280.0, 720.0));
+        let (rects, _, _, _, _, _) = layout_dom_with_paint_order_and_images(
+            &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
+        );
+        let hits: Vec<(f32, f32)> = rects
+            .values()
+            .filter(|r| r.width == 60.0 && r.height == 40.0)
+            .map(|r| (r.x, r.y))
+            .collect();
+        assert_eq!(hits.len(), 1, "60x40 abs box matched {hits:?}");
+        hits[0]
+    }
+
+    // 400×200 container, 60×40 abspos child, body margin 0 — the same
+    // fixture the Chrome ground-truth matrix was measured on.
+    fn flex_sheet(container_extra: &str, child_extra: &str) -> String {
+        format!(
+            "body {{ margin: 0 }} #c {{ position: relative; display: flex; width: 400px; height: 200px; {container_extra} }} \
+             #abs {{ position: absolute; width: 60px; height: 40px; {child_extra} }}"
+        )
+    }
+
+    fn grid_sheet(extra_child: &str, extra_container: &str) -> String {
+        format!(
+            "body {{ margin: 0 }} #c {{ position: relative; display: grid; width: 400px; height: 200px; {extra_container} }} \
+             #abs {{ position: absolute; width: 60px; height: 40px; {extra_child} }}"
+        )
+    }
+
+    #[test]
+    fn flex_align_self_overrides_container_align_items() {
+        // ai=flex-start on the container; the child's own align-self must
+        // win the cross axis. Before: all four landed at (170, 0).
+        assert_eq!(abs_at(&flex_sheet("justify-content: center; align-items: flex-start", "align-self: flex-start")), (170.0, 0.0));
+        assert_eq!(abs_at(&flex_sheet("justify-content: center; align-items: flex-start", "align-self: center")), (170.0, 80.0));
+        assert_eq!(abs_at(&flex_sheet("justify-content: center; align-items: flex-start", "align-self: flex-end")), (170.0, 160.0));
+        // Stretch degenerates to start: auto insets + definite size never
+        // stretch the box (CSS2 §10.3.7) — height stays 40 too.
+        assert_eq!(abs_at(&flex_sheet("justify-content: center; align-items: flex-start", "align-self: stretch")), (170.0, 0.0));
+    }
+
+    #[test]
+    fn flex_justify_self_is_ignored_per_spec() {
+        // css-flexbox §4: justify-self does not apply to flex items — the
+        // main axis carries only the container's justify-content (flex-start
+        // here → x=0). Pinned so a future "fix" can't quietly apply it.
+        for js in ["start", "center", "end"] {
+            assert_eq!(
+                abs_at(&flex_sheet("justify-content: flex-start", &format!("justify-self: {js}"))),
+                (0.0, 0.0),
+                "justify-self={js} must not move a flex item"
+            );
+        }
+    }
+
+    #[test]
+    fn flex_container_alignment_stays_correct() {
+        // Regression guard for the harvest path the correction rides on:
+        // container-level justify-content/align-items keep working when the
+        // child states no align-self.
+        assert_eq!(abs_at(&flex_sheet("justify-content: center; align-items: center", "")), (170.0, 80.0));
+        assert_eq!(abs_at(&flex_sheet("justify-content: flex-end; align-items: flex-end", "")), (340.0, 160.0));
+    }
+
+    #[test]
+    fn flex_column_resolves_align_self_on_x() {
+        // The cross axis of a column flex container is x — the correction
+        // must follow flex_direction, not assume row.
+        assert_eq!(
+            abs_at(&flex_sheet("flex-direction: column", "align-self: center")),
+            (170.0, 0.0),
+            "column flex: align-self moves x, y stays at content start"
+        );
+    }
+
+    #[test]
+    fn flex_align_self_respects_margin() {
+        // Alignment subjects resolve inside the margin box: flex-start puts
+        // the margin edge at the content edge.
+        assert_eq!(
+            abs_at(&flex_sheet("justify-content: center", "align-self: flex-start; margin-top: 20px")),
+            (170.0, 20.0)
+        );
+    }
+
+    #[test]
+    fn grid_self_alignment_matrix() {
+        // The full 4×4 justify-self × align-self matrix against the grid
+        // container's content box. Before: every combo sat at (0, 0).
+        let x_of = |js: &str| match js { "center" => 170.0, "end" => 340.0, _ => 0.0 };
+        let y_of = |aslf: &str| match aslf { "center" => 80.0, "end" => 160.0, _ => 0.0 };
+        for js in ["start", "center", "end", "stretch"] {
+            for aslf in ["start", "center", "end", "stretch"] {
+                assert_eq!(
+                    abs_at(&grid_sheet(&format!("justify-self: {js}; align-self: {aslf}"), "")),
+                    (x_of(js), y_of(aslf)),
+                    "grid js={js} as={aslf}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn grid_falls_back_to_items_level_defaults() {
+        // justify-self/align-self unset → the container's justify-items /
+        // align-items answer; no align-items either → stretch ≈ start.
+        assert_eq!(
+            abs_at(&grid_sheet("", "justify-items: end; align-items: center")),
+            (340.0, 80.0)
+        );
+        assert_eq!(abs_at(&grid_sheet("", "")), (0.0, 0.0));
+    }
+
+    #[test]
+    fn grid_inset_pinned_axis_is_untouched() {
+        // left: 10px pins x through the inset path (anchored to the CB
+        // padding box by the reparent pass); only the auto-inset axis takes
+        // the static-position alignment.
+        assert_eq!(
+            abs_at(&grid_sheet("left: 10px; align-self: center", "")),
+            (10.0, 80.0)
+        );
+    }
 }
 
 #[cfg(test)]

@@ -6142,6 +6142,103 @@ pub fn layout_solve_rooted(
                         static_pos.insert(*dom_id, (r.x, r.y));
                     }
                 }
+
+                // #188-2 (blitz#977): the SELF-alignment of the out-of-flow
+                // box. This taffy rev (pre-OofItemStyle, taffy#1206) places
+                // an absolute child of a flex container using the
+                // container's align-items only — the child's own align-self
+                // is never consulted — and a grid container doesn't place
+                // its abspos children at all (everything lands at 0,0).
+                // CSS resolves an out-of-flow child's static position as
+                // "the sole item of its flow parent" (css-flexbox §4.1;
+                // css-grid §9.2: a grid area spanning the container's
+                // content edges), so the child's own self-alignment resolves
+                // against the parent's content box. Recompute each axis
+                // whose insets are both auto; the harvested position stands
+                // everywhere else.
+                let dom_of: HashMap<NodeId, taffy::tree::NodeId> =
+                    node_map.iter().map(|(k, v)| (*v, *k)).collect();
+                for (tnid, dom_id) in &needs_static {
+                    let (Some(style), Some(parent_dom), Some(entry)) = (
+                        styles.get(dom_id),
+                        tree.with_node(*dom_id, |n| n.parent).flatten(),
+                        static_pos.get_mut(dom_id),
+                    ) else { continue };
+                    let parent = styles.get(&parent_dom);
+                    let is_flex = matches!(parent.and_then(|p| p.display), Some(CssDisplay::Flex));
+                    let is_grid = matches!(parent.and_then(|p| p.display), Some(CssDisplay::Grid));
+                    if !is_flex && !is_grid {
+                        continue;
+                    }
+                    let Some(&parent_tnid) = dom_of.get(&parent_dom) else { continue };
+                    let (Some(prect), Some(crect), Ok(playout), Ok(clayout)) = (
+                        now.get(&parent_tnid),
+                        now.get(tnid),
+                        taffy_tree.layout(parent_tnid),
+                        taffy_tree.layout(*tnid),
+                    ) else { continue };
+                    // The parent's content box in absolute coordinates, from
+                    // taffy's resolved border/padding (Rect<f32> in Layout).
+                    let (pb, pp) = (playout.border, playout.padding);
+                    let ox = prect.x + pb.left + pp.left;
+                    let oy = prect.y + pb.top + pp.top;
+                    let cw =
+                        (playout.size.width - pb.left - pb.right - pp.left - pp.right).max(0.0);
+                    let ch =
+                        (playout.size.height - pb.top - pb.bottom - pp.top - pp.bottom).max(0.0);
+                    let m = clayout.margin;
+                    let x_auto = style.left.is_none() && style.right.is_none();
+                    let y_auto = style.top.is_none() && style.bottom.is_none();
+
+                    if is_grid {
+                        // Grid: the static-position area is the container's
+                        // whole content box (css-grid §9.2); each axis
+                        // resolves the child's self-alignment first, falling
+                        // back to the container's items-level default
+                        // (justify-items inline, align-items block; stretch
+                        // ≈ start under §10.3.7).
+                        if x_auto {
+                            let mode = style
+                                .justify_self
+                                .or(parent.and_then(|p| p.justify_items))
+                                .unwrap_or(JustifyMode::FlexStart);
+                            let free = cw - m.left - m.right - crect.width;
+                            entry.0 = ox + m.left + mode.static_offset(free);
+                        }
+                        if y_auto {
+                            let mode = style
+                                .align_self
+                                .or(parent.and_then(|p| p.align_items))
+                                .unwrap_or(AlignMode::Stretch);
+                            let free = ch - m.top - m.bottom - crect.height;
+                            entry.1 = oy + m.top + mode.static_offset(free);
+                        }
+                    } else {
+                        // Flex: justify-self does not apply to flex items
+                        // (css-flexbox §4) — the main axis keeps taffy's
+                        // placement, which already carries the container's
+                        // justify-content. Only the cross axis re-resolves,
+                        // and only when the child states its own align-self
+                        // (unset defers to the container's align-items,
+                        // already honored by the harvest above).
+                        let column = matches!(
+                            parent.and_then(|p| p.flex_direction),
+                            Some(CssFlexDirection::Column) | Some(CssFlexDirection::ColumnReverse)
+                        );
+                        if column && x_auto {
+                            if let Some(mode) = style.align_self {
+                                let free = cw - m.left - m.right - crect.width;
+                                entry.0 = ox + m.left + mode.static_offset(free);
+                            }
+                        }
+                        if !column && y_auto {
+                            if let Some(mode) = style.align_self {
+                                let free = ch - m.top - m.bottom - crect.height;
+                                entry.1 = oy + m.top + mode.static_offset(free);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
