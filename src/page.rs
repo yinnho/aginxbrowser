@@ -40,6 +40,7 @@ pub struct Page {
 /// pump skips on, extended with the requested scale so a dpr=2 poll never
 /// receives a dpr=1 frame.
 #[cfg(feature = "screenshot")]
+#[derive(Clone)]
 pub(crate) struct BandFrameCache {
     pub sig: (u64, u64, u64, f32, f32, f32, f32, f32),
     pub width: u32,

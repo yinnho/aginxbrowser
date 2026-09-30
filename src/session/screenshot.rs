@@ -6,10 +6,25 @@ use crate::page::{BandFrameCache, Page};
 /// #185: clamp a requested device-pixel ratio. 1.0..=3.0 covers every
 /// shipping display (1x desktop, 1.5/2x laptop, 3x phone); outside that or
 /// non-finite falls back to 1× rather than allocating a 10× bitmap.
-fn resolve_dpr(dpr: Option<f32>) -> f32 {
+pub(crate) fn resolve_dpr(dpr: Option<f32>) -> f32 {
     dpr.filter(|d| d.is_finite())
         .map(|d| d.clamp(1.0, 3.0))
         .unwrap_or(1.0)
+}
+
+/// A cached band frame as the HTTP JSON response — shared by the poll
+/// cache-hit path and the mid-navigation serve (#193), so both faces
+/// return byte-identical shapes.
+pub(crate) fn cached_frame_json(url: &str, width: u32, height: u32, png: &[u8]) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    serde_json::json!({
+        "url": url,
+        "width": width,
+        "height": height,
+        "image_base64": STANDARD.encode(png),
+        "format": "png",
+    })
+    .to_string()
 }
 
 /// The no-argument default is the hosted live page's frame poll: it paints
@@ -56,15 +71,7 @@ pub(super) async fn screenshot(
         );
         if let Some(hit) = page.band_frame_cache.as_ref() {
             if hit.sig == sig {
-                use base64::{engine::general_purpose::STANDARD, Engine as _};
-                return Ok(serde_json::json!({
-                    "url": url,
-                    "width": hit.width,
-                    "height": hit.height,
-                    "image_base64": STANDARD.encode(&hit.png),
-                    "format": "png",
-                })
-                .to_string());
+                return Ok(cached_frame_json(&url, hit.width, hit.height, &hit.png));
             }
         }
         let vp = (vw.max(1.0), vh.max(1.0));
@@ -92,15 +99,7 @@ pub(super) async fn screenshot(
                     height: frame.height,
                     png: png.clone(),
                 });
-                use base64::{engine::general_purpose::STANDARD, Engine as _};
-                return Ok(serde_json::json!({
-                    "url": url,
-                    "width": frame.width,
-                    "height": frame.height,
-                    "image_base64": STANDARD.encode(&png),
-                    "format": "png",
-                })
-                .to_string());
+                return Ok(cached_frame_json(&url, frame.width, frame.height, &png));
             }
         }
         // No live band (pre-navigation) or encode failure: fall through to

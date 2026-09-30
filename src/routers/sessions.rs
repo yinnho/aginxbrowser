@@ -409,14 +409,12 @@ pub(crate) async fn session_preload_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(body): Json<SessionPreloadBody>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut mgr = session::SESSIONS.lock().await;
-    let resp = mgr
-        .send(&id, |reply| session::SessionCommand::SetPreload {
-            scripts: body.scripts,
-            reply,
-        })
-        .await
-        .map_err(session_err)?;
+    let resp = session::send_command(&id, |reply| session::SessionCommand::SetPreload {
+        scripts: body.scripts,
+        reply,
+    })
+    .await
+    .map_err(session_err)?;
     Ok((StatusCode::OK, Json(resp)))
 }
 
@@ -424,14 +422,12 @@ pub(crate) async fn session_navigate_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(req): Json<SessionNavigateRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut mgr = session::SESSIONS.lock().await;
-    let resp = mgr
-        .send(&id, |reply| session::SessionCommand::Navigate {
-            url: req.url.clone(),
-            reply,
-        })
-        .await
-        .map_err(session_err)?;
+    let resp = session::send_command(&id, |reply| session::SessionCommand::Navigate {
+        url: req.url.clone(),
+        reply,
+    })
+    .await
+    .map_err(session_err)?;
     Ok((StatusCode::OK, Json(resp)))
 }
 
@@ -464,9 +460,7 @@ fn session_err(e: session::SessionError) -> AppError {
 pub(crate) async fn session_state_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut mgr = session::SESSIONS.lock().await;
-    let compact_text = mgr
-        .send(&id, |reply| session::SessionCommand::State { reply })
+    let compact_text = session::send_command(&id, |reply| session::SessionCommand::State { reply })
         .await
         .map_err(session_err)?;
     // Return as plain text for token efficiency.
@@ -485,9 +479,7 @@ pub(crate) async fn session_state_handler(
 pub(crate) async fn session_storage_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut mgr = session::SESSIONS.lock().await;
-    let text = mgr
-        .send(&id, |reply| session::SessionCommand::Storage { reply })
+    let text = session::send_command(&id, |reply| session::SessionCommand::Storage { reply })
         .await
         .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
@@ -515,14 +507,12 @@ pub(crate) async fn session_console_handler(
         url_contains: q.url_contains,
         limit: q.limit,
     };
-    let mut mgr = session::SESSIONS.lock().await;
-    let text = mgr
-        .send(&id, |reply| session::SessionCommand::Console {
-            filter,
-            reply,
-        })
-        .await
-        .map_err(session_err)?;
+    let text = session::send_command(&id, |reply| session::SessionCommand::Console {
+        filter,
+        reply,
+    })
+    .await
+    .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("console parse error: {}", e)))?;
     Ok((StatusCode::OK, Json(val)))
@@ -542,15 +532,13 @@ pub(crate) async fn session_dialog_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     axum::Json(body): axum::Json<SessionDialogBody>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut mgr = session::SESSIONS.lock().await;
-    let text = mgr
-        .send(&id, |reply| session::SessionCommand::Dialog {
-            action: body.action,
-            prompt_text: body.prompt_text,
-            reply,
-        })
-        .await
-        .map_err(session_err)?;
+    let text = session::send_command(&id, |reply| session::SessionCommand::Dialog {
+        action: body.action,
+        prompt_text: body.prompt_text,
+        reply,
+    })
+    .await
+    .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("dialog parse error: {}", e)))?;
     Ok((StatusCode::OK, Json(val)))
@@ -573,9 +561,7 @@ pub(crate) async fn session_export_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     axum::extract::Query(q): axum::extract::Query<SessionExportQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut mgr = session::SESSIONS.lock().await;
-    let jsonl = mgr
-        .send(&id, |reply| session::SessionCommand::Export { reply })
+    let jsonl = session::send_command(&id, |reply| session::SessionCommand::Export { reply })
         .await
         .map_err(session_err)?;
     match q.format.as_deref() {
@@ -725,18 +711,16 @@ pub(crate) async fn session_network_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     axum::extract::Query(q): axum::extract::Query<SessionNetworkQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut mgr = session::SESSIONS.lock().await;
-    let text = mgr
-        .send(&id, |reply| session::SessionCommand::Network {
-            media_only: q.filter.as_deref() == Some("media"),
-            include_bodies: q.include_bodies.unwrap_or(false),
-            include_headers: q.include_headers.unwrap_or(false),
-            url_contains: q.url_contains,
-            body_max_chars: q.body_max_chars.unwrap_or(4000),
-            reply,
-        })
-        .await
-        .map_err(session_err)?;
+    let text = session::send_command(&id, |reply| session::SessionCommand::Network {
+        media_only: q.filter.as_deref() == Some("media"),
+        include_bodies: q.include_bodies.unwrap_or(false),
+        include_headers: q.include_headers.unwrap_or(false),
+        url_contains: q.url_contains,
+        body_max_chars: q.body_max_chars.unwrap_or(4000),
+        reply,
+    })
+    .await
+    .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("network parse error: {}", e)))?;
     Ok((StatusCode::OK, Json(val)))
@@ -747,9 +731,7 @@ pub(crate) async fn session_network_handler(
 pub(crate) async fn session_har_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut mgr = session::SESSIONS.lock().await;
-    let text = mgr
-        .send(&id, |reply| session::SessionCommand::Har { reply })
+    let text = session::send_command(&id, |reply| session::SessionCommand::Har { reply })
         .await
         .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
@@ -766,9 +748,7 @@ pub(crate) async fn session_har_handler(
 pub(crate) async fn session_challenges_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut mgr = session::SESSIONS.lock().await;
-    let text = mgr
-        .send(&id, |reply| session::SessionCommand::Challenges { reply })
+    let text = session::send_command(&id, |reply| session::SessionCommand::Challenges { reply })
         .await
         .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
@@ -785,9 +765,7 @@ pub(crate) async fn session_challenges_handler(
 pub(crate) async fn session_verdict_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut mgr = session::SESSIONS.lock().await;
-    let text = mgr
-        .send(&id, |reply| session::SessionCommand::Verdict { reply })
+    let text = session::send_command(&id, |reply| session::SessionCommand::Verdict { reply })
         .await
         .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
@@ -799,14 +777,12 @@ pub(crate) async fn session_click_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(req): Json<SessionClickRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut mgr = session::SESSIONS.lock().await;
-    let resp = mgr
-        .send(&id, |reply| session::SessionCommand::Click {
-            index: req.index,
-            reply,
-        })
-        .await
-        .map_err(session_err)?;
+    let resp = session::send_command(&id, |reply| session::SessionCommand::Click {
+        index: req.index,
+        reply,
+    })
+    .await
+    .map_err(session_err)?;
     Ok((StatusCode::OK, Json(resp)))
 }
 
@@ -826,17 +802,15 @@ pub(crate) async fn session_click_xy_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(req): Json<SessionClickXyRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut mgr = session::SESSIONS.lock().await;
-    let text = mgr
-        .send(&id, |reply| session::SessionCommand::ClickXY {
-            x: req.x,
-            y: req.y,
-            button: req.button.unwrap_or_else(|| "left".to_string()),
-            click_count: req.click_count.unwrap_or(1),
-            reply,
-        })
-        .await
-        .map_err(session_err)?;
+    let text = session::send_command(&id, |reply| session::SessionCommand::ClickXY {
+        x: req.x,
+        y: req.y,
+        button: req.button.unwrap_or_else(|| "left".to_string()),
+        click_count: req.click_count.unwrap_or(1),
+        reply,
+    })
+    .await
+    .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("click_xy parse error: {}", e)))?;
     Ok((StatusCode::OK, Json(val)))
@@ -869,20 +843,18 @@ pub(crate) async fn session_drag_handler(
     Json(req): Json<SessionDragRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let humanize = req.humanize.unwrap_or(true);
-    let mut mgr = session::SESSIONS.lock().await;
-    let text = mgr
-        .send(&id, |reply| session::SessionCommand::Drag {
-            from_x: req.from.x,
-            from_y: req.from.y,
-            to_x: req.to.x,
-            to_y: req.to.y,
-            steps: req.steps.unwrap_or(if humanize { 24 } else { 10 }),
-            delay_ms: req.delay_ms.unwrap_or(if humanize { 18 } else { 30 }),
-            humanize,
-            reply,
-        })
-        .await
-        .map_err(session_err)?;
+    let text = session::send_command(&id, |reply| session::SessionCommand::Drag {
+        from_x: req.from.x,
+        from_y: req.from.y,
+        to_x: req.to.x,
+        to_y: req.to.y,
+        steps: req.steps.unwrap_or(if humanize { 24 } else { 10 }),
+        delay_ms: req.delay_ms.unwrap_or(if humanize { 18 } else { 30 }),
+        humanize,
+        reply,
+    })
+    .await
+    .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| AppError::Internal(format!("drag parse error: {}", e)))?;
     Ok((StatusCode::OK, Json(val)))
@@ -892,16 +864,14 @@ pub(crate) async fn session_input_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(req): Json<SessionInputRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut mgr = session::SESSIONS.lock().await;
-    let filled = mgr
-        .send(&id, |reply| session::SessionCommand::Input {
-            index: req.index,
-            text: req.text,
-            full_events: req.events.as_deref() == Some("full"),
-            reply,
-        })
-        .await
-        .map_err(session_err)?;
+    let filled = session::send_command(&id, |reply| session::SessionCommand::Input {
+        index: req.index,
+        text: req.text,
+        full_events: req.events.as_deref() == Some("full"),
+        reply,
+    })
+    .await
+    .map_err(session_err)?;
     Ok((StatusCode::OK, Json(filled)))
 }
 
@@ -929,15 +899,13 @@ pub(crate) async fn session_set_files_handler(
             })
         })
         .collect();
-    let mut mgr = session::SESSIONS.lock().await;
-    let result = mgr
-        .send(&id, |reply| session::SessionCommand::SetFiles {
-            selector: req.selector,
-            files: specs,
-            reply,
-        })
-        .await
-        .map_err(session_err)?;
+    let result = session::send_command(&id, |reply| session::SessionCommand::SetFiles {
+        selector: req.selector,
+        files: specs,
+        reply,
+    })
+    .await
+    .map_err(session_err)?;
     Ok((StatusCode::OK, Json(result)))
 }
 
@@ -945,15 +913,13 @@ pub(crate) async fn session_scroll_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(req): Json<SessionScrollRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut mgr = session::SESSIONS.lock().await;
-    let scrolled = mgr
-        .send(&id, |reply| session::SessionCommand::Scroll {
-            direction: req.direction,
-            amount: req.amount,
-            reply,
-        })
-        .await
-        .map_err(session_err)?;
+    let scrolled = session::send_command(&id, |reply| session::SessionCommand::Scroll {
+        direction: req.direction,
+        amount: req.amount,
+        reply,
+    })
+    .await
+    .map_err(session_err)?;
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({ "scrolled": scrolled })),
@@ -964,16 +930,14 @@ pub(crate) async fn session_viewport_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(req): Json<SessionViewportRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut mgr = session::SESSIONS.lock().await;
-    let viewport = mgr
-        .send(&id, |reply| session::SessionCommand::Viewport {
-            width: req.width,
-            height: req.height,
-            mobile: req.mobile,
-            reply,
-        })
-        .await
-        .map_err(session_err)?;
+    let viewport = session::send_command(&id, |reply| session::SessionCommand::Viewport {
+        width: req.width,
+        height: req.height,
+        mobile: req.mobile,
+        reply,
+    })
+    .await
+    .map_err(session_err)?;
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({ "viewport": viewport })),
@@ -988,19 +952,17 @@ pub(crate) async fn session_screenshot_handler(
     req: Option<Json<SessionScreenshotRequest>>,
 ) -> Result<impl IntoResponse, AppError> {
     let req = req.map(|Json(r)| r).unwrap_or_default();
-    let mut mgr = session::SESSIONS.lock().await;
-    let shot = mgr
-        .send(&id, |reply| session::SessionCommand::Screenshot {
-            width: req.width,
-            height: req.height,
-            full_page: req.full_page,
-            selector: req.selector.clone(),
-            selector_all: req.selector_all,
-            dpr: req.dpr,
-            reply,
-        })
-        .await
-        .map_err(session_err)?;
+    let shot = session::send_command(&id, |reply| session::SessionCommand::Screenshot {
+        width: req.width,
+        height: req.height,
+        full_page: req.full_page,
+        selector: req.selector.clone(),
+        selector_all: req.selector_all,
+        dpr: req.dpr,
+        reply,
+    })
+    .await
+    .map_err(session_err)?;
     let body: serde_json::Value =
         serde_json::from_str(&shot).map_err(|_| AppError::Internal(shot.clone()))?;
     Ok((StatusCode::OK, Json(body)))
@@ -1029,15 +991,13 @@ pub(crate) async fn session_eval_handler(
 ) -> Result<impl IntoResponse, AppError> {
     let Json(req) =
         payload.map_err(|rej| eval_body_rejection(rej.body_text(), max_body_bytes()))?;
-    let mut mgr = session::SESSIONS.lock().await;
-    let result = mgr
-        .send(&id, |reply| session::SessionCommand::Eval {
-            script: req.script,
-            timeout_ms: req.timeout_ms,
-            reply,
-        })
-        .await
-        .map_err(session_err)?;
+    let result = session::send_command(&id, |reply| session::SessionCommand::Eval {
+        script: req.script,
+        timeout_ms: req.timeout_ms,
+        reply,
+    })
+    .await
+    .map_err(session_err)?;
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({ "result": result })),
@@ -1102,13 +1062,10 @@ pub(crate) async fn session_cookies_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<CookiesQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut mgr = session::SESSIONS.lock().await;
     let text = if query.meta.unwrap_or(false) {
-        mgr.send(&id, |reply| session::SessionCommand::CookieMeta { reply })
-            .await
+        session::send_command(&id, |reply| session::SessionCommand::CookieMeta { reply }).await
     } else {
-        mgr.send(&id, |reply| session::SessionCommand::Cookies { reply })
-            .await
+        session::send_command(&id, |reply| session::SessionCommand::Cookies { reply }).await
     }
     .map_err(session_err)?;
     let val: serde_json::Value = serde_json::from_str(&text)
@@ -1123,16 +1080,14 @@ pub(crate) async fn session_wait_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(req): Json<SessionWaitRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut mgr = session::SESSIONS.lock().await;
-    let out = mgr
-        .send(&id, |reply| session::SessionCommand::Wait {
-            selector: req.selector.clone(),
-            predicate: req.predicate.clone(),
-            timeout_ms: req.timeout_ms,
-            reply,
-        })
-        .await
-        .map_err(session_err)?;
+    let out = session::send_command(&id, |reply| session::SessionCommand::Wait {
+        selector: req.selector.clone(),
+        predicate: req.predicate.clone(),
+        timeout_ms: req.timeout_ms,
+        reply,
+    })
+    .await
+    .map_err(session_err)?;
     let body: serde_json::Value =
         serde_json::from_str(&out).map_err(|_| AppError::Internal(out.clone()))?;
     Ok((StatusCode::OK, Json(body)))

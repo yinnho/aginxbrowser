@@ -1449,6 +1449,177 @@
         assert!(mgr.close_and_wait(&sid).await);
     }
 
+    /// A red instant page (/a.html) and a blue page (/b.html) whose
+    /// response sleeps 2s — the navigate to B is provably still in flight
+    /// when a mid-load command arrives (#193).
+    fn spawn_slow_nav_server() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                // Per-connection threads: the 2s sleep on /b.html must not
+                // queue the fixture's other responses behind it.
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut buf = [0u8; 1024];
+                    let _ = std::io::Read::read(&mut stream, &mut buf);
+                    let req = String::from_utf8_lossy(&buf);
+                    let slow = req.contains("GET /b.html");
+                    if slow {
+                        std::thread::sleep(Duration::from_millis(2000));
+                    }
+                    let body = if slow {
+                        "<html><head><title>blue</title></head><body style=\"margin:0\">\
+                         <div style=\"width:200px;height:200px;background:#0000ff\"></div>\
+                         </body></html>"
+                    } else {
+                        "<html><head><title>red</title></head><body style=\"margin:0\">\
+                         <div style=\"width:200px;height:200px;background:#ff0000\"></div>\
+                         </body></html>"
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = std::io::Write::write_all(&mut stream, resp.as_bytes());
+                });
+            }
+        });
+        port
+    }
+
+    /// #193: while a navigation owns the page, the session loop must keep
+    /// answering the command channel — a default-shape screenshot poll is
+    /// served the pre-navigation frame (Chrome keeps the old frame until
+    /// the new document commits; a poll that hangs behind the load reads
+    /// as a frozen browser), and every other command parks in FIFO and
+    /// replays after the load lands, in arrival order.
+    #[cfg(feature = "screenshot")]
+    #[tokio::test]
+    async fn navigate_in_flight_serves_old_frame_and_defers_other_commands() {
+        let _net = crate::server::test_util::net_env_guard();
+        let port = spawn_slow_nav_server();
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/a.html")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        // Fill the band cache with the red frame (the default-shape poll).
+        let red = mgr
+            .send(&sid, |reply| SessionCommand::Screenshot {
+                width: None,
+                height: None,
+                full_page: false,
+                selector: None,
+                selector_all: false,
+                dpr: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        let pixels = |shot: &str| -> String {
+            serde_json::from_str::<Value>(shot).unwrap()["image_base64"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+
+        // Navigate WITHOUT awaiting: fire the command on the session's
+        // channel directly (send() is &mut self; the oneshot is ours to
+        // hold). Same enqueue pattern the viewport pin uses.
+        let (nav_tx, nav_rx) = tokio::sync::oneshot::channel();
+        mgr.sessions
+            .get(&sid)
+            .unwrap()
+            .cmd_tx
+            .send(SessionCommand::Navigate {
+                url: format!("http://127.0.0.1:{port}/b.html"),
+                reply: nav_tx,
+            })
+            .expect("session channel alive");
+
+        // Mid-load: an eval parks; the default-shape poll must NOT — the
+        // old frame answers in milliseconds, not behind the 2s load.
+        let (eval_tx, eval_rx) = tokio::sync::oneshot::channel();
+        mgr.sessions
+            .get(&sid)
+            .unwrap()
+            .cmd_tx
+            .send(SessionCommand::Eval {
+                script: "document.title".to_string(),
+                timeout_ms: None,
+                reply: eval_tx,
+            })
+            .expect("session channel alive");
+
+        let t0 = Instant::now();
+        let mid = mgr
+            .send(&sid, |reply| SessionCommand::Screenshot {
+                width: None,
+                height: None,
+                full_page: false,
+                selector: None,
+                selector_all: false,
+                dpr: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert!(
+            t0.elapsed() < Duration::from_millis(1200),
+            "mid-load poll must be served from the pre-navigation frame, not queued \
+             behind the load (took {}ms)",
+            t0.elapsed().as_millis()
+        );
+        assert_eq!(
+            pixels(&mid),
+            pixels(&red),
+            "mid-load poll returns the old (red) frame's PNG"
+        );
+
+        // The load lands; the parked eval replays against the NEW page.
+        nav_rx
+            .await
+            .expect("navigate reply")
+            .expect("slow navigation succeeds");
+        let title = eval_rx
+            .await
+            .expect("eval reply")
+            .expect("deferred eval runs after the load");
+        assert_eq!(title, Value::String("blue".into()));
+
+        // Post-load: the poll rasterizes the blue page (no stale cache).
+        let blue = mgr
+            .send(&sid, |reply| SessionCommand::Screenshot {
+                width: None,
+                height: None,
+                full_page: false,
+                selector: None,
+                selector_all: false,
+                dpr: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_ne!(
+            pixels(&blue),
+            pixels(&red),
+            "the new page must not be served the old frame"
+        );
+
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
     /// The async-content case straight from real usage: a page whose cards
     /// arrive via setTimeout can't be probed with a bare eval (racy), so the
     /// agent sleeps blindly. Wait polls with the event loop driven in

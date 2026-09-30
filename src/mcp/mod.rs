@@ -503,13 +503,11 @@ the same login in parallel tabs. Returns {session_id (new), cloned_from, url, vi
         &self,
         Parameters(params): Parameters<SessionNavigateParams>,
     ) -> String {
-        let mut mgr = session::SESSIONS.lock().await;
-        match mgr
-            .send(&params.session_id, |reply| SessionCommand::Navigate {
-                url: params.url.clone(),
-                reply,
-            })
-            .await
+        match session::send_command(&params.session_id, |reply| SessionCommand::Navigate {
+            url: params.url.clone(),
+            reply,
+        })
+        .await
         {
             Ok(resp) => {
                 let mut out = json!({ "url": resp.url, "title": resp.title });
@@ -524,7 +522,7 @@ the same login in parallel tabs. Returns {session_id (new), cloned_from, url, vi
                 if let Some(c) = resp.challenge {
                     out["challenge"] = json!(c);
                 }
-                stamped_json(out, &mgr, &params.session_id)
+                stamp_global(out, &params.session_id).await
             }
             Err(e) => json!({ "error": e }).to_string(),
         }
@@ -538,15 +536,13 @@ the same login in parallel tabs. Returns {session_id (new), cloned_from, url, vi
         &self,
         Parameters(params): Parameters<SessionPreloadParams>,
     ) -> String {
-        let mut mgr = session::SESSIONS.lock().await;
-        match mgr
-            .send(&params.session_id, |reply| SessionCommand::SetPreload {
-                scripts: params.scripts,
-                reply,
-            })
-            .await
+        match session::send_command(&params.session_id, |reply| SessionCommand::SetPreload {
+            scripts: params.scripts,
+            reply,
+        })
+        .await
         {
-            Ok(resp) => stamped_json(resp, &mgr, &params.session_id),
+            Ok(resp) => stamp_global(resp, &params.session_id).await,
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -556,9 +552,7 @@ the same login in parallel tabs. Returns {session_id (new), cloned_from, url, vi
         annotations(title = "Session State", read_only_hint = true)
     )]
     async fn session_state(&self, Parameters(params): Parameters<SessionStateParams>) -> String {
-        let mut mgr = session::SESSIONS.lock().await;
-        match mgr
-            .send(&params.session_id, |reply| SessionCommand::State { reply })
+        match session::send_command(&params.session_id, |reply| SessionCommand::State { reply })
             .await
         {
             Ok(text) => text,
@@ -580,8 +574,7 @@ landed) is answerable without holding a single one.",
         &self,
         Parameters(params): Parameters<SessionCookiesParams>,
     ) -> String {
-        let mut mgr = session::SESSIONS.lock().await;
-        let send = mgr.send(&params.session_id, |reply| {
+        let send = session::send_command(&params.session_id, |reply| {
             if params.meta.unwrap_or(false) {
                 SessionCommand::CookieMeta { reply }
             } else {
@@ -589,7 +582,7 @@ landed) is answerable without holding a single one.",
             }
         });
         match send.await {
-            Ok(text) => stamped(text, &mgr, &params.session_id),
+            Ok(text) => stamped_global(text, &params.session_id).await,
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -605,14 +598,12 @@ keep the session token in localStorage). Call before the session idles out.",
         &self,
         Parameters(params): Parameters<SessionStorageParams>,
     ) -> String {
-        let mut mgr = session::SESSIONS.lock().await;
-        match mgr
-            .send(&params.session_id, |reply| SessionCommand::Storage {
-                reply,
-            })
-            .await
+        match session::send_command(&params.session_id, |reply| SessionCommand::Storage {
+            reply,
+        })
+        .await
         {
-            Ok(text) => stamped(text, &mgr, &params.session_id),
+            Ok(text) => stamped_global(text, &params.session_id).await,
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -636,15 +627,13 @@ this, read the error.",
             url_contains: params.url_contains,
             limit: params.limit,
         };
-        let mut mgr = session::SESSIONS.lock().await;
-        match mgr
-            .send(&params.session_id, |reply| SessionCommand::Console {
-                filter,
-                reply,
-            })
-            .await
+        match session::send_command(&params.session_id, |reply| SessionCommand::Console {
+            filter,
+            reply,
+        })
+        .await
         {
-            Ok(text) => stamped(text, &mgr, &params.session_id),
+            Ok(text) => stamped_global(text, &params.session_id).await,
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -658,16 +647,14 @@ default argument); \"dismiss\" restores the default.",
         annotations(title = "Session Dialog")
     )]
     async fn session_dialog(&self, Parameters(params): Parameters<SessionDialogParams>) -> String {
-        let mut mgr = session::SESSIONS.lock().await;
-        match mgr
-            .send(&params.session_id, |reply| SessionCommand::Dialog {
-                action: params.action,
-                prompt_text: params.prompt_text,
-                reply,
-            })
-            .await
+        match session::send_command(&params.session_id, |reply| SessionCommand::Dialog {
+            action: params.action,
+            prompt_text: params.prompt_text,
+            reply,
+        })
+        .await
         {
-            Ok(text) => stamped(text, &mgr, &params.session_id),
+            Ok(text) => stamped_global(text, &params.session_id).await,
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -685,19 +672,17 @@ Indexes come from the most recent session_state; re-list after navigation.",
         annotations(title = "Session Click")
     )]
     async fn session_click(&self, Parameters(params): Parameters<SessionClickParams>) -> String {
-        let mut mgr = session::SESSIONS.lock().await;
-        match mgr
-            .send(&params.session_id, |reply| SessionCommand::Click {
-                index: params.index,
-                reply,
-            })
-            .await
+        match session::send_command(&params.session_id, |reply| SessionCommand::Click {
+            index: params.index,
+            reply,
+        })
+        .await
         {
-            Ok(resp) => stamped_json(
+            Ok(resp) => stamp_global(
                 json!({ "url": resp.url, "clicked": resp.clicked, "text_after": resp.text_after }),
-                &mgr,
                 &params.session_id,
-            ),
+            )
+            .await,
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -712,18 +697,16 @@ For canvas/map surfaces with no DOM element to index. click_count 2 adds dblclic
         &self,
         Parameters(params): Parameters<SessionClickXyParams>,
     ) -> String {
-        let mut mgr = session::SESSIONS.lock().await;
-        match mgr
-            .send(&params.session_id, |reply| SessionCommand::ClickXY {
-                x: params.x,
-                y: params.y,
-                button: params.button.unwrap_or_else(|| "left".to_string()),
-                click_count: params.click_count.unwrap_or(1),
-                reply,
-            })
-            .await
+        match session::send_command(&params.session_id, |reply| SessionCommand::ClickXY {
+            x: params.x,
+            y: params.y,
+            button: params.button.unwrap_or_else(|| "left".to_string()),
+            click_count: params.click_count.unwrap_or(1),
+            reply,
+        })
+        .await
         {
-            Ok(text) => stamped(text, &mgr, &params.session_id),
+            Ok(text) => stamped_global(text, &params.session_id).await,
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -738,21 +721,19 @@ selections and captcha sliders that only track while the pointer travels.",
     )]
     async fn session_drag(&self, Parameters(params): Parameters<SessionDragParams>) -> String {
         let humanize = params.humanize.unwrap_or(true);
-        let mut mgr = session::SESSIONS.lock().await;
-        match mgr
-            .send(&params.session_id, |reply| SessionCommand::Drag {
-                from_x: params.from.x,
-                from_y: params.from.y,
-                to_x: params.to.x,
-                to_y: params.to.y,
-                steps: params.steps.unwrap_or(if humanize { 24 } else { 10 }),
-                delay_ms: params.delay_ms.unwrap_or(if humanize { 18 } else { 30 }),
-                humanize,
-                reply,
-            })
-            .await
+        match session::send_command(&params.session_id, |reply| SessionCommand::Drag {
+            from_x: params.from.x,
+            from_y: params.from.y,
+            to_x: params.to.x,
+            to_y: params.to.y,
+            steps: params.steps.unwrap_or(if humanize { 24 } else { 10 }),
+            delay_ms: params.delay_ms.unwrap_or(if humanize { 18 } else { 30 }),
+            humanize,
+            reply,
+        })
+        .await
         {
-            Ok(text) => stamped(text, &mgr, &params.session_id),
+            Ok(text) => stamped_global(text, &params.session_id).await,
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -767,18 +748,16 @@ write. Hidden inputs are legitimate targets and are filled normally.",
         annotations(title = "Session Input")
     )]
     async fn session_input(&self, Parameters(params): Parameters<SessionInputParams>) -> String {
-        let mut mgr = session::SESSIONS.lock().await;
         let full = params.events.as_deref() == Some("full");
-        match mgr
-            .send(&params.session_id, |reply| SessionCommand::Input {
-                index: params.index,
-                text: params.text.clone(),
-                full_events: full,
-                reply,
-            })
-            .await
+        match session::send_command(&params.session_id, |reply| SessionCommand::Input {
+            index: params.index,
+            text: params.text.clone(),
+            full_events: full,
+            reply,
+        })
+        .await
         {
-            Ok(filled) => stamped(filled.to_string(), &mgr, &params.session_id),
+            Ok(filled) => stamped_global(filled.to_string(), &params.session_id).await,
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -809,17 +788,14 @@ often hidden and absent from the session_state index.",
                 })
             })
             .collect();
-        let mut mgr = session::SESSIONS.lock().await;
-        let session_id = params.session_id.clone();
-        match mgr
-            .send(&session_id, |reply| SessionCommand::SetFiles {
-                selector: params.selector.clone(),
-                files: specs,
-                reply,
-            })
-            .await
+        match session::send_command(&params.session_id, |reply| SessionCommand::SetFiles {
+            selector: params.selector.clone(),
+            files: specs,
+            reply,
+        })
+        .await
         {
-            Ok(result) => stamped_json(result, &mgr, &session_id),
+            Ok(result) => stamp_global(result, &params.session_id).await,
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -833,16 +809,14 @@ often hidden and absent from the session_state index.",
             "up" => session::ScrollDirection::Up,
             _ => session::ScrollDirection::Down,
         };
-        let mut mgr = session::SESSIONS.lock().await;
-        match mgr
-            .send(&params.session_id, |reply| SessionCommand::Scroll {
-                direction,
-                amount: params.amount,
-                reply,
-            })
-            .await
+        match session::send_command(&params.session_id, |reply| SessionCommand::Scroll {
+            direction,
+            amount: params.amount,
+            reply,
+        })
+        .await
         {
-            Ok(scrolled) => stamped_json(json!({ "scrolled": scrolled }), &mgr, &params.session_id),
+            Ok(scrolled) => stamp_global(json!({ "scrolled": scrolled }), &params.session_id).await,
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -855,16 +829,14 @@ navigation moves the session's URL. JS exceptions are reported with name, line/c
         annotations(title = "Session Eval")
     )]
     async fn session_eval(&self, Parameters(params): Parameters<SessionEvalParams>) -> String {
-        let mut mgr = session::SESSIONS.lock().await;
-        match mgr
-            .send(&params.session_id, |reply| SessionCommand::Eval {
-                script: params.script.clone(),
-                timeout_ms: params.timeout_ms,
-                reply,
-            })
-            .await
+        match session::send_command(&params.session_id, |reply| SessionCommand::Eval {
+            script: params.script.clone(),
+            timeout_ms: params.timeout_ms,
+            reply,
+        })
+        .await
         {
-            Ok(result) => stamped_json(json!({ "result": result }), &mgr, &params.session_id),
+            Ok(result) => stamp_global(json!({ "result": result }), &params.session_id).await,
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -879,17 +851,15 @@ flips pointer/hover matchMedia answers to coarse/none. Omitted width/height keep
         &self,
         Parameters(params): Parameters<SessionViewportParams>,
     ) -> String {
-        let mut mgr = session::SESSIONS.lock().await;
-        match mgr
-            .send(&params.session_id, |reply| SessionCommand::Viewport {
-                width: params.width,
-                height: params.height,
-                mobile: params.mobile,
-                reply,
-            })
-            .await
+        match session::send_command(&params.session_id, |reply| SessionCommand::Viewport {
+            width: params.width,
+            height: params.height,
+            mobile: params.mobile,
+            reply,
+        })
+        .await
         {
-            Ok(viewport) => stamped_json(json!({ "viewport": viewport }), &mgr, &params.session_id),
+            Ok(viewport) => stamp_global(json!({ "viewport": viewport }), &params.session_id).await,
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -905,20 +875,18 @@ session_viewport + session_screenshot shows the responsive layout. Returns \
         &self,
         Parameters(params): Parameters<SessionScreenshotParams>,
     ) -> String {
-        let mut mgr = session::SESSIONS.lock().await;
-        match mgr
-            .send(&params.session_id, |reply| SessionCommand::Screenshot {
-                width: params.width,
-                height: params.height,
-                full_page: params.full_page,
-                selector: params.selector.clone(),
-                selector_all: params.selector_all,
-                dpr: params.dpr,
-                reply,
-            })
-            .await
+        match session::send_command(&params.session_id, |reply| SessionCommand::Screenshot {
+            width: params.width,
+            height: params.height,
+            full_page: params.full_page,
+            selector: params.selector.clone(),
+            selector_all: params.selector_all,
+            dpr: params.dpr,
+            reply,
+        })
+        .await
         {
-            Ok(s) => stamped(s, &mgr, &params.session_id),
+            Ok(s) => stamped_global(s, &params.session_id).await,
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -932,17 +900,15 @@ naming the selector/predicate on expiry. Exactly one of selector/predicate.",
         annotations(title = "Session Wait", read_only_hint = true)
     )]
     async fn session_wait(&self, Parameters(params): Parameters<SessionWaitParams>) -> String {
-        let mut mgr = session::SESSIONS.lock().await;
-        match mgr
-            .send(&params.session_id, |reply| SessionCommand::Wait {
-                selector: params.selector.clone(),
-                predicate: params.predicate.clone(),
-                timeout_ms: params.timeout_ms,
-                reply,
-            })
-            .await
+        match session::send_command(&params.session_id, |reply| SessionCommand::Wait {
+            selector: params.selector.clone(),
+            predicate: params.predicate.clone(),
+            timeout_ms: params.timeout_ms,
+            reply,
+        })
+        .await
         {
-            Ok(s) => stamped(s, &mgr, &params.session_id),
+            Ok(s) => stamped_global(s, &params.session_id).await,
             Err(e) => json!({ "error": e }).to_string(),
         }
     }
@@ -955,17 +921,15 @@ naming the selector/predicate on expiry. Exactly one of selector/predicate.",
         &self,
         Parameters(params): Parameters<SessionNetworkParams>,
     ) -> String {
-        let mut mgr = session::SESSIONS.lock().await;
-        match mgr
-            .send(&params.session_id, |reply| SessionCommand::Network {
-                media_only: params.filter.as_deref() == Some("media"),
-                include_bodies: params.include_bodies.unwrap_or(false),
-                include_headers: params.include_headers.unwrap_or(false),
-                url_contains: params.url_contains,
-                body_max_chars: params.body_max_chars.unwrap_or(4000),
-                reply,
-            })
-            .await
+        match session::send_command(&params.session_id, |reply| SessionCommand::Network {
+            media_only: params.filter.as_deref() == Some("media"),
+            include_bodies: params.include_bodies.unwrap_or(false),
+            include_headers: params.include_headers.unwrap_or(false),
+            url_contains: params.url_contains,
+            body_max_chars: params.body_max_chars.unwrap_or(4000),
+            reply,
+        })
+        .await
         {
             Ok(text) => text,
             Err(e) => json!({ "error": e }).to_string(),
@@ -988,12 +952,10 @@ challenge in this session, and the retry rides the cookie that solving sets. Det
         &self,
         Parameters(params): Parameters<SessionChallengesParams>,
     ) -> String {
-        let mut mgr = session::SESSIONS.lock().await;
-        match mgr
-            .send(&params.session_id, |reply| SessionCommand::Challenges {
-                reply,
-            })
-            .await
+        match session::send_command(&params.session_id, |reply| SessionCommand::Challenges {
+            reply,
+        })
+        .await
         {
             Ok(text) => text,
             Err(e) => json!({ "error": e }).to_string(),
@@ -1017,9 +979,7 @@ no page evals, single-digit milliseconds. Verdict observes, it never bypasses.",
         &self,
         Parameters(params): Parameters<SessionVerdictParams>,
     ) -> String {
-        let mut mgr = session::SESSIONS.lock().await;
-        match mgr
-            .send(&params.session_id, |reply| SessionCommand::Verdict { reply })
+        match session::send_command(&params.session_id, |reply| SessionCommand::Verdict { reply })
             .await
         {
             Ok(text) => text,
@@ -1137,35 +1097,34 @@ it does not exist.",
         annotations(title = "Export Session Replay Script", read_only_hint = true)
     )]
     async fn session_export(&self, Parameters(params): Parameters<SessionExportParams>) -> String {
-        let mut mgr = session::SESSIONS.lock().await;
-        let jsonl = match mgr
-            .send(&params.session_id, |reply| SessionCommand::Export { reply })
-            .await
-        {
+        let send = session::send_command(&params.session_id, |reply| SessionCommand::Export {
+            reply,
+        });
+        let jsonl = match send.await {
             Ok(j) => j,
             Err(e) => return json!({ "error": e }).to_string(),
         };
         match params.format.as_deref() {
-            Some("jsonl") => stamped_json(
+            Some("jsonl") => stamp_global(
                 json!({ "format": "jsonl", "actions": jsonl }),
-                &mgr,
                 &params.session_id,
-            ),
+            )
+            .await,
             Some("json") => {
                 let doc = crate::flow::recorded_to_flow(&jsonl);
-                stamped_json(
+                stamp_global(
                     json!({ "format": "json", "flow": doc }),
-                    &mgr,
                     &params.session_id,
                 )
+                .await
             }
             _ => {
                 let script = session::replay_bash(&jsonl, "http://127.0.0.1:8089");
-                stamped_json(
+                stamp_global(
                     json!({ "format": "bash", "script": script }),
-                    &mgr,
                     &params.session_id,
                 )
+                .await
             }
         }
     }
@@ -1402,9 +1361,21 @@ fn stamped_json(mut v: serde_json::Value, mgr: &session::SessionManager, sid: &s
     v.to_string()
 }
 
-fn stamped(text: String, mgr: &session::SessionManager, sid: &str) -> String {
+/// The stamping pair above for tools that released the SESSIONS lock during
+/// the round trip (session::send_command, #193): the countdown is re-read
+/// through the global manager instead of a held &SessionManager.
+async fn stamp_global(mut v: serde_json::Value, sid: &str) -> String {
+    if v.is_object() {
+        if let Some(s) = session::expires_in_secs(sid).await {
+            v["expires_in_secs"] = json!(s);
+        }
+    }
+    v.to_string()
+}
+
+async fn stamped_global(text: String, sid: &str) -> String {
     match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(v) if v.is_object() => stamped_json(v, mgr, sid),
+        Ok(v) if v.is_object() => stamp_global(v, sid).await,
         _ => text,
     }
 }
