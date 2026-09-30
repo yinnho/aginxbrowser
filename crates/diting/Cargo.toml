@@ -149,7 +149,7 @@ hkdf = "0.12"
 # p256/p384 with arithmetic+pkcs8 for key encode/decode. rand_core's OsRng
 # (over the getrandom 0.2 already in tree) drives key generation.
 ecdsa = { version = "0.16", default-features = false, features = ["signing", "verifying", "hazmat", "pkcs8", "pem"] }
-p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa", "ecdh", "pkcs8", "std"] }
+p256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdsa", "ecdh", "pkcs8", "std"] }
 p384 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa", "ecdh", "pkcs8", "std"] }
 rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
 # CSPRNG for getRandomValues / randomUUID (replaces Math.random).
