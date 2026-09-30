@@ -13765,6 +13765,40 @@
         assert_eq!(parts[2], serde_json::json!(true));
     }
 
+    /// #196: the CSSOM face of the display gate — a replaced element
+    /// (textarea) VISIBLE at parse time must vanish when the page hides it
+    /// with a runtime `style.display = 'none'` write. The write rides the
+    /// same restyle → recascade → layout-rebuild path as an attribute, and
+    /// build_replaced_leaf's gate closes every attach site, so the control
+    /// loses its box (gBCR/offsets zero) instead of painting its value —
+    /// the raw `<style …>` template text baidu/sina ship in hidden
+    /// textareas.
+    #[cfg(feature = "screenshot")]
+    #[test]
+    fn test_cssom_display_none_write_hides_replaced_element() {
+        let mut rt = setup_runtime(
+            r#"<html><body><textarea id="ta">&lt;style id="css_result"&gt;#ftCon{display:none}&lt;/style&gt;</textarea><p id="p">hello</p></body></html>"#,
+        );
+        let result = rt.evaluate(r#"
+            const ta = document.getElementById("ta");
+            const before = [ta.getBoundingClientRect().width, ta.getBoundingClientRect().height];
+            ta.style.display = "none";
+            const after = [ta.getBoundingClientRect().width, ta.getBoundingClientRect().height,
+                           ta.offsetWidth, ta.offsetHeight];
+            const p = document.getElementById("p").getBoundingClientRect();
+            return [before[0] > 0, before[1] > 0, after, p.height > 0];
+        "#).unwrap();
+        let parts = result.as_array().expect("array result");
+        assert_eq!(parts[0], serde_json::json!(true), "visible at parse: real box before the write");
+        assert_eq!(parts[1], serde_json::json!(true));
+        assert_eq!(
+            parts[2],
+            serde_json::json!([0, 0, 0, 0]),
+            "CSSOM display:none write must rebuild layout to a hidden box"
+        );
+        assert_eq!(parts[3], serde_json::json!(true), "rest of the page keeps rendering");
+    }
+
     #[cfg(feature = "screenshot")]
     #[test]
     fn test_scroll_height_reports_overflow_extent_not_own_box() {

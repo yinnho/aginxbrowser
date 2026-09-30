@@ -59,6 +59,106 @@ mod style_text_leak_tests {
 }
 
 #[cfg(test)]
+mod hidden_replaced_tests {
+    // #196: replaced elements (is_replaced_tag family) attach from run-build
+    // call sites that bypass build_element_inner's display gate, so a
+    // display:none textarea — baidu/sina ship page templates as hidden
+    // textareas — laid out as a real control and painted its VALUE (the raw
+    // `<style …>` template text) as visible content. The gate now lives in
+    // build_replaced_leaf itself, closing every attach site at once. These
+    // pin the baidu shape (parse-time inline attribute), the author-rule
+    // shape, a second family member (input), and the visible control that
+    // must keep painting.
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::*;
+
+    // A form control's value is NOT a PaintItem::Text — the replaced paint
+    // walk wraps it in PaintItem::Replaced { alt } (with form: Some(_)), so
+    // the harness collects both faces: Text for real runs, Replaced alt for
+    // control values.
+    fn texts(html: &str, sheet: &str) -> Vec<String> {
+        let tree = parse_html(html);
+        let rules = parse_stylesheet_for(sheet, (800.0, 600.0), CssMediaType::Screen);
+        let styles = compute_styles(&tree, &rules, (1280.0, 720.0));
+        let (_, items, _, _, _, _) = layout_dom_with_paint_order_and_images(
+            &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
+        );
+        items
+            .iter()
+            .filter_map(|it| match it {
+                PaintItem::Text { text, .. } => Some(text.clone()),
+                PaintItem::Replaced { alt: Some((text, ..)), .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const TEMPLATE: &str =
+        "&lt;style data-for=\"result\" id=\"css_result\"&gt;#ftCon{display:none}&lt;/style&gt;";
+
+    #[test]
+    fn inline_attr_hidden_textarea_does_not_paint_its_value() {
+        // The baidu homepage shape: template as textarea content, hidden by
+        // a parse-time inline style attribute.
+        let html = format!(
+            r#"<html><body><textarea style="display:none;">{TEMPLATE}</textarea><p id="p">hello</p></body></html>"#
+        );
+        let ts = texts(&html, "");
+        assert!(ts.iter().any(|t| t.contains("hello")), "rest of page renders: {ts:?}");
+        assert!(
+            !ts.iter().any(|t| t.contains("css_result") || t.contains("ftCon")),
+            "hidden textarea must not paint its template value: {ts:?}"
+        );
+    }
+
+    #[test]
+    fn stylesheet_rule_hidden_textarea_does_not_paint_its_value() {
+        let html = format!(
+            r#"<html><body><textarea class="tmpl">{TEMPLATE}</textarea><p id="p">hello</p></body></html>"#
+        );
+        let ts = texts(&html, ".tmpl { display: none }");
+        assert!(ts.iter().any(|t| t.contains("hello")), "rest of page renders: {ts:?}");
+        assert!(
+            !ts.iter().any(|t| t.contains("css_result") || t.contains("ftCon")),
+            "rule-hidden textarea must not paint its template value: {ts:?}"
+        );
+    }
+
+    #[test]
+    fn hidden_input_does_not_paint_its_value() {
+        // Second family member: the same gate must cover the whole
+        // is_replaced_tag set, not just textarea.
+        let html = r#"<html><body><input value="SECRETV" style="display:none;"><p id="p">hello</p></body></html>"#;
+        let ts = texts(html, "");
+        assert!(ts.iter().any(|t| t.contains("hello")), "rest of page renders: {ts:?}");
+        assert!(!ts.iter().any(|t| t.contains("SECRETV")), "hidden input must not paint: {ts:?}");
+    }
+
+    #[test]
+    fn hidden_img_does_not_paint_its_alt() {
+        // The issue's explicit ask: pin a display:none img too — the whole
+        // is_replaced_tag family (img/video/iframe/input/select/svg…)
+        // attaches through the same call sites. An undecoded img paints its
+        // alt run inside the Replaced placeholder; hidden, it must vanish.
+        let html = r#"<html><body><img src="/missing.png" alt="SECRETALT" style="display:none;"><p id="p">hello</p></body></html>"#;
+        let ts = texts(html, "");
+        assert!(ts.iter().any(|t| t.contains("hello")), "rest of page renders: {ts:?}");
+        assert!(!ts.iter().any(|t| t.contains("SECRETALT")), "hidden img must not paint its alt: {ts:?}");
+    }
+
+    #[test]
+    fn visible_textarea_still_paints_its_value() {
+        // The gate must not over-hide: a visible control keeps painting its
+        // value on the form-control path.
+        let html = r#"<html><body><textarea>shown value</textarea><p id="p">hello</p></body></html>"#;
+        let ts = texts(html, "");
+        assert!(ts.iter().any(|t| t.contains("shown value")), "visible textarea paints: {ts:?}");
+        assert!(ts.iter().any(|t| t.contains("hello")), "rest of page renders: {ts:?}");
+    }
+}
+
+#[cfg(test)]
 mod q_quote_tests {
     use crate::diting_layout::q_quote_pair;
 

@@ -1966,6 +1966,15 @@ fn build_replaced_leaf(
     node_map: &mut HashMap<taffy::tree::NodeId, NodeId>,
     strut_descent: f32,
 ) -> Option<taffy::tree::NodeId> {
+    // #196: replaced elements skip build_element_inner's display gate (they
+    // attach from three run-attach sites that call here directly), so a
+    // display:none textarea — baidu/sina ship page templates as hidden
+    // textareas — used to lay out as a real control and paint its value
+    // (the raw `<style …>` template text) as visible content. One gate
+    // here closes all three attach sites at once.
+    if styles.get(&id).and_then(|s| s.display) == Some(CssDisplay::None) {
+        return None;
+    }
     let style = styles.get(&id).cloned().unwrap_or_default();
     let tag = tree
         .with_node(id, |n| n.as_element().map(|e| e.local.to_string()))
