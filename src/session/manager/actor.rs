@@ -38,6 +38,7 @@ fn try_inject_storage(page: &mut crate::page::Page, pending: &mut Option<Value>)
     *pending = None;
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn session_thread(
     session_id: String,
     start_url: Option<String>,
@@ -45,6 +46,7 @@ pub(super) fn session_thread(
     cookies: Vec<String>,
     storage: Option<Value>,
     account: Option<(String, String)>,
+    nav_shared: std::sync::Arc<NavFrameShared>,
     mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
 ) {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -287,6 +289,16 @@ pub(super) fn session_thread(
                                     let nav_frame = page.band_frame_cache.clone();
                                     #[cfg(feature = "screenshot")]
                                     let nav_frame_url = page.url();
+                                    // #195: publish the pre-navigation state and
+                                    // raise the in-flight flag BEFORE the load
+                                    // starts — from here the V8 thread may sit
+                                    // inside synchronous page JS for seconds,
+                                    // beyond this loop's polling reach (the
+                                    // in-arm serve below still answers while
+                                    // goto awaits the network; the sender side
+                                    // covers the script-held stretch).
+                                    #[cfg(feature = "screenshot")]
+                                    nav_shared.begin(nav_frame_url.clone(), nav_frame.clone());
                                     // Scoped so the pinned goto (which holds
                                     // &mut page) drops before the post-landing
                                     // bookkeeping borrows the page again.
@@ -323,6 +335,10 @@ pub(super) fn session_thread(
                                             }
                                         }
                                     };
+                                    // #195: the load is over (landed or failed)
+                                    // — sender-side old-frame answers stand
+                                    // down; polls go through the channel again.
+                                    nav_shared.end();
                                     match nav_result {
                                         Ok(()) => {
                                             let final_url = page.url();
@@ -388,6 +404,12 @@ pub(super) fn session_thread(
                                 STANDARD.encode(html.as_bytes())
                             );
                             page.inner.set_preload_scripts(preload_scripts.clone());
+                            // #195: a data: URL parses inline scripts on the
+                            // same V8 thread — a long script in setContent
+                            // HTML holds the actor exactly like a network
+                            // navigation, so publish + flag around it too.
+                            #[cfg(feature = "screenshot")]
+                            nav_shared.begin(page.url(), page.band_frame_cache.clone());
                             let result = match page.goto(&url).await {
                                 Ok(()) => {
                                     let title = page
@@ -408,6 +430,8 @@ pub(super) fn session_thread(
                                     Err(msg)
                                 }
                             };
+                            // #195: same stand-down as the Navigate arm.
+                            nav_shared.end();
                             recorder.push(RecordedAction::SetContent {
                                 ok: result.is_ok(),
                                 html,

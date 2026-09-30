@@ -185,6 +185,56 @@ impl ConsoleFilter {
 // Session handle
 // ---------------------------------------------------------------------------
 
+/// #195: the channel-layer old-frame answer's shared state. Parse-time
+/// synchronous JS can hold the session's V8 thread for seconds — the actor
+/// cannot poll the command channel while a script runs, so even the #193
+/// in-arm serve (which polls inside the goto) waits for the script to
+/// yield. The session thread publishes its pre-navigation state here (old
+/// URL + last band frame) before starting a load and lowers `in_flight`
+/// after; the sender side (`SessionManager::nav_frame_answer`) answers
+/// default-shape screenshot polls from this snapshot without ever entering
+/// the channel. Chrome's frame contract is unchanged: the old frame is
+/// what the browser shows until the new document commits.
+#[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
+#[derive(Default)]
+pub(super) struct NavFrameShared {
+    /// True while a navigation owns the page (raised before the load
+    /// starts, lowered after it lands or fails).
+    pub(super) in_flight: std::sync::atomic::AtomicBool,
+    /// The pre-navigation URL + band frame, replaced on every navigation.
+    /// Senders clone the Arc out under a short lock — no PNG copy per poll.
+    #[cfg(feature = "screenshot")]
+    pub(super) state: std::sync::Mutex<std::sync::Arc<NavFrameSnapshot>>,
+}
+
+/// One published pre-navigation frame: the page's URL at the moment the
+/// navigation started plus the last band-frame cache entry (#189) — the
+/// same pair the #193 in-arm serve reads from the page directly.
+#[cfg(feature = "screenshot")]
+#[derive(Default)]
+pub(super) struct NavFrameSnapshot {
+    pub(super) url: String,
+    pub(super) frame: Option<crate::page::BandFrameCache>,
+}
+
+impl NavFrameShared {
+    /// Publish the pre-navigation state and mark the navigation in flight.
+    /// Must run before the load starts — from that point the V8 thread may
+    /// sit inside synchronous page JS, beyond the actor's reach.
+    #[cfg(feature = "screenshot")]
+    pub(super) fn begin(&self, url: String, frame: Option<crate::page::BandFrameCache>) {
+        *self.state.lock().expect("nav frame lock") =
+            std::sync::Arc::new(NavFrameSnapshot { url, frame });
+        self.in_flight.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The load is over (landed or failed) — sender-side old-frame answers
+    /// stand down and polls go through the channel again.
+    pub(super) fn end(&self) {
+        self.in_flight.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 pub(super) struct BrowserSession {
     pub(super) cmd_tx: mpsc::UnboundedSender<SessionCommand>,
     pub(super) last_active: Instant,
@@ -208,6 +258,11 @@ pub(super) struct BrowserSession {
     /// anonymous sessions; for account sessions the account IS the
     /// persistence (a new session_create {account} picks up the warm jar).
     pub(super) account: Option<(String, String)>,
+    /// #195: shared with this session's thread — see [`NavFrameShared`].
+    /// The manager side reads it to answer default-shape screenshot polls
+    /// while a navigation holds the V8 thread.
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
+    pub(super) nav_frame: std::sync::Arc<NavFrameShared>,
 }
 
 impl BrowserSession {

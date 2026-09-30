@@ -1766,6 +1766,156 @@
         assert!(mgr.close_and_wait(&sid).await);
     }
 
+    /// #195: the #193 test above holds the navigation in the NETWORK wait,
+    /// where the in-arm biased select can still poll the channel. This one
+    /// holds it inside parse-time synchronous JS — the V8 call never
+    /// returns to Rust, the actor loop cannot poll anything, and the
+    /// default-shape poll must be answered on the SENDER side from the
+    /// published pre-navigation frame (the issue's fixture: a 3s head busy
+    /// loop, poll waited 2.75s behind the script).
+    #[cfg(feature = "screenshot")]
+    #[tokio::test]
+    async fn sync_js_hold_still_serves_default_screenshot_polls() {
+        let _net = crate::server::test_util::net_env_guard();
+        // /a.html renders instantly; /c.html is network-instant but its
+        // head script busy-loops 2.5s — the hold is JS execution, not
+        // transport.
+        let (port, _hits) = crate::server::test_util::recording_server(&[
+            (
+                "GET /a.html",
+                "<html><head><title>red</title></head><body style=\"margin:0\">\
+                 <div style=\"width:200px;height:200px;background:#ff0000\"></div>\
+                 </body></html>",
+            ),
+            (
+                "GET /c.html",
+                "<html><head><script>var t=Date.now();while(Date.now()-t<2500);</script>\
+                 <title>held</title></head><body style=\"margin:0\">\
+                 <div style=\"width:200px;height:200px;background:#00ff00\"></div>\
+                 </body></html>",
+            ),
+        ]);
+
+        // This test drives the production path end to end: send_screenshot
+        // answers through the GLOBAL SESSIONS manager, so the session lives
+        // there (not a test-local SessionManager::new()).
+        let sid = {
+            let mut mgr = SESSIONS.lock().await;
+            mgr.evict_expired();
+            mgr.create(
+                Some(&format!("http://127.0.0.1:{port}/a.html")),
+                false,
+                vec![],
+                None,
+                None,
+                None,
+                false,
+                false,
+                None,
+            )
+        };
+
+        // Prime the band cache with the red frame.
+        let red = send_command(&sid, |reply| SessionCommand::Screenshot {
+                width: None,
+                height: None,
+                full_page: false,
+                selector: None,
+                selector_all: false,
+                dpr: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        let png = |shot: &str| -> String {
+            serde_json::from_str::<Value>(shot).unwrap()["image_base64"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let red_url = format!("http://127.0.0.1:{port}/a.html");
+        assert_eq!(
+            serde_json::from_str::<Value>(&red).unwrap()["url"],
+            Value::String(red_url.clone()),
+            "the primed frame belongs to /a.html"
+        );
+
+        // Fire the navigate without awaiting (same enqueue pattern as the
+        // #193 test above, through the global manager's channel).
+        let (nav_tx, nav_rx) = tokio::sync::oneshot::channel();
+        {
+            let mgr = SESSIONS.lock().await;
+            mgr.sessions
+                .get(&sid)
+                .unwrap()
+                .cmd_tx
+                .send(SessionCommand::Navigate {
+                    url: format!("http://127.0.0.1:{port}/c.html"),
+                    reply: nav_tx,
+                })
+                .expect("session channel alive");
+
+            // Wait until the navigation is in flight (pre-navigation state
+            // published), so the poll below is deterministic — not a race
+            // with the navigate command still queued. The lock is dropped
+            // each iteration so nothing else contends on it.
+            let shared = std::sync::Arc::clone(&mgr.sessions.get(&sid).unwrap().nav_frame);
+            drop(mgr);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !shared.in_flight.load(std::sync::atomic::Ordering::Acquire) {
+                assert!(
+                    Instant::now() < deadline,
+                    "navigation never went in flight"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        // The busy loop now holds the V8 thread (~2.4s of it left). The
+        // poll must answer from the sender-side snapshot in milliseconds,
+        // not queue behind the script.
+        let t0 = Instant::now();
+        let mid = super::send_screenshot(&sid, None, None, false, None, false, None)
+            .await
+            .unwrap();
+        assert!(
+            t0.elapsed() < Duration::from_millis(800),
+            "mid-hold poll must be answered sender-side, not queued behind \
+             the busy-loop script (took {}ms)",
+            t0.elapsed().as_millis()
+        );
+        let mid_v: Value = serde_json::from_str(&mid).expect("screenshot JSON");
+        assert_eq!(png(&mid), png(&red), "mid-hold poll serves the old frame");
+        assert_eq!(
+            mid_v["url"],
+            Value::String(red_url),
+            "the served frame is the pre-navigation page's"
+        );
+
+        // The busy loop finishes; the load lands; in_flight drops and the
+        // next poll goes through the channel and paints the held page.
+        nav_rx
+            .await
+            .expect("navigate reply")
+            .expect("busy-loop page still loads");
+        let after = send_screenshot(&sid, None, None, false, None, false, None)
+            .await
+            .unwrap();
+        let after_v: Value = serde_json::from_str(&after).expect("screenshot JSON");
+        assert_eq!(
+            after_v["url"],
+            Value::String(format!("http://127.0.0.1:{port}/c.html")),
+            "post-landing poll reflects the new page"
+        );
+        assert_ne!(
+            png(&after),
+            png(&red),
+            "the landed page must not be served the old frame"
+        );
+
+        assert!(SESSIONS.lock().await.close_and_wait(&sid).await);
+    }
+
     /// The async-content case straight from real usage: a page whose cards
     /// arrive via setTimeout can't be probed with a bare eval (racy), so the
     /// agent sleeps blindly. Wait polls with the event loop driven in

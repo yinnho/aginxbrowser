@@ -881,15 +881,15 @@ session_viewport + session_screenshot shows the responsive layout. Returns \
         &self,
         Parameters(params): Parameters<SessionScreenshotParams>,
     ) -> String {
-        match session::send_command(&params.session_id, |reply| SessionCommand::Screenshot {
-            width: params.width,
-            height: params.height,
-            full_page: params.full_page,
-            selector: params.selector.clone(),
-            selector_all: params.selector_all,
-            dpr: params.dpr,
-            reply,
-        })
+        match session::send_screenshot(
+            &params.session_id,
+            params.width,
+            params.height,
+            params.full_page,
+            params.selector.as_deref(),
+            params.selector_all,
+            params.dpr,
+        )
         .await
         {
             Ok(s) => stamped_global(s, &params.session_id).await,

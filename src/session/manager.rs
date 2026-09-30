@@ -19,8 +19,9 @@ use super::interact::{
 };
 use super::record::{RecordedAction, inject_storage_js};
 use super::state::{
-    BrowserSession, SessionError, SnapshotStore, SESSION_COUNTER, PER_SESSION_FLUSH_BUDGET,
-    SESSION_TIMEOUT, SHUTDOWN_FLUSH_BUDGET, SNAPSHOT_MAX_AGE_SECS, drain_console,
+    BrowserSession, NavFrameShared, SessionError, SnapshotStore, SESSION_COUNTER,
+    PER_SESSION_FLUSH_BUDGET, SESSION_TIMEOUT, SHUTDOWN_FLUSH_BUDGET, SNAPSHOT_MAX_AGE_SECS,
+    drain_console,
 };
 
 // Session manager
@@ -83,6 +84,45 @@ where
 /// ([`send_command`]).
 pub(crate) async fn expires_in_secs(session_id: &str) -> Option<u64> {
     SESSIONS.lock().await.expires_in_secs(session_id)
+}
+
+/// Screenshot round trip with the #195 channel-layer fast path: while a
+/// navigation holds the session's V8 thread (synchronous page JS can sit
+/// there for seconds, beyond the actor's polling reach), a default-shape
+/// poll is answered from the published pre-navigation frame on the sender
+/// side — the command never enters the channel, so it cannot queue behind
+/// the script. Every other shape (and a not-in-flight session) rides
+/// [`send_command`] as before.
+pub(crate) async fn send_screenshot(
+    session_id: &str,
+    width: Option<u32>,
+    height: Option<u32>,
+    full_page: bool,
+    selector: Option<&str>,
+    selector_all: bool,
+    dpr: Option<f32>,
+) -> Result<String, SessionError> {
+    let default_shape =
+        width.is_none() && height.is_none() && !full_page && selector.is_none() && !selector_all;
+    if default_shape {
+        let early = {
+            let mgr = SESSIONS.lock().await;
+            mgr.nav_frame_answer(session_id, dpr)
+        };
+        if let Some(answer) = early {
+            return answer;
+        }
+    }
+    send_command(session_id, |reply| SessionCommand::Screenshot {
+        width,
+        height,
+        full_page,
+        selector: selector.map(str::to_string),
+        selector_all,
+        dpr,
+        reply,
+    })
+    .await
 }
 
 impl SessionManager {
@@ -164,9 +204,15 @@ impl SessionManager {
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
+        // #195: shared nav-state for the channel-layer old-frame answer
+        // (NavFrameShared). Fresh per spawn — a revived session starts with
+        // the flag down and an empty frame.
+        let nav_shared = std::sync::Arc::new(NavFrameShared::default());
+
         let thread_id = session_id.to_string();
         let thread_url = start_url.map(|s| s.to_string());
         let thread_account = account.clone();
+        let thread_nav = std::sync::Arc::clone(&nav_shared);
         std::thread::Builder::new()
             .name(format!("session-{}", &thread_id[..8.min(thread_id.len())]))
             // Deep stack for the V8 isolate — see server::v8_stack_size.
@@ -181,6 +227,7 @@ impl SessionManager {
                     cookies,
                     storage,
                     thread_account,
+                    thread_nav,
                     cmd_rx,
                 );
             })
@@ -196,6 +243,7 @@ impl SessionManager {
                 use_proxy,
                 persistent,
                 account,
+                nav_frame: nav_shared,
             },
         );
         // Fire-and-forget viewport pin: it queues ahead of anything the
@@ -223,6 +271,58 @@ impl SessionManager {
             return None;
         }
         Some(s.timeout.saturating_sub(s.last_active.elapsed()).as_secs())
+    }
+
+    /// #195: the sender side of the channel-layer old-frame answer. A
+    /// default-shape screenshot poll against a session mid-navigation —
+    /// whose V8 thread may be held by synchronous page JS, so the actor
+    /// cannot poll the channel — is answered here from the published
+    /// pre-navigation frame, without entering the channel. The requested
+    /// dpr must match the cached frame's signature scale (the same rule as
+    /// the in-actor serve); any mismatch, an idle-expired session, or a
+    /// not-in-flight navigation returns None and the caller falls through
+    /// to the normal command path.
+    #[cfg(feature = "screenshot")]
+    pub(super) fn nav_frame_answer(
+        &self,
+        session_id: &str,
+        dpr: Option<f32>,
+    ) -> Option<Result<String, SessionError>> {
+        let session = self.sessions.get(session_id)?;
+        // Expired-but-present: let the normal path run the revive/expire
+        // policy instead of answering a stale frame for a dying session.
+        if session.is_expired() {
+            return None;
+        }
+        let shared = &session.nav_frame;
+        if !shared.in_flight.load(Ordering::Acquire) {
+            return None;
+        }
+        let snap = shared.state.lock().ok()?.clone();
+        let frame = snap.frame.as_ref()?;
+        let scale = super::screenshot::resolve_dpr(dpr);
+        if frame.sig.7 != scale {
+            return None;
+        }
+        Some(Ok(super::screenshot::cached_frame_json(
+            &snap.url,
+            frame.width,
+            frame.height,
+            &frame.png,
+        )))
+    }
+
+    /// The no-feature build of [`Self::nav_frame_answer`]: no band frames
+    /// exist without the screenshot feature, so there is nothing to answer
+    /// from — every poll rides the channel (and errors with the feature
+    /// gate message there, as today).
+    #[cfg(not(feature = "screenshot"))]
+    pub(super) fn nav_frame_answer(
+        &self,
+        _session_id: &str,
+        _dpr: Option<f32>,
+    ) -> Option<Result<String, SessionError>> {
+        None
     }
 
     /// Derive a new session carrying the source's login state: cookies,

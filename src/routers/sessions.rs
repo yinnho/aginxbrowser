@@ -946,21 +946,24 @@ pub(crate) async fn session_viewport_handler(
 
 /// Screenshot the session's current DOM state. The reply mirrors
 /// POST /screenshot's shape (image_base64 PNG) so existing consumers work
-/// against either; empty body is allowed (viewport-sized capture).
+/// against either; empty body is allowed (viewport-sized capture). Rides
+/// send_screenshot: while a navigation holds the session's V8 thread
+/// (#195), the default-shape poll is answered sender-side from the last
+/// frame instead of queueing behind the load.
 pub(crate) async fn session_screenshot_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     req: Option<Json<SessionScreenshotRequest>>,
 ) -> Result<impl IntoResponse, AppError> {
     let req = req.map(|Json(r)| r).unwrap_or_default();
-    let shot = session::send_command(&id, |reply| session::SessionCommand::Screenshot {
-        width: req.width,
-        height: req.height,
-        full_page: req.full_page,
-        selector: req.selector.clone(),
-        selector_all: req.selector_all,
-        dpr: req.dpr,
-        reply,
-    })
+    let shot = session::send_screenshot(
+        &id,
+        req.width,
+        req.height,
+        req.full_page,
+        req.selector.as_deref(),
+        req.selector_all,
+        req.dpr,
+    )
     .await
     .map_err(session_err)?;
     let body: serde_json::Value =
