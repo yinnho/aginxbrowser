@@ -142,12 +142,13 @@ pub(crate) async fn pump_screencast_frames(ctx: &mut CdpContext) {
         // any layout/paint work). A page id with no page behind it (closed
         // while the cast was armed) drops its state here, or the pump would
         // keep waking every tick for a dead id.
-        let (epoch, rev, ox, oy) = {
+        let (gen, epoch, rev, ox, oy) = {
             let Some(page) = ctx.get_page(&page_id) else {
                 ctx.screencast.remove(&page_id);
                 continue;
             };
             (
+                page.realm_gen(),
                 page.dom_epoch(),
                 page.layout_rev(),
                 page.scroll_offset().0,
@@ -158,7 +159,7 @@ pub(crate) async fn pump_screencast_frames(ctx: &mut CdpContext) {
             let Some(page) = ctx.get_page(&page_id) else { continue };
             page.effective_viewport()
         };
-        let sig = (epoch, rev, ox, oy, vw, vh);
+        let sig = (gen, epoch, rev, ox, oy, vw, vh);
         if st.last_damage == Some(sig) {
             continue;
         }

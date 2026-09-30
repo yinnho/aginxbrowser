@@ -61,12 +61,14 @@ pub struct ScreencastState {
     /// A frame is in flight until the client acks (`Page.screencastFrameAck`);
     /// while set, the pump skips this page (Chrome's backpressure).
     pub outstanding_ack: bool,
-    /// Damage signature of the last emitted frame: (dom epoch, layout rev,
-    /// scroll_x, scroll_y, viewport w, h). A tick with an unchanged
-    /// signature emits nothing — static pages cost zero frames. The layout
-    /// rev covers attribute-level mutations, which clear the layout cache
-    /// without moving the tree-shape epoch.
-    pub last_damage: Option<(u64, u64, f32, f32, f32, f32)>,
+    /// Damage signature of the last emitted frame: (realm gen, dom epoch,
+    /// layout rev, scroll_x, scroll_y, viewport w, h). A tick with an
+    /// unchanged signature emits nothing — static pages cost zero frames.
+    /// The layout rev covers attribute-level mutations, which clear the
+    /// layout cache without moving the tree-shape epoch; the realm gen
+    /// disambiguates across navigations, where epoch and rev restart at 0
+    /// and two static pages could otherwise collide (#189).
+    pub last_damage: Option<(u64, u64, u64, f32, f32, f32, f32)>,
 }
 
 pub struct CdpContext {

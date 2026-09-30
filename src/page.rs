@@ -25,6 +25,26 @@ fn nid_from_value(v: &Value) -> Option<u64> {
 pub struct Page {
     pub(crate) inner: InnerPage,
     pub(crate) context: Arc<BrowserContext>,
+    /// #189: the last default-path band frame plus the damage signature
+    /// that produced it. The HTTP /screenshot poll path (browser86's
+    /// display, the hosted live view) re-rasterizes nothing when the
+    /// signature is unchanged — a static page's frame goes from seconds of
+    /// band paint + PNG encode to a base64 memcpy.
+    #[cfg(feature = "screenshot")]
+    pub(crate) band_frame_cache: Option<BandFrameCache>,
+}
+
+/// One cached viewport-band frame: the encoded PNG plus the damage
+/// signature (realm gen, dom epoch, layout rev, scroll, viewport, dpr)
+/// under which it was produced — the same signature the CDP screencast
+/// pump skips on, extended with the requested scale so a dpr=2 poll never
+/// receives a dpr=1 frame.
+#[cfg(feature = "screenshot")]
+pub(crate) struct BandFrameCache {
+    pub sig: (u64, u64, u64, f32, f32, f32, f32, f32),
+    pub width: u32,
+    pub height: u32,
+    pub png: Vec<u8>,
 }
 
 impl Page {

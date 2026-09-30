@@ -462,6 +462,21 @@ impl Page {
             .unwrap_or(0)
     }
 
+    /// Process-wide realm generation — the navigation-disambiguating half of
+    /// the damage signature (#189). The tree epoch and layout rev above are
+    /// per-realm counters that restart at 0 with every cross-document
+    /// navigation, so two equally static documents can collide on
+    /// (epoch, rev, scroll, viewport) and hand a frame consumer the previous
+    /// page's pixels; this stamp never repeats. 0 only when no realm exists
+    /// (pre-navigation), where there is no frame to confuse either.
+    #[cfg(feature = "screenshot")]
+    pub fn realm_gen(&self) -> u64 {
+        self.js
+            .as_ref()
+            .map(|js| js.with_state(|st| st.realm_gen.get()))
+            .unwrap_or(0)
+    }
+
     /// Drop the override and return to the persona viewport everywhere.
     pub fn clear_viewport_override(&mut self) {
         self.viewport_override = None;

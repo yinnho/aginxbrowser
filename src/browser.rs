@@ -59,6 +59,8 @@ impl Browser {
         Ok(Page {
             inner: page,
             context: self.context.clone(),
+            #[cfg(feature = "screenshot")]
+            band_frame_cache: None,
         })
     }
 

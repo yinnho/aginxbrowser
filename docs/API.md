@@ -1494,6 +1494,8 @@ Screenshot the session's **current DOM state** (mutations from clicks/evals incl
 
 **Response:** `{"url": "...", "width": 1280, "height": 800, "image_base64": "iVBOR...", "format": "png"}` — with `dpr: 2`, `width`/`height` are the device-pixel bitmap dims (e.g. 2560×1600)
 
+> **Poll cost (#189):** the no-argument default path (no `width`/`height`/`full_page`/`selector`) paints the live tree's viewport band and caches the frame under a damage signature — realm generation, dom epoch, layout rev, scroll offset, viewport, `dpr`. A repeated poll on an unchanged page returns the cached PNG (base64 cost, milliseconds) instead of re-rasterizing; any DOM mutation, layout change, scroll, viewport resize, navigation, or different `dpr` re-rasterizes. Explicit-size/`full_page`/`selector` requests always render fresh.
+
 ### POST /session/{id}/wait
 
 Wait until a CSS selector matches or a JS predicate turns truthy, with a timeout. The page's event loop keeps running while waiting (fetches, timers, promise chains progress), so this replaces blind sleeps for async content: navigate, wait for `.price-card`, then click/read. Exactly one of `selector` / `predicate`.

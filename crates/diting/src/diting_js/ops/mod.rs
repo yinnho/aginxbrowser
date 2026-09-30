@@ -292,6 +292,15 @@ pub struct JsState {
     /// report fresh geometry (the AginxOS five-mutation report).
     #[cfg(feature = "screenshot")]
     pub(crate) layout_rev: std::cell::Cell<u64>,
+    /// Process-wide generation stamp of this realm (#189). The tree epoch
+    /// and `layout_rev` are per-realm counters that restart at 0 on every
+    /// navigation, so two equally static documents can collide on
+    /// (epoch, rev, scroll, viewport) — and every damage-signature consumer
+    /// (the screencast pump's skip logic, the HTTP /screenshot frame cache)
+    /// would then reuse the previous page's frame. This stamp never
+    /// repeats within a process.
+    #[cfg(feature = "screenshot")]
+    pub(crate) realm_gen: std::cell::Cell<u64>,
     /// Attribute names referenced by attribute selectors in the last parsed
     /// rule pool, lowercased (obscura#983). Lets a write to a layout-inert
     /// attribute skip the layout-cache drop; `None` until the first layout
@@ -322,6 +331,11 @@ pub struct JsState {
     #[cfg(feature = "screenshot")]
     pub(crate) sticky_shift_cache: std::cell::RefCell<StickyShiftCache>,
 }
+
+/// Source of `JsState::realm_gen` (#189): a fresh stamp per realm, never
+/// reused within a process.
+#[cfg(feature = "screenshot")]
+static REALM_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Default for JsState {
     fn default() -> Self {
@@ -497,6 +511,8 @@ impl JsState {
             css_transitions: std::cell::RefCell::new(Vec::new()),
             #[cfg(feature = "screenshot")]
             layout_rev: std::cell::Cell::new(0),
+            #[cfg(feature = "screenshot")]
+            realm_gen: std::cell::Cell::new(REALM_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)),
             #[cfg(feature = "screenshot")]
             attr_selector_names: std::cell::RefCell::new(None),
             #[cfg(feature = "screenshot")]
