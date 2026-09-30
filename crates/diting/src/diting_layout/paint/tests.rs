@@ -1514,6 +1514,72 @@ fn text_shadow_blur_clamped_and_budgeted() {
     assert!(!budgeted.is_empty(), "fallback still draws shadow ink");
 }
 
+/// Chrome shadows the decorations with the glyphs (blitz#984): a hard
+/// layer restamps underline/overline/line-through strokes in the shadow
+/// color at the same offset. Underline-only ink (present in a decorated
+/// render, absent undecorated) must appear red-shifted — every stroke
+/// pixel carries a red twin at (+8, 0).
+#[test]
+fn text_shadow_underlines_are_shadowed() {
+    let fonts = crate::diting_fonts::font_book();
+    let item = |decorated: bool, shadow: Option<TextShadow>| {
+        vec![PaintItem::Text {
+            text: "mmmmm".into(),
+            font_size: 16.0,
+            bold: false,
+            color: [0, 0, 0, 255],
+            line_height: 20.0,
+            x: 10.0,
+            y: 20.0,
+            wrap_at: 400.0,
+            gradient: None,
+            decorations: TextDecorations { underline: decorated, ..TextDecorations::default() },
+            mono: false,
+            word_spacing: 0.0,
+            truncate_at: None,
+            tokens: None,
+            ws: WhiteSpace::Normal,
+            text_shadow: shadow.map(|sh| vec![sh]),
+            small_caps: false,
+            han: None,
+        }]
+    };
+    let render = |items: &[PaintItem]| {
+        let mut c = Canvas::new_filled(140, 40, [255, 255, 255, 255]);
+        execute(items, &fonts, &mut c);
+        c
+    };
+    let ink = |c: &Canvas| {
+        (0..c.height)
+            .flat_map(|y| (0..c.width).map(move |x| (x, y)))
+            .filter(|(x, y)| px(c, *x, *y)[0] < 255)
+            .collect::<std::collections::HashSet<(usize, usize)>>()
+    };
+    let decorated_ink = ink(&render(&item(true, None)));
+    let plain_ink = ink(&render(&item(false, None)));
+    let stroke_only: Vec<(usize, usize)> = decorated_ink.difference(&plain_ink).copied().collect();
+    assert!(!stroke_only.is_empty(), "the underline contributes stroke-only ink");
+
+    let shadowed = render(&item(true, Some(TextShadow { dx: 8.0, dy: 0.0, blur: 0.0, color: crate::diting_css::Color(255, 0, 0, 255) })));
+    // Twins landing under real ink (glyphs or the real stroke itself) are
+    // covered — the shadow rides UNDER the content, like Chrome. The ones
+    // in letter gaps must be red, and at least one must be visible or the
+    // stroke restamp isn't happening at all.
+    let mut visible = 0;
+    for (x, y) in &stroke_only {
+        let twin = (x + 8, *y);
+        if twin.0 >= shadowed.width || decorated_ink.contains(&twin) {
+            continue;
+        }
+        assert!(
+            px(&shadowed, twin.0, twin.1)[0] > px(&shadowed, twin.0, twin.1)[1],
+            "underline pixel ({x},{y}) has its red shadow twin at (+8,0)"
+        );
+        visible += 1;
+    }
+    assert!(visible > 0, "some stroke twin is visible in letter gaps");
+}
+
 /// The separable box blur preserves the plane's total mass up to edge
 /// clamping and is idempotent-flat on a constant plane.
 #[test]

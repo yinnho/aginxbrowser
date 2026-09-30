@@ -2445,6 +2445,15 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     if let Some(shadows) = text_shadow {
                         for sh in shadows.iter().rev() {
                             stamp_text_shadow(out, fonts, text, *font_size, *bold, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), sh, true, (*x + sh.dx) as f64, (*y + sh.dy) as f64);
+                            // Chrome shadows the decorations with the text
+                            // (blitz#984): each hard layer restamps the
+                            // strokes in the shadow color at the same offset.
+                            // Blurred layers skip the stroke copy — a hard
+                            // line beside a feathered glyph reads as a bug,
+                            // not a shadow.
+                            if sh.blur <= 0.0 {
+                                paint_text_decorations(out, fonts, text, *font_size, *bold, [sh.color.0, sh.color.1, sh.color.2, sh.color.3], *line_height, *x + sh.dx, *y + sh.dy, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), 0.0, 0.0);
+                            }
                         }
                     }
                     let r = fonts.rasterize_wrapped_with(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, *ws, tokens.clone(), *small_caps, *han);
@@ -2468,6 +2477,9 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     if let Some(shadows) = text_shadow {
                         for sh in shadows.iter().rev() {
                             stamp_text_shadow(out, fonts, text, *font_size, *bold, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), sh, false, (*x + sh.dx - dx) as f64, (*y + sh.dy - dy) as f64);
+                            if sh.blur <= 0.0 {
+                                paint_text_decorations(out, fonts, text, *font_size, *bold, [sh.color.0, sh.color.1, sh.color.2, sh.color.3], *line_height, *x + sh.dx, *y + sh.dy, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), dx, dy);
+                            }
                         }
                     }
                     let r = fonts.rasterize_wrapped_with(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, *ws, tokens.clone(), *small_caps, *han);
