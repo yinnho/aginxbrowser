@@ -402,15 +402,31 @@ pub(crate) async fn session_list_handler() -> impl IntoResponse {
 #[derive(Deserialize)]
 pub(crate) struct SessionPreloadBody {
     /// Full JS sources, in order. `[]` clears the group.
+    #[serde(default)]
     scripts: Vec<String>,
+    /// Builtin recipe name appended after `scripts` (e.g. "xhs-sign") —
+    /// the maintained document-start wrapper for that site (#84).
+    #[serde(default)]
+    recipe: Option<String>,
 }
 
 pub(crate) async fn session_preload_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(body): Json<SessionPreloadBody>,
 ) -> Result<impl IntoResponse, AppError> {
+    let mut scripts = body.scripts;
+    if let Some(name) = &body.recipe {
+        match session::preload_recipes::resolve(name) {
+            Some(src) => scripts.push(src.to_string()),
+            None => {
+                return Err(AppError::BadRequest(format!(
+                    "unknown preload recipe '{name}'"
+                )))
+            }
+        }
+    }
     let resp = session::send_command(&id, |reply| session::SessionCommand::SetPreload {
-        scripts: body.scripts,
+        scripts,
         reply,
     })
     .await

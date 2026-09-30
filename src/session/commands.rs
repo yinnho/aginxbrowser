@@ -266,6 +266,11 @@ pub struct SessionNavResponse {
     /// when the navigation involved no redirect.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub redirected_from: Vec<String>,
+    /// Builtin document-start recipes auto-mounted for this navigation
+    /// (#84), e.g. ["xhs-sign"] — user-set preload scripts ride behind
+    /// them and are not listed. Empty when none applied.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub preloads: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]

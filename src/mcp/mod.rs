@@ -536,8 +536,20 @@ the same login in parallel tabs. Returns {session_id (new), cloned_from, url, vi
         &self,
         Parameters(params): Parameters<SessionPreloadParams>,
     ) -> String {
+        // #84: a recipe name resolves to the maintained builtin source —
+        // mounted explicitly it survives off-domain too; unknown names
+        // error rather than mount nothing silently.
+        let mut scripts = params.scripts;
+        if let Some(name) = &params.recipe {
+            match session::preload_recipes::resolve(name) {
+                Some(src) => scripts.push(src.to_string()),
+                None => {
+                    return json!({ "error": format!("unknown preload recipe '{name}'") }).to_string()
+                }
+            }
+        }
         match session::send_command(&params.session_id, |reply| SessionCommand::SetPreload {
-            scripts: params.scripts,
+            scripts,
             reply,
         })
         .await

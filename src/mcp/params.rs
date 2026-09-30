@@ -275,6 +275,12 @@ pub struct SessionPreloadParams {
     /// applies to every navigation from then on.
     #[serde(default)]
     pub scripts: Vec<String>,
+    /// Builtin recipe name appended after `scripts` (e.g. "xhs-sign"): the
+    /// maintained document-start wrapper for that site — same source the
+    /// engine auto-mounts on its navigations, without pasting JS. Unknown
+    /// names are an error, not a silent no-op.
+    #[serde(default)]
+    pub recipe: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]

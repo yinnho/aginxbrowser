@@ -155,6 +155,17 @@ pub(super) fn session_thread(
                 // keeps the group authoritative here.
                 let mut preload_scripts: Vec<String> = Vec::new();
                 if let Some(url) = start_url {
+                    // #84: the creation navigation rides the same builtin
+                    // recipes as an explicit Navigate — an agent creating the
+                    // session straight onto the site (the reporter's usage)
+                    // must not land on an unsigned page while a later
+                    // navigate would have been covered.
+                    page.inner.set_preload_scripts(
+                        crate::session::preload_recipes::effective_scripts(
+                            &url,
+                            &preload_scripts,
+                        ),
+                    );
                     match page.goto(&url).await {
                         Ok(()) => pages_loaded += 1,
                         Err(e) => {
@@ -284,7 +295,13 @@ pub(super) fn session_thread(
                             {
                                 Err(reason) => Err(reason),
                                 Ok(()) => {
-                                    page.inner.set_preload_scripts(preload_scripts.clone());
+                                    // #84: builtin recipes for this host
+                                    // ride ahead of the user group at
+                                    // document-start; the names are
+                                    // echoed in the nav response so a
+                                    // caller can see what was applied.
+                                    let builtin_preloads = crate::session::preload_recipes::builtin_names(&url);
+                                    page.inner.set_preload_scripts(crate::session::preload_recipes::effective_scripts(&url, &preload_scripts));
                                     #[cfg(feature = "screenshot")]
                                     let nav_frame = page.band_frame_cache.clone();
                                     #[cfg(feature = "screenshot")]
@@ -365,6 +382,7 @@ pub(super) fn session_thread(
                                                 title,
                                                 challenge,
                                                 redirected_from: page.inner.redirect_chain.clone(),
+                                                preloads: builtin_preloads.iter().map(|s| s.to_string()).collect(),
                                             })
                                         }
                                         Err(e) => {

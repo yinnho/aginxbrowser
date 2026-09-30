@@ -970,6 +970,7 @@ Replace the session's document-start preload group (issue #96). Sources run befo
 | Field | Type | Required | Description |
 |------|------|------|------|
 | scripts | string[] | ✅ | Full JS sources, in order. `[]` clears the group |
+| recipe | string | ❌ | Builtin recipe name appended after `scripts` (e.g. `"xhs-sign"`) — the maintained document-start wrapper for that site (#84). Unknown names are an error, not a silent no-op |
 
 Set the group before the session's first navigate (create without `url` → preload → navigate) and it applies to every navigation from then on, `set_content` included.
 
@@ -982,6 +983,18 @@ curl -sS -X POST http://127.0.0.1:8089/session/s_42/preload \
 ```
 
 **Response:** `{"count": N}`
+
+#### Builtin recipes (auto-mounted, #84)
+
+The engine ships maintained document-start recipes and **auto-mounts them on matching navigations** — no preload call needed. They ride before any user-set group; the `navigate` response names what applied in a `preloads` field (e.g. `"preloads": ["xhs-sign"]`, absent when none did):
+
+| Recipe | Domain match | What it does |
+|------|------|------|
+| `xhs-sign` (alias `xhs`) | `*.xiaohongshu.com`, `*.xhslink.com` | xhs signing wrapper: swallows the page's own `x-s`/`x-t` (computed in-engine, rejected 406 by the server) and re-signs both at send time via the page's own `_webmsxyw`; fuses `/sso/logout` (unsigned-API 406s misread as session death) with a synthetic 200; mounts itself as the fetch/XHR natives before the inline jsvmp can capture them |
+
+Observability counters live on `window` for post-hoc checks via `eval`: `__xs_installed` (mounted), `__xs_swallowed` (page signatures swallowed), `__xs_signed` (fresh signatures issued), `__xs_fuse` (logout attempts defused).
+
+Off-domain use (or on an engine predating auto-mount): `{"recipe": "xhs-sign"}` mounts it explicitly. The kill switch for the whole auto-mount layer is `AGINXBROWSER_DISABLE_SITE_PRELOAD=1`.
 
 ### POST /session/{id}/state
 
@@ -1715,7 +1728,7 @@ Browser sessions (`session_create` & co.) are shared across MCP sessions by desi
 | `session_clone` | Derive a new session carrying the full login state (cookies + storage + viewport + dialog policy); the source stays untouched — snapshot before risky actions, or run one login in parallel |
 | `session_list` | List live sessions with idle age and time left before auto-eviction (discover one to reuse) |
 | `session_navigate` | Navigate to a new URL within a session |
-| `session_preload` | Replace the session's document-start preload group (empty array clears). Sources run before each new document's own scripts — including inline `<script>` tags — the only hook that beats pages whose signing layer captures `window.fetch`/XHR natives at parse time |
+| `session_preload` | Replace the session's document-start preload group (empty array clears). Sources run before each new document's own scripts — including inline `<script>` tags — the only hook that beats pages whose signing layer captures `window.fetch`/XHR natives at parse time. `recipe` names a maintained builtin (e.g. "xhs-sign", auto-mounted on its domains — #84) without pasting JS |
 | `session_state` | Get the indexed page state |
 | `session_cookies` | Export the session's current cookies as full Set-Cookie strings (`name=value; Domain=…; Path=/`, for login-state reuse — cross-subdomain state survives the round-trip). `meta: true` switches to the metadata-only view (issue #102): `{name, domain, path, secure, httpOnly, sameSite, expires, hostOnly}` per cookie, **no values ever** — for checking what auth state exists, leave it false for the value-bearing export that round-trips login state |
 | `session_storage` | Snapshot the session's `localStorage`/`sessionStorage` for the current origin — the half of login state cookies can't carry; restore it in a new session via `session_create`'s `storage` field |

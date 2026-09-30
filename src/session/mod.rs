@@ -17,6 +17,7 @@
 mod commands;
 pub(crate) mod interact;
 mod manager;
+pub(crate) mod preload_recipes;
 mod record;
 #[cfg(feature = "screenshot")]
 mod screenshot;
