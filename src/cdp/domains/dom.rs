@@ -107,7 +107,7 @@ pub async fn handle(
                 let is_iframe = page
                     .with_dom(|dom| {
                         dom.get_node(NodeId::new(node_id as u32))
-                            .and_then(|n| n.as_element().map(|q| q.local.as_ref().eq_ignore_ascii_case("iframe")))
+                            .and_then(|n| n.as_element().map(|q| q.local.as_str().eq_ignore_ascii_case("iframe")))
                             .unwrap_or(false)
                     })
                     .unwrap_or(false);
@@ -465,8 +465,8 @@ fn node_value(dom: &DomTree, node_id: NodeId) -> Option<(Value, Vec<NodeId>)> {
         }
         NodeData::Element { name, attrs, .. } => {
             result["nodeType"] = json!(1);
-            result["nodeName"] = json!(name.local.as_ref().to_ascii_uppercase());
-            result["localName"] = json!(name.local.as_ref());
+            result["nodeName"] = json!(name.local.as_str().to_ascii_uppercase());
+            result["localName"] = json!(name.local.as_str());
             result["nodeValue"] = json!("");
             let cdp_attrs: Vec<String> = attrs
                 .iter()

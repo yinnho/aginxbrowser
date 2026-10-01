@@ -250,7 +250,7 @@ impl<'a> DomElement<'a> {
                 n.as_element()
                     .map(|name| {
                         matches!(
-                            name.local.as_ref(),
+                            name.local.as_str(),
                             "input"
                                 | "button"
                                 | "select"
@@ -282,10 +282,10 @@ impl<'a> DomElement<'a> {
             .with_node(self.node_id, |n| {
                 let e = n.as_element()?;
                 let local = e.local.to_ascii_lowercase();
-                if matches!(local.as_ref(), "textarea" | "select") {
+                if matches!(local.as_str(), "textarea" | "select") {
                     return Some(true);
                 }
-                if local.as_ref() == "input" {
+                if local.as_str() == "input" {
                     let t = n
                         .get_attribute("type")
                         .map(|s| s.to_ascii_lowercase())
@@ -565,7 +565,7 @@ impl<'a> Element for DomElement<'a> {
             .with_node(self.node_id, |n| {
                 n.as_element()
                     .map(|name| {
-                        matches!(name.local.as_ref(), "a" | "area" | "link")
+                        matches!(name.local.as_str(), "a" | "area" | "link")
                             && n.get_attribute("href").is_some()
                     })
                     .unwrap_or(false)

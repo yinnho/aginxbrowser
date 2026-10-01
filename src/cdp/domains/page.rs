@@ -105,13 +105,13 @@ pub(crate) fn sync_child_frames(
                         diting::diting_dom::NodeData::Element { name, attrs, .. } => (name, attrs),
                         _ => return None,
                     };
-                    if !name.local.as_ref().eq_ignore_ascii_case("iframe") {
+                    if !name.local.as_str().eq_ignore_ascii_case("iframe") {
                         return None;
                     }
                     let attr = |key: &str| {
                         attrs
                             .iter()
-                            .find(|a| a.name.local.as_ref().eq_ignore_ascii_case(key))
+                            .find(|a| a.name.local.as_str().eq_ignore_ascii_case(key))
                             .map(|a| a.value.clone())
                     };
                     Some((

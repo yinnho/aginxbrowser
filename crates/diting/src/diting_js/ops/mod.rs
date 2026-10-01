@@ -549,7 +549,7 @@ pub type SharedState = Rc<RefCell<JsState>>;
 pub(crate) fn node_is_script(dom: &DomTree, node_id: NodeId) -> bool {
     dom.with_node(node_id, |node| {
         node.as_element()
-            .map(|name| name.local.as_ref().eq_ignore_ascii_case("script"))
+            .map(|name| name.local.as_str().eq_ignore_ascii_case("script"))
             .unwrap_or(false)
     })
     .unwrap_or(false)
@@ -1070,7 +1070,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         "document_element" => {
             for cid in dom.children(dom.document()) {
                 if let Some(n) = dom.get_node(cid) {
-                    if n.as_element().map(|name| name.local.as_ref() == "html").unwrap_or(false) {
+                    if n.as_element().map(|name| name.local.as_str() == "html").unwrap_or(false) {
                         return cid.index().to_string();
                     }
                 }
@@ -1131,7 +1131,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         "node_name" => {
             let nid = arg1.parse::<u32>().unwrap_or(0);
             let name: String = dom.get_node(NodeId::new(nid)).map(|n| match &n.data {
-                NodeData::Document => "#document".to_string(), NodeData::Element { name, .. } => if name.ns == html5ever::ns!(html) { name.local.as_ref().to_ascii_uppercase() } else { name.local.as_ref().to_string() },
+                NodeData::Document => "#document".to_string(), NodeData::Element { name, .. } => if name.ns == html5ever::ns!(html) { name.local.as_str().to_ascii_uppercase() } else { name.local.as_str().to_string() },
                 NodeData::Text { .. } => "#text".to_string(), NodeData::Comment { .. } => "#comment".to_string(),
                 NodeData::Doctype { name, .. } => name.clone(), NodeData::ProcessingInstruction { target, .. } => target.clone(),
             }).unwrap_or_default();
@@ -1253,7 +1253,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             let name = dom.get_node(NodeId::new(nid)).and_then(|n| n.as_element().map(|name|
                 // HTML elements read uppercase (Chrome tagName convention);
                 // XML-namespace elements keep their source case.
-                if name.ns == html5ever::ns!(html) { name.local.as_ref().to_ascii_uppercase() } else { name.local.as_ref().to_string() }
+                if name.ns == html5ever::ns!(html) { name.local.as_str().to_ascii_uppercase() } else { name.local.as_str().to_string() }
             )).unwrap_or_default();
             serde_json::to_string(&name).unwrap_or("\"\"".into())
         }
@@ -1266,7 +1266,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             let nid = arg1.parse::<u32>().unwrap_or(0);
             let ns = dom
                 .get_node(NodeId::new(nid))
-                .and_then(|n| n.as_element().map(|name| name.ns.as_ref().to_string()));
+                .and_then(|n| n.as_element().map(|name| name.ns.as_str().to_string()));
             serde_json::to_string(&ns).unwrap_or("null".into())
         }
         "get_attribute" => {
@@ -1280,7 +1280,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 .get_node(NodeId::new(nid))
                 .map(|n| {
                     n.attrs()
-                        .map(|a| a.iter().map(|x| x.name.local.as_ref().to_string()).collect())
+                        .map(|a| a.iter().map(|x| x.name.local.as_str().to_string()).collect())
                         .unwrap_or_default()
                 })
                 .unwrap_or_default();
@@ -1423,7 +1423,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             let nid = match parse_nid(&arg1) { Some(id) => id, None => return "false".into() };
             dom.with_node_mut(nid, |n| {
                 if let NodeData::Element { attrs, .. } = &mut n.data {
-                    attrs.retain(|a| a.name.local.as_ref() != arg2.as_str());
+                    attrs.retain(|a| a.name.local.as_str() != arg2.as_str());
                 }
             });
             dom.note_restyle(nid);
@@ -1942,7 +1942,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 .with_node(nid, |n| {
                     n.as_element().map(|e| {
                         matches!(
-                            e.local.to_ascii_lowercase().as_ref(),
+                            e.local.to_ascii_lowercase().as_str(),
                             "html" | "body"
                         )
                     })
@@ -1993,7 +1993,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             let is_html = dom
                 .with_node(nid, |n| {
                     n.as_element()
-                        .map(|e| e.local.to_ascii_lowercase().as_ref() == "html")
+                        .map(|e| e.local.to_ascii_lowercase().as_str() == "html")
                 })
                 .flatten()
                 .unwrap_or(false);
@@ -2083,7 +2083,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             };
             let cssom_tag = dom
                 .with_node(nid, |n| {
-                    n.as_element().map(|e| e.local.as_ref().to_ascii_lowercase())
+                    n.as_element().map(|e| e.local.as_str().to_ascii_lowercase())
                 })
                 .flatten();
             let epoch = dom.epoch();
@@ -6385,7 +6385,7 @@ fn svg_measure(
     };
     let node = dom.get_node(NodeId::new(nid))?;
     let tag = match &node.data {
-        crate::diting_dom::NodeData::Element { name, .. } => name.local.as_ref(),
+        crate::diting_dom::NodeData::Element { name, .. } => name.local.as_str(),
         _ => return None,
     };
     crate::diting_layout::svg::build_path_measure(tag, &|a| {

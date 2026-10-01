@@ -246,7 +246,7 @@ impl DomTree {
                 .with_node(desc_id, |n| {
                     let name = n.as_element()?;
                     Some((
-                        name.local.as_ref().to_string(),
+                        name.local.as_str().to_string(),
                         n.get_attribute("id").map(|s| s.to_string()),
                         n.get_attribute("class").map(|s| s.to_string()),
                     ))
@@ -473,7 +473,7 @@ impl DomTree {
                         let meta = self.with_node(d, |n| {
                             n.as_element().map(|e| {
                                 (
-                                    e.local.as_ref().to_ascii_lowercase(),
+                                    e.local.as_str().to_ascii_lowercase(),
                                     n.get_attribute("id").map(|s| s.to_string()),
                                     n.get_attribute("class").map(|s| s.to_string()),
                                 )
