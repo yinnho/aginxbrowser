@@ -123,7 +123,7 @@ tempfile = "3"
 url = "2"
 
 # --- html / dom parsing ---
-html5ever = "0.39"
+html5ever = "0.40"
 selectors = "0.40"
 servo_arc = "0.4"
 cssparser = "0.37"
