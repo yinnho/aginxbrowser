@@ -29,6 +29,10 @@ pub mod workflow;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+fn hex(d: &[u8]) -> String {
+    d.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Format tenths-of-a-pixel as a compact decimal: integer when whole, one
 /// place when not. `{:.1}` on an exact x/10 rounds correctly, so bytes are
 /// stable.
@@ -200,7 +204,7 @@ pub fn render_with_quality(
 
     let mut hasher = Sha256::new();
     hasher.update(doc.html.as_bytes());
-    let sha256 = format!("{:x}", hasher.finalize());
+    let sha256 = hex(&hasher.finalize());
 
     let receipt = json!({
         "bytes": doc.html.len(),
@@ -238,7 +242,7 @@ mod tests {
         // The receipt hash is over the artifact itself.
         let mut h = Sha256::new();
         h.update(a.html.as_bytes());
-        assert_eq!(a.receipt["sha256"], format!("{:x}", h.finalize()));
+        assert_eq!(a.receipt["sha256"], hex(&h.finalize()));
     }
 
     #[test]

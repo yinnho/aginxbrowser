@@ -52,7 +52,7 @@ pub(crate) fn op_subtle_hmac(
     #[buffer] key: &[u8],
     #[buffer] data: &[u8],
 ) -> Result<Vec<u8>, deno_error::JsErrorBox> {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     macro_rules! run {
         ($d:ty) => {{
             let mut mac = Hmac::<$d>::new_from_slice(key).map_err(crypto_err)?;

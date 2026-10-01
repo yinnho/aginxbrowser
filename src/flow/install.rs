@@ -68,7 +68,7 @@ fn valid_pkg_path(p: &str) -> bool {
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
-    format!("{:x}", h.finalize())
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Install a flow package from the configured hub. See [`install_from`].
