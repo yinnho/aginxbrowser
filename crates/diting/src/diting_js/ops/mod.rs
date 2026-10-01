@@ -321,6 +321,17 @@ pub struct JsState {
     /// clearing wholesale would thrash pages with more images than the cap).
     #[cfg(feature = "screenshot")]
     pub(crate) image_order: std::cell::RefCell<std::collections::VecDeque<String>>,
+    /// Canvas playback bitmaps (#210), keyed by the canvas element's nid.
+    /// The 2D buffer lives in the JS realm, so the host pushes a snapshot in
+    /// before it renders (`op_canvas_store`); `layout_collect_with_images`
+    /// layers these over the solve's `<img>` map and the replaced-element
+    /// branch paints them like any other bitmap. A store that changes pixels
+    /// goes through `drop_paint_only` — canvas draw is a paint-only
+    /// invalidation (geometry never moves), which also moves `layout_rev` so
+    /// the damage signature lets the screencast/screenshot caches see it.
+    #[cfg(feature = "screenshot")]
+    pub(crate) canvas_images:
+        std::cell::RefCell<HashMap<NodeId, crate::diting_layout::DecodedImage>>,
     /// Sticky (v2): per-node scroll-dependent shift map ([dx, dy] in
     /// document space), memoized per (epoch, layout_rev, root scroll,
     /// viewport, scroll_gen) — scroll and viewport moves don't bump the
@@ -519,6 +530,8 @@ impl JsState {
             image_bytes: std::cell::RefCell::new(HashMap::new()),
             #[cfg(feature = "screenshot")]
             image_order: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            #[cfg(feature = "screenshot")]
+            canvas_images: std::cell::RefCell::new(HashMap::new()),
             // External stylesheet bodies fetched at navigation, keyed by
             // absolute URL. The layout run joins them with the live <style>
             // blocks in document order — without this table an author sheet
@@ -2412,7 +2425,15 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
         // JsState — nothing else can interleave on this single thread.
         let guard = gs.geometry_cache.borrow();
         let (_, solved) = guard.as_ref().expect("freshness checked above");
-        crate::diting_layout::layout_collect(dom, &styles_map, &fonts, solved, viewport_width)
+        let canvases = gs.canvas_images.borrow();
+        crate::diting_layout::layout_collect_with_images(
+            dom,
+            &styles_map,
+            &fonts,
+            solved,
+            viewport_width,
+            Some(&canvases),
+        )
     } else {
         // The byte table the run resolves http(s) img sources against.
         // Empty → None keeps the all-placeholder path byte-identical to
@@ -2432,13 +2453,16 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
         );
         drop(bytes_map);
         gs.solves.set(gs.solves.get() + 1);
-        let run = crate::diting_layout::layout_collect(
+        let canvases = gs.canvas_images.borrow();
+        let run = crate::diting_layout::layout_collect_with_images(
             dom,
             &styles_map,
             &fonts,
             &solved,
             viewport_width,
+            Some(&canvases),
         );
+        drop(canvases);
         *gs.geometry_cache.borrow_mut() = Some((epoch, solved));
         run
     };
@@ -2577,8 +2601,17 @@ fn iframe_layout_run(
         None,
         Some(root),
     );
+    let canvases = gs.canvas_images.borrow();
     let (rects, items, paint_order, local_geom, sticky_spans, scroller_spans) =
-        crate::diting_layout::layout_collect(dom, &styles_map, &fonts, &solved, vw);
+        crate::diting_layout::layout_collect_with_images(
+            dom,
+            &styles_map,
+            &fonts,
+            &solved,
+            vw,
+            Some(&canvases),
+        );
+    drop(canvases);
     let run = std::rc::Rc::new((
         rects
             .into_iter()
@@ -2971,7 +3004,7 @@ pub(crate) use band::{
 };
 pub(crate) use canvas::op_canvas_png;
 #[cfg(feature = "screenshot")]
-pub(crate) use canvas::op_canvas_text;
+pub(crate) use canvas::{op_canvas_store, op_canvas_text};
 pub(crate) use ecdsa::{
     op_subtle_ecdh_derive_bits, op_subtle_ecdsa_generate, op_subtle_ecdsa_import_private,
     op_subtle_ecdsa_import_public, op_subtle_ecdsa_sign, op_subtle_ecdsa_verify,
@@ -6570,6 +6603,8 @@ pub fn build_extension() -> Extension {
             op_fetch_url_sync(),
             op_image_info(),
             op_canvas_png(),
+            #[cfg(feature = "screenshot")]
+            op_canvas_store(),
             #[cfg(feature = "screenshot")]
             op_canvas_text(),
             op_get_cookies(),

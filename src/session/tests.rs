@@ -1606,6 +1606,92 @@
         assert!(mgr.close_and_wait(&sid).await);
     }
 
+    /// #210: a canvas's 2D buffer lives in the JS realm, so both screenshot
+    /// paths rendered the element box empty — a merchant QR went gray while
+    /// `toDataURL` stayed correct. The canvas bitmaps now ride into the
+    /// layout (live band) and across the re-parse by document order
+    /// (selector/full-page), so a checkerboard canvas must come back with
+    /// both ink colors on either path.
+    #[cfg(feature = "screenshot")]
+    #[tokio::test]
+    async fn screenshot_paints_canvas_pixels_on_both_paths() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /canvas",
+            "<html><body style='margin:0'>\
+             <canvas id='probe' width='120' height='120' style='width:120px;height:120px'></canvas>\
+             <script>\
+             (function(){var x=document.getElementById('probe').getContext('2d');\
+             x.fillStyle='#ffffff';x.fillRect(0,0,120,120);\
+             x.fillStyle='#000000';\
+             for(var i=0;i<4;i++)for(var j=0;j<4;j++)\
+             if((i+j)%2===0)x.fillRect(i*30,j*30,30,30);})();\
+             </script></body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/canvas")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        // Both paths: the no-request default (live band) and the selector
+        // request (re-parsed tree, pixels paired by document order).
+        for (label, selector) in [
+            ("live band", None::<String>),
+            ("selector", Some("#probe".to_string())),
+        ] {
+            let shot = mgr
+                .send(&sid, |reply| SessionCommand::Screenshot {
+                    width: selector.as_ref().map(|_| 200),
+                    height: selector.as_ref().map(|_| 200),
+                    full_page: false,
+                    selector: selector.clone(),
+                    selector_all: false,
+                    dpr: None,
+                    reply,
+                })
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&shot).expect("screenshot JSON");
+            use base64::{engine::general_purpose::STANDARD, Engine as _};
+            let png = STANDARD
+                .decode(v["image_base64"].as_str().expect("base64 body"))
+                .expect("decodable base64");
+            let decoder = png::Decoder::new(std::io::Cursor::new(&png));
+            let mut reader = decoder.read_info().expect("png read_info");
+            let mut buf = vec![0; reader.output_buffer_size().expect("png buffer size")];
+            let info = reader.next_frame(&mut buf).expect("png decode");
+            let px = &buf[..info.buffer_size()];
+            let mut dark = 0usize;
+            let mut light = 0usize;
+            for y in 0..info.height {
+                for x in 0..info.width {
+                    let i = ((y * info.width + x) * 4) as usize;
+                    let lum = px[i] as u32 + px[i + 1] as u32 + px[i + 2] as u32;
+                    if lum < 120 {
+                        dark += 1;
+                    } else if lum > 600 {
+                        light += 1;
+                    }
+                }
+            }
+            assert!(
+                dark > 100 && light > 100,
+                "{label}: checkerboard must paint (dark={dark}, light={light})"
+            );
+        }
+
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
     /// The hosted live page's frame poll is the no-argument screenshot, and
     /// it must paint the LIVE tree. Dirty form values live in
     /// NodeData::Element::live_value (mirrored from the JS value setter),

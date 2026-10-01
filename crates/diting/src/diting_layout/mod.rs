@@ -6898,6 +6898,22 @@ pub fn layout_collect(
     solved: &SolvedGeometry,
     viewport_width: f32,
 ) -> LayoutCollect {
+    layout_collect_with_images(tree, styles, fonts, solved, viewport_width, None)
+}
+
+/// [`layout_collect`] with host-supplied replaced-element bitmaps layered
+/// over the solve's own `<img>` map (canvas compositing, #210): the JS
+/// realm owns canvas pixels, so the page host pushes them in per render
+/// instead of the solve resolving them from resource bytes. Entries here
+/// win over the same-nid img entry (a node is one or the other).
+pub fn layout_collect_with_images(
+    tree: &DomTree,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    fonts: &FontBook,
+    solved: &SolvedGeometry,
+    viewport_width: f32,
+    extra_images: Option<&HashMap<NodeId, DecodedImage>>,
+) -> LayoutCollect {
     let mut rects = HashMap::new();
     let mut items: Vec<PaintItem> = Vec::new();
     // Paint sequence of the boxed elements (obscura #738): filled by the
@@ -6933,6 +6949,17 @@ pub fn layout_collect(
         collapsed_edges,
         ..
     } = solved;
+    // Host-supplied bitmaps (#210) shadow the solve's img map by nid. The
+    // merged map is owned here and lives to the end of the walk.
+    let merged_images: Option<HashMap<NodeId, DecodedImage>> = extra_images.map(|extra| {
+        let mut m: HashMap<NodeId, DecodedImage> =
+            images.iter().map(|(k, v)| (*k, v.clone())).collect();
+        for (k, v) in extra.iter() {
+            m.insert(*k, v.clone());
+        }
+        m
+    });
+    let images: &HashMap<NodeId, DecodedImage> = merged_images.as_ref().unwrap_or(images);
 
     // Accumulate locations down the taffy tree: child location already
     // includes the parent's border+padding offset, so a plain sum is the

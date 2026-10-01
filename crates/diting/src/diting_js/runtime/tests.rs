@@ -19,6 +19,42 @@
         assert_eq!(title, serde_json::json!("Test Page"));
     }
 
+    /// #208: FontFaceSet.forEach shadowed Array.prototype.forEach with a
+    /// function that called itself — every call was a RangeError. The
+    /// replacement iterates by index and keeps Set callback semantics
+    /// (value, value, set) with thisArg pass-through.
+    #[test]
+    fn fonts_for_each_iterates_without_recursing() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let probe = "(function() { \
+            var seen = 0, self2nd = null, set3rd = null, thisOk = false; \
+            var ctx = { tag: 'ctx' }; \
+            document.fonts.forEach(function (v, v2, s) { \
+                seen++; self2nd = (v === v2); set3rd = s; \
+                if (this === ctx) thisOk = true; \
+            }, ctx); \
+            return JSON.stringify({ seen: seen, selfSecond: self2nd, \
+                setIsFontFaceSet: set3rd === document.fonts, thisOk: thisOk, \
+                identity: document.fonts === document.fonts, \
+                repeat: (function(){ var n = 0; document.fonts.forEach(function(){ n++; }); return n; })() }); \
+        })()";
+        let out = rt.evaluate(probe).unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+        assert!(v["seen"].as_u64().unwrap() > 0, "forEach must visit the faces");
+        assert_eq!(v["selfSecond"], serde_json::json!(true), "Set semantics: 2nd arg is the value");
+        assert_eq!(v["setIsFontFaceSet"], serde_json::json!(true), "3rd arg is the set");
+        assert_eq!(
+            v["identity"], serde_json::json!(true),
+            "document.fonts must be the same object across accesses"
+        );
+        assert_eq!(v["thisOk"], serde_json::json!(true), "thisArg pass-through");
+        assert_eq!(
+            v["repeat"].as_u64().unwrap(),
+            v["seen"].as_u64().unwrap(),
+            "repeat calls must stay stable (no state corruption)"
+        );
+    }
+
     /// The hardware persona (screen/dpr/GPU/canvas) is drawn from a seed the
     /// host owns: the realm is rebuilt per navigation and __diting_init
     /// self-deletes after drawing, so a Page re-pins the same seed via
@@ -16829,6 +16865,63 @@ async fn idb_error_contracts_version_constraint_and_keypath() {
     assert_eq!(parsed["dupAdd"], serde_json::json!("ConstraintError"));
     assert_eq!(parsed["missingKeyPath"], serde_json::json!("DataError"));
     assert_eq!(parsed["putOverwrite"], serde_json::json!(true));
+}
+
+/// #209: driver pages reference the standard IDB interface names directly
+/// (抖店's `IDBRequest is not defined` loop) and probe them with instanceof.
+/// Every interface is a global constructor; factory objects inherit its
+/// prototype; direct construction throws the same TypeError Chrome throws.
+#[tokio::test(flavor = "current_thread")]
+async fn idb_interfaces_are_exposed_with_prototypes() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    rt.evaluate("localStorage.removeItem('__diting_idb__iface-db')").unwrap();
+    rt.evaluate(r#"
+        (function () {
+          const names = ['IDBRequest','IDBOpenDBRequest','IDBDatabase','IDBTransaction',
+                         'IDBObjectStore','IDBIndex','IDBCursor','IDBCursorWithValue',
+                         'IDBKeyRange','IDBFactory'];
+          const out = { types: {}, illegal: {}, inst: {} };
+          for (const n of names) out.types[n] = typeof globalThis[n];
+          try { new IDBRequest(); out.illegal.request = 'no-throw'; }
+          catch (e) { out.illegal.request = e.name; }
+          out.inst.factory = (indexedDB instanceof IDBFactory);
+          out.inst.openReqProto = false;
+          const r = indexedDB.open('iface-db', 1);
+          out.inst.openReqProto = r instanceof IDBOpenDBRequest;
+          r.onupgradeneeded = function (e) {
+            const db = e.target.result;
+            out.inst.db = (db instanceof IDBDatabase);
+            out.inst.tx = (e.transaction instanceof IDBTransaction);
+            const st = db.createObjectStore('s', { keyPath: 'id' });
+            out.inst.storeFromCreate = (st instanceof IDBObjectStore);
+            out.inst.storeFromTx = (e.transaction.objectStore('s') instanceof IDBObjectStore);
+            out.inst.index = (st.createIndex('byN', 'n') instanceof IDBIndex);
+            out.inst.keyRange = (IDBKeyRange.only(3) instanceof IDBKeyRange);
+            out.inst.tag = Object.prototype.toString.call(r);
+            out.inst.reqBase = (r instanceof IDBRequest);
+          };
+          r.onsuccess = function () { globalThis.__out = JSON.stringify(out); };
+        })();
+    "#).unwrap();
+    let _ = rt.run_event_loop_bounded(300).await;
+    let out = rt.evaluate("globalThis.__out").unwrap();
+    let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+    for n in ["IDBRequest", "IDBOpenDBRequest", "IDBDatabase", "IDBTransaction",
+              "IDBObjectStore", "IDBIndex", "IDBCursor", "IDBCursorWithValue",
+              "IDBKeyRange", "IDBFactory"] {
+        assert_eq!(v["types"][n], serde_json::json!("function"), "{n} must be a constructor");
+    }
+    assert_eq!(v["illegal"]["request"], serde_json::json!("TypeError"));
+    assert_eq!(v["inst"]["factory"], serde_json::json!(true));
+    assert_eq!(v["inst"]["openReqProto"], serde_json::json!(true));
+    assert_eq!(v["inst"]["reqBase"], serde_json::json!(true), "open request is also an IDBRequest");
+    assert_eq!(v["inst"]["db"], serde_json::json!(true));
+    assert_eq!(v["inst"]["tx"], serde_json::json!(true));
+    assert_eq!(v["inst"]["storeFromCreate"], serde_json::json!(true));
+    assert_eq!(v["inst"]["storeFromTx"], serde_json::json!(true));
+    assert_eq!(v["inst"]["index"], serde_json::json!(true));
+    assert_eq!(v["inst"]["keyRange"], serde_json::json!(true));
+    assert_eq!(v["inst"]["tag"], serde_json::json!("[object IDBOpenDBRequest]"));
 }
 
 /// #48: window named access. Elements with an id (and form/iframe/embed/

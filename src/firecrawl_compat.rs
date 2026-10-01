@@ -490,6 +490,7 @@ async fn scrape_with_session(
                     full_page,
                     None,
                     false,
+                    &[],
                     Some(&resources),
                 ) {
                     Ok(rendered) => Some(rendered.png),

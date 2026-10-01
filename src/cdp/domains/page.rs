@@ -1095,6 +1095,7 @@ pub async fn handle(
                         true,
                         None,
                         false,
+                        &[],
                         None,
                     )
                     .map_err(|e| format!("screenshot failed: {e}"))?;

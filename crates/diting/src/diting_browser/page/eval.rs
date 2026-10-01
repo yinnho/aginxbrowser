@@ -3,6 +3,43 @@
 use super::*;
 
 impl Page {
+    /// Snapshot every drawn canvas's 2D buffer into the layout bitmap table
+    /// (#210). The pixels live in the JS realm, so a render that runs
+    /// without this call paints canvas boxes empty. Call it before any
+    /// rasterizing band frame; it is cheap on a page with no canvases
+    /// (one guarded evaluate) and marks a paint-only invalidation only
+    /// when pixels actually changed.
+    #[cfg(feature = "screenshot")]
+    pub fn sync_canvas_bitmaps(&mut self) {
+        if self.js.is_none() {
+            return;
+        }
+        self.evaluate_with_timeout(
+            "globalThis.__diting_flush_canvas_bitmaps ? __diting_flush_canvas_bitmaps() : 0",
+            std::time::Duration::from_millis(2000),
+        );
+    }
+
+    /// Document-order canvas snapshots from the last
+    /// [`Self::sync_canvas_bitmaps`] — `(width, height, straight RGBA)`.
+    /// The re-parse screenshot path renders a fresh tree with no JS realm,
+    /// so it pairs these with that tree's canvases by document order.
+    #[cfg(feature = "screenshot")]
+    pub fn canvas_bitmaps_in_order(&self) -> Vec<(u32, u32, std::sync::Arc<Vec<u8>>)> {
+        let Some(js) = &self.js else { return Vec::new() };
+        let ids = match js.with_dom(|dom| dom.query_selector_all("canvas")) {
+            Some(Ok(v)) => v,
+            _ => return Vec::new(),
+        };
+        js.with_state(|st| {
+            let map = st.canvas_images.borrow();
+            ids.iter()
+                .filter_map(|id| map.get(id))
+                .map(|img| (img.width, img.height, std::sync::Arc::clone(&img.rgba)))
+                .collect()
+        })
+    }
+
     #[cfg_attr(not(test), allow(dead_code))] // snapshot helper exercised by tests; DOM consumers read via evaluate
     pub fn with_dom<R>(&self, f: impl FnOnce(&DomTree) -> R) -> Option<R> {
         if let Some(js) = &self.js {

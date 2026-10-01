@@ -226,6 +226,41 @@ pub(crate) fn op_canvas_png(
     canvas_png_encode(width, height, rgba).map_err(deno_error::JsErrorBox::generic)
 }
 
+/// Snapshot one canvas's 2D buffer into the page's canvas bitmap table
+/// (#210) so the render path can paint it. Called by the realm's flush
+/// helper before a render; returns true when the pixels changed. A change
+/// is a paint-only invalidation: geometry never moves, but the collected
+/// items and the damage signature must move (`drop_paint_only` covers
+/// both), so a canvas that just drew reaches the next frame instead of a
+/// cached empty box.
+#[cfg(feature = "screenshot")]
+#[op2(fast)]
+pub(crate) fn op_canvas_store(
+    state: &OpState,
+    nid: u32,
+    width: u32,
+    height: u32,
+    #[buffer] rgba: &[u8],
+) -> bool {
+    use crate::diting_layout::DecodedImage;
+    if width == 0 || height == 0 || rgba.len() != width as usize * height as usize * 4 {
+        return false;
+    }
+    let gs = state.borrow::<SharedState>().clone();
+    let g = gs.borrow_mut();
+    let id = NodeId::new(nid);
+    if let Some(prev) = g.canvas_images.borrow().get(&id) {
+        if prev.width == width && prev.height == height && prev.rgba.as_slice() == rgba {
+            return false;
+        }
+    }
+    g.canvas_images
+        .borrow_mut()
+        .insert(id, DecodedImage::new(width, height, rgba.to_vec()));
+    g.drop_paint_only();
+    true
+}
+
 /// A single-line swash raster for `fillText`: the same font book, shaper
 /// and raster cache the page painter uses, sized to the canvas font's px.
 /// `baseline` is the distance from the tile's top edge to the text

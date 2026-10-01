@@ -57,6 +57,11 @@ pub(super) async fn screenshot(
     // path uses, so HTTP frames and screencast frames key identically (and
     // the poll no longer needs the four JS evaluates to size itself).
     if !full_page && selector.is_none() && width.is_none() && height.is_none() {
+        // Canvas pixels live in the JS realm (#210): push any drawn canvases
+        // into the layout bitmap table before the signature is read — a
+        // changed buffer moves layout_rev, which is exactly what the band
+        // cache below keys on.
+        page.inner.sync_canvas_bitmaps();
         let (sx, sy) = page.inner.scroll_offset();
         let (vw, vh) = page.inner.effective_viewport();
         let sig = (
@@ -112,6 +117,11 @@ pub(super) async fn screenshot(
     let h = height.unwrap_or_else(|| vh.as_f64().unwrap_or(800.0) as u32).max(1);
 
     let html = page.content();
+    // Canvas pixels live only in the JS realm; the re-parse below builds a
+    // fresh tree with no realm at all, so carry them across by document
+    // order (#210).
+    page.inner.sync_canvas_bitmaps();
+    let canvases = page.inner.canvas_bitmaps_in_order();
     let resources =
         crate::screenshot::prefetch_render_resources(page, &url, &html, w as f32).await;
     crate::screenshot::render_html_to_png_diting(
@@ -123,6 +133,7 @@ pub(super) async fn screenshot(
         full_page,
         selector,
         selector_all,
+        &canvases,
         Some(&resources),
     )
     .map_err(|e| format!("screenshot failed: {e}"))

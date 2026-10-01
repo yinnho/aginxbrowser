@@ -879,6 +879,7 @@ pub fn do_screenshot(req: ScreenshotRequest) -> Result<ScreenshotResponse> {
                     req.full_page,
                     req.selector.as_deref(),
                     req.selector_all,
+                    &[],
                     Some(&resources),
                 )?
             };
