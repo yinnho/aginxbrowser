@@ -1,6 +1,6 @@
 [package]
 name = "aginxbrowser"
-version = "0.5.26"
+version = "0.5.27"
 edition = "2021"
 authors = ["OpenCarrier Team"]
 description = "Pure server-side browser engine with built-in V8. HTTP API for scraping, search, and interactive browsing. No Chromium required."
@@ -69,8 +69,6 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 uuid = { version = "1", features = ["v4"] }
 
 # --- MCP (Model Context Protocol) ---
-rmcp = { version = "3.4", features = ["server", "transport-io", "transport-streamable-http-server"] }
-schemars = "1"
 
 # --- serialization ---
 serde = { version = "1", features = ["derive"] }
@@ -93,7 +91,6 @@ reqwest = { version = "0.12", features = ["cookies", "gzip", "brotli", "deflate"
 http = "1"
 url = "2"
 urlencoding = "2"
-http-body-util = "0.1"
 
 # --- html / dom parsing (product-side convenience wrappers) ---
 scraper = "0.27"

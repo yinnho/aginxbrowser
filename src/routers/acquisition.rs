@@ -71,7 +71,7 @@ pub struct FetchRequest {
 }
 
 /// Configuration for JS global extraction after page load.
-#[derive(Debug, Deserialize, Serialize, Clone, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct JsExtractConfig {
     /// JS expression to evaluate. Must return a JSON-serializable value.
     pub expression: String,
@@ -87,7 +87,7 @@ fn default_js_extract_timeout_ms() -> u64 {
 }
 
 /// Tiered rendering strategy selector.
-#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum RenderTier {
     /// HTTP-direct first, fall back to diting browser. (default)
@@ -179,6 +179,15 @@ pub struct FetchResponse {
     /// URL and `url` the effective one. Always empty on the browser tier.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub redirected_from: Vec<String>,
+    /// SHA-256 of `content` — consecutive samples of the same URL can be
+    /// diffed. Present when the local store is on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+    /// Whether `content_hash` differs from the previous stored sample of
+    /// this URL (`false` across samples = a frozen/echoing origin). `None`
+    /// on the first sample.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed_since_prev: Option<bool>,
     /// What the injection stripper removed — present only when sanitization
     /// was on and actually stripped something (observable, never silent).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -345,9 +354,14 @@ pub(crate) async fn fetch_handler(Json(req): Json<FetchRequest>) -> Result<impl 
     if let Some(cached) = fetch_cache_get(&cache_key) {
         return Ok((StatusCode::OK, Json(cached)));
     }
-    let resp = smart_fetch(req).await?;
+    let mut resp = smart_fetch(req).await?;
+    if let Some((hash, changed)) = store::record_fetch(store::REST_OWNER, &resp) {
+        if !hash.is_empty() {
+            resp.content_hash = Some(hash);
+            resp.changed_since_prev = changed;
+        }
+    }
     fetch_cache_put(&cache_key, &resp);
-    store::record_fetch(store::REST_OWNER, &resp);
     Ok((StatusCode::OK, Json(resp)))
 }
 
@@ -521,6 +535,8 @@ mod tests {
             js_extract_result: None,
             tier: None,
             redirected_from: Vec::new(),
+            content_hash: None,
+            changed_since_prev: None,
             sanitize_report: None,
             xhr: Vec::new(),
         }

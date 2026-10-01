@@ -8,112 +8,29 @@
 > 帮我安装 AginxBrowser：https://raw.githubusercontent.com/yinnho/aginxbrowser/main/docs/install.md
 > ```
 
-AginxBrowser 是为 AI Agent 设计的浏览器引擎。一个 Rust 二进制，内置 V8，不依赖 Chromium。能读网页、搜全网、截图、交互（点击/输入/滚动）。
-
-**本项目运行着一个公网托管实例**，绝大多数情况你不需要自己部署--一行命令接上即可。
+AginxBrowser 是为 AI Agent 设计的浏览器引擎。一个 Rust 二进制，内置 V8，不依赖 Chromium。能读网页、搜全网、截图、交互（点击/输入/滚动）。**HTTP API 就是全部接口**：装到本机、把服务跑起来，所有能力都是一条 `curl` POST 的事。
 
 ---
 
 ## 0. 前置
 
-- 一个支持 MCP HTTP transport 的客户端：Claude Code / Claude Desktop / Cursor / Windsurf 等。
-- 能访问 `https://browser.aginx.net`（公网）。
+- 一台能跑它的机器（macOS / Linux / Windows）。
+- `curl`（用来验证和首次调用）。
 
 不需要 Node、Chromium、Docker，也不需要 API Key。
 
 ---
 
-## 1. 一行接入（托管实例，推荐）
-
-```bash
-claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
-```
-
-如果是其他客户端，等价配置（写入对应的 settings 文件）：
-
-```json
-{
-  "mcpServers": {
-    "aginxbrowser": {
-      "type": "http",
-      "url": "https://browser.aginx.net/mcp"
-    }
-  }
-}
-```
-
----
-
-## 2. 验证
-
-```bash
-# 看到 aginxbrowser 在列表里
-claude mcp list
-
-# 看托管实例的能力清单（不触发网络抓取，秒回）
-curl -sS https://browser.aginx.net/doctor | jq .
-
-# 想确认抓取链路真的通？跑一次真实探活（会抓一次 example.com）
-curl -sS 'https://browser.aginx.net/doctor?probe=true' | jq .
-```
-
-`/doctor` 返回 `capabilities`（screenshot / stealth / captcha_solver 是否可用）、`search_engines`、`endpoints`。`?probe=true` 额外跑一次真实 fetch，报 `ok` / `latency_ms`。
-
----
-
-## 3. 首次调用
-
-接上 MCP 后，直接让 Agent 用自然语言调，或显式调工具：
-
-- "帮我读一下这个网页：https://example.com" → `fetch`
-- "搜一下 macbook 价格" → `search`
-- "截个图看看这个页面长啥样" → `screenshot`（需托管实例开了 screenshot feature；`/doctor` 会告诉你）
-- "把这个 zip / 这个 pdf 下载保存" → `download`（流式写盘、SHA-256 校验、断点续传）
-- "帮我登录这个网站并翻到第二页" → `session_create` + `session_state` + `session_click`/`session_input`
-
-HTTP API 也能直接调（不走 MCP）：
-
-```bash
-curl -sS -X POST https://browser.aginx.net/fetch \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://example.com"}'
-```
-
----
-
-## 4.（可选）装 SKILL.md，让 Agent 主动触发
-
-MCP 接上后工具就可用，但 Agent 不一定知道**何时**该用。把仓库根的 `SKILL.md` 放进 skills 目录，Agent 就会在"读网页/搜索/截图/交互"类任务上主动调用：
-
-```bash
-mkdir -p ~/.claude/skills/aginxbrowser
-curl -sS https://raw.githubusercontent.com/yinnho/aginxbrowser/main/SKILL.md \
-  -o ~/.claude/skills/aginxbrowser/SKILL.md
-```
-
----
-
-## 5.（可选）自己部署
-
-托管实例够用就跳过这步。
+## 1. 安装并启动
 
 ### 方式 A：Homebrew（macOS / Linuxbrew）
 
 ```bash
 brew install yinnho/aginxbrowser/aginxbrowser
-aginxbrowser doctor   # 特性 + 字体 + 出网自检
+aginxbrowser          # 启动 HTTP 服务，监听 0.0.0.0:8089
 ```
 
-### 方式 B：Docker
-
-```bash
-docker run -d -p 8089:8089 yinnho/aginxbrowser:latest
-curl -sS http://127.0.0.1:8089/health
-```
-
-GHCR 同步镜像：`ghcr.io/yinnho/aginxbrowser:latest`。
-
-### 方式 C：一行安装器（最快）
+### 方式 B：一行安装器
 
 ```bash
 # 先下载审查再执行——不要盲管道跑网络脚本
@@ -122,34 +39,30 @@ less install.sh
 bash install.sh
 ```
 
-自动识别平台、下载预编译二进制、SHA-256 校验、装到 `~/.local/bin`（`PREFIX=...` 改路径、`VERSION=v0.2.5` 钉版本），收尾跑一次自检：
+自动识别平台、下载预编译二进制、SHA-256 校验、装到 `/usr/local/bin` 或 `~/.local/bin`（`AGINXBROWSER_BIN_DIR=...` 改路径、`AGINXBROWSER_VERSION=v0.5.x` 钉版本），收尾跑一次自检。
+
+### 方式 C：手动下载预编译二进制
+
+各 release 提供预编译二进制（macOS Apple Silicon / Linux x86_64 / Windows x86_64；Windows 资产从 v0.3.1 起提供——v0.2.10 砍掉了 Intel-macOS 资产，它烤进去的 V8 snapshot 架构不对）：
 
 ```bash
-aginxbrowser doctor   # 编译特性 + 内置字体 + 环境态势 + 一次出口探针
-```
-
-### 方式 C′：手动下载预编译二进制
-
-v0.2.5 提供三平台预编译二进制（macOS Apple Silicon / macOS Intel / Linux x86_64）：
-
-```bash
-VER=v0.2.5
+VER=v0.5.26
 OS=$(uname -s); ARCH=$(uname -m)
 case "$OS-$ARCH" in
-  Darwin-arm64) T=aarch64-apple-darwin ;;
-  Darwin-x86_64) T=x86_64-apple-darwin ;;
-  Linux-x86_64) T=x86_64-unknown-linux-gnu ;;
+  Darwin-arm64)  T=aarch64-apple-darwin ;;
+  Linux-x86_64)  T=x86_64-unknown-linux-gnu ;;
+  MINGW*-x86_64) T=x86_64-pc-windows-msvc ;;   # git-bash；PowerShell 用户手动挑资产
   *) echo "unsupported: $OS-$ARCH"; exit 1 ;;
 esac
 curl -fsSL -o aginxbrowser.tar.gz \
   "https://github.com/yinnho/aginxbrowser/releases/download/${VER}/aginxbrowser-${VER}-${T}.tar.gz"
 tar xzf aginxbrowser.tar.gz && cd aginxbrowser-${VER}-${T}
-./aginxbrowser   # 默认监听 0.0.0.0:8089
+./aginxbrowser   # 默认监听 0.0.0.0:8089（Windows 下是 .exe）
 ```
 
-同一 release 下有对应 `.sha256` 文件可校验下载完整性。
+同一 release 下有对应 `.sha256` 文件可校验下载完整性。release 二进制带全量特性（stealth TLS + 截图）；`doctor` 会报编译进去的特性集。
 
-压缩包里还带公众号文章拼装工具：`workflow/wechat-oa-post/`（`md_to_args.py` + `templates/`），在你自己的机器上把 markdown 文章拼成内置 `wechat-oa-post` flow 要的 `args_json`。Docker 镜像同样带这两个文件，位于 `/usr/local/share/aginxbrowser/workflow/wechat-oa-post/`。
+压缩包里还带公众号文章拼装工具：`workflow/wechat-oa-post/`（`md_to_args.py` + `templates/`），在你自己的机器上把 markdown 文章拼成内置 `wechat-oa-post` flow 要的 `args_json`。
 
 ### 方式 D：源码构建
 
@@ -160,43 +73,91 @@ cargo build --release --features stealth,screenshot   # 约 4 分钟
 ./target/release/aginxbrowser                          # 默认监听 0.0.0.0:8089
 ```
 
-环境变量：
+---
+
+## 2. 验证
+
+```bash
+# 服务活着吗
+curl -sS http://127.0.0.1:8089/health
+
+# 看能力清单（不触发网络抓取，秒回）
+curl -sS http://127.0.0.1:8089/doctor | jq .
+
+# 想确认抓取链路真的通？跑一次真实探活（会抓一次 example.com）
+curl -sS 'http://127.0.0.1:8089/doctor?probe=true' | jq .
+```
+
+`/doctor` 返回 `capabilities`（screenshot / stealth / captcha_solver 是否可用）、`search_engines`、`endpoints`。`?probe=true` 额外跑一次真实 fetch，报 `ok` / `latency_ms`。
+
+---
+
+## 3. 首次调用
+
+```bash
+BASE=http://127.0.0.1:8089
+
+# 读网页 -> markdown
+curl -sS -X POST $BASE/fetch \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com"}'
+
+# 搜索（百度/Bing/搜狗/搜狗微信/Google 聚合）
+curl -sS -X POST $BASE/search \
+  -H "Content-Type: application/json" \
+  -d '{"q":"macbook 价格","max_results":5}'
+
+# 多步交互：建 session，按序号操作，关闭
+# 1. POST $BASE/session/create {"url":"https://site.com/login"} -> session_id
+# 2. GET  $BASE/session/$ID/state                              -> [N] 序号
+# 3. POST $BASE/session/$ID/input  {"index":1,"text":"user"}
+# 4. POST $BASE/session/$ID/click  {"index":3}                 -> 提交
+```
+
+装好下面的 skill 后，也可以直接用自然语言使唤 Agent："帮我读一下这个网页"、"搜一下 macbook 价格"、"帮我登录这个网站并翻到第二页"。
+
+---
+
+## 4.（可选）装 SKILL.md，让 Agent 主动触发
+
+API 对任何进程都可用，但 Agent 不一定知道**何时**该用。把 `SKILL.md` 放进 skills 目录，Agent 就会在"读网页/搜索/截图/交互"类任务上主动调用：
+
+```bash
+bash skill.sh   # 仓库根目录；下载 SKILL.md 并验证本机实例
+# 或手动：
+mkdir -p ~/.claude/skills/aginxbrowser
+curl -sS https://raw.githubusercontent.com/yinnho/aginxbrowser/main/SKILL.md \
+  -o ~/.claude/skills/aginxbrowser/SKILL.md
+```
+
+---
+
+## 环境变量
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `AGINXBROWSER_BIND` | `0.0.0.0:8089` | 监听地址（公网部署建议绑 127.0.0.1 + nginx 反代） |
-| `AGINXBROWSER_PROXY` | 无 | 代理地址（`use_proxy:true` 时用；browser/session/CDP 页面导航遇到已知被墙域名（wikipedia.org、github.com 等）也会自动走它）。注意：`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 这些标准代理变量引擎一律不认，代理只看 `AGINXBROWSER_PROXY` 这一个开关 |
+| `AGINXBROWSER_BIND` | `0.0.0.0:8089` | 监听地址（绑 `127.0.0.1:8089` 即只允许本机访问） |
+| `AGINXBROWSER_TOKEN` | 无 | 设了之后所有路由都要求这个 bearer token |
+| `AGINXBROWSER_PROXY` | 无 | 代理地址（`use_proxy:true` 时用；browser/session 页面导航遇到已知被墙域名（wikipedia.org、github.com 等）也会自动走它）。注意：`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 这些标准代理变量引擎一律不认，代理只看 `AGINXBROWSER_PROXY` 这一个开关 |
 | `CAPTCHA_SOLVER_API_KEY` | 无 | 2captcha Key，设了自动解验证码 |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL（秒），`0` 禁用 |
 | `AGINXBROWSER_DOMAIN_RATE_PER_MIN` | `20` | 单域名每分钟页面上限（超限返回 429；`0` 关闭）——本工具做实时查询，不做爬虫 |
 | `AGINXBROWSER_SESSION_PAGE_LIMIT` | `200` | 单个交互 session 可走的页面总数（`0` 关闭） |
-
----
-
-## 能力清单（14 个 MCP 工具）
-
-| 工具 | 用途 |
-|------|------|
-| `fetch` | 读网页 → markdown/html/text（分层渲染、stealth、js_extract） |
-| `search` | 多引擎聚合搜索（百度/Bing/搜狗/搜狗微信/Google），可图搜 |
-| `eval` | 在页面执行 JS（支持 async/Promise） |
-| `click` | 加载页面并点击 CSS 选择器 |
-| `download` | HTTP(S) 流式下载到磁盘（SHA-256 校验、断点续传）— 二进制/压缩包/数据集 |
-| `session_create` | 创建持久交互会话（多步登录/填表/翻页），支持 `cookies` 注入登录态 |
-| `session_navigate` / `session_state` / `session_click` / `session_input` / `session_scroll` / `session_eval` / `session_cookies` / `session_close` | 会话操作（`session_cookies` 导出登录态复用） |
-
-完整字段说明见 [API.md](https://github.com/yinnho/aginxbrowser/blob/main/docs/API.md)。
+| `AGINXBROWSER_STORE_SCOPE` | `global` | 本地持久缓存范围；`session` = 只留内存 |
 
 ---
 
 ## 故障排查
 
-- **工具调不通**：先 `curl https://browser.aginx.net/doctor?probe=true`，看 `probe.ok` 和 `probe.error`。
-- **截图不可用**：`/doctor` 的 `capabilities.screenshot` 为 false，说明托管实例没开 screenshot feature；用 `fetch` 或 `/v1/scrape` 代替。
-- **国外站读不到**：`fetch` / `search` 传 `use_proxy: true`。
+- **连接被拒**：服务没跑——先 `aginxbrowser` 启动，再 `curl http://127.0.0.1:8089/health`。
+- **工具调不通**：先 `curl 'http://127.0.0.1:8089/doctor?probe=true'`，看 `probe.ok` 和 `probe.error`。
+- **截图不可用**：`/doctor` 的 `capabilities.screenshot` 为 false，说明编译时没开 screenshot feature（源码构建加 `--features stealth,screenshot`）；先用 `fetch` 或 `/v1/scrape` 代替。
+- **国外站读不到**：`fetch` / `search` 传 `use_proxy: true`（需实例设了 `AGINXBROWSER_PROXY`）。
 - **被 Cloudflare 拦**：默认自动绕；仍被拦可换 `tls_fingerprint`（firefox133 / safari18 等）。
 - **登录墙后的内容**：`fetch` 传 `cookies: ["name=value", ...]` 注入会话 cookie。
 
+完整路由说明见 [API.md](https://github.com/yinnho/aginxbrowser/blob/main/docs/API.md)。
+
 ---
 
-© 2026 OpenCarrier · Apache-2.0 开源 · 托管于 browser.aginx.net
+© 2026 OpenCarrier · Apache-2.0 开源

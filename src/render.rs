@@ -291,6 +291,8 @@ pub async fn http_fetch(
             .iter()
             .map(|u| u.to_string())
             .collect(),
+        content_hash: None,
+        changed_since_prev: None,
         sanitize_report,
         xhr: Vec::new(),
     }))

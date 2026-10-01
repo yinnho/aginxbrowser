@@ -1,12 +1,9 @@
 use axum::{
-    extract::{Json, Query, State},
+    extract::{Json, Query},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Router,
-};
-use rmcp::transport::streamable_http_server::{
-    session::local::LocalSessionManager, StreamableHttpService,
 };
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +14,6 @@ mod browser;
 // and the domain dispatch. Rides the engine's Page API; a product concern
 // since the workspace split (ARCHITECTURE.md §4 — "CDP is a face riding
 // core/engine").
-mod cdp;
 mod captcha;
 mod config;
 mod cookie;
@@ -32,7 +28,6 @@ mod error;
 mod firecrawl_compat;
 mod flow;
 mod har;
-mod mcp;
 mod page;
 mod panel;
 // Same gate as its only consumer (panel::on): without screenshot+unix the
@@ -184,37 +179,14 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
     }
 }
 
-/// `--cdp-port N`: bind the whole surface on loopback at N — the local
-/// agent-tooling entry (agent-browser `--cdp`, Playwright `connectOverCDP`).
-/// Wins over `AGINXBROWSER_BIND` (an explicit launch flag beats ambient env);
-/// wider or non-loopback binds still go through the env.
-fn cdp_port_from_args(args: &[String]) -> Result<Option<u16>, String> {
-    let Some(pos) = args.iter().position(|a| a == "--cdp-port") else {
-        return Ok(None);
-    };
-    let raw = args
-        .get(pos + 1)
-        .ok_or_else(|| "--cdp-port requires a port number".to_string())?;
-    let port: u16 = raw
-        .parse()
-        .map_err(|_| format!("--cdp-port: {raw:?} is not a valid port"))?;
-    if port == 0 {
-        // OS-assigned ports are useless here — the caller must already know
-        // the port to connect, so refuse instead of starting unreachable.
-        return Err("--cdp-port: port 0 is OS-assigned; pick a fixed port".to_string());
-    }
-    Ok(Some(port))
-}
-
 /// Flags that consume the following token as their value — the token after
 /// one of these is never a flag position.
-const VALUE_FLAGS: &[&str] = &["--cdp-port", "--allow-network", "--font-dir"];
+const VALUE_FLAGS: &[&str] = &["--allow-network", "--font-dir"];
 
 /// First unrecognized flag-shaped argument, if any. `--port` and friends
 /// must refuse instead of silently starting a misconfigured server.
 fn first_unknown_flag(args: &[String]) -> Option<String> {
     const KNOWN: &[&str] = &[
-        "--mcp",
         "--allow-file-access",
         "--allow-private-network",
         "--panel",
@@ -244,7 +216,7 @@ fn first_unknown_flag(args: &[String]) -> Option<String> {
 }
 
 const CLI_HELP: &str = "\
-aginxbrowser — agent-owned browser face (HTTP + MCP stdio)
+aginxbrowser — agent-owned browser face (HTTP)
 
 USAGE:
     aginxbrowser [FLAGS]
@@ -254,8 +226,6 @@ SUBCOMMAND:
     doctor                    diagnose this box (env knobs, net, fonts), then exit
 
 FLAGS:
-    --mcp                     serve MCP over stdio instead of HTTP
-    --cdp-port <PORT>         bind the whole surface on loopback at PORT
     --allow-private-network   permit fetches to private/loopback ranges
     --allow-file-access       permit file:// fetches
     --allow-network <CIDRS>   comma-separated allowed network ranges
@@ -264,17 +234,11 @@ FLAGS:
     --version, -V             print version and exit
     --help, -h                print this help and exit
 
-Bind address comes from AGINXBROWSER_BIND (default 0.0.0.0:8089); --cdp-port
-pins loopback:PORT and wins over the env. Run `aginxbrowser doctor` for the
-full environment-knob report.";
+Bind address comes from AGINXBROWSER_BIND (default 0.0.0.0:8089). Run
+`aginxbrowser doctor` for the full environment-knob report.";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // In --mcp (stdio transport) mode, stdout IS the JSON-RPC channel —
-    // tracing lines there break strict clients on the first non-JSON
-    // output. Route logs to stderr for that mode only; the HTTP server
-    // keeps stdout (container conventions expect logs there).
-    let mcp_stdio_mode = std::env::args().any(|a| a == "--mcp");
     let subscriber = tracing_subscriber::fmt()
         .with_ansi(false)
         .with_env_filter(
@@ -285,11 +249,7 @@ async fn main() -> anyhow::Result<()> {
                     )
                 }),
         );
-    if mcp_stdio_mode {
-        subscriber.with_writer(std::io::stderr).init();
-    } else {
-        subscriber.init();
-    }
+    subscriber.init();
 
     // Before anything else can die: the crash hook must be in place before
     // the first engine warmup, not after (device died mid-search with no
@@ -338,11 +298,9 @@ async fn main() -> anyhow::Result<()> {
     // serialized inside the runtime).
     std::mem::drop(diting::diting_js::runtime::JsRuntime::new());
 
-    // Opt-in relaxations, parsed before any mode branches so the HTTP server
-    // and MCP stdio both see them. Both were previously documented as CLI
-    // flags without wiring (only the env vars worked) — issue #33 and
-    // requirements-aginxos P2.
-    let cdp_port = cdp_port_from_args(&args).map_err(|e| anyhow::anyhow!(e))?;
+    // Opt-in relaxations, parsed before any mode branches. Both were
+    // previously documented as CLI flags without wiring (only the env vars
+    // worked) — issue #33 and requirements-aginxos P2.
     if args.contains(&"--allow-file-access".to_string()) {
         diting::diting_net::client::set_allow_file_access(true);
         tracing::info!("file:// access enabled (--allow-file-access)");
@@ -378,20 +336,10 @@ async fn main() -> anyhow::Result<()> {
         panel::start();
     }
 
-    // Check if running in MCP mode
-    if args.contains(&"--mcp".to_string()) {
-        tracing::info!("Starting in MCP mode");
-        mcp::run_mcp_stdio()
-            .await
-            .map_err(|e| anyhow::anyhow!("MCP server error: {}", e))?;
-        return Ok(());
-    }
-
     // #162: opt-in token gate. Validated here — a mis-shaped token is a
     // hard refusal, never a silently half-open surface. The ambient copy
     // feeds CDP discovery's webSocketDebuggerUrl embedding.
     let auth_token = auth::token_from_env().map_err(|e| anyhow::anyhow!(e))?;
-    auth::set_ambient(auth_token.clone());
     if auth_token.is_some() {
         tracing::info!(
             "auth gate on ({}): every route except /health requires the token; \
@@ -462,17 +410,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/accounts/:name", delete(account_delete_handler))
         .route("/account/verify", post(account_verify_handler))
         .route("/account/login", post(account_login_handler))
-        .route("/mcp", get(mcp_handler).post(mcp_handler))
-        // CDP bridge — Playwright connectOverCDP / Puppeteer connect surface.
-        .route("/json/version", get(crate::cdp::http::json_version))
-        .route("/json/version/", get(crate::cdp::http::json_version))
-        .route("/json", get(crate::cdp::http::json_list))
-        .route("/json/", get(crate::cdp::http::json_list))
-        .route("/json/list", get(crate::cdp::http::json_list))
-        .route("/json/list/", get(crate::cdp::http::json_list))
-        .route("/json/unimplemented", get(crate::cdp::http::json_unimplemented))
-        .route("/devtools/:kind/:id", get(crate::cdp::http::devtools_ws));
-
+        .route(
+            "/render_markdown",
+            post(routers::render::render_markdown_handler),
+        );
     #[cfg(feature = "screenshot")]
     let app = app
         .route(
@@ -488,8 +429,8 @@ async fn main() -> anyhow::Result<()> {
             post(pdf_handler).layer(axum::extract::DefaultBodyLimit::max(max_body_bytes())),
         );
 
-    // #162: the gate layers on AFTER every route above (screenshot routes,
-    // /mcp, and the CDP discovery + /devtools WS surface included) so it
+    // #162: the gate layers on AFTER every route above (screenshot routes
+    // included) so it
     // wraps the whole face; /health stays open inside the middleware.
     // Unset env = no layer at all — the open-loopback default keeps its
     // exact behavior (dogfood, install.sh, DSH, carrier untouched).
@@ -501,11 +442,8 @@ async fn main() -> anyhow::Result<()> {
         None => app,
     };
 
-    let bind_addr = if let Some(port) = cdp_port {
-        format!("127.0.0.1:{port}")
-    } else {
-        std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".to_string())
-    };
+    let bind_addr =
+        std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".to_string());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
 
     // #88: sessions the previous process flushed at ITS shutdown revive
@@ -531,19 +469,13 @@ async fn main() -> anyhow::Result<()> {
         let loopback = addr.ip().is_loopback();
         if !loopback {
             tracing::warn!(
-                "HTTP/CDP surface has NO auth on {} — any process on this \
+                "HTTP surface has NO auth on {} — any process on this \
                  machine (and, on this bind, the LAN) can drive logged-in \
                  sessions; set {} to gate it (#162)",
                 addr,
                 auth::TOKEN_ENV
             );
         }
-    }
-    if let Some(port) = cdp_port {
-        tracing::info!(
-            "CDP on loopback — agent-browser: `agent-browser --cdp {port}` · \
-             Playwright: connectOverCDP(\"http://127.0.0.1:{port}\")"
-        );
     }
 
     // Standard proxy env vars do NOT configure this engine (reqwest/wreq's
@@ -569,7 +501,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    axum::serve(listener, app.with_state(mcp::mcp_http_service()))
+    axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
@@ -808,7 +740,6 @@ async fn status_handler() -> axum::response::Html<String> {
     <tr><td>POST&nbsp;/pdf</td><td>page &rarr; paginated PDF / PNGs</td></tr>
     <tr><td>POST&nbsp;/download</td><td>streaming file download</td></tr>
     <tr><td>POST&nbsp;/session/:id/&hellip;</td><td>stateful browser session (navigate/click/eval/&hellip;)</td></tr>
-    <tr><td>GET&nbsp;&nbsp;/mcp</td><td>MCP endpoint (streamable HTTP)</td></tr>
   </table>
 
   <footer>
@@ -879,7 +810,7 @@ async fn doctor_handler(Query(params): Query<DoctorParams>) -> impl IntoResponse
         };
         // do_fetch drives the real fetch pipeline (build_browser -> goto ->
         // extract) on a local runtime; spawn_blocking because it is !Send and
-        // cannot run inside the tokio runtime - same pattern as the MCP tools.
+        // cannot run inside the tokio runtime.
         let start = std::time::Instant::now();
         let result = tokio::task::spawn_blocking(move || do_fetch(req)).await;
         let latency_ms = start.elapsed().as_millis() as u64;
@@ -917,21 +848,10 @@ async fn doctor_handler(Query(params): Query<DoctorParams>) -> impl IntoResponse
         "endpoints": [
             "/health", "/doctor", "/engines", "/fetch", "/click", "/eval",
             "/search", "/download", "/v1/scrape", "/session/create",
-            "/session/list", "/import/curl", "/mcp"
+            "/session/list", "/import/curl", "/render_markdown"
         ],
         "probe": probe,
     }))
-}
-
-async fn mcp_handler(
-    State(service): State<StreamableHttpService<mcp::AginxBrowserMcp, LocalSessionManager>>,
-    req: axum::extract::Request,
-) -> Response {
-    let (parts, body) = service.handle(req).await.into_parts();
-    // rmcp's body error is Infallible (never produced); coerce to an Error type.
-    use http_body_util::BodyExt;
-    let body = axum::body::Body::new(body.map_err(|never| -> std::io::Error { match never {} }));
-    Response::from_parts(parts, body)
 }
 
 /// Lazy-initialized TTL read from env (parsed once, then cached). Shared by
@@ -965,22 +885,6 @@ where
 mod tests {
     use super::*;
 
-    // --cdp-port: the local agent-tooling entry. Valid port wins, garbage
-    // and port 0 refuse loudly instead of silently starting unreachable.
-    #[test]
-    fn cdp_port_flag_parses_and_validates() {
-        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(cdp_port_from_args(&a(&["aginxbrowser"])).unwrap(), None);
-        assert_eq!(
-            cdp_port_from_args(&a(&["aginxbrowser", "--cdp-port", "9223"])).unwrap(),
-            Some(9223)
-        );
-        assert!(cdp_port_from_args(&a(&["aginxbrowser", "--cdp-port"])).is_err());
-        assert!(cdp_port_from_args(&a(&["aginxbrowser", "--cdp-port", "abc"])).is_err());
-        assert!(cdp_port_from_args(&a(&["aginxbrowser", "--cdp-port", "0"])).is_err());
-        assert!(cdp_port_from_args(&a(&["aginxbrowser", "--cdp-port", "99999"])).is_err());
-    }
-
     // #98: unknown flags are named, value flags shield their argument, and
     // bare "-" (stdin convention) passes through. --version/--help exit
     // paths are too trivial to pin; the guard logic is where bugs would live.
@@ -988,9 +892,9 @@ mod tests {
     fn unknown_flag_guard_names_offenders_and_shields_values() {
         let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(first_unknown_flag(&a(&["aginxbrowser"])), None);
-        assert_eq!(first_unknown_flag(&a(&["aginxbrowser", "--mcp", "--panel"])), None);
+        assert_eq!(first_unknown_flag(&a(&["aginxbrowser", "--panel", "--version"])), None);
         assert_eq!(
-            first_unknown_flag(&a(&["aginxbrowser", "--cdp-port", "9223"])),
+            first_unknown_flag(&a(&["aginxbrowser", "--allow-network", "10.0.0.0/8"])),
             None
         );
         assert_eq!(

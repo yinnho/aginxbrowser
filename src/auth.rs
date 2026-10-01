@@ -1,13 +1,12 @@
 //! Opt-in bearer-token gate for the whole HTTP/WS surface (#162).
 //!
-//! Default = today's open shape: loopback dev, the /mcp dogfood face, the
-//! DSH plugin and carrier keep zero-config access, byte for byte. When
+//! Default = today's open shape: loopback dev, the DSH plugin and carrier
+//! keep zero-config access, byte for byte. When
 //! `AGINXBROWSER_TOKEN` is set, every route except `/health` demands the
-//! token — `Authorization: Bearer <t>` or `?token=<t>` — including the
-//! `/devtools/*` WebSocket upgrade. The CDP discovery endpoints embed the
-//! token into `webSocketDebuggerUrl` so Playwright connectOverCDP /
-//! Puppeteer connect keep working with zero client change (Chrome's own
-//! path-uuid-as-capability shape; lightpanda#3452 absorption).
+//! token — `Authorization: Bearer <t>` or `?token=<t>` (the query form
+//! exists because header-less GETs — WebSocket upgrades, curl one-liners —
+//! cannot carry an Authorization header; Chrome's own path-uuid-as-
+//! capability shape; lightpanda#3452 absorption).
 //!
 //! The token charset is deliberately URL-safe so the header form and the
 //! `?token=` form are the same string — no percent-encoding ambiguity
@@ -45,19 +44,6 @@ pub fn token_from_env() -> Result<Option<String>, String> {
     }
 }
 
-/// The one validated token for this process, set once at boot before the
-/// listener opens. Discovery handlers read it to embed into
-/// `webSocketDebuggerUrl`; the gate layer carries its own clone.
-static AMBIENT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-
-pub fn set_ambient(token: Option<String>) {
-    let _ = AMBIENT.set(token);
-}
-
-pub fn ambient() -> Option<&'static str> {
-    AMBIENT.get().and_then(|t| t.as_deref())
-}
-
 /// Constant-time equality. Differing lengths return fast — the length is
 /// public (it rides every discovery URL anyway); the byte walk folds
 /// without early exit so matching position doesn't leak.
@@ -80,9 +66,8 @@ fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
     (!rest.is_empty()).then(|| rest.to_string())
 }
 
-/// `?token=<t>` — the door WebSocket clients use (the upgrade GET cannot
-/// carry custom headers from most WS libraries, which is exactly why the
-/// discovery URLs embed the token).
+/// `?token=<t>` — the header-less door (WebSocket-style GETs and plain
+/// curl one-liners).
 fn query_token(uri: &axum::http::Uri) -> Option<String> {
     let q = uri.query()?;
     q.split('&').find_map(|pair| {

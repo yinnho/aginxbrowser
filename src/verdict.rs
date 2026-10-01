@@ -174,7 +174,7 @@ pub fn verdict_for(input: &VerdictInput, rules: &[UrlRule]) -> (Verdict, Vec<Str
     (Verdict::Unknown, signals)
 }
 
-/// The full fact sheet (the MCP/REST/flow step payload):
+/// The full fact sheet (the REST/flow step payload):
 /// `{verdict, url, facts, signals, elapsed_ms}` plus `account` and the
 /// human-handoff instruction when the verdict is `challenge`.
 pub fn fact_sheet(input: &VerdictInput, elapsed_ms: u64) -> Value {

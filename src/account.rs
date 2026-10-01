@@ -52,8 +52,8 @@ static LIVE_JARS: std::sync::LazyLock<JarMap> =
 
 /// Get-or-create the live jar for `(owner, name)`. Keys use the canonical
 /// owner ([`crate::store::norm_owner`]) so every face lands on one jar per
-/// identity — the REST face's "rest" and the MCP face's session owner are the
-/// same local user under the default global scope. A fresh jar is seeded
+/// identity — every face lands on one jar per identity
+/// ("rest" under the default global scope). A fresh jar is seeded
 /// from the stored account record (if any) so a post-restart
 /// `session_create {account}` starts where the last session left off.
 pub fn jar_for(owner: &str, name: &str) -> Arc<CookieJar> {
@@ -260,7 +260,7 @@ pub fn persona_for(owner: &str, name: &str, ua_hint: Option<&str>) -> Persona {
     persona
 }
 
-/// One row per account for `GET /accounts` / the MCP list tool. Metadata
+/// One row per account for `GET /accounts`. Metadata
 /// only — cookie values never appear (they're credentials; the count and
 /// domains are enough to tell identities apart).
 #[derive(Debug, serde::Serialize)]

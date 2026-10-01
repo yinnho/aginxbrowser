@@ -337,8 +337,7 @@ fn widen_cookie_scope(cookies: Vec<String>, url: &str) -> Vec<String> {
 }
 
 /// Parse a copied cURL command and turn its login state into a live session
-/// navigating to the copied URL. Shared by the HTTP `/import/curl` endpoint
-/// and the MCP `import_curl` tool so the two can't drift. With `account`,
+/// navigating to the copied URL. Serves the HTTP `/import/curl` endpoint. With `account`,
 /// the session runs as that named identity: the imported cookies land in the
 /// account's private jar and are written back under its name.
 pub async fn create_session_from_curl(

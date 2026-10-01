@@ -6,17 +6,15 @@
 
 **Agent 的浏览器。看 live web，读它，操作它，记住它。**
 
-[![skills.sh](https://skills.sh/b/yinnho/aginxbrowser)](https://skills.sh/yinnho/aginxbrowser)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![MCP](https://img.shields.io/badge/MCP-compatible-brightgreen)](https://browser.aginx.net/mcp)
-[![Hosted](https://img.shields.io/badge/hosted-browser.aginx.net-4dd0ff)](https://browser.aginx.net/)
+[![skills.sh](https://skills.sh/b/yinnho/aginxbrowser)](https://skills.sh/yinnho/aginxbrowser)
 [![X](https://img.shields.io/badge/X-%40aginxbrowser-black?logo=x)](https://x.com/aginxbrowser)
 
 不是给人用的浏览器改吧改吧给 Agent 用。是从第一行代码就为 AI Agent 设计的——看世界、读世界、搜世界、操作世界，还要记得住读过的东西：一个 Rust 二进制，内置 V8，不依赖 Chromium。
 
 > 人有 Chrome，Agent 有 AginxBrowser。
 
-一个二进制，零依赖，启动即服务。HTTP API + MCP + CDP 三种协议——Agent 拿来就能用，已有的 Playwright / Puppeteer / browser-use 代码一行直连。
+一个二进制，零依赖，启动即服务。**HTTP API 就是全部接口**——任何有 HTTP 客户端的语言，拿来就能用。
 
 <video src="https://github.com/yinnho/aginxbrowser/releases/download/v0.5.3/aginxbrowser-vs-competitors-2026-09.mp4" controls muted width="720"></video>
 
@@ -42,7 +40,7 @@
 | 找得到（搜索） | ✅ 20 引擎 7 分类聚合 | ❌ | ❌ | ❌ |
 | 操得了 | session 索引化交互 | DevTools API | ❌ | LLM 驱动 |
 | 记得住 | ✅ 本地 fetch/搜索缓存（SQLite FTS5） | ❌ | 爬虫缓存 | ❌ |
-| 协议 | HTTP + MCP 原生 + CDP | Node API | HTTP | Python |
+| 协议 | HTTP | Node API | HTTP | Python |
 | TLS 指纹 | ✅ Chrome/Firefox/Safari/Edge | 需插件 | ❌ | ❌ |
 | CAPTCHA | ✅ 识别 + 自动等待 + 可选 2captcha | 要自己接 | ❌ | ❌ |
 | 交互式 Session | ✅ 持久化 | ✅ | ❌ | ✅ |
@@ -52,22 +50,20 @@
 | | AginxBrowser | Obscura | Blitz | Lightpanda |
 |---|---|---|---|---|
 | 是什么 | Rust 浏览器，V8，diting 绘制 | Rust 无头浏览器，V8 | HTML/CSS 引擎（Stylo），不是给智能体用的浏览器 | Zig 无头浏览器，V8 |
-| Playwright / CDP | `connectOverCDP` | Puppeteer 和 Playwright 走 CDP | 没有 | Puppeteer 和 Playwright 走 CDP |
 | 截图 | 自带绘制，编译时打开 | 截图、screencast、PDF | 画窗口 | Hermes 集成里截图退回 Chrome |
 | 公开的 CSS 套件 | CI 里没有 | 没有公开的 WPT | CI 里跑 WPT，含 SVG | 没有公开的 WPT |
 | 许可证 | Apache-2.0 | Apache-2.0 | Apache-2.0 和 MIT | AGPL-3.0 |
 
-Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操得了、记得住。** 一个二进制全包，systemd 守护，MCP 直连 Claude/Cursor，零依赖启动即服务。
+Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操得了、记得住。** 一个二进制全包，systemd 守护，零依赖启动即服务。
 
 **核心优势：不依赖 Chromium。** AginxBrowser 内联了完整的浏览器引擎（V8 + Rust HTTP 栈 + 自有的 diting CSS/布局/绘制渲染引擎，以 Blitz/Stylo/Taffy 谱系为参照实现），不需要 Puppeteer、不需要 Chrome、不需要 Docker。一个 Rust 二进制挂 systemd，就是 agent 的浏览器基础设施。
 
-## 三件事：无状态渲染器干不了
+## 两件事：无状态渲染器干不了
 
-刚冒出来的「agent 浏览器」大多是**无状态、无指纹**的一次性渲染引擎——抓公开页很轻，碰上 Cloudflare 或要登录的站就死。AginxBrowser 走相反的路：
+刚冒出来的「agent 浏览器」大多是**无状态、无指纹**的一���性渲染引擎——抓公开页很轻，碰上 Cloudflare 或要登录的站就死。AginxBrowser 走相反的路：
 
 - **🔐 真实 TLS 指纹** — stealth 模式用 BoringSSL 复刻 Chrome145 / Firefox133 / Safari / Edge 的完整 TLS 握手（不是只改 UA），可按请求切换；Cloudflare Turnstile 挑战页自动等 `cf_clearance`。无指纹引擎碰反爬就是 403，我们穿过去。
 - **🤝 有状态交互 Session** — 登录态可注入可导出（`session_create(cookies=...)` ↔ `session_cookies`），跨翻页、跨多步流程不断；`persistent: true` 连闲置过期和服务重启都能扛过去，同一个 session_id 复活时还带着登录态。一次性引擎抓完即弃，做不了「登录 → 操作 → 再操作」。
-- **🔌 MCP 原生** — 37 个工具是一等公民（不是 CDP 套壳），Claude Code / Cursor / Claude Desktop 一行接入。HTTP + MCP 双协议之外还有 CDP 桥，DevTools 生态照样能用。
 
 > 参照：Cloudflare 的 Kitesurf 明确不做真实 TLS 指纹协商、不做持久认证会话——反爬与登录正是 AginxBrowser 的地盘。
 
@@ -91,17 +87,15 @@ Agent 是照着浏览器说的话行事的，所以响应里要写清楚实际�
 - **图片搜索**：`categories=images` 接百度图片/必应图片，返回 `image_url` 二进制直链（可直接下成 jpg/png）+ `source_url` 溯源
 - **交互式 Session**：持久化浏览器会话，索引化交互（state/click/input/scroll/eval），Agent 像人一样浏览；`session_export` 把 Agent 摸索出来的操作导出成能直接跑的 curl 回放脚本，重放零模型 token；`format=json` 则导出成 flow 文档（`flow_run` 服务端复跑：`{{var}}` 替换、`wait`/`expect` 设门、`save` 收产出；装好的 flow 放在 `workflow/<name>/flow.json`，丢目录进去即部署，不用重编）。操作面也补齐了：`session_viewport` 模拟设备视口（media query 会响应）、`session_wait` 按 selector/谓词带超时等待、`session_screenshot` 截会话当前状态、`session_console` 回放页面 console 环形日志、`session_storage` 导出/恢复 cookie + localStorage 方便交接登录态
 - **播放链接嗅探**：`session_network(filter=media)` 从页面播放器运行时真正发出的请求里挖 m3u8/mp4/dash 链接——写在 HTML 里的播放地址多半是诱饵，请求日志才是真相。`GET /session/{id}/har` 把同一份流量导出成 HAR 1.2（含已保留的响应体）
-- **CDP 桥**：`/json/version` + `/devtools/{kind}/{id}` WebSocket——Playwright / Puppeteer / browser-use 的 `chromium.connectOverCDP()` 一行接入，agent-browser 走 `--cdp` 直驱（`snapshot` 吐合成无障碍树带 `@ref` 句柄）（[集成指南](docs/integrations.md)）。兼容 DevTools 生态，但自己不做 CDP 套壳
 - **文件下载**：流式落盘（不吃内存）、SHA-256 校验、断点续传——二进制、压缩包、数据集用这个
-- **记得住本地缓存**：每次 fetch/搜索自动进 SQLite（FTS5），落 `~/.aginxbrowser/cache.db`。`cache` 工具从 Agent 已读过的内容里找答案，不再重付网络时间：全文检索支持中文逐字匹配、关键词×新鲜度融合排序、`[§ 标题]` 小节感知摘要、每 URL 内容哈希测漂移、TTL 有界、共享部署可按 session 隔离
+- **记得住本地缓存**：每次 fetch/搜索自动进 SQLite（FTS5），落 `~/.aginxbrowser/cache.db`。TTL 内的重复请求直接命中 Agent 已读过的内容，不再重付网络时间：全文检索支持中文逐字匹配、关键词×新鲜度融合排序、`[§ 标题]` 小节感知摘要、每 URL 内容哈希测漂移、共享部署可按 session 隔离
 - **CAPTCHA 处理**：类型识别 + Cloudflare 挑战自动等待 + 可选 2captcha 解算，搜索不卡验证页
 - **JS 数据提取**：`js_extract` 参数，从 SPA 提 `window.__INITIAL_STATE__` 等结构化数据
-- **文档生成**：`render_markdown` 把 markdown 渲成一份确定性的自包含 HTML——文档这层 agent 不用手写 HTML 了。正文走纯离线壳（无字体无脚本）；围栏代码块标成 `archify` 的话，里面放带类型的零坐标图 JSON（sequence / workflow / architecture / dataflow / lifecycle 五族），布局引擎直接出内联 SVG。同一份输入出同一份字节，回执带 sha256，确定性可以验。`theme` 明暗、`preset` 配色族（classic / signal-flow / blueprint / editorial）在生成时烤进产物；`quality:"showcase"` 是交付档，审计连线路交叉、标签净空、节奏都打分，但不动产物字节。图上还能挂 views 引导页签，点节点亮 ego 图、点页签亮子图，`window.agxViewer` 还能编程查 route（两点最短路径）和 reach（上下游闭包）。传 `session_id` 的话产物直接装进活会话，回执告诉你这页在视口里是 fits 还是 tall/wide。Mermaid 源码归 agent 翻译成 archify JSON，引擎只收 archify JSON。图词汇表改编自 archify（MIT）
+- **文档生成**：`POST /render_markdown` 把 markdown 渲成一份确定性的自包含 HTML——文档这层 agent 不用手写 HTML 了。正文走纯离线壳（无字体无脚本）；围栏代码块标成 `archify` 的话，里面放带类型的零坐标图 JSON（sequence / workflow / architecture / dataflow / lifecycle 五族），布局引擎直接出内联 SVG。同一份输入出同一份字节，回执带 sha256，确定性可以验。`theme` 明暗、`preset` 配色族（classic / signal-flow / blueprint / editorial）在生成时烤进产物；`quality:"showcase"` 是交付档，审计连线路交叉、标签净空、节奏都打分，但不动产物字节。views 引导页签 + `window.agxViewer`（`focus`/ego/route/reach）让产物可交互。Mermaid 源码归 agent 翻译成 archify JSON，引擎只收 archify JSON。图词汇表改编自 archify（MIT）
 - **截图渲染**：`/screenshot` 端点（`--features screenshot`），JS 渲染后的 DOM 用自有的 diting 引擎出 PNG——纯 CPU，无 Chromium，agent 的视觉输入
-- **时间线视频**：`/video` 端点 + `render_video` MCP 工具，把页面的动画渲成 MP4。约定很简单：页面脚本把时间线注册进 `window.__timelines`（GSAP 风格，带 `duration()` 和 `pause(t)` 就行），引擎每帧 seek 到 `t=i/fps`、画视口、RGBA 直接 pipe 给 ffmpeg 编 H.264/yuv420p。确定性是构造出来的——像素值里没有墙钟，同一页面渲两遍出同一个 MP4。服务器上要有 ffmpeg
-- **页集（PDF/PNG/PPTX/DOCX）**：`/pdf` 端点 + `render_pdf` MCP 工具，把渲好的页面切页打包——打印模式按顶层块边界分页（默认 96dpi A4，断点尽量落在块边，文字不拦腰截断），幻灯片模式每个选择器匹配自成一张页、按元素定高（HTML 写个 deck、一页一个 `.slide`，导出就是真能用的 deck）。图基 PDF：每页 JPEG 走 DCTDecode，PDF 1.4 手写打包器，零新依赖。PPTX 把同一叠页每页打一张幻灯片；DOCX 每页一个按页定尺寸的 section——两个 OOXML 容器都是手写的（stored-ZIP 打包器、时间戳写死），字节级确定性，零新依赖
+- **时间线视频**：`/video` 端点把页面的动画渲成 MP4。约定���简单：页面脚本把时间线注册进 `window.__timelines`（GSAP 风格，带 `duration()` 和 `pause(t)` 就行），引擎每帧 seek 到 `t=i/fps`、画视口、RGBA 直接 pipe 给 ffmpeg 编 H.264/yuv420p。确定性是构造出来的——像素值里没有墙钟，同一页面渲两遍出同一个 MP4。服务器上要有 ffmpeg
+- **页集（PDF/PNG/PPTX/DOCX）**：`/pdf` 端点把渲好的页面切页打包——打印模式按顶层块边界分页（默认 96dpi A4，断点尽量落在块边，文字不拦腰截断），幻灯片模式每个选择器匹配自成一张页、按元素定高（HTML 写个 deck、一页一个 `.slide`，导出就是真能用的 deck）。图基 PDF：每页 JPEG 走 DCTDecode，PDF 1.4 手写打包器，零新依赖。PPTX 把同一叠页每页打一张幻灯片；DOCX 每页一个按页定尺寸的 section——两个 OOXML 容器都是手写的（stored-ZIP 打包器、时间戳写死），字节级确定性，零新依赖
 - **TLS 指纹伪装**：stealth 模式模拟 Chrome145/Firefox133/Safari/Edge，可按请求切换
-- **MCP Server**：`--mcp` 模式暴露 37 个工具（fetch/eval/click/search/download/cache + session + flow + 截图 + 视频/PDF + 文档生成工具），Claude Code / Claude Desktop / Cursor 直接调用
 - **Firecrawl 兼容**：`/v1/scrape` 端点，现有 Firecrawl 客户端改 base URL 即可迁移
 - **DNS 重绑定防护**：内置 SSRF 防护 + 解析后 IP 校验
 
@@ -132,31 +126,21 @@ computer-use agent 分两层。**GUI 层**（Cua、桌面 CUA 一类）驱动整
 
 | | GUI 层（桌面 CUA） | AginxBrowser（引擎层） |
 |---|---|---|
-| 动作空间 | 屏幕像素 → 系统输入事件 | DOM/CDP：按坐标或选择器点击，真事件派发 |
+| 动作空间 | 屏幕像素 → 系统输入事件 | DOM：按坐标或选择器点击，真事件派发 |
 | 状态读取 | 显示器截图 | 结构化 DOM / 无障碍树，截图可选 |
 | 单会话成本 | Xvfb + VM/容器 | 一个进程，不要显示服务器 |
 | iframe | 压平成像素 | 一等公民：命中测试下钻 iframe，evaluate 按 frame 隔离 |
 | 回放 | 尽量（合成器时序看运气） | 操作日志导出成可跑的 curl / flow JSON |
 
-拿 GUI 层自己的考卷验过：[cua-bench](https://github.com/trycua/cua) 的 webtop gym——一个每个「窗口」都是 iframe 的窗口管理器——通过 CDP 桥跑在 AginxBrowser 上，点击任务端到端 PASS。这条路恰好踩遍 iframe 命中测试、frame 隔离的脚本状态、坐标换算——引擎层替代品最常翻车的地方。browser-use 的接法和 Playwright 一样：`cdp_url` 指过来就行。
-
 ## 快速开始
 
-想先体验？直接用托管实例 **https://browser.aginx.net/**。
-
-**一键全装**（SKILL.md 触发面 + MCP 工具 + 验活）：
+**一键全装**（SKILL.md 触发面 + 验活）：
 
 ```bash
 # 下载 -> 先看一眼内容 -> 确认无误再执行（不要盲跑网络脚本）
 curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh -o skill.sh
 less skill.sh
 bash skill.sh
-```
-
-**只注册 MCP**：
-
-```bash
-claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
 ```
 
 **通过 [skills.sh](https://www.skills.sh) 装触发面**：
@@ -169,16 +153,15 @@ npx skills add yinnho/aginxbrowser
 
 ```text
 把 aginxbrowser 装成你的 web 访问层：
-1. 注册 MCP 服务（已注册就跳过）：
-   claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
-   没有 claude CLI？HTTP API 直接用，不需要 MCP。
-2. 先查 https://browser.aginx.net/doctor 确认能力（screenshot/stealth 要在列表里）
-   再调对应端点。
-3. 以后 web 任务走它，别裸 curl：
-   - 读页面 / 抓 URL      -> fetch {url}              （输出 markdown，默认过 Cloudflare）
-   - 搜网                  -> search {q, fetch_top:3}   （5 引擎，含百度/微信）
-   - 看页面长什么样        -> screenshot {url}
-   - 登录 / 填表 / 点穿    -> session_create -> session_state -> session_input/session_click -> session_close
+1. 装到本机并确认健康：
+   brew install yinnho/aginxbrowser/aginxbrowser
+   aginxbrowser doctor   # 然后启动：aginxbrowser（监听 0.0.0.0:8089）
+   curl http://127.0.0.1:8089/health
+2. 以后 web 任务走 http://127.0.0.1:8089，别裸 curl：
+   - 读页面 / 抓 URL      -> POST /fetch {"url":...}       （输出 markdown，默认过 Cloudflare）
+   - 搜网                 -> POST /search {"q":...,"fetch_top":3}
+   - 看页面长什么样       -> POST /screenshot {"url":...}
+   - 登录 / 填表 / 点穿   -> POST /session/create -> /session/{id}/state -> /input /click -> /close
 ```
 
 自己部署：
@@ -187,10 +170,6 @@ npx skills add yinnho/aginxbrowser
 # macOS / Linux 用 Homebrew
 brew install yinnho/aginxbrowser/aginxbrowser
 aginxbrowser doctor   # 特性 + 字体 + 出口自检
-
-# Docker（Docker Hub，GHCR 有镜像）
-docker run -p 8089:8089 yinnho/aginxbrowser:latest
-# （或 ghcr.io/yinnho/aginxbrowser:latest）
 
 # 或预编译二进制（平台识别 + sha256 校验 + 镜像回退 + doctor 自检）
 # macOS / Linux / Windows（git-bash；Windows 预编译从 v0.3.1 起，v0.4.0 起带全 stealth+screenshot）
@@ -228,9 +207,6 @@ curl -sS -X POST http://127.0.0.1:8089/session/create \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com"}'
 # → {"session_id":"s_1","url":"https://example.com/"}
-
-# MCP 模式（给 AI Agent 用）
-./target/release/aginxbrowser --mcp
 ```
 
 ## REST 路由总表
@@ -257,10 +233,9 @@ curl -sS -X POST http://127.0.0.1:8089/session/create \
 | GET | `/session/list` | 活着的会话 |
 | POST | `/session/{id}/navigate` · `/state` · `/click` · `/click_xy` · `/drag` · `/input` · `/scroll` · `/eval` · `/wait` · `/dialog` · `/viewport` · `/screenshot` · `/clone` · `/close` | 会话动作 |
 | GET | `/session/{id}/cookies` · `/storage` · `/console` · `/network` · `/har` · `/export` | 会话观测 |
-| GET | `/json/version` · `/json/list` · `/devtools/…` | CDP 桥（Playwright/Puppeteer 连这里） |
-| POST | `/mcp` | MCP 端点（`--mcp` 模式走 stdio） |
+| POST | `/render_markdown` | markdown → 确定性自包含 HTML 产物（含内联 SVG 图） |
 
-只有两个 MCP 工具没有 REST 路由：`cache`（查本地抓取/搜索缓存）和 `render_markdown`（markdown → 确定性 HTML 产物）。Agent 走 MCP 能做的每一件事，上面 REST 都能做。
+每一项能力都是一条 POST 的事——不需要 SDK，不需要协议适配层。
 
 ## 目录结构
 
@@ -273,8 +248,7 @@ aginxbrowser/
 ├── workflow/            # Flow 资产：<name>/flow.json 由 flow_run 复跑（丢目录进去即部署）
 ├── README.md
 ├── docs/
-│   ├── API.md            # 完整 API 参考（HTTP + MCP）
-│   └── integrations.md   # CDP 桥：Playwright / Puppeteer / browser-use
+│   └── API.md            # 完整 API 参考（HTTP）
 ├── bench/                # 基准测试（对 headless Chrome）
 │   ├── README.md         #   方法论 + 数字
 │   ├── pages.txt         #   固定 20 页集合
@@ -285,7 +259,6 @@ aginxbrowser/
     ├── main.rs              # HTTP 服务入口与路由
     ├── server.rs            # 业务层（fetch/click/eval/search）
     ├── session.rs           # 交互式浏览器会话
-    ├── mcp.rs               # MCP Server（37 个工具）
     ├── docgen/              # 文档层：markdown → 确定性 HTML + 内联 SVG 图
     ├── render.rs            # 分层渲染（HTTP 直取 → diting 浏览器引擎）
     ├── store.rs             # 本地 fetch/搜索缓存（SQLite FTS5、漂移哈希）
@@ -297,7 +270,6 @@ aginxbrowser/
     ├── video.rs             # 时间线视频泵（__timelines seek → ffmpeg → MP4）
     ├── pages.rs             # 页泵（打印/幻灯片分页 → PDF/PNG）
     ├── ooxml.rs             # OOXML 容器（图基 PPTX/DOCX，stored-ZIP 手写打包器）
-    ├── diting_cdp/          # CDP 桥（DevTools HTTP + WebSocket）
     ├── doctor_cli.rs        # `aginxbrowser doctor` 自检
     ├── browser.rs           # 顶层 API：Browser、BrowserBuilder
     ├── page.rs              # 顶层 API：Page、Element
@@ -361,26 +333,25 @@ cargo build --release --features stealth,screenshot
 | 变量 | 默认 | 说明 |
 |------|------|------|
 | `AGINXBROWSER_BIND` | `0.0.0.0:8089` | 监听地址 |
-| `--cdp-port N`（旗标） | 未设 | 改绑 `127.0.0.1:N`——本地 agent 工具入口（`agent-browser --cdp N`、Playwright `connectOverCDP`）。与 `AGINXBROWSER_BIND` 同时设置时旗标优先 |
 | `AGINXBROWSER_STEALTH` | 启用 | `0` 关闭 stealth（诊断用） |
 | `AGINXBROWSER_UA` | Linux Chrome145 | 伪装 UA |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language 头 |
-| `AGINXBROWSER_PROXY` | 无 | 可选回退代理。被墙源引擎（维基百科/Bing News/Hugging Face/RubyGems）先直连、失败才走此代理——海外部署无需配置；单次请求也可传 `use_proxy:true` 走代理。浏览器/session/CDP 导航到已知被墙域名（wikipedia.org、github.com 等）会自动走代理。引擎故意无视标准 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`（给别的工具设没问题），启动时见到会打警告 |
+| `AGINXBROWSER_PROXY` | 无 | 可选回退代理。被墙源引擎（维基百科/Bing News/Hugging Face/RubyGems）先直连、失败才走此代理——海外部署无需配置；单次请求也可传 `use_proxy:true` 走代理。浏览器/session 导航到已知被墙域名（wikipedia.org、github.com 等）会自动走代理。引擎故意无视标准 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`（给别的工具设���问题），启动时见到会打警告 |
 | `AGINXBROWSER_NAV_CHAIN_LIMIT` | `10` | JS 导航链上限：页面经 `location`/表单连跳多少个文档后导航中止。计数含最初文档（10 = 首文档 + 9 跳）。合法长链（跨提供商 SSO 跳转）可调高；HTTP 3xx 重定向单独算额度（20，按 Fetch spec/浏览器对齐） |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 进程内缓存 TTL，`0` 禁用 |
-| `AGINXBROWSER_HONOR_ROBOTS` | 未设 | `/fetch`、`/screenshot`、`/download` 和 MCP 工具默认不查 robots.txt；设 `1` 打开（运维自选） |
-| `AGINXBROWSER_ALLOW_FILE_ACCESS` | 未设 | 打开 `file://` 读取——导航、子资源、`/fetch`、CDP `setFileInputFiles`。等价于 `--allow-file-access` 命令行开关。默认关：服务默认绑 0.0.0.0，开了门等于把本地文件交给任何够得着端口的人。本地开发机再设，托管实例别设 |
+| `AGINXBROWSER_HONOR_ROBOTS` | 未设 | `/fetch`、`/screenshot`、`/download` 默认不查 robots.txt；设 `1` 打开（运维自选） |
+| `AGINXBROWSER_ALLOW_FILE_ACCESS` | 未设 | 打开 `file://` 读取——导航、子资源、`/fetch`。等价于 `--allow-file-access` 命令行开关。默认关：服务默认绑 0.0.0.0，开了门等于把本地文件交给任何够得着端口的人。本地开发机再设，托管实例别设 |
 | `AGINXBROWSER_ALLOW_PRIVATE_NETWORK` | 未设 | 打开回环/RFC1918/链路本地地址的抓取（SSRF 门）。等价于 `--allow-private-network` 命令行开关——仅开发机 |
 | `AGINXBROWSER_ALLOW_NETWORK` | 未设 | 范围版替代：逗号分隔的 CIDR 白名单（如 `10.20.0.0/16,192.168.1.0/24`），只放行列表内网段——云 metadata 端点（169.254.169.254、100.100.100.200）与其余禁段仍然关闭。等价于 `--allow-network <cidrs>` |
+| `AGINXBROWSER_FONT_DIR` | 未设 | 额外字体目录（`.ttf`/`.otf`/`.ttc`），作为内置 CJK 子集没覆盖的文字（韩文/泰文/阿拉伯文等）的兜底。等价于 `--font-dir <path>` 旗标。内置子集已覆盖的字面继续走内置渲染——目录字体是覆盖尾巴，不是指定家族覆盖 |
 | `AGINXBROWSER_ROBOTS_TTL_SECS` | `3600` | 每主机 robots.txt 策略缓存 TTL |
 | `AGINXBROWSER_DOMAIN_RATE_PER_MIN` | `20` | 单注册域每分钟页面数上限（子域名共用额度，超限返回 429；`0` 关闭。见「是浏览器，不是爬虫」 |
 | `AGINXBROWSER_SESSION_PAGE_LIMIT` | `200` | 单个交互 session 可走的页面总数上限（换页的点击也计），超限后续导航被拒，当前页仍可操作；`0` 关闭 |
-| `AGINXBROWSER_MCP_ALLOWED_HOSTS` | 无 | `/mcp` 额外放行的 `Host`（逗号分隔）。传输层的 DNS 重绑定防护默认只认回环地址，局域网 IP 或 Docker 主机名调用本实例时需加上 |
 | `AGINXBROWSER_STORE` | 开 | 本地 fetch/搜索缓存；`0`/`false`/`off` 关闭 |
 | `AGINXBROWSER_STORE_PATH` | `~/.aginxbrowser/cache.db` | SQLite 数据库位置（0600 权限创建） |
 | `AGINXBROWSER_STORE_TTL_HOURS` | `720` | 缓存页面 TTL |
 | `AGINXBROWSER_STORE_SEARCH_TTL_HOURS` | `168` | 缓存搜索结果集 TTL |
-| `AGINXBROWSER_STORE_SCOPE` | `global` | `session` 让每个 MCP 客户端会话有独立缓存作用域——公共多客户端部署设这个 |
+| `AGINXBROWSER_STORE_SCOPE` | `global` | `session` 让缓存按会话隔离，而不是一个共享池 |
 | `CAPTCHA_SOLVER_API_KEY` | 无 | 2captcha API Key，设置后自动解算验证码 |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | 验证码解算服务 |
 | `AGINXBROWSER_MEILI_URL` | 无 | Meilisearch 地址；设置后启用私有索引引擎 |
@@ -390,24 +361,17 @@ cargo build --release --features stealth,screenshot
 ## API 文档
 
 **完整 API 参考** → [`docs/API.md`](docs/API.md)
-**CDP 集成指南** → [`docs/integrations.md`](docs/integrations.md) — Playwright / Puppeteer / browser-use 一行接入
 **安全审计说明** → [`docs/skills-sh-audit.md`](docs/skills-sh-audit.md) — 为什么 skills.sh 上显示 Critical Risk，每条告警对应的真实产品功能
 
 包含：
-- 全部 37 个 HTTP 端点（`/fetch`、`/search`、`/screenshot`、`/video`、`/pdf`、`/download`、`/v1/scrape`、`/flow/run`、`/doctor`、19 个 session 端点、CDP 发现、MCP 传输）
-- MCP Server 的 37 个工具及参数
-- Claude Code / Claude Desktop / Cursor 客户端配置
+- 全部 HTTP 端点（`/fetch`、`/search`、`/screenshot`、`/video`、`/pdf`、`/download`、`/render_markdown`、`/v1/scrape`、`/flow/run`、`/doctor`、session 端点族）
 - 环境变量、错误码、站点抓取示例
 
 ## 作为外挂接入其他系统
 
 AginxBrowser 定位是**纯外挂基础设施**——像真实浏览器一样作为独立服务挂在系统里，谁需要谁调用，不嵌入宿主代码、不污染宿主配置。同机部署一个实例（systemd 守护），所有需要"渲染 + 抓取"能力的应用共享它。
 
-三个接入口：
-
-- **HTTP** — `/fetch`、`/search`、`/screenshot`、`/download`，任何有 HTTP 客户端的语言都能调
-- **MCP** — 一行接进 Claude Code / Cursor / Claude Desktop（见上）
-- **CDP** — 把 Playwright / Puppeteer / browser-use 指到 `ws://your-host:8089/devtools/browser/<id>`；agent-browser 走 `--cdp` 直驱（`--cdp-port N` 绑回环）。Google 的 chrome-devtools-mcp 也能挂：`aginxbrowser --cdp-port 9223` + `chrome-devtools-mcp --browser-url http://127.0.0.1:9223`，全套工具（建页/快照/求值/截图/网络/resize）打谛听引擎全通过。见 [`docs/integrations.md`](docs/integrations.md)
+接入口就是 HTTP——`/fetch`、`/search`、`/screenshot`、`/download`、`/render_markdown`，任何有 HTTP 客户端的语言都能调。
 
 集成方式：读环境变量 `AGINXBROWSER_URL=http://127.0.0.1:8089`。未设 → 行为不变；设了 → 风控站自动调 AginxBrowser 渲染抓取，失败自动回退。
 

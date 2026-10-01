@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# AginxBrowser skill + MCP installer.
+# AginxBrowser skill installer.
 #
-# Wires up BOTH halves so your agent proactively reaches for AginxBrowser:
-#   1. SKILL.md  -> the trigger (tells the agent WHEN to use the tools)
-#   2. MCP server -> the tools themselves (fetch/search/screenshot/session)
+# Wires up the trigger surface so your agent proactively reaches for
+# AginxBrowser: SKILL.md tells the agent WHEN to call the HTTP API
+# (fetch/search/screenshot/session on a local instance).
 #
 # Usage (download, review, then run - never blind-pipe from the network):
 #   curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh -o skill.sh
@@ -12,20 +12,18 @@
 #   bash skill.sh
 #   ./skill.sh
 #
-# Self-hosted? Point it at your own instance:
-#   AGINXBROWSER_MCP=https://your-host/mcp ./skill.sh
+# Instance not on this machine? Point the verification at it:
+#   AGINXBROWSER_URL=http://your-host:8089 ./skill.sh
 #
 set -euo pipefail
 
-MCP="${AGINXBROWSER_MCP:-https://browser.aginx.net/mcp}"
-# /doctor lives at the host root, not under /mcp.
-HOST_ROOT="$(printf '%s' "$MCP" | sed 's#/mcp$##; s#/$##')"
-DOCTOR="$HOST_ROOT/doctor"
+URL="${AGINXBROWSER_URL:-http://127.0.0.1:8089}"
+DOCTOR="$URL/doctor"
 SKILL_DIR="${HOME}/.claude/skills/aginxbrowser"
 SKILL_URL="https://raw.githubusercontent.com/yinnho/aginxbrowser/main/SKILL.md"
 
-echo "==> AginxBrowser skill + MCP installer"
-echo "    endpoint: $MCP"
+echo "==> AginxBrowser skill installer"
+echo "    instance: $URL"
 echo ""
 
 # 1. SKILL.md - the trigger surface.
@@ -37,21 +35,7 @@ else
   exit 1
 fi
 
-# 2. MCP server - the tools.
-if command -v claude >/dev/null 2>&1; then
-  if claude mcp add aginxbrowser --transport http "$MCP" 2>/dev/null; then
-    echo "  [ok] mcp registered: aginxbrowser -> $MCP"
-  else
-    echo "  [skip] 'claude mcp add' did not succeed (already registered, or needs an interactive shell)."
-    echo "         verify with: claude mcp list"
-  fi
-else
-  echo "  [skip] 'claude' CLI not on PATH."
-  echo "         add the server via settings.json instead:"
-  echo "           {\"mcpServers\":{\"aginxbrowser\":{\"type\":\"http\",\"url\":\"$MCP\"}}}"
-fi
-
-# 3. Verify the instance is alive and report capabilities.
+# 2. Verify the instance is alive and report capabilities.
 echo ""
 echo "==> verifying instance..."
 if command -v curl >/dev/null 2>&1; then
@@ -70,8 +54,9 @@ print("  stealth:     ",c.get("stealth"))
       echo "  $BODY"
     fi
   else
-    echo "  [warn] could not reach $DOCTOR (instance down, or network blocked)."
-    echo "         the skill is still installed; MCP will work once the endpoint is reachable."
+    echo "  [warn] could not reach $DOCTOR (instance down, or not installed here)."
+    echo "         install the server first: brew install yinnho/aginxbrowser/aginxbrowser"
+    echo "         then start it: aginxbrowser"
   fi
 fi
 
@@ -79,4 +64,3 @@ echo ""
 echo "==> done."
 echo "    tell your agent: \"use aginxbrowser to read / search / screenshot / interact with web pages\""
 echo "    docs: https://github.com/yinnho/aginxbrowser/blob/main/docs/API.md"
-echo "    ⭐ like it? star us: https://github.com/yinnho/aginxbrowser"

@@ -570,7 +570,7 @@ fn validate_flow_args(flow: &Value, vars: &Map<String, Value>) -> Option<String>
 }
 
 /// Execute one step against the session — the same SessionCommand path the
-/// HTTP/MCP handlers drive, so quotas, stealth egress, and recording
+/// HTTP handlers drive, so quotas, stealth egress, and recording
 /// behavior are identical whether a human, an agent, or a flow does it.
 async fn exec_step(
     mgr: &mut SessionManager,

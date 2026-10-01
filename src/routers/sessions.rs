@@ -1065,9 +1065,8 @@ pub(crate) async fn sessions_handler() -> Result<impl IntoResponse, AppError> {
     ))
 }
 
-/// Cookie read-back for one session — the HTTP-face mirror of the MCP
-/// `session_cookies` tool (the Cookies command already existed; only the
-/// route was missing). Values are the full Set-Cookie form so the output
+/// Cookie read-back for one session (the Cookies command already existed;
+/// only the route was missing). Values are the full Set-Cookie form so the output
 /// round-trips with `POST /session/create`'s `cookies` field. `?meta=true`
 /// switches to the metadata-only view (#102): names/scoping/flags/expiry
 /// without a single value — the observability face for callers who must

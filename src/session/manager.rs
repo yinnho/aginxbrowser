@@ -35,7 +35,7 @@ pub struct SessionManager {
 mod actor;
 mod persist;
 
-/// Global session manager, shared between HTTP handlers and MCP tools.
+/// Global session manager, shared between HTTP handlers.
 pub static SESSIONS: std::sync::LazyLock<tokio::sync::Mutex<SessionManager>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(SessionManager::new()));
 
@@ -77,13 +77,6 @@ where
         mgr.persist_after_success(session_id).await;
     }
     result
-}
-
-/// Read a session's idle budget through the global manager — reply stamping
-/// for handlers that released the lock during the round trip
-/// ([`send_command`]).
-pub(crate) async fn expires_in_secs(session_id: &str) -> Option<u64> {
-    SESSIONS.lock().await.expires_in_secs(session_id)
 }
 
 /// Screenshot round trip with the #195 channel-layer fast path: while a

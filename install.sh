@@ -114,8 +114,9 @@ fi
 
 say ""
 say "    start a server:   $bindir/$bin                # HTTP API on 0.0.0.0:8089"
-say "    register in claude code:"
-say "      claude mcp add aginxbrowser --transport http http://127.0.0.1:8089/mcp"
+say "    try it:           curl -sS -X POST http://127.0.0.1:8089/fetch \\"
+say "                         -H 'Content-Type: application/json' \\"
+say "                         -d '{\"url\":\"https://example.com\"}'"
 say "    docs: https://github.com/$repo/blob/main/docs/API.md"
 case ":$PATH:" in
     *":$bindir:"*) ;;

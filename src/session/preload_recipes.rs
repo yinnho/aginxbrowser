@@ -2,7 +2,7 @@
 //!
 //! session_preload (802c3d7) shipped the document-start hook but no
 //! content: the xhs resign wrapper lived only in workflow/xhs-post's
-//! flow.json, so a plain MCP caller could not have fixed the stuck
+//! flow.json, so plain session callers could not fix the stuck
 //! comments even on a release that carried the mechanism — the field
 //! report that reopened #84. Builtin recipes close the gap from both
 //! ends: the engine auto-mounts them on matching hosts (zero-config,

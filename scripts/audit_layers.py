@@ -9,10 +9,10 @@ Checks:
   R1a  downward only  — engine code never names a product module (`crate::server`,
                         `crate::session`, ...) at any depth.
   R1b  nothing imports faces — outside the face modules themselves (+ the bin
-                        root), no product file references `crate::{routers,cdp,
-                        mcp,firecrawl_compat,doctor_cli}`.
+                        root), no product file references `crate::{routers,
+                        firecrawl_compat,doctor_cli}`.
   R2a  engine purity  — crates/diting/Cargo.toml never grows a faces/product
-                        dependency (axum, rmcp, schemars, ...).
+                        dependency (axum, tower-http, ...).
   R2b  engine purity  — engine source never references blitz crates or the
                         product cross-check pipeline (comment-stripped, so
                         doc mentions of upstream bugs are fine).
@@ -35,11 +35,9 @@ PRODUCT = ROOT / "src"
 
 # The faces: doors hold routing/parameter structs only (R3), and nothing may
 # import them (R1b) — main.rs is the bin root doing assembly, so it may.
-FACE_MODULES = ("routers", "cdp", "mcp", "firecrawl_compat", "doctor_cli")
+FACE_MODULES = ("routers", "firecrawl_compat", "doctor_cli")
 FACE_PATHS = (
     PRODUCT / "routers",
-    PRODUCT / "cdp",
-    PRODUCT / "mcp.rs",
     PRODUCT / "firecrawl_compat.rs",
     PRODUCT / "doctor_cli.rs",
     PRODUCT / "main.rs",
@@ -58,8 +56,6 @@ ENGINE_DENY_DEPS = (
     "axum",
     "tower",
     "tower-http",
-    "rmcp",
-    "schemars",
     "http-body-util",
     "pulldown-cmark",
     "scraper",
@@ -80,7 +76,6 @@ GOD_FILE_GRANDFATHER = {
     "crates/diting/src/diting_layout/mod.rs": 9642,
     "crates/diting/src/diting_css/mod.rs": 8511,
     "crates/diting/src/diting_js/ops/mod.rs": 6475,
-    "src/cdp/dispatch.rs": 5408,
     "crates/diting/src/diting_layout/paint.rs": 4030,
     "src/bridge_cross_check.rs": 3766,
     "crates/diting/src/diting_js/runtime.rs": 1826,
@@ -94,7 +89,6 @@ GOD_FILE_GRANDFATHER = {
     "src/video.rs": 1672,
     "src/docgen/workflow.rs": 1615,
     "src/docgen/graph.rs": 1584,
-    "src/cdp/domains/page.rs": 1093,
 }
 
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)

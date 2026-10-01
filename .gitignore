@@ -36,3 +36,9 @@ docs/**/*.md
 
 # localStorage persistence test artifact (runtime state, must never rsync to hosted instance)
 /localStorage/
+
+# working docs & credentials — never committed
+HANDOFF-*.md
+scripts/__pycache__/
+docs/aginx上传测试包_*.zip
+docs/登录凭据_*.json

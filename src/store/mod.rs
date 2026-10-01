@@ -12,16 +12,15 @@
 //!
 //! Multi-tenant note: rows carry an `owner`. `AGINXBROWSER_STORE_SCOPE`
 //! defaults to `global` (single-user instances share one pool); set to
-//! `session` on public multi-client deployments so each MCP session only
-//! sees its own rows.
+//! `session` on multi-client deployments so each session only sees its
+//! own rows.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, params_from_iter, Connection};
-use serde::Serialize;
+use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 
 pub const REST_OWNER: &str = "rest";
@@ -89,19 +88,9 @@ fn env_hours(name: &str, default: i64) -> i64 {
         .unwrap_or(default)
 }
 
-/// Owner id for one MCP server instance (one stdio process, or one streamable
-/// HTTP client session — rmcp constructs the service once per session).
-pub fn session_owner() -> String {
-    if scope_global() {
-        "global".to_string()
-    } else {
-        format!("s-{}", uuid::Uuid::new_v4())
-    }
-}
-
 /// Canonical owner under the active scope. Pub for the account layer: its
 /// live-jar registry keys must agree with the store rows, so every face
-/// (REST owner "rest", MCP session owner) converges on one account under the
+/// (e.g. the REST owner "rest") converges on one account under the
 /// default global scope.
 pub fn norm_owner(owner: &str) -> String {
     if scope_global() {
@@ -173,115 +162,6 @@ fn split_cjk(text: &str) -> String {
         out.push(c);
     }
     out
-}
-
-/// Build an FTS5 MATCH expression from free user input. CJK runs become
-/// quoted per-character phrases (substring semantics); ASCII words become
-/// implicit-AND terms with quote characters stripped. None when nothing
-/// searchable remains.
-fn fts_query(q: &str) -> Option<String> {
-    let mut terms = Vec::new();
-    for tok in q.split_whitespace() {
-        if tok.chars().any(is_cjk) {
-            let phrase = split_cjk(tok);
-            if phrase.chars().any(|c| !c.is_whitespace()) {
-                terms.push(format!("\"{}\"", phrase));
-            }
-        } else {
-            let cleaned: String = tok.chars().filter(|&c| c != '"').collect();
-            if !cleaned.is_empty() {
-                terms.push(cleaned);
-            }
-        }
-    }
-    if terms.is_empty() {
-        None
-    } else {
-        Some(terms.join(" "))
-    }
-}
-
-fn like_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if matches!(c, '%' | '_' | '\\') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
-}
-
-/// Snippet centered on the earliest occurrence of any term, bounded to
-/// char boundaries. When the hit sits under a markdown heading that falls
-/// outside the window, the heading is prefixed so the caller can tell which
-/// section of the page it landed in.
-fn snippet(text: &str, raw_query: &str) -> String {
-    let hay = text.to_lowercase();
-    let mut hit: Option<usize> = None;
-    for term in raw_query.split_whitespace() {
-        if let Some(p) = hay.find(&term.to_lowercase()) {
-            if hit.is_none_or(|b| p < b) {
-                hit = Some(p);
-            }
-        }
-    }
-    let bytes = text.len();
-    let center = hit.unwrap_or(0);
-    let start = floor_char_boundary(text, center.saturating_sub(80));
-    let end = ceil_char_boundary(text, (center + 200).min(bytes));
-    let mut s = String::new();
-    if let Some((off, h)) = heading_above(text, center) {
-        if off < start {
-            s.push_str(&format!("[§ {h}] "));
-        }
-    }
-    if start > 0 {
-        s.push('…');
-    }
-    s.push_str(text[start..end].trim());
-    if end < bytes {
-        s.push('…');
-    }
-    s
-}
-
-/// Text of the nearest markdown heading (`#`..`######`) strictly above the
-/// line containing `pos`, plus its byte offset.
-fn heading_above(text: &str, pos: usize) -> Option<(usize, String)> {
-    let line_start = text[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let mut off = 0;
-    let mut last_heading: Option<(usize, String)> = None;
-    for line in text[..line_start].split_inclusive('\n') {
-        let trimmed = line.trim_end().trim_start();
-        let hashes = trimmed.chars().take_while(|&c| c == '#').count();
-        if (1..=6).contains(&hashes) {
-            let rest = trimmed[hashes..].trim_start();
-            if !rest.is_empty() {
-                let mut out: String = rest.chars().take(60).collect();
-                if rest.chars().count() > 60 {
-                    out.push('…');
-                }
-                last_heading = Some((off, out));
-            }
-        }
-        off += line.len();
-    }
-    last_heading
-}
-
-fn floor_char_boundary(s: &str, mut i: usize) -> usize {
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
-fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
-    while i < s.len() && !s.is_char_boundary(i) {
-        i += 1;
-    }
-    i
 }
 
 fn now() -> i64 {
@@ -392,6 +272,9 @@ impl Store {
         Ok(Store { conn })
     }
 
+    /// Upsert one page sample; returns `(content_hash, changed_since_prev)`
+    /// so the fetch response can carry the drift receipt. `("", None)` when
+    /// there is nothing to record.
     fn record_fetch(
         &self,
         owner: &str,
@@ -400,9 +283,9 @@ impl Store {
         content: &str,
         tier: &str,
         truncated: bool,
-    ) {
+    ) -> (String, Option<bool>) {
         if content.is_empty() {
-            return;
+            return (String::new(), None);
         }
         let norm = normalize_url(url);
         let hash = hex(&Sha256::digest(content.as_bytes()));
@@ -419,6 +302,7 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap_or_default();
+        let changed = (!prev.0.is_empty()).then(|| prev.0 != hash);
         let res = self.conn.query_row(
             "INSERT INTO pages (owner, url, norm_url, title, content, tier, truncated,
                                 content_hash, prev_hash, prev_fetched_at, fetched_at, expires_at)
@@ -455,8 +339,12 @@ impl Store {
                     "INSERT INTO pages_fts (rowid, title, content, url) VALUES (?1, ?2, ?3, ?4)",
                     params![id, split_cjk(title), split_cjk(content), norm],
                 );
+                (hash, changed)
             }
-            Err(e) => tracing::debug!("store: page upsert failed: {e}"),
+            Err(e) => {
+                tracing::debug!("store: page upsert failed: {e}");
+                (String::new(), None)
+            }
         }
     }
 
@@ -515,379 +403,8 @@ impl Store {
             .execute("DELETE FROM searches WHERE expires_at < ?1", params![ts]);
     }
 
-    fn query(&self, owner: &str, q: &CacheQuery) -> Result<QueryResult, String> {
-        self.purge_expired();
-        let mut out = QueryResult::default();
-        let want_pages = q.kind != "searches";
-        let want_searches = q.kind != "pages";
-        if want_pages {
-            out.pages = self.query_pages(owner, q)?;
-        }
-        if want_searches {
-            out.searches = self.query_searches(owner, q)?;
-        }
-        let (tp, ts) = self
-            .conn
-            .query_row(
-                "SELECT (SELECT COUNT(*) FROM pages WHERE owner=?1),
-                        (SELECT COUNT(*) FROM searches WHERE owner=?1)",
-                params![owner],
-                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
-            )
-            .map_err(|e| e.to_string())?;
-        out.total_pages = tp;
-        out.total_searches = ts;
-        Ok(out)
-    }
-
-    fn query_pages(&self, owner: &str, q: &CacheQuery) -> Result<Vec<PageHit>, String> {
-        let since = q.since_hours.map(|h| now() - h as i64 * 3600);
-        let limit = q.limit.clamp(1, 100) as i64;
-        // Filters shared by every branch; args must stay index-aligned (?1..?n).
-        let mut filter_sql = String::from(" p.owner = ?1");
-        let mut filter_args: Vec<rusqlite::types::Value> = vec![owner.to_string().into()];
-        if let Some(u) = &q.url {
-            filter_sql.push_str(&format!(
-                " AND p.norm_url LIKE '%'||?{}||'%' ESCAPE '\\'",
-                filter_args.len() + 1
-            ));
-            filter_args.push(like_escape(u).into());
-        }
-        if let Some(s) = since {
-            filter_sql.push_str(&format!(" AND p.fetched_at >= ?{}", filter_args.len() + 1));
-            filter_args.push(s.into());
-        }
-        let cols = "p.url, p.title, p.content, p.tier, p.truncated, p.fetched_at, p.content_hash";
-
-        // 1) FTS path: bm25() must sit in the same (sub)query as its MATCH.
-        //    Candidates are over-fetched and fused with recency before the
-        //    limit is applied — a much newer fetch can outrank a hair better
-        //    bm25 score, which is what a fetch-history cache wants.
-        if let Some(raw) = q.query.as_deref().filter(|s| !s.trim().is_empty()) {
-            if let Some(match_expr) = fts_query(raw) {
-                let mph = filter_args.len() + 1;
-                let sql = format!(
-                    "SELECT {cols} FROM pages p
-                     JOIN (SELECT rowid AS rid, bm25(pages_fts) AS rank
-                           FROM pages_fts WHERE pages_fts MATCH ?{mph}) f
-                       ON f.rid = p.id
-                     WHERE {filter_sql}
-                     ORDER BY f.rank LIMIT {}",
-                    limit.saturating_mul(4)
-                );
-                let mut fargs = filter_args.clone();
-                fargs.push(match_expr.into());
-                if let Ok(hits) = self.query_fts_fused(&sql, &fargs, raw, limit) {
-                    if !hits.is_empty() {
-                        return Ok(hits);
-                    }
-                }
-            }
-            // 2) LIKE fallback: catches unicode61 misses and odd MATCH syntax.
-            let base = filter_args.len();
-            let sql = format!(
-                "SELECT {cols} FROM pages p WHERE {filter_sql}
-                 AND (p.title LIKE '%'||?{t}||'%' ESCAPE '\\'
-                      OR p.content LIKE '%'||?{c}||'%' ESCAPE '\\'
-                      OR p.norm_url LIKE '%'||?{u}||'%' ESCAPE '\\')
-                 ORDER BY p.fetched_at DESC LIMIT {limit}",
-                t = base + 1,
-                c = base + 2,
-                u = base + 3,
-            );
-            let esc = format!("%{}%", like_escape(raw));
-            let mut largs = filter_args.clone();
-            largs.push(esc.clone().into());
-            largs.push(esc.clone().into());
-            largs.push(esc.into());
-            return self.query_page_hits(&sql, &largs, raw);
-        }
-
-        // 3) No query: recency listing (optionally URL-filtered above).
-        let sql = format!(
-            "SELECT {cols} FROM pages p WHERE {filter_sql}
-             ORDER BY p.fetched_at DESC LIMIT {limit}"
-        );
-        self.query_page_hits(&sql, &filter_args, "")
-    }
-
-    fn query_page_hits(
-        &self,
-        sql: &str,
-        args: &[rusqlite::types::Value],
-        raw_query: &str,
-    ) -> Result<Vec<PageHit>, String> {
-        let mut stmt = self.conn.prepare(sql).map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params_from_iter(args.iter()), |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, i64>(4)?,
-                    r.get::<_, i64>(5)?,
-                    r.get::<_, String>(6)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?;
-        let mut hits = Vec::new();
-        for row in rows {
-            let (url, title, content, tier, truncated, fetched_at, content_hash) =
-                row.map_err(|e| e.to_string())?;
-            hits.push(PageHit {
-                url,
-                title,
-                snippet: snippet(&content, raw_query),
-                tier,
-                truncated: truncated != 0,
-                fetched_at,
-                content_hash,
-            });
-        }
-        Ok(hits)
-    }
-
-    /// Reciprocal-rank fusion over the FTS candidate set: bm25 rank (the
-    /// order the SQL returns) × recency rank, equal weight, k=60. Exact
-    /// score ties break toward the newer fetch.
-    fn query_fts_fused(
-        &self,
-        sql: &str,
-        args: &[rusqlite::types::Value],
-        raw_query: &str,
-        limit: i64,
-    ) -> Result<Vec<PageHit>, String> {
-        let mut stmt = self.conn.prepare(sql).map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params_from_iter(args.iter()), |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, i64>(4)?,
-                    r.get::<_, i64>(5)?,
-                    r.get::<_, String>(6)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?;
-        let mut cands: Vec<(String, String, String, String, bool, i64, String)> = Vec::new();
-        for row in rows {
-            let (url, title, content, tier, truncated, fetched_at, content_hash) =
-                row.map_err(|e| e.to_string())?;
-            cands.push((
-                url,
-                title,
-                content,
-                tier,
-                truncated != 0,
-                fetched_at,
-                content_hash,
-            ));
-        }
-        let n = cands.len();
-        let mut by_recency: Vec<usize> = (0..n).collect();
-        by_recency.sort_by(|&a, &b| cands[b].5.cmp(&cands[a].5));
-        let mut recency_rank = vec![0usize; n];
-        for (pos, &idx) in by_recency.iter().enumerate() {
-            recency_rank[idx] = pos + 1;
-        }
-        let k = 60.0f64;
-        let mut scored: Vec<(f64, usize)> = cands
-            .iter()
-            .enumerate()
-            .map(|(i, _)| {
-                (
-                    1.0 / (k + i as f64 + 1.0) + 1.0 / (k + recency_rank[i] as f64),
-                    i,
-                )
-            })
-            .collect();
-        scored.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(cands[b.1].5.cmp(&cands[a.1].5))
-                .then(a.1.cmp(&b.1))
-        });
-        Ok(scored
-            .into_iter()
-            .take(limit as usize)
-            .map(|(_, i)| {
-                let (url, title, content, tier, truncated, fetched_at, content_hash) = &cands[i];
-                PageHit {
-                    url: url.clone(),
-                    title: title.clone(),
-                    snippet: snippet(content, raw_query),
-                    tier: tier.clone(),
-                    truncated: *truncated,
-                    fetched_at: *fetched_at,
-                    content_hash: content_hash.clone(),
-                }
-            })
-            .collect())
-    }
-
-    fn query_searches(&self, owner: &str, q: &CacheQuery) -> Result<Vec<SearchHit>, String> {
-        let mut sql = String::from(
-            "SELECT query, categories, n_results, results_json, searched_at FROM searches WHERE owner=?1",
-        );
-        let mut args: Vec<rusqlite::types::Value> = vec![owner.to_string().into()];
-        if let Some(raw) = q.query.as_deref().filter(|s| !s.trim().is_empty()) {
-            sql.push_str(&format!(
-                " AND query LIKE '%'||?{}||'%' ESCAPE '\\'",
-                args.len() + 1
-            ));
-            args.push(like_escape(raw).into());
-        }
-        if let Some(u) = &q.url {
-            sql.push_str(&format!(
-                " AND results_json LIKE '%'||?{}||'%' ESCAPE '\\'",
-                args.len() + 1
-            ));
-            args.push(like_escape(u).into());
-        }
-        if let Some(h) = q.since_hours {
-            sql.push_str(&format!(" AND searched_at >= ?{}", args.len() + 1));
-            args.push((now() - h as i64 * 3600).into());
-        }
-        sql.push_str(&format!(
-            " ORDER BY searched_at DESC LIMIT {}",
-            q.limit.clamp(1, 100)
-        ));
-        let mut stmt = self.conn.prepare(&sql).map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params_from_iter(args.iter()), |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, i64>(4)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?;
-        let mut hits = Vec::new();
-        for row in rows {
-            let (query, categories, n, json, at) = row.map_err(|e| e.to_string())?;
-            let top = serde_json::from_str::<serde_json::Value>(&json)
-                .ok()
-                .and_then(|v| v.as_array().cloned())
-                .unwrap_or_default()
-                .iter()
-                .take(3)
-                .map(|item| {
-                    let title = item
-                        .get("title")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let url = item
-                        .get("url")
-                        .and_then(|u| u.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    TopResult { title, url }
-                })
-                .collect();
-            hits.push(SearchHit {
-                query,
-                categories,
-                n_results: n,
-                searched_at: at,
-                top,
-            });
-        }
-        Ok(hits)
-    }
-
-    fn get_page(&self, owner: &str, url: &str) -> Result<Option<PageFull>, String> {
-        self.conn
-            .query_row(
-                "SELECT url, title, content, tier, truncated, fetched_at,
-                        content_hash, prev_hash, prev_fetched_at FROM pages
-                 WHERE owner=?1 AND norm_url=?2",
-                params![owner, normalize_url(url)],
-                |r| {
-                    let content_hash: String = r.get(6)?;
-                    let prev_hash: String = r.get(7)?;
-                    Ok(PageFull {
-                        url: r.get(0)?,
-                        title: r.get(1)?,
-                        content: r.get(2)?,
-                        tier: r.get(3)?,
-                        truncated: r.get::<_, i64>(4)? != 0,
-                        fetched_at: r.get(5)?,
-                        changed_since_prev: !prev_hash.is_empty() && prev_hash != content_hash,
-                        content_hash,
-                        prev_hash,
-                        prev_fetched_at: r.get(8)?,
-                    })
-                },
-            )
-            .map(Some)
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                e => Err(e.to_string()),
-            })
-    }
-
-    fn clear(
-        &self,
-        owner: &str,
-        url: Option<&str>,
-        since_hours: Option<u64>,
-        all: bool,
-    ) -> Result<(usize, usize), String> {
-        if !all && url.is_none() && since_hours.is_none() {
-            return Err(
-                "refusing to clear without a filter: pass url, since_hours, or all=true".into(),
-            );
-        }
-        let mut where_pages = String::from("owner=?1");
-        let mut where_searches = String::from("owner=?1");
-        let mut args: Vec<rusqlite::types::Value> = vec![owner.to_string().into()];
-        if let Some(u) = url {
-            let ph = format!("?{}", args.len() + 1);
-            where_pages.push_str(&format!(" AND norm_url LIKE '%'||{ph}||'%' ESCAPE '\\'"));
-            where_searches.push_str(&format!(
-                " AND results_json LIKE '%'||{ph}||'%' ESCAPE '\\'"
-            ));
-            args.push(like_escape(u).into());
-        }
-        if let Some(h) = since_hours {
-            let ph = format!("?{}", args.len() + 1);
-            where_pages.push_str(&format!(" AND fetched_at >= {ph}"));
-            where_searches.push_str(&format!(" AND searched_at >= {ph}"));
-            args.push((now() - h as i64 * 3600).into());
-        }
-        self.conn
-            .execute(
-                &format!(
-                    "DELETE FROM pages_fts WHERE rowid IN (SELECT id FROM pages WHERE {where_pages})"
-                ),
-                params_from_iter(args.iter()),
-            )
-            .map_err(|e| e.to_string())?;
-        let np = self
-            .conn
-            .execute(
-                &format!("DELETE FROM pages WHERE {where_pages}"),
-                params_from_iter(args.iter()),
-            )
-            .map_err(|e| e.to_string())?;
-        let ns = self
-            .conn
-            .execute(
-                &format!("DELETE FROM searches WHERE {where_searches}"),
-                params_from_iter(args.iter()),
-            )
-            .map_err(|e| e.to_string())?;
-        Ok((np, ns))
-    }
-
     // Persistent-session snapshots (feedback ③). Keyed by bare session id —
-    // session ids are process-global (REST and MCP share one manager), so an
+    // session ids are process-global, so an
     // owner column would add nothing. Snapshots hold login cookies and live
     // next to fetched page content under the same 0600 db.
 
@@ -1047,31 +564,6 @@ impl Store {
         Ok(out)
     }
 
-    fn stats(&self, owner: &str) -> Result<Stats, String> {
-        let (pages, searches, oldest) = self
-            .conn
-            .query_row(
-                "SELECT (SELECT COUNT(*) FROM pages WHERE owner=?1),
-                        (SELECT COUNT(*) FROM searches WHERE owner=?1),
-                        (SELECT MIN(fetched_at) FROM pages WHERE owner=?1)",
-                params![owner],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, Option<i64>>(2)?,
-                    ))
-                },
-            )
-            .map_err(|e| e.to_string())?;
-        let db_bytes = std::fs::metadata(db_path()).map(|m| m.len()).unwrap_or(0);
-        Ok(Stats {
-            pages,
-            searches,
-            oldest_fetch: oldest,
-            db_bytes,
-        })
-    }
 }
 
 fn hex(d: &[u8]) -> String {
@@ -1106,11 +598,13 @@ fn with_store<T>(f: impl FnOnce(&Store) -> Result<T, String>) -> Result<T, Strin
     }
 }
 
-/// Record a successful page fetch. Best-effort: failures are logged, never
-/// propagated — caching must not break the fetch that produced the data.
-pub fn record_fetch(owner: &str, resp: &crate::FetchResponse) {
-    let _ = with_store(|st| {
-        st.record_fetch(
+/// Record a successful page fetch and return the drift receipt
+/// `(content_hash, changed_since_prev)` for stamping onto the response.
+/// Best-effort: failures are logged, never propagated — caching must not
+/// break the fetch that produced the data.
+pub fn record_fetch(owner: &str, resp: &crate::FetchResponse) -> Option<(String, Option<bool>)> {
+    with_store(|st| {
+        let receipt = st.record_fetch(
             &norm_owner(owner),
             &resp.url,
             resp.title.as_deref().unwrap_or(""),
@@ -1119,8 +613,9 @@ pub fn record_fetch(owner: &str, resp: &crate::FetchResponse) {
             resp.truncated,
         );
         st.purge_expired();
-        Ok(())
-    });
+        Ok(receipt)
+    })
+    .ok()
 }
 
 /// Record a successful search (whole result set). Best-effort, same policy.
@@ -1136,99 +631,6 @@ pub fn record_search(owner: &str, query: &str, categories: &str, resp: &crate::S
         );
         Ok(())
     });
-}
-
-#[derive(Debug, Default, Serialize)]
-pub struct CacheQuery {
-    pub query: Option<String>,
-    pub url: Option<String>,
-    /// "auto" (default), "pages", or "searches"
-    pub kind: String,
-    pub since_hours: Option<u64>,
-    pub limit: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct TopResult {
-    pub title: String,
-    pub url: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct PageHit {
-    pub url: String,
-    pub title: String,
-    pub snippet: String,
-    pub tier: String,
-    pub truncated: bool,
-    pub fetched_at: i64,
-    /// SHA-256 of the cached content — diff consecutive samples of the same
-    /// URL to catch a source that serves frozen bodies while claiming 200.
-    pub content_hash: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SearchHit {
-    pub query: String,
-    pub categories: String,
-    pub n_results: i64,
-    pub searched_at: i64,
-    /// First 3 results of the cached set (titles + URLs) for quick triage.
-    pub top: Vec<TopResult>,
-}
-
-#[derive(Debug, Default, Serialize)]
-pub struct QueryResult {
-    pub pages: Vec<PageHit>,
-    pub searches: Vec<SearchHit>,
-    pub total_pages: i64,
-    pub total_searches: i64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct PageFull {
-    pub url: String,
-    pub title: String,
-    pub content: String,
-    pub tier: String,
-    pub truncated: bool,
-    pub fetched_at: i64,
-    /// True when this fetch's content differs from the previous sample of the
-    /// same URL. Frozen-body lies (rate-limited origins serving stale 200s)
-    /// show up as false across consecutive samples.
-    pub changed_since_prev: bool,
-    pub content_hash: String,
-    pub prev_hash: String,
-    pub prev_fetched_at: i64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct Stats {
-    pub pages: i64,
-    pub searches: i64,
-    pub oldest_fetch: Option<i64>,
-    pub db_bytes: u64,
-}
-
-pub fn query(owner: &str, q: &CacheQuery) -> Result<QueryResult, String> {
-    with_store(|st| st.query(&norm_owner(owner), q))
-}
-
-pub fn get_page(owner: &str, url: &str) -> Result<Option<PageFull>, String> {
-    with_store(|st| st.get_page(&norm_owner(owner), url))
-}
-
-pub fn clear(
-    owner: &str,
-    url: Option<&str>,
-    since_hours: Option<u64>,
-    all: bool,
-) -> Result<(usize, usize), String> {
-    with_store(|st| st.clear(&norm_owner(owner), url, since_hours, all))
-}
-
-pub fn stats(owner: &str) -> Result<Stats, String> {
-    with_store(|st| st.stats(&norm_owner(owner)))
 }
 
 /// Best-effort snapshot persistence — a failed write degrades the session to

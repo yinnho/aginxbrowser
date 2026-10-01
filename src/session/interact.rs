@@ -803,21 +803,6 @@ pub(super) fn eval_interaction(page: &mut Page, js: &str) {
     page.evaluate_with_timeout(js, crate::page::INTERACTION_EVAL_TIMEOUT);
 }
 
-/// Shared touch-event builder for CDP `Input.dispatchTouchEvent` (#156):
-/// one command's touch points serialized into the `__diting_touchDispatch`
-/// call. `kind` is the CDP `type` verbatim (`touchStart`/`touchMove`/
-/// `touchEnd`/`touchCancel`); each point is a `{x, y, id, radiusX,
-/// radiusY, rotationAngle, force}` map (x/y/id per the CDP schema, the
-/// rest optional — the helper defaults radii to 1 and force to 0).
-pub(crate) fn touch_event_js(kind: &str, points: &[serde_json::Value]) -> String {
-    let pts = serde_json::to_string(points).unwrap_or_else(|_| "[]".to_string());
-    format!(
-        "__diting_touchDispatch({}, {});",
-        serde_json::json!(kind),
-        pts
-    )
-}
-
 /// Click at viewport coordinates through the real mouse chain — same JS the
 /// CDP bridge dispatches, so pages can't tell the two apart.
 pub(super) async fn click_xy(page: &mut Page, x: f64, y: f64, button: &str, click_count: u32) {

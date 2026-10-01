@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AginxBrowser — The Browser for AI Agents. Headless Browser + MCP Server, No Chromium.</title>
-<meta name="description" content="AginxBrowser is a browser built for AI agents: fetch live pages as markdown, render JS-heavy SPAs, take screenshots, search across 5 engines, and drive interactive login sessions — one Rust binary with built-in V8, no Chromium, MCP native for Claude Code and Cursor.">
-<meta name="keywords" content="browser for AI agents, agent browser, headless browser, MCP server, Model Context Protocol browser, web scraping API, markdown scraping, screenshot API without Chromium, stealth TLS fingerprint, Cloudflare bypass, anti-bot bypass, Claude Code tools, Cursor MCP, AI web automation, V8 server-side rendering, Rust headless browser">
+<title>AginxBrowser — The Browser for AI Agents. Headless Browser with a Plain HTTP API, No Chromium.</title>
+<meta name="description" content="AginxBrowser is a browser built for AI agents: fetch live pages as markdown, render JS-heavy SPAs, take screenshots, search across 5 engines, and drive interactive login sessions — one Rust binary with built-in V8, no Chromium, every capability a plain HTTP route away.">
+<meta name="keywords" content="browser for AI agents, agent browser, headless browser, HTTP browser API, web scraping API, markdown scraping, screenshot API without Chromium, stealth TLS fingerprint, Cloudflare bypass, anti-bot bypass, AI web automation, V8 server-side rendering, Rust headless browser">
 <meta property="og:title" content="AginxBrowser — The Browser for AI Agents">
 <meta property="og:description" content="See the live web and interact with it. Real-time pages, any URL, clickable sessions — a browser for agents, not a search index. One Rust binary, built-in V8, no Chromium.">
 <meta property="og:type" content="website">
@@ -211,18 +211,18 @@ footer a { color: var(--accent); }
     <p class="tagline">Humans have Chrome. Agents have AginxBrowser.</p>
 
     <div class="install-box">
-      <div class="install-label">One line to connect Claude Code (public hosted instance, nothing to deploy)</div>
+      <div class="install-label">Install locally, start it, done — the HTTP API is the whole interface</div>
       <div class="install-cmd">
-        <code id="install-cmd">claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp</code>
+        <code id="install-cmd">brew install yinnho/aginxbrowser/aginxbrowser &amp;&amp; aginxbrowser</code>
         <button class="copy-btn" onclick="copyInstall()" id="copy-btn">Copy</button>
       </div>
-      <div class="install-hint">Or one-command skill + MCP install: <a href="https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh">curl skill.sh | bash</a> · <a href="https://www.skills.sh">skills.sh directory</a> · <a href="#quickstart">call HTTP directly</a> · <a href="#tiers">self-host</a></div>
+      <div class="install-hint">Or the prebuilt installer: <a href="https://raw.githubusercontent.com/yinnho/aginxbrowser/main/install.sh">curl install.sh</a> · <a href="https://www.skills.sh">skills.sh directory</a> · <a href="#quickstart">call HTTP directly</a> · <a href="#tiers">build from source</a></div>
     </div>
 
     <div class="stats">
       <div><b>1</b> Rust binary</div>
       <div><b>0</b> Chromium dependency</div>
-      <div><b>13</b> MCP tools</div>
+      <div><b>30+</b> HTTP routes</div>
       <div><b>~1s</b> per live page fetch</div>
     </div>
   </div>
@@ -290,7 +290,7 @@ footer a { color: var(--accent); }
       <div class="perf"><b>~100ms</b><span>repeat fetch (cached)</span></div>
       <div class="perf"><b>~1s</b><span>JS-rendered screenshot</span></div>
       <div class="perf"><b>~0.3s</b><span>5-engine meta search</span></div>
-      <div class="perf-note">Measured on the hosted instance at browser.aginx.net — production numbers, not lab benchmarks. First hits include V8 cold start; cache hits run on plain HTTP.</div>
+      <div class="perf-note">Measured in real use, not lab benchmarks. First hits include V8 cold start; cache hits run on plain HTTP.</div>
     </div>
   </div>
 </section>
@@ -328,7 +328,7 @@ footer a { color: var(--accent); }
         <div class="icon">⚡</div>
         <h3>Deploy</h3>
         <p>One binary ~70MB (~104MB with screenshots). No Node, no Chromium, no Docker. Run it under systemd and it's infrastructure.</p>
-        <span class="tag">HTTP API + MCP</span>
+        <span class="tag">Plain HTTP API</span>
       </div>
     </div>
   </div>
@@ -348,8 +348,8 @@ footer a { color: var(--accent); }
         <p>Persistent sessions (8-minute idle keep-alive), login state <strong>injectable and exportable</strong> (<code>session_create(cookies=...)</code> ↔ <code>session_cookies</code>). Login → paginate → act, unbroken. One-shot engines discard state and can't do multi-step flows.</p>
       </div>
       <div class="wb-card">
-        <h3>🔌 MCP native</h3>
-        <p>All 13 tools are first-class citizens, <strong>not a CDP shim</strong>. One line connects Claude Code / Cursor — no DevTools protocol to learn first. HTTP + MCP dual protocol, usable as-is.</p>
+        <h3>🔌 Plain HTTP, zero SDK</h3>
+        <p>Every capability is a <strong>plain HTTP route</strong> — curl it from any language, any agent framework, any machine on your network. No protocol client to install, no DevTools to learn, no lock-in. The API is the whole interface.</p>
       </div>
     </div>
     <p class="perf-note">Reference point: Cloudflare's Kitesurf explicitly ships neither real TLS-fingerprint negotiation nor persistent auth sessions — anti-bot and login territory is exactly where AginxBrowser plays.</p>
@@ -396,19 +396,19 @@ footer a { color: var(--accent); }
     <div class="secpriv-grid">
       <div class="sp-card">
         <h4>🚫 No cookie / session persistence</h4>
-        <p>Injected cookies and interactive sessions live in memory only, reclaimed after 8 minutes idle. The hosted instance persists none of your login state — gone when the session ends.</p>
+        <p>Injected cookies and interactive sessions live in memory only, reclaimed after 8 minutes idle — gone when the session ends, nothing written to disk.</p>
       </div>
       <div class="sp-card">
         <h4>🛡️ SSRF + DNS rebinding protection</h4>
         <p>Non-http(s) schemes blocked, private/loopback IPs rejected, re-validation after every DNS resolution. The agent can't reach your intranet, and DNS rebinding doesn't work either.</p>
       </div>
       <div class="sp-card">
-        <h4>🔒 MCP safe on the public internet</h4>
-        <p>MCP over HTTP only accepts trusted hosts by default — safe exposed to the public internet. Streamable HTTP + SSE, natively supported by Claude Code / Cursor.</p>
+        <h4>🔒 Runs on your machine</h4>
+        <p>Local install, local use — your cookies and sessions never leave the box. Want it locked down? Set <code>AGINXBROWSER_TOKEN</code> and every route requires a bearer token.</p>
       </div>
       <div class="sp-card">
         <h4>👁️ Fully open source</h4>
-        <p>Apache-2.0, transparent and auditable. Don't trust the hosted instance? Self-host everything locally — your data never leaves your machine.</p>
+        <p>Apache-2.0, transparent and auditable. It runs on your machine — your data never leaves it.</p>
       </div>
       <div class="sp-card">
         <h4>🧩 CAPTCHA auto-solve</h4>
@@ -432,14 +432,14 @@ footer a { color: var(--accent); }
       </thead>
       <tbody>
         <tr>
-          <td class="tier-name">🆓 Zero-config<br><span style="font-weight:400;font-size:12px;color:var(--text-dim)">Hosted, free</span></td>
-          <td>fetch / search / eval / click / session — full interaction suite, 13 MCP tools out of the box</td>
-          <td class="tier-now">Free, one line to connect</td>
+          <td class="tier-name">🆓 Local install<br><span style="font-weight:400;font-size:12px;color:var(--text-dim)">Zero-config, free</span></td>
+          <td>fetch / search / eval / click / session — the full interaction suite over plain HTTP, listening on <code>:8089</code></td>
+          <td class="tier-now">brew install, one binary, no config</td>
         </tr>
         <tr>
           <td class="tier-name">⚡ Advanced<br><span style="font-weight:400;font-size:12px;color:var(--text-dim)">Feature flags</span></td>
-          <td>screenshot rendering / stealth TLS fingerprints / CAPTCHA auto-solve / higher rate limits</td>
-          <td class="tier-now">Enabled per feature on the hosted instance (check <a href="https://browser.aginx.net/doctor">/doctor</a>); self-hosted enables everything with <code>--features stealth,screenshot</code></td>
+          <td>screenshot rendering / stealth TLS fingerprints / CAPTCHA auto-solve</td>
+          <td class="tier-now">Build with <code>--features stealth,screenshot</code> (check what's compiled in via <code>/doctor</code>)</td>
         </tr>
         <tr>
           <td class="tier-name">🏗 Self-hosted<br><span style="font-weight:400;font-size:12px;color:var(--text-dim)">Open source, private</span></td>
@@ -454,42 +454,41 @@ footer a { color: var(--accent); }
 <section id="quickstart" class="quickstart">
   <div class="container">
     <h2 class="section-title">Connect Your Agent</h2>
-    <p class="section-desc">MCP or HTTP, your pick. Claude Code / Claude Desktop / Cursor work with one line of config.</p>
+    <p class="section-desc">Plain HTTP, any agent, any language. Install locally and every capability is one POST away.</p>
 
     <div class="step">
-      <div class="h"><span class="num">1</span> One-line MCP setup (Claude Code)</div>
-      <pre><span class="c"># Hosted instance — connect straight to the public endpoint:</span>
-claude mcp add aginxbrowser \
-  --transport http https://<span class="k">browser.aginx.net/mcp</span>
-
-<span class="c"># Or one-command skill + MCP install (lets the agent trigger it itself):</span>
-curl -fsSL https://<span class="k">raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh</span> | bash
-
-<span class="c"># Or install the skill trigger surface via skills.sh (MCP still registers separately):</span>
-npx skills add <span class="k">yinnho/aginxbrowser</span></pre>
+      <div class="h"><span class="num">1</span> Install and start the server</div>
+      <pre><span class="c"># macOS / Linux via Homebrew (or: curl install.sh from the repo)</span>
+brew install yinnho/aginxbrowser/aginxbrowser
+aginxbrowser &amp;              <span class="c"># listens on 0.0.0.0:8089</span>
+curl -sS http://<span class="k">127.0.0.1:8089/health</span></pre>
     </div>
 
     <div class="step">
-      <div class="h"><span class="num">2</span> Call the HTTP API directly</div>
+      <div class="h"><span class="num">2</span> Call the HTTP API</div>
       <pre><span class="c"># Fetch a live page -> markdown</span>
-curl -sS -X POST https://<span class="k">browser.aginx.net/fetch</span> \
+curl -sS -X POST http://<span class="k">127.0.0.1:8089/fetch</span> \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com"}'
 
 <span class="c"># Search -> merged and deduplicated</span>
-curl -sS -X POST https://<span class="k">browser.aginx.net/search</span> \
+curl -sS -X POST http://<span class="k">127.0.0.1:8089/search</span> \
   -H "Content-Type: application/json" \
   -d '{"q":"macbook price","max_results":5}'
 
 <span class="c"># Capability listing (no fetching, instant)</span>
-curl -sS https://<span class="k">browser.aginx.net/doctor</span> | jq .</pre>
+curl -sS http://<span class="k">127.0.0.1:8089/doctor</span> | jq .</pre>
     </div>
 
     <div class="step">
-      <div class="h"><span class="num">3</span> Self-host</div>
-      <pre><span class="c"># Single binary, zero dependencies, systemd-friendly</span>
-cargo build --release --features stealth,screenshot
-./target/release/aginxbrowser</pre>
+      <div class="h"><span class="num">3</span> Give your agent the trigger surface</div>
+      <pre><span class="c"># Installs SKILL.md so Claude Code reaches for the API proactively</span>
+<span class="c"># (download, review, then run - never blind-pipe from the network):</span>
+curl -fsSL https://<span class="k">raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh</span> -o skill.sh
+less skill.sh &amp;&amp; bash skill.sh
+
+<span class="c"># Or via the skills.sh directory:</span>
+npx skills add <span class="k">yinnho/aginxbrowser</span></pre>
     </div>
   </div>
 </section>
@@ -500,7 +499,7 @@ cargo build --release --features stealth,screenshot
     <p>The agent internet is taking shape. Agents need to collaborate with each other, access the world, and be accessible in turn.</p>
     <p>AginxBrowser is the "see the world" layer — eyes and hands for every agent.</p>
     <p style="margin-top:14px;"><a href="https://github.com/yinnho/aginxbrowser">GitHub</a> · <a href="https://x.com/aginxbrowser">X</a> · <a href="/blog/en.html">Blog</a> · <a href="https://github.com/yinnho/aginxbrowser/blob/main/docs/API.md">API docs</a> · <a href="https://github.com/yinnho/aginxbrowser/blob/main/docs/install.md">Install guide</a> · <a href="https://github.com/yinnho/aginxbrowser/blob/main/SKILL.md">SKILL.md</a> · <a href="https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh">skill.sh</a></p>
-    <p style="margin-top:18px; font-size:13px; color:#5b6f85;">© 2026 OpenCarrier · Apache-2.0 open source · hosted at browser.aginx.net</p>
+    <p style="margin-top:18px; font-size:13px; color:#5b6f85;">© 2026 OpenCarrier · Apache-2.0 open source</p>
   </div>
 </footer>
 

@@ -2,7 +2,7 @@
 
 [English](API.md) | [中文](API.zh-CN.md)
 
-> 完整的 HTTP API + MCP Server 接入文档。5 分钟快速接入。
+> 完整的 HTTP API 参考。一个二进制、装到本机，所有能力一条 POST。
 
 ## 快速开始
 
@@ -69,7 +69,7 @@ curl http://127.0.0.1:8089/health
 | selector | string | | `null` | CSS 选择器，仅提取匹配区域 |
 | wait_secs | u64 | | `null` | 页面加载后额外等待秒数（等 JS 渲染完成） |
 | use_proxy | bool | | `false` | 走 `AGINXBROWSER_PROXY` 代理。国外站点设 `true` |
-| cookies | string[] \| object[] | | `[]` | 导航前注入的 cookie：`"name=value"` 字符串（可带 `; Domain=…; Path=/; Secure` 属性）或 CDP 风格对象 `{"name","value","domain","path","secure","httpOnly","sameSite"}`。带 `Domain=` 的条目锚定在它自己声明的域上，跨子域登录态（`.taobao.com` / `.tmall.com` 这种）注入时不会再被 RFC 6265 域校验悄悄丢掉 |
+| cookies | string[] \| object[] | | `[]` | 导航前注入的 cookie：`"name=value"` 字符串（可带 `; Domain=…; Path=/; Secure` 属性）或 cookie 对象 `{"name","value","domain","path","secure","httpOnly","sameSite"}`。带 `Domain=` 的条目锚定在它自己声明的域上，跨子域登录态（`.taobao.com` / `.tmall.com` 这种）注入时不会再被 RFC 6265 域校验悄悄丢掉 |
 | max_chars | usize | | `50000` | 截断 `content` 到指定字符数。`0` 不限 |
 | auto_bypass_challenge | bool | | `true` | 自动检测并绕过 Cloudflare Turnstile 挑战 |
 | render_tier | string | | `"auto"` | 渲染策略（见下方说明） |
@@ -215,7 +215,7 @@ curl -sS -X POST http://127.0.0.1:8089/fetch \
 | selector | string | ✅ | — | CSS 选择器 |
 | wait_secs | u64 | | `null` | 页面加载后额外等待秒数 |
 | use_proxy | bool | | `false` | 走代理 |
-| cookies | string[] \| object[] | | `[]` | 导航前注入的 cookie（`"name=value"` 字符串或 CDP 风格对象，语义同 `/fetch`） |
+| cookies | string[] \| object[] | | `[]` | 导航前注入的 cookie（`"name=value"` 字符串或 cookie 对象，语义同 `/fetch`） |
 | tls_fingerprint | string | | `null` | TLS 指纹（stealth 模式） |
 
 **响应字段：**
@@ -249,7 +249,7 @@ curl -sS -X POST http://127.0.0.1:8089/click \
 | script | string | ✅ | — | JS 表达式或 async IIFE |
 | wait_secs | u64 | | `null` | 页面加载后额外等待秒数 |
 | use_proxy | bool | | `false` | 走代理 |
-| cookies | string[] \| object[] | | `[]` | 导航前注入的 cookie（`"name=value"` 字符串或 CDP 风格对象，语义同 `/fetch`） |
+| cookies | string[] \| object[] | | `[]` | 导航前注入的 cookie（`"name=value"` 字符串或 cookie 对象，语义同 `/fetch`） |
 | tls_fingerprint | string | | `null` | TLS 指纹（stealth 模式） |
 
 **响应字段：**
@@ -388,7 +388,7 @@ curl -sL -o cabin_ref.jpg "<image_url>"
 | filename | string | | 自动 | 输出文件名。自动解析顺序：`Content-Disposition` 头 → URL 路径尾段 → `"download"` |
 | resume | bool | | `false` | 本地存在未完成文件时续传。通过 `Range: bytes=N-` 探测服务端支持：`206` 追加，`200` 重下 |
 | use_proxy | bool | | `false` | 走代理（github.com 等已知被墙域名自动启用） |
-| cookies | string[] \| object[] | | `[]` | 随请求发送的 cookie（`["name=value", ...]` 或 CDP 风格对象），用于登录态下载 |
+| cookies | string[] \| object[] | | `[]` | 随请求发送的 cookie（`["name=value", ...]` 或 cookie 对象），用于登录态下载 |
 
 **响应字段：**
 
@@ -437,7 +437,7 @@ curl -sS -X POST http://127.0.0.1:8089/download \
 | selector | string | | `null` | CSS 选择器，截**指定元素区域**而非整页（见下） |
 | selector_all | bool | | `false` | 配合 `selector`：不裁剪，返回**所有匹配**的坐标 |
 | use_proxy | bool | | `false` | 走 `AGINXBROWSER_PROXY` 代理 |
-| cookies | string[] \| object[] | | `[]` | 导航前注入的 cookie（`"name=value"` 字符串或 CDP 风格对象，语义同 `/fetch`） |
+| cookies | string[] \| object[] | | `[]` | 导航前注入的 cookie（`"name=value"` 字符串或 cookie 对象，语义同 `/fetch`） |
 | tls_fingerprint | string | | `null` | TLS 指纹（stealth 模式） |
 
 **响应字段：**
@@ -883,7 +883,7 @@ curl -sS -X POST http://127.0.0.1:8089/session/create \
 }
 ```
 
-`session_id` 就是普通会话，session API / MCP session 工具随便使。`authorization_prefix` 只回前 16 个字符（完整头本身就是凭证，响应里永远不整段回显 cookie）。`method`/`has_body` 说明复制的是哪类请求。cookie 锚定在复制请求的 host 上；同站其他子域可能要重新认证——那是站点的设备绑定，不是凭证丢了。
+`session_id` 就是普通会话，session API 直接使。`authorization_prefix` 只回前 16 个字符（完整头本身就是凭证，响应里永远不整段回显 cookie）。`method`/`has_body` 说明复制的是哪类请求。cookie 锚定在复制请求的 host 上；同站其他子域可能要重新认证——那是站点的设备绑定，不是凭证丢了。
 
 **实操建议**：登录后的页面上挑一条 XHR 复制，cookie 往往最全（document 请求有时缺 `httpOnly` 的 API 会话对）。`-b FILE` 的 cookie 文件会直接报错——服务器读不到你的磁盘。粘过来的命令当密码对待：它原样携带登录态。
 
@@ -1004,209 +1004,29 @@ export CAPTCHA_SOLVER_SERVICE=2captcha
 
 ---
 
-## MCP Server
+## 文档生成
 
-AginxBrowser 将核心操作包装为 MCP（Model Context Protocol）Server，AI Agent 可直接调用，无需手写 HTTP 客户端。支持两种接入方式：
+### POST /render_markdown
 
-- **stdio**：`--mcp` 模式，本地/自部署，通过 stdin/stdout 通信
-- **streamable HTTP**：HTTP Server 自带 `/mcp` 端点，公网可直接访问（托管实例开箱即用）
-
-### 启动方式
-
-**方式一：托管实例（无需部署，推荐）**
-
-本项目运行着一个公网托管实例，Claude Code 一行接入：
-
-```bash
-claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
-```
-
-HTTP Server 自带 `/mcp` 端点，走 MCP Streamable HTTP 协议（SSE），支持 `GET`（SSE 事件流）和 `POST`（请求/响应）。任何支持 HTTP transport 的 MCP 客户端（Claude Code / Claude Desktop / Cursor）都能连。
-
-**方式二：自部署 stdio**
-
-```bash
-./target/release/aginxbrowser --mcp
-```
-
-`--mcp` 模式走 stdio 协议，不启动 HTTP 服务器，通过 stdin/stdout 与 MCP 客户端通信。
-
-### 提供的工具（32 个）
-
-#### 基础工具
-
-| 工具 | 说明 |
-|------|------|
-| `fetch` | 抓取网页（支持分层渲染、stealth、js_extract）；默认开注入剥离（`sanitize: false` 可关），`capture_xhr` 把页面自己调的 API 响应体随正文一起返回 |
-| `eval` | 在页面上执行 JavaScript（支持 async/Promise） |
-| `click` | 点击页面元素（CSS 选择器） |
-| `search` | 多引擎聚合搜索（百度/Bing/搜狗/搜狗微信/Google） |
-| `download` | 流式下载文件到磁盘（SHA-256 校验、断点续传） |
-| `cache` | 查询本地抓取/搜索缓存（全文含 CJK、整页 `get`、统计、按条件清理） |
-| `render_markdown` | 把 markdown 渲成确定性自包含 HTML 文档；围栏 `archify` 块（带类型的图 JSON——sequence / workflow / architecture / dataflow / lifecycle）出内联 SVG 图；`theme`/`preset`/`quality`（showcase 审计）+ 可选 `session_id` 视口适配评级 |
-| `render_video` | 把页面的动画时间线（`window.__timelines`，GSAP 风格 `duration()`+`pause(t)`）渲成 base64 MP4——每帧确定性 seek（`t=i/fps`）、进程内绘制、ffmpeg 编码；要 PATH 上有 ffmpeg 和 `screenshot` feature |
-| `render_pdf` | 把渲好的页面切成一叠页，打包 base64 PDF、逐页 PNG、PPTX（每页一张幻灯片）、可编辑 PPTX（`format="pptx-native"`：元素级 DrawingML——文本 run/形状/渐变/图片，必须给 `selector`）或 DOCX（每页一个按页定尺寸的 section）——打印模式按顶层块边界分页（默认 96dpi A4），幻灯片模式每个选择器匹配自成一张页、按元素定高；要 `screenshot` feature |
-
-#### Session 工具
-
-| 工具 | 说明 |
-|------|------|
-| `session_create` | 创建交互式浏览器会话；`persistent: true` 时登录态落盘，闲置过期甚至服务重启后同一个 `session_id` 带登录态复活 |
-| `import_curl` | 粘一条 DevTools "Copy as cURL" 命令 → 直接得到带该站 cookie 的活会话，停在复制请求的 URL 上——人在自己 Chrome 里把验证码/短信做掉，agent 从那里继续；bash/PowerShell/cmd 格式都认 |
-| `session_clone` | 从现役会话派生新会话，完整带走登录态（cookie + storage + viewport + 弹窗策略），原会话不动——危险操作前先存档，或同一登录态并行开多会话 |
-| `session_list` | 列出存活会话（空闲时长 + 剩余寿命，能复用就别新建） |
-| `session_navigate` | 会话内导航到新 URL |
-| `session_state` | 获取索引化的页面状态 |
-| `session_cookies` | 导出会话当前 cookie，完整 Set-Cookie 形式（`name=value; Domain=…; Path=/`，用于登录态复用——跨子域状态能扛住回灌） |
-| `session_storage` | 快照会话的 `localStorage`/`sessionStorage`——cookie 带不走的那半登录态，配 `session_create` 的 `storage` 字段回灌 |
-| `session_console` | 读会话最近的页面 console 输出（`log/info/warn/error/dialog` 环形缓冲 500 条，支持 `level`/`since_ts`/`url_contains`/`limit` 过滤）——页面为什么坏，点一下按钮再读它最快 |
-| `session_click` | 按索引点击元素 |
-| `session_click_xy` | 按页面坐标走真实鼠标链点击（pointerdown→click，逐事件 hit-test）——canvas/地图/自绘控件吃这套；`click_count: 2` 补 `dblclick` |
-| `session_drag` | 从 `from` 按下、滑到 `to` 松开——地图 marker/canvas 选区跟着每一步走；轨迹默认拟人化（缓动+抖动+停顿），`humanize: false` 回精确线性 |
-| `session_input` | 按索引输入文本（写值后派发 `input`+`change`；`events:"full"` 逐字符派发键盘事件） |
-| `session_scroll` | 滚动页面 |
-| `session_eval` | 在会话中执行 JavaScript |
-| `session_dialog` | 查看/接管弹窗策略（`alert`/`confirm`/`prompt` 永不阻塞：自动作答并记录，`list`/`accept`/`dismiss`） |
-| `session_viewport` | 设会话视口（设备模拟）：media query 重算，`mobile: true` 翻 `pointer: coarse`/`hover: none`；设置活过导航 |
-| `session_screenshot` | 截会话**当前** DOM 状态（含 click/eval 后的突变）为 base64 PNG；可选 `width`/`height`/`full_page`/`selector` |
-| `session_wait` | 等 CSS 选择器命中或 JS 谓词为真，带超时——等待期间页面事件循环照常跑，替代瞎 sleep |
-| `session_network` | 读会话网络请求日志；`filter: "media"` 从页面真实发出的请求里提播放/直播链接（m3u8、mp4…）——拿真视频直链靠它。`include_bodies: true` 加一个 `xhr` 数组带页面脚本发起的响应体（它自己的 API 面），`url_contains` 收窄 |
-| `session_export` | 导出会话录制的动作：可回放的 curl 脚本（默认）、原始日志（`format=jsonl`）、或 flow 文档（`format=json`——剥 cookie、可编辑的步骤）供 `flow_run` 服务端复跑 |
-| `flow_run` | 一次跑完一个 flow，零模型 token：内联 flow 文档或服务端 `workflow/<name>/flow.json` 资产，`{{var}}` 替换、`wait`/`expect` 设门、`save` 收产出；失败回执带失败步骤/原因/URL/截图，会话保活；传 `session_id` 让 flow 和导入的登录态组合 |
-| `session_close` | 关闭会话（persistent 会话顺带删落盘登录快照——空闲过期保留，显式关闭不留） |
-
-#### fetch 工具参数
+把 markdown 渲成一份确定性的自包含 HTML 文档——文档这层 agent 不用手写 HTML。标成 `archify` 的围栏代码块放带类型的零坐标图 JSON（`sequence` / `workflow` / `architecture` / `dataflow` / `lifecycle`），布局引擎直接出内联 SVG；Mermaid 源码归调用方翻译成 archify JSON。
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
-| url | string | ✅ | — | 目标 URL |
-| format | string | | `"markdown"` | 输出格式：`markdown` / `html` / `text` |
-| selector | string | | `null` | CSS 选择器 |
-| wait_secs | u64 | | `null` | 页面加载后等待秒数 |
-| use_proxy | bool | | `false` | 走代理 |
-| max_chars | usize | | `50000` | 截断字符数 |
-| auto_bypass_challenge | bool | | `true` | 自动绕过 Cloudflare Turnstile |
-| render_tier | string | | `"auto"` | 渲染策略：`auto` / `http` / `browser` |
-| tls_fingerprint | string | | `null` | TLS 指纹 |
-| js_extract | object | | `null` | JS 数据提取：`{expression, timeout_ms}` |
-| sanitize | bool | | `true` | 从 text/markdown 输出剥 prompt injection 载体（零宽字符、隐藏 span 文本、指令形状的行）；有动作时响应带 `sanitize_report` |
-| capture_xhr | string[] | | `null` | 把页面脚本发起的 XHR/fetch 响应体作为一等公民 `xhr` 数组返回。条目是 URL 子串；`[]` = 全部 |
+| markdown | string | ✅ | — | markdown 源文。`archify` 围栏块变成内联 SVG 图 |
+| theme | string | | `"light"` | 明暗：`light` / `dark`，生成时烤进产物 |
+| preset | string | | `"classic"` | 配色族：`classic` / `signal-flow` / `blueprint` / `editorial`，与 `theme` 正交（只给 `theme` 也行） |
+| quality | string | | `"standard"` | `showcase` 跑交付档构图审计（连线路交叉、标签净空、节奏）——只给回执打分，不动产物字节 |
+| motion | bool | | `false` | 把声明式入场动效烤进产物（CSS keyframes，零脚本） |
 
-#### session_create 参数
+**响应**：`{ "html": "<!DOCTYPE html>…", "receipt": { … } }`——回执带产物 `sha256`、`bytes`、`diagrams` 数量、`preset`/`quality`/`motion` 设置，`showcase` 档还有审计 `checks`/`diagnostics`。
 
-| 参数 | 类型 | 必填 | 默认 | 说明 |
-|------|------|------|------|------|
-| url | string | | `null` | 初始 URL |
-| use_proxy | bool | | `false` | 走代理 |
-| cookies | string[] \| object[] | | `[]` | 注入 cookie（`"name=value",...` 或 CDP 风格对象），会话创建即登录态。配合 `session_cookies` 复用登录态 |
-| storage | object | | `null` | 初始导航落地后注入的 Web Storage：`{"local_storage": {"k":"v"}, "session_storage": {"k":"v"}}`。与 `session_storage` 工具往返 |
-| ttl_secs | u64 | | `480` | 空闲回收秒数（钳 60..3600），长流程调大 |
-| keepalive | bool | | `false` | 免空闲回收：活到 `session_close` 或进程退出——中间穿插长非浏览器步骤的流程不再丢登录态 |
-| persistent | bool | | `false` | 登录态落盘（cookie、`localStorage`/`sessionStorage`、视口、弹窗策略，每次操作后存一份）。会话闲置过期甚至服务重启后，下一次调用同一个 `session_id` 会带着登录态原地复活。`session_close` 会删掉快照，空闲过期则保留（Playwright storageState 的语义，但不用换钥匙——还是你手里那个 session_id） |
-| width / height | u32 | | `null` | 初始视口，会话存活期钉住（活过导航） |
-| mobile | bool | | `false` | 初始视口的手机模拟（`pointer: coarse`、`hover: none`、`maxTouchPoints = 5`） |
-
-#### session 操作参数
-
-所有 session 操作都需要 `session_id` 参数。`click`/`input` 需要 `index`（从 `session_state` 获取），`input` 还需要 `text`，`eval` 需要 `script`，`navigate` 需要 `url`，`clone` 只要源会话 id。带可选参数的工具：`click_xy` 要 `x`/`y`（可选 `button`、`click_count`）；`drag` 要 `from`/`to`（可选 `steps`、`delay_ms`、`humanize`——轨迹默认拟人化：缓动+抖动+停顿，`humanize: false` 回到精确线性插值）；`viewport` 收 `width`/`height`/`mobile`（都可选，缺省保持当前值）；`screenshot` 收 `width`/`height`/`full_page`/`selector`/`selector_all`；`wait` 的 `selector`/`predicate` 二选一，加 `timeout_ms`（默认 10000，上限 120000）；`export` 收 `format`（`bash` 默认 / `jsonl` / `json` 出 flow 文档）；`flow_run` 的 `flow`/`name` 二选一，可加 `vars` 和 `session_id`；`network` 收 `filter: "media"` 或 `include_bodies: true`（加 `url_contains`/`body_max_chars`）；`dialog` 收 `action`（`list`/`accept`/`dismiss`）加可选 `prompt_text`；`console` 收 `level`/`since_ts`/`url_contains`/`limit`；`storage`/`cookies` 只要 `session_id`。
-
-### 客户端配置
-
-#### Claude Code
-
-**托管实例（一行命令）**：
+输出是确定性的——同一份输入出同一份字节，回执带 `sha256`，可验。views 引导页签和 `window.agxViewer` 运行时（`focus` / ego / `route` / `reach`）烤在产物里。图词汇表改编自 archify（MIT，本身基于 Cocoon-AI 的 architecture-diagram-generator）。
 
 ```bash
-claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
+curl -sS -X POST http://127.0.0.1:8089/render_markdown \
+  -H "Content-Type: application/json" \
+  -d '{"markdown":"# 你好\\n\\n世界","theme":"dark","quality":"showcase"}'
 ```
-
-或在 settings 文件里配置 HTTP transport：
-
-```json
-{
-  "mcpServers": {
-    "aginxbrowser": {
-      "type": "http",
-      "url": "https://browser.aginx.net/mcp"
-    }
-  }
-}
-```
-
-**自部署（stdio）**：编辑项目或全局的 settings 文件：
-
-**项目级** `.claude/settings.json`：
-
-```json
-{
-  "mcpServers": {
-    "aginxbrowser": {
-      "command": "/path/to/aginxbrowser",
-      "args": ["--mcp"]
-    }
-  }
-}
-```
-
-**全局级** `~/.claude/settings.json`：
-
-```json
-{
-  "mcpServers": {
-    "aginxbrowser": {
-      "command": "/path/to/aginxbrowser",
-      "args": ["--mcp"]
-    }
-  }
-}
-```
-
-#### Claude Desktop
-
-编辑 `~/Library/Application Support/Claude/claude_desktop_config.json`（macOS）或 `%APPDATA%\Claude\claude_desktop_config.json`（Windows）：
-
-```json
-{
-  "mcpServers": {
-    "aginxbrowser": {
-      "command": "/path/to/aginxbrowser",
-      "args": ["--mcp"]
-    }
-  }
-}
-```
-
-#### Cursor
-
-编辑项目根目录的 `.cursor/mcp.json`：
-
-```json
-{
-  "mcpServers": {
-    "aginxbrowser": {
-      "command": "/path/to/aginxbrowser",
-      "args": ["--mcp"]
-    }
-  }
-}
-```
-
-#### 远程服务器（via SSH）
-
-如果 AginxBrowser 部署在远程服务器上，通过 SSH 隧道接入：
-
-```json
-{
-  "mcpServers": {
-    "aginxbrowser": {
-      "command": "ssh",
-      "args": ["your-server", "/data/www/aginxbrowser/target/release/aginxbrowser", "--mcp"]
-    }
-  }
-}
-```
-
-> **注意**：SSH 方式需要本机能免密登录远程服务器（`ssh-copy-id` 配置公钥），且远程服务器上已编译好 AginxBrowser。
 
 ---
 
@@ -1221,7 +1041,7 @@ claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL（秒），`0` 禁用 |
 | `AGINXBROWSER_DOWNLOAD_DIR` | `.` | `/download` 落盘目录 |
 | `AGINXBROWSER_WORKFLOW_DIR` | `./workflow` | `flow_run(name=…)` 找盘上 `<name>/flow.json` 覆盖的目录——样例流烤在二进制里，这里的同名文件盖内置、新名进列表；丢一个目录进去即部署，不用重编 |
-| `AGINXBROWSER_PROXY` | 无 | 代理地址（`use_proxy:true` 时使用；browser/session/CDP 页面导航遇到已知被墙域名时也会自动走它） |
+| `AGINXBROWSER_PROXY` | 无 | 代理地址（`use_proxy:true` 时使用；browser/session 页面导航遇到已知被墙域名时也会自动走它） |
 | `CAPTCHA_SOLVER_API_KEY` | 无 | 2captcha API Key，设置后自动解决验证码 |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | 验证码解决服务 |
 

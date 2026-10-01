@@ -218,7 +218,7 @@ async function refreshList() {
   try {
     const r = await (await api("/session/list")).json();
     if (!r.sessions.length) {
-      box.innerHTML = '<p class="sub">No live sessions. Create one above, or point your agent at the <code>/session/create</code> API / MCP <code>session_create</code> tool and reload this page.</p>';
+      box.innerHTML = '<p class="sub">No live sessions. Create one above, or point your agent at the <code>/session/create</code> API and reload this page.</p>';
       return;
     }
     box.innerHTML = "";

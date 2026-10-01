@@ -469,8 +469,8 @@ mod cookie_injection_tests {
     // #115: an agent guessing the field name `start_url` (natural after
     // account_login's wizard pattern) got it silently dropped by serde and a
     // session parked on about:blank. The alias must land it in `url`.
-    // (MCP-side twin pin lives in mcp/params.rs — R1b bars this file from
-    // referencing the face directly.)
+    // (The MCP-side twin pin went away with the MCP face itself; this pin
+    // is now the only one.)
     #[test]
     fn session_create_request_accepts_start_url_alias() {
         let req: crate::SessionCreateRequest = serde_json::from_str(

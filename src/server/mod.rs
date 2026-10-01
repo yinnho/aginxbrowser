@@ -710,6 +710,8 @@ pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
                 js_extract_result,
                 tier: Some("browser"),
                 redirected_from: Vec::new(),
+                content_hash: None,
+                changed_since_prev: None,
                 sanitize_report,
                 xhr,
             })

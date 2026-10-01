@@ -6,17 +6,15 @@ English | [中文](README.zh-CN.md)
 
 **The Browser for AI Agents. See the live web. Read it. Act on it. Remember it.**
 
-[![skills.sh](https://skills.sh/b/yinnho/aginxbrowser)](https://skills.sh/yinnho/aginxbrowser) [![MCP Queen operational grade](https://mcpqueen.com/badge/net.aginx/aginxbrowser.svg)](https://mcpqueen.com/s/net.aginx/aginxbrowser)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![MCP](https://img.shields.io/badge/MCP-compatible-brightgreen)](https://browser.aginx.net/mcp)
-[![Hosted](https://img.shields.io/badge/hosted-browser.aginx.net-4dd0ff)](https://browser.aginx.net/)
+[![skills.sh](https://skills.sh/b/yinnho/aginxbrowser)](https://skills.sh/yinnho/aginxbrowser)
 [![X](https://img.shields.io/badge/X-%40aginxbrowser-black?logo=x)](https://x.com/aginxbrowser)
 
 A browser built for agents from the first line of code — not a human browser bolted onto automation. See the world, read it, search it, act on it, and keep what you read: one Rust binary with built-in V8, **no Chromium required**.
 
 > Humans have Chrome. Agents have AginxBrowser.
 
-One binary, zero dependencies, instant service. HTTP API + native MCP + CDP — agents plug in and go, and existing Playwright / Puppeteer / browser-use code attaches directly.
+One binary, zero dependencies, instant service. The HTTP API is the whole interface — agents plug in and go.
 
 <video src="https://github.com/yinnho/aginxbrowser/releases/download/v0.5.3/lightpanda-star-story.mp4" controls muted width="720"></video>
 
@@ -42,7 +40,7 @@ Existing "browser automation" was built for humans or for one-shot scraping — 
 | Finds (search) | ✅ 20 engines, 7 categories, merged | ❌ | ❌ | ❌ |
 | Acts | indexed session interaction | DevTools API | ❌ | LLM-driven |
 | Remembers | ✅ local fetch/search cache (SQLite FTS5) | ❌ | crawl cache | ❌ |
-| Protocol | HTTP + native MCP + CDP | Node API | HTTP | Python |
+| Protocol | HTTP | Node API | HTTP | Python |
 | TLS fingerprints | ✅ Chrome/Firefox/Safari/Edge | Plugin required | ❌ | ❌ |
 | CAPTCHA | ✅ detect + auto-wait + optional 2captcha | DIY | ❌ | ❌ |
 | Interactive sessions | ✅ persistent | ✅ | ❌ | ✅ |
@@ -52,22 +50,20 @@ Same-tier engines, not the tools in the table above. Cells are capabilities, not
 | | AginxBrowser | Obscura | Blitz | Lightpanda |
 |---|---|---|---|---|
 | What it is | Rust browser, V8, diting CSS paint | Rust headless browser, V8 | HTML/CSS engine (Stylo). Not an agent browser | Zig headless browser, V8 |
-| Playwright / CDP | `connectOverCDP` | Puppeteer and Playwright over CDP | no | Puppeteer and Playwright over CDP |
 | Screenshot | built-in paint, opt-in build | screenshots, screencast, PDF | paints a window | Hermes integration falls back to Chrome for screenshots |
 | Public CSS suite | none in CI | not published as WPT | WPT in CI, including SVG | not published as WPT |
 | License | Apache-2.0 | Apache-2.0 | Apache-2.0 and MIT | AGPL-3.0 |
 
-An agent needs five things from a browser: **see, read, find, act, remember.** One binary covers them all — systemd-friendly, MCP-native for Claude/Cursor, zero dependencies.
+An agent needs five things from a browser: **see, read, find, act, remember.** One binary covers them all — systemd-friendly, zero dependencies.
 
 **Core advantage: no Chromium.** AginxBrowser inlines a full browser engine (V8 + Rust HTTP stack + the diting CSS/layout/paint rendering engine, with the Blitz/Stylo/Taffy lineage as its reference implementation). No Puppeteer, no Chrome, no Docker. One Rust binary under systemd is your agent browsing infrastructure.
 
-## Three Things Stateless Renderers Can't Do
+## Two Things Stateless Renderers Can't Do
 
 Most new "agent browsers" are stateless, fingerprint-less one-shot renderers — fine for public pages, dead on arrival against Cloudflare or login flows. AginxBrowser goes the opposite way:
 
 - **🔐 Real TLS fingerprints** — stealth mode replicates the complete Chrome145 / Firefox133 / Safari / Edge TLS handshakes via BoringSSL (not just a UA string), switchable per request; Cloudflare Turnstile challenges wait automatically for `cf_clearance`. Fingerprint-less engines eat 403s — we get through.
 - **🤝 Stateful interactive sessions** — login state injectable and exportable (`session_create(cookies=...)` ↔ `session_cookies`), surviving pagination and multi-step flows; `persistent: true` even survives idle eviction and server restarts — the same session id comes back logged in. One-shot engines throw state away.
-- **🔌 MCP native** — 37 tools as first-class citizens (not a CDP shim). Claude Code / Cursor / Claude Desktop connect in one line. HTTP + MCP dual protocol — plus a CDP bridge, so the DevTools ecosystem works too.
 
 > Reference point: Cloudflare's Kitesurf explicitly ships neither real TLS-fingerprint negotiation nor persistent auth sessions — anti-bot and login territory is exactly where AginxBrowser plays.
 
@@ -91,17 +87,15 @@ The [local cache](#capabilities) builds on the same idea: search hits come back 
 - **Image search**: `categories=images` hits Baidu/Bing image indexes and returns direct binary `image_url` links (downloadable straight to jpg/png) plus `source_url` provenance
 - **Interactive sessions**: persistent browser sessions with indexed interaction (`state/click/input/scroll/eval`) — agents browse like humans do, and `session_export` turns what an agent figured out into a runnable curl replay script (zero model tokens on re-run) — or, with `format=json`, into a flow document (`flow_run` replays it server-side with `{{var}}` substitution, `wait`/`expect` gates and saved outputs; installed flows live in `workflow/<name>/flow.json`, dropped in without a rebuild). Session tools also cover the acting part: `session_viewport` simulates device viewports (media queries respond), `session_wait` blocks on a selector or predicate with a timeout, `session_screenshot` renders the live state, `session_console` replays the page's console ring, and `session_storage` exports/restores cookies plus localStorage for login hand-off
 - **Playback-link sniffer**: `session_network(filter=media)` extracts the m3u8/mp4/dash URLs a page's player *actually requested* at runtime — links found only in page HTML are often decoys, so the request log is the source of truth. `GET /session/{id}/har` exports the same traffic as HAR 1.2 (retained bodies included)
-- **CDP bridge**: `/json/version` + `/devtools/{kind}/{id}` WebSocket — `chromium.connectOverCDP()` from Playwright, Puppeteer, or browser-use attaches with one line, and agent-browser drives it via `--cdp` (`snapshot` returns the synthesized accessibility tree with `@ref` handles) ([integration guide](docs/integrations.md)). DevTools ecosystem compatibility without becoming a CDP shim
 - **File download**: streaming to disk (no memory buffering), SHA-256 integrity, resume of interrupted transfers — for binaries, archives, datasets
-- **Local cache that remembers**: every fetch/search lands in SQLite (FTS5) at `~/.aginxbrowser/cache.db`. The `cache` tool re-answers from what the agent already read instead of re-paying network time: full-text search with CJK substring matching, keyword × freshness fusion ranking, `[§ heading]` section-aware snippets, per-URL content hashes for drift detection, TTL-bounded, per-session scoping for shared deployments
+- **Local cache that remembers**: every fetch/search lands in SQLite (FTS5) at `~/.aginxbrowser/cache.db` — a re-fetch inside the TTL answers from what the agent already read instead of re-paying network time, with CJK substring matching, `[§ heading]` section-aware snippets, per-URL content hashes for drift detection, and per-session scoping for shared deployments
 - **CAPTCHA handling**: type detection with automatic Cloudflare challenge wait and optional 2captcha integration — search never stalls on verification pages
 - **JS data extraction**: `js_extract` pulls `window.__INITIAL_STATE__` and other structured data out of SPAs
-- **Document generation**: `render_markdown` turns markdown into a deterministic, self-contained HTML artifact — the document layer, so agents never write HTML by hand. Prose rides a plain offline shell (no fonts, no scripts); fenced `archify` blocks carry typed zero-coordinate diagram JSON (sequence / workflow / architecture / dataflow / lifecycle families) and render to inline SVG via the layout engine. Same input, same bytes — the receipt carries the sha256 so determinism is verifiable. `theme` (light/dark) and `preset` (classic / signal-flow / blueprint / editorial) bake colors at generation time; `quality: "showcase"` is the delivery gate, grading route crossings, label clearance and rhythm without touching the artifact bytes. Guided-view tabs plus `window.agxViewer` (`focus` / ego / `route` / `reach`) make the artifact interactive; with `session_id` it loads into a live session and the reply grades how it fits the viewport (fits/tall/wide/oversized). Mermaid sources are the agent's job to translate into archify JSON, not the engine's. Diagram vocabulary adapted from archify (MIT)
+- **Document generation**: `POST /render_markdown` turns markdown into a deterministic, self-contained HTML artifact — the document layer, so agents never write HTML by hand. Prose rides a plain offline shell (no fonts, no scripts); fenced `archify` blocks carry typed zero-coordinate diagram JSON (sequence / workflow / architecture / dataflow / lifecycle families) and render to inline SVG via the layout engine. Same input, same bytes — the receipt carries the sha256 so determinism is verifiable. `theme` (light/dark) and `preset` (classic / signal-flow / blueprint / editorial) bake colors at generation time; `quality: "showcase"` is the delivery gate, grading route crossings, label clearance and rhythm without touching the artifact bytes. Guided-view tabs plus `window.agxViewer` (`focus` / ego / `route` / `reach`) make the artifact interactive. Mermaid sources are the agent's job to translate into archify JSON, not the engine's. Diagram vocabulary adapted from archify (MIT)
 - **Screenshot rendering**: `/screenshot` endpoint (opt-in `--features screenshot`) paints the JS-rendered DOM with the diting rendering engine — pure CPU, no Chromium — to PNG. Vision input for agents
-- **Timeline video**: `/video` endpoint + `render_video` MCP tool render a page's animation timelines to MP4 — the page's scripts register GSAP-style timelines in `window.__timelines` (`duration()` + `pause(t)`), each frame seeks to `t=i/fps` and paints the viewport, and the frames pipe into ffmpeg (H.264, yuv420p). Deterministic by construction: no wall clock in the pixel values, same render twice = same MP4. Needs ffmpeg on PATH
-- **Page set (PDF/PNG/PPTX/DOCX)**: `/pdf` endpoint + `render_pdf` MCP tool cut a rendered page into pages and package them — print mode paginates at top-level block boundaries (default A4 @96dpi, no half-cut text where a break can land on a block edge), slides mode makes one page per CSS-selector match sized to the element (an HTML deck with one `.slide` per page exports as a real deck). Image-based PDF: per-page JPEG via DCTDecode, hand-rolled PDF 1.4 writer, zero new dependencies. PPTX packages the same pages as one slide per page; DOCX as one page-sized section per page — both hand-rolled OOXML (stored-ZIP writer, fixed timestamps), byte-deterministic, zero new dependencies
+- **Timeline video**: `/video` renders a page's animation timelines to MP4 — the page's scripts register GSAP-style timelines in `window.__timelines` (`duration()` + `pause(t)`), each frame seeks to `t=i/fps` and paints the viewport, and the frames pipe into ffmpeg (H.264, yuv420p). Deterministic by construction: no wall clock in the pixel values, same render twice = same MP4. Needs ffmpeg on PATH
+- **Page set (PDF/PNG/PPTX/DOCX)**: `/pdf` cuts a rendered page into pages and packages them — print mode paginates at top-level block boundaries (default A4 @96dpi, no half-cut text where a break can land on a block edge), slides mode makes one page per CSS-selector match sized to the element (an HTML deck with one `.slide` per page exports as a real deck). Image-based PDF: per-page JPEG via DCTDecode, hand-rolled PDF 1.4 writer, zero new dependencies. PPTX packages the same pages as one slide per page; DOCX as one page-sized section per page — both hand-rolled OOXML (stored-ZIP writer, fixed timestamps), byte-deterministic, zero new dependencies
 - **TLS fingerprint spoofing**: stealth mode impersonates Chrome145/Firefox133/Safari/Edge, switchable per request
-- **MCP server**: `--mcp` mode exposes 37 tools (fetch/eval/search/download/cache + session + flow + screenshot + video/pdf + docgen tools) — Claude Code / Claude Desktop / Cursor call them directly
 - **Firecrawl compatible**: `/v1/scrape` endpoint — existing Firecrawl clients migrate by changing the base URL
 - **DNS rebinding protection**: built-in SSRF guard + post-resolution IP validation
 
@@ -132,31 +126,22 @@ Computer-use agents come in two layers. **GUI-layer** stacks (Cua, desktop CUA a
 
 | | GUI layer (desktop CUA) | AginxBrowser (engine layer) |
 |---|---|---|
-| Action space | screen pixels → OS input events | DOM/CDP: click by coordinates or selector, real event dispatch |
+| Action space | screen pixels → OS input events | DOM: click by coordinates or selector, real event dispatch |
 | State readout | screenshot of a display | structured DOM / accessibility tree, screenshot optional |
 | Per-session cost | Xvfb + VM/container | one process, no display server |
 | Frames | flattened into pixels | first-class: hit-testing descends into iframes, frame-scoped evaluate |
 | Replay | best-effort (compositor timing) | action logs export as runnable curl / flow JSON |
 
-Validated against the GUI layer's own harness: the [cua-bench](https://github.com/trycua/cua) webtop gym — a window manager where every "window" is an iframe — runs on AginxBrowser through the CDP bridge (click task: PASS end-to-end). That's the path that exercises iframe hit-testing, frame-scoped script state, and coordinate translation, which is exactly where engine-layer substitutes usually break. browser-use attaches the same way Playwright does: point `cdp_url` at the bridge.
 
 ## Quick Start
 
-Try the hosted instance first: **https://browser.aginx.net/**
-
-**One-command full install** (SKILL.md trigger surface + MCP tools + verification):
+**One-command full install** (SKILL.md trigger surface + verification):
 
 ```bash
 # Download -> inspect the contents -> run only after review (never blind-run network scripts)
 curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh -o skill.sh
 less skill.sh
 bash skill.sh
-```
-
-**Register MCP only**:
-
-```bash
-claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
 ```
 
 **Install the skill trigger surface via [skills.sh](https://www.skills.sh)**:
@@ -169,16 +154,15 @@ npx skills add yinnho/aginxbrowser
 
 ```text
 Set up aginxbrowser as your web access layer:
-1. Register the MCP server (skip if already present):
-   claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
-   No claude CLI? The HTTP API works directly — no MCP needed.
-2. Verify capabilities at https://browser.aginx.net/doctor before calling
-   feature-gated endpoints (screenshot/stealth must be listed).
-3. From now on, route web tasks through it instead of raw curl:
-   - read a page / scrape a URL  -> fetch {url}              (markdown output, Cloudflare bypassed by default)
-   - search the web              -> search {q, fetch_top:3}   (5 engines incl. Baidu/WeChat)
-   - see a page                  -> screenshot {url}
-   - login / form / click-through-> session_create -> session_state -> session_input/session_click -> session_close
+1. Install it locally and verify it is healthy:
+   brew install yinnho/aginxbrowser/aginxbrowser
+   aginxbrowser doctor   # then start: aginxbrowser (listens on 0.0.0.0:8089)
+   curl http://127.0.0.1:8089/health
+2. From now on, route web tasks through http://127.0.0.1:8089 instead of raw curl:
+   - read a page / scrape a URL  -> POST /fetch {"url":...}        (markdown output, Cloudflare bypassed by default)
+   - search the web              -> POST /search {"q":...,"fetch_top":3}
+   - see a page                  -> POST /screenshot {"url":...}
+   - login / form / click-through-> POST /session/create -> /session/{id}/state -> /input /click -> /close
 ```
 
 Self-hosting:
@@ -228,9 +212,6 @@ curl -sS -X POST http://127.0.0.1:8089/session/create \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com"}'
 # → {"session_id":"s_1","url":"https://example.com/"}
-
-# MCP mode (for AI agents)
-./target/release/aginxbrowser --mcp
 ```
 
 ## REST Routes
@@ -257,10 +238,9 @@ Every capability is plain HTTP — no SDK required. There is no `/openapi.json` 
 | GET | `/session/list` | Live sessions |
 | POST | `/session/{id}/navigate` · `/state` · `/click` · `/click_xy` · `/drag` · `/input` · `/scroll` · `/eval` · `/wait` · `/dialog` · `/viewport` · `/screenshot` · `/clone` · `/close` | Session actions |
 | GET | `/session/{id}/cookies` · `/storage` · `/console` · `/network` · `/har` · `/export` | Session inspection |
-| GET | `/json/version` · `/json/list` · `/devtools/…` | CDP bridge (Playwright/Puppeteer connect here) |
-| POST | `/mcp` | MCP endpoint (`--mcp` mode serves stdio) |
+| POST | `/render_markdown` | Markdown → deterministic self-contained HTML artifact (+ inline-SVG diagrams) |
 
-Two MCP tools have no REST route: `cache` (query the local fetch/search cache) and `render_markdown` (markdown → deterministic HTML artifact). Everything an agent does through MCP is callable over REST above.
+Every capability is one POST away — no SDK, no protocol adapter.
 
 ## Project Layout
 
@@ -273,8 +253,7 @@ aginxbrowser/
 ├── workflow/            # Flow assets: <name>/flow.json replayed by flow_run (drop-in, no rebuild)
 ├── README.md
 ├── docs/
-│   ├── API.md            # Full API reference (HTTP + MCP)
-│   └── integrations.md   # CDP bridge: Playwright / Puppeteer / browser-use
+│   └── API.md            # Full API reference (HTTP)
 ├── bench/                # Benchmark harness + results (vs headless Chrome)
 │   ├── README.md         #   methodology + numbers
 │   ├── pages.txt         #   fixed 20-page set
@@ -285,7 +264,6 @@ aginxbrowser/
     ├── main.rs              # HTTP service entry & routing
     ├── server.rs            # Business layer (fetch/click/eval/search)
     ├── session.rs           # Interactive browser sessions
-    ├── mcp.rs               # MCP server (37 tools)
     ├── docgen/              # Document layer: markdown → deterministic HTML + inline-SVG diagrams
     ├── render.rs            # Tiered rendering (HTTP direct → diting browser engine)
     ├── store.rs             # Local fetch/search cache (SQLite FTS5, drift hashes)
@@ -297,7 +275,6 @@ aginxbrowser/
     ├── video.rs             # Timeline video pump (__timelines seek → ffmpeg → MP4)
     ├── pages.rs             # Page pump (print/slides pagination → PDF/PNG)
     ├── ooxml.rs             # OOXML containers (image-based PPTX/DOCX, stored-ZIP writer)
-    ├── diting_cdp/          # CDP bridge (DevTools HTTP + WebSocket)
     ├── doctor_cli.rs        # `aginxbrowser doctor` self-check
     ├── browser.rs           # Top-level API: Browser, BrowserBuilder
     ├── page.rs              # Top-level API: Page, Element
@@ -361,27 +338,25 @@ If your network can't reach the rusty_v8 CDN (build hangs with zero progress aft
 | Variable | Default | Description |
 |------|------|------|
 | `AGINXBROWSER_BIND` | `0.0.0.0:8089` | Listen address |
-| `--cdp-port N` (flag) | unset | Bind on `127.0.0.1:N` instead — the local agent-tooling entry (`agent-browser --cdp N`, Playwright `connectOverCDP`). Beats `AGINXBROWSER_BIND` when both are set |
 | `AGINXBROWSER_STEALTH` | enabled | `0` disables stealth (for diagnostics) |
 | `AGINXBROWSER_UA` | Linux Chrome145 | Spoofed User-Agent |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language header |
-| `AGINXBROWSER_PROXY` | none | Optional fallback proxy. Blocked-source engines (Wikipedia, Bing News, Hugging Face, RubyGems) connect directly first and fall through to this proxy only when the direct attempt fails — overseas deployments need no proxy at all; per-request `use_proxy:true` also routes fetch/search through it. Browser/session/CDP navigations to known-blocked domains (wikipedia.org, github.com, …) route through it automatically. Standard `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` are deliberately ignored by the engine (set them for other tools freely); startup logs a warning when it sees one |
+| `AGINXBROWSER_PROXY` | none | Optional fallback proxy. Blocked-source engines (Wikipedia, Bing News, Hugging Face, RubyGems) connect directly first and fall through to this proxy only when the direct attempt fails — overseas deployments need no proxy at all; per-request `use_proxy:true` also routes fetch/search through it. Browser/session navigations to known-blocked domains (wikipedia.org, github.com, …) route through it automatically. Standard `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` are deliberately ignored by the engine (set them for other tools freely); startup logs a warning when it sees one |
 | `AGINXBROWSER_NAV_CHAIN_LIMIT` | `10` | JS navigation-chain cap: documents a page may chain via `location`/form hops before navigation aborts. The count includes the requested document (10 = initial doc + 9 hops). Raise for legit long chains (SSO handover across providers); HTTP 3xx redirects are budgeted separately (20, per Fetch spec / browser parity) |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL, `0` disables |
-| `AGINXBROWSER_HONOR_ROBOTS` | unset | robots.txt is not consulted by default on `/fetch`, `/screenshot`, `/download` and MCP tools; set `1` to opt in (operator choice) |
-| `AGINXBROWSER_ALLOW_FILE_ACCESS` | unset | Opt in to `file://` reads — navigation, subresources, `/fetch`, and CDP `setFileInputFiles`. Same as the `--allow-file-access` CLI flag. Off by default: the server binds 0.0.0.0, so an open gate hands local files to anyone who can reach the port. Set it on a local dev instance, not a hosted one |
+| `AGINXBROWSER_HONOR_ROBOTS` | unset | robots.txt is not consulted by default on `/fetch`, `/screenshot`, `/download`; set `1` to opt in (operator choice) |
+| `AGINXBROWSER_ALLOW_FILE_ACCESS` | unset | Opt in to `file://` reads — navigation, subresources, `/fetch`. Same as the `--allow-file-access` CLI flag. Off by default: the server binds 0.0.0.0, so an open gate hands local files to anyone who can reach the port. Set it on a local dev instance, not a hosted one |
 | `AGINXBROWSER_ALLOW_PRIVATE_NETWORK` | unset | Opt in to loopback/RFC1918/link-local fetches (the SSRF gate). Same as the `--allow-private-network` CLI flag — dev machines only |
 | `AGINXBROWSER_ALLOW_NETWORK` | unset | Scoped alternative: comma-separated CIDR allowlist (e.g. `10.20.0.0/16,192.168.1.0/24`) that opens just those ranges — cloud-metadata endpoints (169.254.169.254, 100.100.100.200) and everything else stay blocked. Same as `--allow-network <cidrs>` |
 | `AGINXBROWSER_FONT_DIR` | unset | Directory of extra fonts (`.ttf`/`.otf`/`.ttc`) loaded as tail fallbacks for scripts the bundled CJK subset doesn't cover (Korean, Thai, Arabic, …). Same as the `--font-dir <path>` CLI flag. Faces the bundle already covers keep bundle rendering — dir fonts are coverage tails, not named-family overrides |
 | `AGINXBROWSER_ROBOTS_TTL_SECS` | `3600` | Per-host robots.txt policy cache TTL |
 | `AGINXBROWSER_DOMAIN_RATE_PER_MIN` | `20` | Per-registrable-domain page budget per minute (subdomains share one budget); over-budget requests get 429 with the stance message. `0` disables. See "A Browser, Not a Crawler" |
 | `AGINXBROWSER_SESSION_PAGE_LIMIT` | `200` | Total pages one interactive session may walk (navigation-causing clicks count); over-budget navigations are refused, the current page stays interactive. `0` disables |
-| `AGINXBROWSER_MCP_ALLOWED_HOSTS` | unset | Extra `Host` values accepted by `/mcp` (comma-separated) — the transport's DNS-rebinding guard defaults to loopback, so add your LAN IP or Docker hostname when other machines call the instance |
 | `AGINXBROWSER_STORE` | on | Local fetch/search cache; `0`/`false`/`off` disables |
 | `AGINXBROWSER_STORE_PATH` | `~/.aginxbrowser/cache.db` | SQLite database location (created 0600) |
 | `AGINXBROWSER_STORE_TTL_HOURS` | `720` | Cached page TTL |
 | `AGINXBROWSER_STORE_SEARCH_TTL_HOURS` | `168` | Cached search-result-set TTL |
-| `AGINXBROWSER_STORE_SCOPE` | `global` | `session` gives each MCP client session its own cache scope — set this on public multi-client deployments |
+| `AGINXBROWSER_STORE_SCOPE` | `global` | `session` scopes the cache per session instead of one shared pool |
 | `CAPTCHA_SOLVER_API_KEY` | none | 2captcha API key; enables CAPTCHA auto-solving |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | CAPTCHA solving provider |
 | `AGINXBROWSER_MEILI_URL` | none | Meilisearch base URL; set to enable the private-index engine |
@@ -391,24 +366,17 @@ If your network can't reach the rusty_v8 CDN (build hangs with zero progress aft
 ## API Documentation
 
 **Full API reference** → [`docs/API.md`](docs/API.md)
-**CDP integration guide** → [`docs/integrations.md`](docs/integrations.md) — Playwright / Puppeteer / browser-use one-liners
 **Security audit notes** → [`docs/skills-sh-audit.md`](docs/skills-sh-audit.md) — why skills.sh shows "Critical Risk", and which real product feature each warning corresponds to
 
 Covers:
-- All 37 HTTP endpoints (`/fetch`, `/search`, `/screenshot`, `/video`, `/pdf`, `/download`, `/v1/scrape`, `/flow/run`, `/doctor`, 19 session endpoints, CDP discovery, MCP transport)
-- All 37 MCP server tools and their parameters
-- Claude Code / Claude Desktop / Cursor client configuration
+- All HTTP endpoints (`/fetch`, `/search`, `/screenshot`, `/video`, `/pdf`, `/download`, `/render_markdown`, `/v1/scrape`, `/flow/run`, `/doctor`, the session endpoints)
 - Environment variables, error codes, per-site scraping examples
 
 ## Plugging Into Other Systems
 
 AginxBrowser is **pure attach-alongside infrastructure** — like a real browser, it runs as an independent service that anything can call, without embedding host code or polluting host config. Deploy one instance per machine (under systemd) and every app needing "render + scrape" capability shares it.
 
-Three attach points:
-
-- **HTTP** — `/fetch`, `/search`, `/screenshot`, `/download` for any language with an HTTP client
-- **MCP** — one line into Claude Code / Cursor / Claude Desktop (above)
-- **CDP** — point Playwright / Puppeteer / browser-use at `ws://your-host:8089/devtools/browser/<id>`; agent-browser drives it with `--cdp` (`--cdp-port N` binds loopback for that). Google's chrome-devtools-mcp attaches too: `aginxbrowser --cdp-port 9223` + `chrome-devtools-mcp --browser-url http://127.0.0.1:9223` — its full tool battery (pages, snapshot, evaluate, screenshot, network, resize) passes against the diting engine. See [`docs/integrations.md`](docs/integrations.md)
+The attach point is HTTP — `/fetch`, `/search`, `/screenshot`, `/download`, `/render_markdown` for any language with an HTTP client.
 
 Integration: read the environment variable `AGINXBROWSER_URL=http://127.0.0.1:8089`. Unset → behavior unchanged; set → risk-controlled sites automatically route through AginxBrowser for rendering, falling back gracefully on failure.
 

@@ -1,6 +1,6 @@
 //! robots.txt compliance (RFC 9309 subset), available on every autonomous
 //! fetch path — `/fetch`, `/click`, `/eval`, `/screenshot`, `/download`, the
-//! `/search` fetch_top body-grab, and the MCP and firecrawl equivalents.
+//! `/search` fetch_top body-grab, and the firecrawl equivalent.
 //! aginxbrowser is a real-time acquisition layer, not a crawler: an agent
 //! arrives with a question, reads a few pages, leaves with the answer, and
 //! robots.txt is crawler etiquette — not a gate for that. The check is

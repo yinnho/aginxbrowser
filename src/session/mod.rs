@@ -8,14 +8,12 @@
 //! per-session thread, [`commands`] is the command protocol, [`state`]
 //! holds handles/errors/snapshot backends, [`interact`] the page
 //! interaction executors, [`record`] recording/replay. The re-exports
-//! below are exactly the externally consumed face (`main.rs`, `mcp.rs`,
+//! below are exactly the externally consumed face (`main.rs`,
 //! `flow.rs`); the response types stay reachable inside the module via
-//! their defining submodules. `interact` is `pub(crate)` (not re-exported)
-//! because the CDP Input face imports its mouse-event JS builders downward
-//! — the R1-allowed direction (issue #47).
+//! their defining submodules.
 
 mod commands;
-pub(crate) mod interact;
+mod interact;
 mod manager;
 pub(crate) mod preload_recipes;
 mod record;
@@ -27,6 +25,6 @@ mod tests;
 
 pub use commands::{ScrollDirection, SessionCommand};
 pub use manager::{SessionManager, SESSIONS};
-pub(crate) use manager::{expires_in_secs, send_command, send_screenshot};
+pub(crate) use manager::{send_command, send_screenshot};
 pub use record::replay_bash;
 pub use state::{ConsoleFilter, SessionError};

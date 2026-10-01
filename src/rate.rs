@@ -11,7 +11,7 @@
 //! page after page, minute after minute.
 //!
 //! Where the gate counts: page loads only, at the outermost entry per path
-//! (`smart_fetch`, `do_fetch` via MCP, click/eval/screenshot/download,
+//! (`smart_fetch`, `do_fetch`, click/eval/screenshot/download,
 //! search body-grabs, firecrawl scrapes, session navigations). Subresources
 //! a page pulls are the page's business and never counted. CDP is exempt:
 //! it is a raw automation surface by design, like Chrome's remote port.

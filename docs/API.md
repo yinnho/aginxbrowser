@@ -2,7 +2,7 @@
 
 [English](API.md) | [中文](API.zh-CN.md)
 
-> Complete HTTP API + MCP Server integration guide. Get up and running in 5 minutes.
+> Complete HTTP API reference. One binary, local install, every capability a POST away.
 
 ## Quick Start
 
@@ -70,7 +70,7 @@ Fetch a page and return its content. Supports tiered rendering, automatic Cloudf
 | selector | string | | `null` | CSS selector; only extract the matching region |
 | wait_secs | u64 | | `null` | Extra seconds to wait after page load (let JS rendering finish) |
 | use_proxy | bool | | `false` | Route through the `AGINXBROWSER_PROXY` proxy. Set `true` for overseas sites |
-| cookies | string[] \| object[] | | `[]` | Cookies injected before navigation: `"name=value"` strings (may carry `; Domain=…; Path=/; Secure` attributes) or CDP-style objects `{"name","value","domain","path","secure","httpOnly","sameSite"}`. Entries declaring `Domain=` anchor at that domain, so sibling-domain login state (`.taobao.com` / `.tmall.com` style) survives injection instead of being dropped by RFC 6265 domain checks |
+| cookies | string[] \| object[] | | `[]` | Cookies injected before navigation: `"name=value"` strings (may carry `; Domain=…; Path=/; Secure` attributes) or cookie objects `{"name","value","domain","path","secure","httpOnly","sameSite"}`. Entries declaring `Domain=` anchor at that domain, so sibling-domain login state (`.taobao.com` / `.tmall.com` style) survives injection instead of being dropped by RFC 6265 domain checks |
 | max_chars | usize | | `50000` | Truncate `content` to this many characters. `0` = unlimited |
 | auto_bypass_challenge | bool | | `true` | Automatically detect and bypass Cloudflare Turnstile challenges |
 | render_tier | string | | `"auto"` | Rendering strategy (see below) |
@@ -228,7 +228,7 @@ Load a page and click the specified element (`element.click()`), returning the p
 | selector | string | ✅ | — | CSS selector |
 | wait_secs | u64 | | `null` | Extra seconds to wait after page load |
 | use_proxy | bool | | `false` | Route through a proxy |
-| cookies | string[] \| object[] | | `[]` | Cookies injected before navigation (`"name=value"` strings or CDP-style objects, same semantics as `/fetch`) |
+| cookies | string[] \| object[] | | `[]` | Cookies injected before navigation (`"name=value"` strings or cookie objects, same semantics as `/fetch`) |
 | tls_fingerprint | string | | `null` | TLS fingerprint (stealth mode) |
 
 **Response fields:**
@@ -262,7 +262,7 @@ Execute arbitrary JavaScript on the page and return the result. Supports `async`
 | script | string | ✅ | — | JS expression or async IIFE |
 | wait_secs | u64 | | `null` | Extra seconds to wait after page load |
 | use_proxy | bool | | `false` | Route through a proxy |
-| cookies | string[] \| object[] | | `[]` | Cookies injected before navigation (`"name=value"` strings or CDP-style objects, same semantics as `/fetch`) |
+| cookies | string[] \| object[] | | `[]` | Cookies injected before navigation (`"name=value"` strings or cookie objects, same semantics as `/fetch`) |
 | tls_fingerprint | string | | `null` | TLS fingerprint (stealth mode) |
 
 **Response fields:**
@@ -456,7 +456,7 @@ Stream a file from a URL to disk. Unlike `/fetch` (which returns page content fo
 | filename | string | | auto | Output filename. Auto resolution: `Content-Disposition` header → URL path tail → `"download"` |
 | resume | bool | | `false` | Continue an interrupted download when a local partial file exists. Server support is probed via `Range: bytes=N-`: `206` appends, `200` restarts |
 | use_proxy | bool | | `false` | Route through proxy (auto-enabled for known blocked domains like github.com) |
-| cookies | string[] \| object[] | | `[]` | Cookies to send (`["name=value", ...]` or CDP-style objects) for gated downloads |
+| cookies | string[] \| object[] | | `[]` | Cookies to send (`["name=value", ...]` or cookie objects) for gated downloads |
 
 **Response fields:**
 
@@ -507,7 +507,7 @@ Does not use `/fetch`'s tiered rendering — it always drives the JS browser thr
 | selector | string | | `null` | CSS selector; capture the **specified element region** instead of the full page (see below) |
 | selector_all | bool | | `false` | Used with `selector`: skip cropping and return coordinates of **all matches** |
 | use_proxy | bool | | `false` | Route through the `AGINXBROWSER_PROXY` proxy |
-| cookies | string[] \| object[] | | `[]` | Cookies injected before navigation (`"name=value"` strings or CDP-style objects, same semantics as `/fetch`) |
+| cookies | string[] \| object[] | | `[]` | Cookies injected before navigation (`"name=value"` strings or cookie objects, same semantics as `/fetch`) |
 | tls_fingerprint | string | | `null` | TLS fingerprint (stealth mode) |
 
 **Response fields:**
@@ -781,7 +781,7 @@ Create an interactive browser session.
 |------|------|------|------|------|
 | url | string | | `null` | Initial URL (optional); `start_url` is accepted as an alias — creation navigates there before the session id is handed back |
 | use_proxy | bool | | `false` | Route through a proxy |
-| cookies | string[] \| object[] | | `[]` | Cookies injected before navigation (`"name=value",...` or CDP-style objects) so the session starts already logged in |
+| cookies | string[] \| object[] | | `[]` | Cookies injected before navigation (`"name=value",...` or cookie objects) so the session starts already logged in |
 | persistent | bool | | `false` | Persist login state to the server-side store: if the session idles out or the server restarts, the same `session_id` revives logged-in on the next call (`session/{id}/close` drops the snapshot; idle expiry keeps it) |
 | account | string | | `null` | Run as a named login identity (see [Named Accounts](#named-accounts-multi-login)): a private cookie jar seeded from the account record, written back after every action — concurrent logins on different accounts never clobber each other, and none touch the anonymous shared jar. The identity's device persona (own UA + hardware fingerprint) rides every session |
 
@@ -820,7 +820,7 @@ Turn a DevTools **"Copy as cURL"** command into a logged-in browser session — 
 }
 ```
 
-The `session_id` is an ordinary session — drive it with the session API or the MCP session tools. `authorization_prefix` previews only the first 16 chars (the full header is a credential; the response never echoes whole cookies). `method`/`has_body` report what kind of request was copied. Cookies anchor on the copied request's host; other subdomains of the site may re-authenticate — that is the site's device binding, not a lost credential.
+The `session_id` is an ordinary session — drive it with the session API. `authorization_prefix` previews only the first 16 chars (the full header is a credential; the response never echoes whole cookies). `method`/`has_body` report what kind of request was copied. Cookies anchor on the copied request's host; other subdomains of the site may re-authenticate — that is the site's device binding, not a lost credential.
 
 **Tips**: an XHR on the logged-in page usually carries the most complete cookie set (document requests sometimes miss the `httpOnly` API-session pair). `-b FILE` cookie jars are rejected — the server cannot read your disk. Treat a pasted command like a password: it carries the login state verbatim.
 
@@ -846,7 +846,7 @@ List live sessions — the discovery twin of `/session/create` (reuse an idle se
 {"count": 1, "sessions": [{"session_id": "s_1", "idle_secs": 19, "expires_in_secs": 460}]}
 ```
 
-Sessions are process-global and shared across callers (HTTP and MCP alike) — that's what makes "one instance per machine, every agent shares it" work.
+Sessions are process-global and shared across callers — that's what makes "one instance per machine, every agent shares it" work.
 
 ### GET /sessions
 
@@ -1366,7 +1366,6 @@ Flow discovery — `POST /flow/install` takes a name; this is how you learn the 
 }
 ```
 
-MCP face: `flow_search(query)`.
 
 ### GET /session/{id}/network
 
@@ -1560,7 +1559,7 @@ curl -sS -X POST http://127.0.0.1:8089/session/$SID/close
 
 ## robots.txt Checking (opt-in)
 
-AginxBrowser fetches on demand — one page when an agent asks, not bulk crawling — and by default does **not** consult `robots.txt` on any path: real-time acquisition is not crawling, and robots.txt is crawler etiquette. The full RFC 9309 checker ships built in and, when the operator opts in with `AGINXBROWSER_HONOR_ROBOTS=1`, applies to every autonomous path — `/fetch`, `/click`, `/eval`, `/screenshot`, `/download`, the `/search` fetch_top body-grab (denied results keep their entry; `fetch_error` carries the reason), their MCP tool equivalents, and the Firecrawl-compatible `/v1/scrape`. A disallowed URL then returns **HTTP 403** with the matched rule in the error, so the agent can see exactly why:
+AginxBrowser fetches on demand — one page when an agent asks, not bulk crawling — and by default does **not** consult `robots.txt` on any path: real-time acquisition is not crawling, and robots.txt is crawler etiquette. The full RFC 9309 checker ships built in and, when the operator opts in with `AGINXBROWSER_HONOR_ROBOTS=1`, applies to every autonomous path — `/fetch`, `/click`, `/eval`, `/screenshot`, `/download`, the `/search` fetch_top body-grab (denied results keep their entry; `fetch_error` carries the reason), and the Firecrawl-compatible `/v1/scrape`. A disallowed URL then returns **HTTP 403** with the matched rule in the error, so the agent can see exactly why:
 
 ```json
 {"error": "robots.txt disallows /yinnho/aginxbrowser/pulse on https://github.com (matched `Disallow: /*/*/pulse`). This instance checks robots.txt (AGINXBROWSER_HONOR_ROBOTS=1); remove it to skip the check."}
@@ -1599,9 +1598,9 @@ AginxBrowser is a real-time retrieval tool, not a crawler — budgets enforce th
 - **Per-domain rate**: 20 pages/minute per registrable domain (`AGINXBROWSER_DOMAIN_RATE_PER_MIN`). Subdomains share one budget, so rotating `www.` / `api.` / random subdomains doesn't escape. A private/loopback host is exempt (the operator's own network), and a domain's window resets when the minute rolls over.
 - **Per-session page budget**: 200 pages per interactive session (`AGINXBROWSER_SESSION_PAGE_LIMIT`). Every navigation counts, plus clicks that change the page; reads on the current page (state/scroll/eval/typing) are free. An over-budget session refuses further navigations but stays interactive until closed.
 
-Counted surfaces: `/fetch`, `/click`, `/eval`, `/screenshot`, `/download`, the `/search` fetch_top body-grab (an over-budget item keeps its entry; `fetch_error` carries the reason), `/v1/scrape` (both plain and actions paths), their MCP tool equivalents, and session navigations/clicks. Subresources a page pulls are never counted. The CDP bridge is exempt — it is a raw automation surface by design, like Chrome's remote debugging port.
+Counted surfaces: `/fetch`, `/click`, `/eval`, `/screenshot`, `/download`, the `/search` fetch_top body-grab (an over-budget item keeps its entry; `fetch_error` carries the reason), `/v1/scrape` (both plain and actions paths), and session navigations/clicks. Subresources a page pulls are never counted.
 
-An over-budget request returns **HTTP 429** with the stance in the message (MCP tools return the same text in their `error` field):
+An over-budget request returns **HTTP 429** with the stance in the message:
 
 ```json
 {"error": "rate limit: example.com is capped at 20 pages/min — aginxbrowser does real-time lookups for agents, not site crawling. Slow down, or self-host and tune AGINXBROWSER_DOMAIN_RATE_PER_MIN."}
@@ -1618,15 +1617,14 @@ export AGINXBROWSER_SESSION_PAGE_LIMIT=200    # pages per session, 0 disables
 
 ---
 
-## Local Store (durable cache, default on)
+## Local Store (durable record, default on)
 
-Every successful `fetch` and `search` — HTTP API and MCP tools alike — is persisted to a local SQLite database so an agent can query what it already read instead of paying for it again (a cache hit is instant; a fresh fetch costs 5-60s). Default location: `~/.aginxbrowser/cache.db` (WAL mode, `0600`).
+Every successful `fetch` and `search` is persisted to a local SQLite database at `~/.aginxbrowser/cache.db` (WAL mode, `0600`) — the record that backs the fetch receipts.
 
 - **Pages**: one row per fetched URL — title, extracted content, serving tier, fetch time — deduplicated by normalized URL and FTS5-indexed (Chinese substrings work: CJK text is indexed per character)
 - **Searches**: whole result sets per `(query, categories)` pair
 - **TTL**: pages 30 days, search results 7 days; expired rows are purged lazily on writes
-
-Query it through the `cache` MCP tool: `query` (full-text over page contents/titles/URLs and past search queries, ranked by BM25 × recency fusion), `get` (full cached content of one URL), `url`/`since_hours` filters, `stats`, `clear` (refuses to run without a filter or `all=true`). Text hits come back with `[§ heading]` section prefixes so you know *where on the page* they landed. Every page row stores a `content_hash` plus the previous sample's hash — `cache get` reports `changed_since_prev`, the cheapest drift detector for origins serving frozen bodies (a rate-limited 200 that never changes reads as `false` across consecutive samples).
+- **Drift receipts**: every page row stores its `content_hash` plus the previous sample's hash. The `/fetch` response surfaces them as `content_hash` and `changed_since_prev` — the cheapest drift detector for origins serving frozen bodies (a rate-limited 200 that never changes reads as `false` across consecutive samples)
 
 | Env | Default | Meaning |
 |-----|---------|---------|
@@ -1634,9 +1632,9 @@ Query it through the `cache` MCP tool: `query` (full-text over page contents/tit
 | `AGINXBROWSER_STORE_PATH` | `~/.aginxbrowser/cache.db` | Database file location |
 | `AGINXBROWSER_STORE_TTL_HOURS` | `720` | Page rows time-to-live |
 | `AGINXBROWSER_STORE_SEARCH_TTL_HOURS` | `168` | Search-result rows time-to-live |
-| `AGINXBROWSER_STORE_SCOPE` | `global` | `global` = one shared pool, right for single-user instances; `session` = each MCP client session only sees its own rows — set this on public multi-client deployments |
+| `AGINXBROWSER_STORE_SCOPE` | `global` | `global` = one shared pool, right for single-user instances; `session` = rows are scoped per session — set this on multi-client deployments |
 
-This is the durable layer; the short-lived in-process `/fetch` cache (`AGINXBROWSER_CACHE_TTL_SECS`) is unchanged and sits in front of it.
+This is the durable layer; the short-lived in-process `/fetch` cache (`AGINXBROWSER_CACHE_TTL_SECS`) sits in front of it and serves repeat requests of the same URL inside the TTL without re-paying the network.
 
 ---
 
@@ -1662,239 +1660,29 @@ Once configured, `/fetch` and `/search` automatically submit CAPTCHAs to 2captch
 
 ---
 
-## MCP Server
+## Document Generation
 
-AginxBrowser wraps its core operations as an MCP (Model Context Protocol) server that AI agents can call directly — no hand-written HTTP client required. Two access modes are supported:
+### POST /render_markdown
 
-- **stdio**: `--mcp` mode, local/self-hosted, communicating over stdin/stdout
-- **streamable HTTP**: the HTTP server ships a built-in `/mcp` endpoint, directly reachable from the public internet (works out of the box on the hosted instance)
-
-### Getting Started
-
-**Option 1: Hosted instance (zero deployment, recommended)**
-
-This project runs a publicly hosted instance; Claude Code connects with one line:
-
-```bash
-claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
-```
-
-The HTTP server ships a `/mcp` endpoint speaking the MCP Streamable HTTP protocol (SSE), supporting both `GET` (SSE event stream) and `POST` (request/response). Any MCP client with HTTP transport support (Claude Code / Claude Desktop / Cursor) can connect.
-
-**Option 2: Self-hosted stdio**
-
-```bash
-./target/release/aginxbrowser --mcp
-```
-
-`--mcp` mode speaks the stdio protocol, does not start an HTTP server, and communicates with MCP clients over stdin/stdout.
-
-### Session Semantics (`Mcp-Session-Id`)
-
-The streamable HTTP transport follows the protocol's dual session semantics — this is the *MCP-layer* session (the JSON-RPC conversation), separate from browser sessions:
-
-- **Header absent** on `initialize`: the server creates a new isolated MCP session and returns the ID in the `Mcp-Session-Id` response header. A client that never sends the header back gets a fresh session per connection — sessions don't leak into each other.
-- **Header present**: the request continues the identified session. An unknown or expired ID returns `404` — clients re-initialize.
-- **HTTP `DELETE`** with the header terminates that MCP session.
-
-Browser sessions (`session_create` & co.) are shared across MCP sessions by design: two MCP clients on the same server can list (`session_list`) and reuse the same browser session IDs, which is what makes "one instance per machine, every agent shares it" work. For a self-hosted instance reached over a LAN IP or a Docker hostname (not `localhost`/`127.0.0.1`), add the hostname to `AGINXBROWSER_MCP_ALLOWED_HOSTS` — the transport validates the `Host` header as DNS-rebinding protection and rejects unlisted hosts with `403`.
-
-### Provided Tools (35)
-
-#### Core Tools
-
-| Tool | Description |
-|------|------|
-| `fetch` | Fetch a web page (tiered rendering, stealth, js_extract supported); injection stripping on by default (`sanitize: false` opts out) and `capture_xhr` returns the page's own API responses alongside the text |
-| `eval` | Execute JavaScript on the page (async/Promise supported) |
-| `click` | Click a page element (CSS selector) |
-| `search` | Multi-engine aggregated search (Baidu/Bing/Sogou/Sogou WeChat/DuckDuckGo/Wikipedia/Hacker News + code/packages/academic verticals) |
-| `download` | Stream a file to disk with SHA-256 and resume support |
-| `cache` | Query the local cache of fetched pages and past searches (full-text incl. CJK, full-content `get`, stats, filtered clear) |
-| `render_markdown` | Render markdown into a deterministic, self-contained HTML document; fenced `archify` blocks (typed diagram JSON — sequence / workflow / architecture / dataflow / lifecycle) become inline-SVG diagrams; `theme`/`preset`/`quality` (showcase audit) and optional `session_id` viewport grading |
-| `render_video` | Render a page's animation timelines (`window.__timelines`, GSAP-style `duration()`+`pause(t)`) to a base64 MP4 — deterministic seek per frame (`t=i/fps`), in-process paint, ffmpeg encode; needs ffmpeg on PATH and the `screenshot` feature |
-| `render_pdf` | Cut a rendered page into pages and package as base64 PDF, per-page PNGs, PPTX (one slide per page), editable PPTX (`format="pptx-native"`: element-level DrawingML — text runs/shapes/gradients/images; requires `selector`) or DOCX (one page-sized section per page) — print mode paginates at top-level block boundaries (default A4 @96dpi), slides mode makes one page per CSS-selector match sized to the element; needs the `screenshot` feature |
-
-#### Session Tools
-
-| Tool | Description |
-|------|------|
-| `session_create` | Create an interactive browser session; with `persistent: true` the login state survives idle eviction and server restarts — the same `session_id` revives logged-in |
-| `import_curl` | Paste a DevTools "Copy as cURL" command → a live session already carrying that site's cookies, anchored at the copied request's URL — the human logs in (CAPTCHA/SMS once) in their own Chrome, the agent continues from there; bash/PowerShell/cmd flavors all parse; `account` attaches the login to a named identity |
-| `account_list` | List named login identities (the multi-account layer) — metadata only: name, cookie domains, cookie count, updated_at, last verify verdict, persona UA. Each account is one stable device (own UA + hardware fingerprint). See which identities exist before `session_create {account}` picks one |
-| `account_verify` | Check whether a named account is still logged in. Teach-once: first call passes `url` + `predicate` (a JS expression truthy on a logged-in page); the spec is remembered, later calls can be bare. Runs in a scratch session as the account — the probe doubles as a cookie refresh |
-| `account_login` | Open a site's login page AS a named account and close the login loop: probes the generic gates (password/sms/qr/slider), waits for the automatic bounce when a `predicate` is given and no gate blocks, stamps the verify spec on success. `waiting` = human step outstanding — drive `session_wait`/`session_input` on the returned `session_id` (or `/live`), then re-call with the same arguments; the account's shared jar already holds the finished login |
-| `account_delete` | Delete a named login identity: stored record AND live jar (delete means gone) |
-| `session_clone` | Derive a new session carrying the full login state (cookies + storage + viewport + dialog policy); the source stays untouched — snapshot before risky actions, or run one login in parallel |
-| `session_list` | List live sessions with idle age and time left before auto-eviction (discover one to reuse) |
-| `session_navigate` | Navigate to a new URL within a session |
-| `session_preload` | Replace the session's document-start preload group (empty array clears). Sources run before each new document's own scripts — including inline `<script>` tags — the only hook that beats pages whose signing layer captures `window.fetch`/XHR natives at parse time. `recipe` names a maintained builtin (e.g. "xhs-sign", auto-mounted on its domains — #84) without pasting JS |
-| `session_state` | Get the indexed page state |
-| `session_cookies` | Export the session's current cookies as full Set-Cookie strings (`name=value; Domain=…; Path=/`, for login-state reuse — cross-subdomain state survives the round-trip). `meta: true` switches to the metadata-only view (issue #102): `{name, domain, path, secure, httpOnly, sameSite, expires, hostOnly}` per cookie, **no values ever** — for checking what auth state exists, leave it false for the value-bearing export that round-trips login state |
-| `session_storage` | Snapshot the session's `localStorage`/`sessionStorage` for the current origin — the half of login state cookies can't carry; restore it in a new session via `session_create`'s `storage` field |
-| `session_console` | Read the session's recent page console output (`log/info/warn/error/dialog` ring buffer of 500, filters: `level`/`since_ts`/`url_contains`/`limit`) — the fastest way to see why a page misbehaves |
-| `session_click` | Click an element by index |
-| `session_click_xy` | Click at viewport coordinates via the real mouse chain (`pointerdown`→`click`, hit-tested) — for canvas/map/custom widgets; `click_count: 2` adds `dblclick` |
-| `session_drag` | Press at `from`, glide through `mousemove` events, release at `to` — drags map markers/canvas selections; the trajectory is humanized by default (eased velocity, wobble, jittered timing) |
-| `session_input` | Type text by index (`input`+`change` dispatched; `events:"full"` for per-character keyboard cycles) |
-| `session_set_files` | Select files on a file input programmatically (Playwright `setInputFiles` semantics): files arrive as `{name, content_base64, mime_type?, last_modified?}`, get assigned to `input.files`, then `input`+`change` dispatch. Selector-addressed (`input[type=file]`) because file inputs are often hidden — the `session_state` index may not include them |
-| `session_scroll` | Scroll the page |
-| `session_eval` | Execute JavaScript in the session |
-| `session_dialog` | Inspect/steer dialog policy (`alert`/`confirm`/`prompt` never block: auto-answered, logged, `list`/`accept`/`dismiss`) |
-| `session_viewport` | Set the session's viewport (device emulation): media queries re-evaluate, `mobile: true` flips `pointer: coarse` / `hover: none`; override survives navigation |
-| `session_screenshot` | Screenshot the session's current DOM state (mutations included) as a base64 PNG; optional `width`/`height`/`full_page`/`selector`/`dpr` (device pixel ratio, 1.0–3.0, Retina-sharp bitmap) |
-| `session_wait` | Wait until a CSS selector matches or a JS predicate turns truthy, with a timeout — the page's event loop keeps running while waiting, so this replaces blind sleeps for async content |
-| `session_network` | Read the session's network request log; `filter: "media"` extracts playback/stream URLs (m3u8, mp4, ...) actually requested by the page — the reliable way to get a real video link. `include_bodies: true` adds an `xhr` array with the page's script-initiated response bodies (its own API face), narrowed by `url_contains`. `include_headers: true` adds each request's outbound header set to its row (#97). Every row carries `nav`, the navigation generation that issued it, and the payload's top-level `nav` is the current one — a lower row `nav` is an earlier (e.g. timed-out) attempt's leftover (#101). The payload always carries `in_flight` (`[]` when quiet; url/method/age_ms rows for script-initiated requests dispatched but not settled) and a `challenges` count (0 = clean) — the "still executing?" check before re-issuing a save |
-| `session_challenges` | One-call risk-control report: did this session hit an anti-bot wall? Taobao/tmall x5 answers 200 — a punish-page redirect or an MTop body with `FAIL_SYS_USER_VALIDATE`/`RGV587`/`x5secdata`. Returns `{total, events:[{url,method,status,kind,via}]}`, plus `account` and a human-`handoff` instruction when there are hits (detection only — the engine never auto-bypasses) |
-| `session_export` | Export the session's recorded actions: a runnable curl replay script (default), the raw action log (`format=jsonl`), or a flow.json document (`format=json` — cookies stripped, editable ops) that `flow_run` replays server-side |
-| `flow_run` | Run a flow to completion — zero model tokens: an inline flow document or a server-side `workflow/<name>/flow.json` asset, `{{var}}` substitution, `wait`/`expect` gates, `save` outputs; fails with a receipt (failing step, reason, URL, screenshot) and the session stays alive; `session_id` composes flows with imported login state |
-| `flow_install` | Install a third-party flow from DupHub into the workflow directory — manifest sha256 verification, flow.json validation, atomic landing under `workflow/<name>/`; the receipt discloses files, bytes, steps and `eval_steps` (review third-party scripts before running) |
-| `session_close` | Close the session (for a persistent one this drops the on-disk login snapshot — idle expiry keeps it, an explicit close does not) |
-
-#### `fetch` Tool Parameters
+Render markdown into a deterministic, self-contained HTML document — the document layer, so agents never write HTML by hand. Fenced code blocks tagged `archify` carry typed zero-coordinate diagram JSON (`sequence` / `workflow` / `architecture` / `dataflow` / `lifecycle`) rendered to inline SVG by the layout engine; Mermaid sources must be translated to archify JSON by the caller.
 
 | Parameter | Type | Required | Default | Description |
 |------|------|------|------|------|
-| url | string | ✅ | — | Target URL |
-| format | string | | `"markdown"` | Output format: `markdown` / `html` / `text` |
-| selector | string | | `null` | CSS selector |
-| wait_secs | u64 | | `null` | Seconds to wait after page load |
-| use_proxy | bool | | `false` | Route through a proxy |
-| max_chars | usize | | `50000` | Character truncation limit |
-| auto_bypass_challenge | bool | | `true` | Automatically bypass Cloudflare Turnstile |
-| render_tier | string | | `"auto"` | Rendering strategy: `auto` / `http` / `browser` |
-| tls_fingerprint | string | | `null` | TLS fingerprint |
-| js_extract | object | | `null` | JS data extraction: `{expression, timeout_ms}` |
-| sanitize | bool | | `true` | Strip prompt-injection carriers (zero-width chars, hidden-span text, instruction-shaped lines) from text/markdown output; response carries a `sanitize_report` when anything fired |
-| capture_xhr | string[] | | `null` | Return the page's script-initiated XHR/fetch response bodies as a first-class `xhr` array. Entries are URL substrings; `[]` = every XHR/fetch |
-
-#### `render_markdown` Parameters
-
-| Parameter | Type | Required | Default | Description |
-|------|------|------|------|------|
-| markdown | string | ✅ | — | Markdown source. Fenced code blocks tagged `archify` carry typed zero-coordinate diagram JSON (`sequence` / `workflow` / `architecture` / `dataflow` / `lifecycle`) rendered to inline SVG by the layout engine; Mermaid sources must be translated to archify JSON by the caller |
+| markdown | string | ✅ | — | Markdown source. Fenced `archify` blocks become inline-SVG diagrams |
 | theme | string | | `"light"` | Color scheme: `light` / `dark` — baked into the artifact at generation time |
-| preset | string | | `"classic"` | Visual preset: `classic` / `signal-flow` / `blueprint` / `editorial` |
-| quality | string | | `"standard"` | `showcase` runs the delivery-gate composition audit (route crossings, label clearance, rhythm) — it grades the artifact without changing a byte |
-| session_id | string | | `null` | Load the finished artifact into a live interactive session; the reply grades how it fits the viewport (`fits` / `tall` / `wide` / `oversized`) |
+| preset | string | | `"classic"` | Visual preset: `classic` / `signal-flow` / `blueprint` / `editorial`, orthogonal to `theme` (a bare `theme` alone is accepted too) |
+| quality | string | | `"standard"` | `showcase` runs the delivery-gate composition audit (route crossings, label clearance, rhythm) — it grades the receipt without changing an artifact byte |
+| motion | bool | | `false` | Bake the declarative entrance choreography into the artifact (CSS keyframes, zero scripts) |
+
+**Response**: `{ "html": "<!DOCTYPE html>…", "receipt": { … } }` — the receipt carries the artifact `sha256`, `bytes`, `diagrams` count, the `preset`/`quality`/`motion` settings, and the audit `checks`/`diagnostics` when `showcase` grading ran.
 
 The output is deterministic — same input, same bytes — and the receipt carries the artifact's `sha256` so that's verifiable. Guided-view tabs and the `window.agxViewer` runtime (`focus` / ego views / `route` / `reach`) ship inside the artifact. Diagram vocabulary adapted from archify (MIT, itself based on Cocoon-AI's architecture-diagram-generator).
 
-#### `session_create` Parameters
-
-| Parameter | Type | Required | Default | Description |
-|------|------|------|------|------|
-| url | string | | `null` | Initial URL |
-| use_proxy | bool | | `false` | Route through a proxy |
-| cookies | string[] \| object[] | | `[]` | Inject cookies (`"name=value",...` or CDP-style objects) so the session starts already logged in. Pair with `session_cookies` to reuse login state |
-| storage | object | | `null` | Web storage to inject after the initial navigation lands: `{"local_storage": {"k":"v"}, "session_storage": {"k":"v"}}`. An optional `"origin": "https://site"` key holds the injection until a navigation lands on that origin (a session created without a `url` sits on about:blank first). Round-trips with `session_storage` |
-| ttl_secs | u64 | | `480` | Idle time-to-live in seconds before the session is evicted (clamped 60..3600). Raise it for long workflows |
-| keepalive | bool | | `false` | Exempt the session from the idle reaper: it lives until `session_close` or server exit — a workflow interrupted by long non-browser steps keeps its login state |
-| persistent | bool | | `false` | Persist the login state (cookies, `localStorage`/`sessionStorage`, viewport, dialog policy) to the server-side store after every action. If the session idles out — or the server restarts — the same `session_id` revives logged-in on the next call. `session_close` drops the snapshot; idle expiry keeps it (Playwright storageState semantics, but keyed by the session id you already hold) |
-| width / height | u32 | | `null` | Initial viewport, pinned for the session's life (survives navigation) |
-| mobile | bool | | `false` | Mobile emulation for the initial viewport (`pointer: coarse`, `hover: none`, `maxTouchPoints = 5`) |
-
-#### Session Operation Parameters
-
-All session operations require the `session_id` parameter. `click`/`input` also need `index` (from `session_state`); `input` additionally needs `text`; `eval` needs `script` (optional `timeout_ms`, default 5000, clamped 100..120000 — a script that outlives the budget returns `EVAL_TIMEOUT` instead of a silent null); `navigate` needs `url`; `clone` needs nothing but the source id. The acting/rendering tools take optional extras: `click_xy` needs `x`/`y` (optional `button`, `click_count`); `drag` needs `from`/`to` (optional `steps`, `delay_ms`, `humanize` — trajectory is humanized by default; `humanize: false` gives exact linear interpolation); `viewport` accepts `width`/`height`/`mobile` (all optional — omit to keep current); `screenshot` accepts `width`/`height`/`full_page`/`selector`/`selector_all`; `wait` takes exactly one of `selector` / `predicate` plus `timeout_ms` (default 10000, max 120000); `export` accepts `format` (`bash` default / `jsonl` / `json` for a flow document); `flow_run` takes exactly one of `flow` / `name`, plus optional `vars` and `session_id`; `network` accepts `filter: "media"` or `include_bodies: true` (plus `url_contains`/`body_max_chars`, and `include_headers` for the outbound header sets); `dialog` accepts `action` (`list` default / `accept` / `dismiss`) plus optional `prompt_text`; `console` accepts `level`/`since_ts`/`url_contains`/`limit`; `storage` takes only `session_id`; `cookies` takes `session_id` plus optional `meta` (true = the metadata-only view, no values).
-
-### Client Configuration
-
-#### Claude Code
-
-**Hosted instance (one command)**:
-
 ```bash
-claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp
+curl -sS -X POST http://127.0.0.1:8089/render_markdown \
+  -H "Content-Type: application/json" \
+  -d '{"markdown":"# Hello\\n\\nworld","theme":"dark","quality":"showcase"}'
 ```
-
-Or configure the HTTP transport in a settings file:
-
-```json
-{
-  "mcpServers": {
-    "aginxbrowser": {
-      "type": "http",
-      "url": "https://browser.aginx.net/mcp"
-    }
-  }
-}
-```
-
-**Self-hosted (stdio)**: edit the project-level or global settings file:
-
-**Project-level** `.claude/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "aginxbrowser": {
-      "command": "/path/to/aginxbrowser",
-      "args": ["--mcp"]
-    }
-  }
-}
-```
-
-**Global** `~/.claude/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "aginxbrowser": {
-      "command": "/path/to/aginxbrowser",
-      "args": ["--mcp"]
-    }
-  }
-}
-```
-
-#### Claude Desktop
-
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
-
-```json
-{
-  "mcpServers": {
-    "aginxbrowser": {
-      "command": "/path/to/aginxbrowser",
-      "args": ["--mcp"]
-    }
-  }
-}
-```
-
-#### Cursor
-
-Edit `.cursor/mcp.json` in the project root:
-
-```json
-{
-  "mcpServers": {
-    "aginxbrowser": {
-      "command": "/path/to/aginxbrowser",
-      "args": ["--mcp"]
-    }
-  }
-}
-```
-
-#### Remote Server (via SSH)
-
-If AginxBrowser is deployed on a remote server, connect through an SSH tunnel:
-
-```json
-{
-  "mcpServers": {
-    "aginxbrowser": {
-      "command": "ssh",
-      "args": ["your-server", "/data/www/aginxbrowser/target/release/aginxbrowser", "--mcp"]
-    }
-  }
-}
-```
-
-> **Note**: SSH access requires passwordless login to the remote server (set up a public key with `ssh-copy-id`) and a pre-built AginxBrowser binary on that server.
 
 ---
 
@@ -1902,18 +1690,17 @@ If AginxBrowser is deployed on a remote server, connect through an SSH tunnel:
 
 | Variable | Default | Description |
 |------|------|------|
-| `AGINXBROWSER_TOKEN` | unset | Opt-in auth gate for the whole HTTP/WS surface (#162). Unset = no gate (loopback dev, `/mcp` dogfood, DSH, carrier all keep zero-config access). Set = every route except `/health` requires the token via `Authorization: Bearer <t>` or `?token=<t>` — the `/devtools/*` WebSocket upgrade and `/mcp` included. CDP discovery (`/json/version`, `/json/list`) embeds the token into `webSocketDebuggerUrl`, so Playwright `connectOverCDP` / Puppeteer `connect` work with zero client change; the human takeover view carries it too (`/live?session=…&token=…`). Value must be 16+ chars of `[A-Za-z0-9_-]` (URL-safe so the header and query forms are the same string) — an invalid shape refuses to boot rather than serve a half-open surface |
+| `AGINXBROWSER_TOKEN` | unset | Opt-in auth gate for the whole HTTP surface (#162). Unset = no gate (local dev keeps zero-config access). Set = every route except `/health` requires the token via `Authorization: Bearer <t>` or `?token=<t>`; the human takeover view carries it too (`/live?session=…&token=…`). Value must be 16+ chars of `[A-Za-z0-9_-]` (URL-safe so the header and query forms are the same string) — an invalid shape refuses to boot rather than serve a half-open surface |
 | `AGINXBROWSER_BIND` | `0.0.0.0:8089` | HTTP server listen address |
 | `AGINXBROWSER_STEALTH` | Enabled | `0` disables stealth (for diagnostics) |
 | `AGINXBROWSER_UA` | macOS Chrome145 persona | Spoofed User-Agent for browser traffic (a pinned persona from the fingerprint pool — see `/health`'s `ua` for what this instance presents; search-engine transports keep their own defaults). Startup logs a `fingerprint mismatch` warning when the UA's browser family/major version disagrees with the TLS fingerprint (default chrome145) — an intentionally coherent pair avoids a WAF tell |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language header |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL (seconds); `0` disables |
-| `AGINXBROWSER_MCP_ALLOWED_HOSTS` | unset | Extra `Host` values accepted by `/mcp` (comma-separated) — the DNS-rebinding guard defaults to loopback; add your LAN IP / Docker hostname when other machines call the instance |
 | `AGINXBROWSER_DOWNLOAD_DIR` | `.` | Directory where `/download` saves files |
 | `AGINXBROWSER_MAX_BODY_BYTES` | `67108864` (64 MiB) | Max request body for `/eval`-family POST endpoints (`/session/{id}/eval`, `/screenshot`, `/video`, `/pdf`). Oversized bodies get a structured `413 EVAL_BODY_TOO_LARGE` naming the limit |
 | `AGINXBROWSER_WORKFLOW_DIR` | `./workflow` | Where `flow_run(name=…)` looks for on-disk `<name>/flow.json` overrides — the sample flows are baked into the binary, a file here beats the same-named built-in and new names add to the list; drop a directory in to deploy, no rebuild. `POST /flow/install` lands installed flows here too |
 | `AGINXBROWSER_DUPHUB_URL` | `https://duphub.com` | Base remote for `POST /flow/install` — a private DupHub instance replaces this. Env-only, never a request parameter |
-| `AGINXBROWSER_PROXY` | None | Proxy address (used when `use_proxy:true`, and applied automatically for browser/session/CDP navigations to known-blocked domains) |
+| `AGINXBROWSER_PROXY` | None | Proxy address (used when `use_proxy:true`, and applied automatically for browser/session navigations to known-blocked domains) |
 | `CAPTCHA_SOLVER_API_KEY` | None | 2captcha API key; enables automatic CAPTCHA solving when set |
 | `CAPTCHA_SOLVER_SERVICE` | `2captcha` | CAPTCHA solving service |
 
