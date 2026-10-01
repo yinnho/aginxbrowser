@@ -336,7 +336,7 @@ fn first_pass_corpus_bytes_are_frozen() {
             let outcome = render(md);
             let mut h = Sha256::new();
             h.update(outcome.html.as_bytes());
-            (name, format!("{:x}", h.finalize()))
+            (name, super::hex(&h.finalize()))
         })
         .collect();
     assert_eq!(computed.len(), FROZEN.len());
@@ -378,7 +378,7 @@ fn dark_corpus_bytes_are_frozen_and_distinct() {
             );
             let mut h = Sha256::new();
             h.update(dark.as_bytes());
-            (names[i], format!("{:x}", h.finalize()))
+            (names[i], super::hex(&h.finalize()))
         })
         .collect();
     let drift: Vec<String> = computed
@@ -405,7 +405,7 @@ fn preset_corpus_bytes_are_frozen_and_distinct() {
             let rendered = render_with_theme(md, preset);
             let mut h = Sha256::new();
             h.update(rendered.html.as_bytes());
-            (key, rendered.html, format!("{:x}", h.finalize()))
+            (key, rendered.html, super::hex(&h.finalize()))
         })
         .collect();
     let drift: Vec<String> = computed
