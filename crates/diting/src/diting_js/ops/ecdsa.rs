@@ -56,7 +56,7 @@ macro_rules! ecdsa_key_flat {
             .as_bytes()
             .to_vec();
         let vk = sk.verifying_key();
-        let sec1 = vk.to_encoded_point(false).as_bytes().to_vec();
+        let sec1 = vk.to_sec1_point(false).as_bytes().to_vec();
         let spki = vk
             .to_public_key_der()
             .map_err(crypto_err)?
@@ -77,8 +77,8 @@ pub(crate) fn op_subtle_ecdsa_generate(
     ecdsa_curves!(curve, {
         use ec::ecdsa::SigningKey;
         use ec::elliptic_curve::pkcs8::{EncodePrivateKey, EncodePublicKey};
-        let mut rng = rand_core::OsRng;
-        let sk = SigningKey::random(&mut rng);
+        use ec::elliptic_curve::Generate;
+        let sk = SigningKey::generate();
         Ok(ecdsa_key_flat!(sk))
     })
 }
@@ -121,7 +121,7 @@ pub(crate) fn op_subtle_ecdsa_import_public(
         } else {
             VerifyingKey::from_sec1_bytes(material).map_err(crypto_err)?
         };
-        let sec1 = vk.to_encoded_point(false).as_bytes().to_vec();
+        let sec1 = vk.to_sec1_point(false).as_bytes().to_vec();
         let spki = vk
             .to_public_key_der()
             .map_err(crypto_err)?
