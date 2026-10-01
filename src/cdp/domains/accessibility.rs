@@ -297,7 +297,7 @@ fn parse_bool_attr(v: &str) -> Option<bool> {
 /// Fragments without an html wrapper fall back to the document's children.
 fn body_children(dom: &DomTree) -> Vec<NodeId> {
     let is_tag = |id: NodeId, tag: &str| {
-        dom.with_node(id, |n| n.as_element().map(|q| q.local.as_ref()) == Some(tag))
+        dom.with_node(id, |n| n.as_element().map(|q| q.local.as_str()) == Some(tag))
             .unwrap_or(false)
     };
     let doc = dom.document();
@@ -370,7 +370,7 @@ impl<'a> TreeBuilder<'a> {
             let for_id = self
                 .dom
                 .with_node(id, |n| {
-                    (n.as_element().map(|q| q.local.as_ref()) == Some("label"))
+                    (n.as_element().map(|q| q.local.as_str()) == Some("label"))
                         .then(|| n.get_attribute("for").map(str::to_string))
                         .flatten()
                 })
@@ -471,7 +471,7 @@ impl<'a> TreeBuilder<'a> {
         match &node.data {
             NodeData::Text { contents } => out.push_str(contents),
             NodeData::Element { name, .. } => {
-                if !SKIPPED_TAGS.contains(&name.local.as_ref()) {
+                if !SKIPPED_TAGS.contains(&name.local.as_str()) {
                     for child in self.dom.children(id) {
                         self.collect_text(child, out);
                     }
@@ -534,7 +534,7 @@ impl<'a> TreeBuilder<'a> {
                 let is_label = self
                     .dom
                     .with_node(ancestor, |n| {
-                        n.as_element().map(|q| q.local.as_ref()) == Some("label")
+                        n.as_element().map(|q| q.local.as_str()) == Some("label")
                     })
                     .unwrap_or(false);
                 if is_label {

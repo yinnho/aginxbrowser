@@ -90,12 +90,12 @@ impl DomTree {
                     buf.push('>');
                 }
                 NodeData::Element { name, attrs, template_contents, .. } => {
-                    let tag = name.local.as_ref();
+                    let tag = name.local.as_str();
                     // The void-element rule only exists in HTML. An XML
                     // <img size="123">text</img> parses with a text child, and
                     // serializing it as self-closing dropped both the text and
                     // the closing tag (report 2026-09-15).
-                    let html_ns = name.ns.as_ref() == "http://www.w3.org/1999/xhtml";
+                    let html_ns = name.ns.as_str() == "http://www.w3.org/1999/xhtml";
                     if include_self {
                         buf.push('<');
                         buf.push_str(tag);
@@ -105,7 +105,7 @@ impl DomTree {
                                 buf.push_str(prefix);
                                 buf.push(':');
                             }
-                            buf.push_str(attr.name.local.as_ref());
+                            buf.push_str(attr.name.local.as_str());
                             buf.push_str("=\"");
                             escape_attr(&attr.value, buf);
                             buf.push('"');
@@ -132,7 +132,7 @@ impl DomTree {
                         .and_then(|pid| {
                             self.with_node(pid, |p| {
                                 p.as_element()
-                                    .map(|name| is_raw_text_element(name.local.as_ref()))
+                                    .map(|name| is_raw_text_element(name.local.as_str()))
                                     .unwrap_or(false)
                             })
                         })

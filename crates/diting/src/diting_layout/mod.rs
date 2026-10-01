@@ -1093,7 +1093,7 @@ fn selected_option_label(tree: &DomTree, root: NodeId) -> Option<String> {
     let mut stack = children_rev(root);
     while let Some(nid) = stack.pop() {
         let is_option = tree
-            .with_node(nid, |n| n.as_element().map(|e| e.local.as_ref() == "option"))
+            .with_node(nid, |n| n.as_element().map(|e| e.local.as_str() == "option"))
             .flatten()
             .unwrap_or(false);
         if is_option {
@@ -2976,7 +2976,7 @@ fn subtree_paints_nothing(tree: &DomTree, id: NodeId) -> bool {
                 if contents.trim().is_empty() { Step::Skip } else { Step::Paints }
             }
             crate::diting_dom::NodeData::Element { name, .. } => {
-                if matches!(name.local.as_ref(), "link" | "meta" | "style" | "script" | "template") {
+                if matches!(name.local.as_str(), "link" | "meta" | "style" | "script" | "template") {
                     Step::Skip
                 } else {
                     Step::Descend
@@ -3992,7 +3992,7 @@ pub fn shadow_style_texts(tree: &crate::diting_dom::DomTree) -> Vec<String> {
             for desc in tree.descendants(root) {
                 let is_style = tree
                     .with_node(desc, |n| {
-                        n.as_element().is_some_and(|e| e.local.as_ref() == "style")
+                        n.as_element().is_some_and(|e| e.local.as_str() == "style")
                     })
                     .unwrap_or(false);
                 if is_style {
@@ -6822,7 +6822,7 @@ pub(crate) fn effective_viewport_overflow(
     let local = |id: NodeId| -> Option<String> {
         dom.get_node(id).and_then(|n| {
             n.as_element()
-                .map(|e| e.local.to_ascii_lowercase().as_ref().to_string())
+                .map(|e| e.local.to_ascii_lowercase().as_str().to_string())
         })
     };
     // The viewport-carrying element: a body query climbs to its parent (the
@@ -6870,7 +6870,7 @@ pub(crate) fn body_overflow_propagates(
         dom.get_node(*c)
             .and_then(|n| {
                 n.as_element()
-                    .map(|e| e.local.to_ascii_lowercase().as_ref() == "body")
+                    .map(|e| e.local.to_ascii_lowercase().as_str() == "body")
             })
             .unwrap_or(false)
     });
@@ -7493,7 +7493,7 @@ pub fn layout_collect_with_images(
                     let widget = tree
                         .with_node(*dom_id, |n| {
                             let is_input =
-                                n.as_element().map(|e| e.local.as_ref() == "input").unwrap_or(false);
+                                n.as_element().map(|e| e.local.as_str() == "input").unwrap_or(false);
                             if !is_input {
                                 return None;
                             }
@@ -7654,7 +7654,7 @@ pub fn layout_collect_with_images(
                 // must not clip either.
                 let tag = tree.get_node(*dom_id).and_then(|n| {
                     n.as_element()
-                        .map(|e| e.local.to_ascii_lowercase().as_ref().to_string())
+                        .map(|e| e.local.to_ascii_lowercase().as_str().to_string())
                 });
                 if tag.as_deref() == Some("html")
                     || (tag.as_deref() == Some("body")
@@ -8086,7 +8086,7 @@ pub fn layout_collect_with_images(
                     n.as_element()
                         .map(|e| {
                             matches!(
-                                e.local.to_ascii_lowercase().as_ref(),
+                                e.local.to_ascii_lowercase().as_str(),
                                 "thead" | "tbody" | "tfoot"
                             )
                         })
@@ -8146,7 +8146,7 @@ pub fn layout_collect_with_images(
                             n.as_element()
                                 .map(|e| {
                                     matches!(
-                                        e.local.to_ascii_lowercase().as_ref(),
+                                        e.local.to_ascii_lowercase().as_str(),
                                         "thead" | "tbody" | "tfoot"
                                     )
                                 })

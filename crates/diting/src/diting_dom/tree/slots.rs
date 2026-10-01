@@ -14,8 +14,8 @@ impl DomTree {
     pub fn is_html_slot_element(&self, node: NodeId) -> bool {
         self.get_node(node).is_some_and(|node| {
             node.as_element().is_some_and(|name| {
-                name.ns.as_ref() == "http://www.w3.org/1999/xhtml"
-                    && name.local.as_ref() == "slot"
+                name.ns.as_str() == "http://www.w3.org/1999/xhtml"
+                    && name.local.as_str() == "slot"
             })
         })
     }

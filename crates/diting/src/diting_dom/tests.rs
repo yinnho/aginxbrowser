@@ -626,7 +626,7 @@ mod selector_tests {
         let result = tree.query_selector("h1").unwrap();
         assert!(result.is_some());
         let node = tree.get_node(result.unwrap()).unwrap();
-        assert_eq!(node.as_element().unwrap().local.as_ref(), "h1");
+        assert_eq!(node.as_element().unwrap().local.as_str(), "h1");
     }
 
     #[test]
@@ -660,7 +660,7 @@ mod selector_tests {
         let result = tree.query_selector("#outer span").unwrap();
         assert!(result.is_some());
         let node = tree.get_node(result.unwrap()).unwrap();
-        assert_eq!(node.as_element().unwrap().local.as_ref(), "span");
+        assert_eq!(node.as_element().unwrap().local.as_str(), "span");
     }
 
     #[test]
@@ -733,7 +733,7 @@ mod selector_tests {
         assert_eq!(hits.len(), 1, ":root matches exactly the document element");
         let html = hits[0];
         let node = tree.get_node(html).unwrap();
-        assert_eq!(node.as_element().map(|q| q.local.as_ref()), Some("html"));
+        assert_eq!(node.as_element().map(|q| q.local.as_str()), Some("html"));
         assert!(tree.query_selector_all("div:root").unwrap().is_empty());
     }
 

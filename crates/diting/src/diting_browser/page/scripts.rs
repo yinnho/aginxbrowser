@@ -56,7 +56,7 @@ impl Page {
                         for nid in dom.descendants(root) {
                             let Some(node) = dom.get_node(nid) else { continue };
                             let Some(name) = node.as_element() else { continue };
-                            if name.local.as_ref() == "base" && !found_base {
+                            if name.local.as_str() == "base" && !found_base {
                                 if let Some(href) = node.get_attribute("href") {
                                     found_base = true;
                                     if let Some(resolved) = active_base
@@ -66,7 +66,7 @@ impl Page {
                                         active_base = Some(resolved);
                                     }
                                 }
-                            } else if name.local.as_ref() == "script" {
+                            } else if name.local.as_str() == "script" {
                                 bases_at_script.insert(
                                     nid.raw(),
                                     active_base
