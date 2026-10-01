@@ -288,6 +288,10 @@ pub fn render_html_to_png_diting(
     full_page: bool,
     selector: Option<&str>,
     selector_all: bool,
+    // Canvas snapshots in document order (#210): the re-parsed tree has no
+    // realm to read pixels from, so its <canvas> elements are paired with
+    // these positionally.
+    canvases: &[(u32, u32, std::sync::Arc<Vec<u8>>)],
     resources: Option<&PrefetchedResources>,
 ) -> Result<RenderedScreenshot> {
     use diting::diting_layout::{paint, Rect as DitingRect};
@@ -341,7 +345,33 @@ pub fn render_html_to_png_diting(
         })
         .unwrap_or_default();
     let net_ref = (!network_bytes.is_empty()).then_some(&network_bytes);
-    let (rects, items) = diting::diting_layout::layout_dom_with_paint_and_images(
+    // Canvas bitmaps (#210) keyed onto the fresh tree's canvas nodes by
+    // document order — the live realm's ordered snapshots line up with the
+    // re-parsed canvases because outerHTML preserves document order.
+    let canvas_images: HashMap<diting::diting_dom::NodeId, diting::diting_layout::DecodedImage> =
+        if canvases.is_empty() {
+            HashMap::new()
+        } else {
+            tree.query_selector_all("canvas")
+                .unwrap_or_default()
+                .into_iter()
+                .zip(canvases.iter())
+                .map(|(nid, (w, h, rgba))| {
+                    (
+                        nid,
+                        diting::diting_layout::DecodedImage {
+                            width: *w,
+                            height: *h,
+                            rgba: std::sync::Arc::clone(rgba),
+                        },
+                    )
+                })
+                .collect()
+        };
+    let canvas_ref = (!canvas_images.is_empty()).then_some(&canvas_images);
+    // Same pipeline as `layout_dom_with_paint_and_images`, with the canvas
+    // bitmaps layered over the fetched `<img>` bytes.
+    let solved = diting::diting_layout::layout_solve(
         &tree,
         &styles,
         &fonts,
@@ -350,6 +380,15 @@ pub fn render_html_to_png_diting(
         net_ref,
         Some(base_url),
     );
+    let (rects, items, _order, _local_geom, _sticky, _scroller) =
+        diting::diting_layout::layout_collect_with_images(
+            &tree,
+            &styles,
+            &fonts,
+            &solved,
+            width as f32,
+            canvas_ref,
+        );
 
     // Content height for full_page: the deepest laid-out bottom edge.
     let content_h = rects.values().map(|r| r.y + r.height).fold(0.0_f32, f32::max);
@@ -655,7 +694,7 @@ mod tests {
             <p>谛听渲染第一图</p>
         </body></html>"##;
 
-        let full = render_html_to_png_diting(html, "https://example.com/", 300, 200, 1.0, true, None, false, None)
+        let full = render_html_to_png_diting(html, "https://example.com/", 300, 200, 1.0, true, None, false, &[], None)
             .expect("diting full render");
         assert_eq!(full.pixel_width, 300, "viewport width");
         // banner 60 + target 50 + one 16px line ≈ 78-80px of content: full_page
@@ -672,7 +711,7 @@ mod tests {
 
         // Selector crop: a 120x50 window whose pixels are all red (the
         // #target box), proving the crop is the element's own canvas region.
-        let cropped = render_html_to_png_diting(html, "https://example.com/", 300, 200, 1.0, false, Some("#target"), false, None)
+        let cropped = render_html_to_png_diting(html, "https://example.com/", 300, 200, 1.0, false, Some("#target"), false, &[], None)
             .expect("diting crop");
         assert_eq!((cropped.pixel_width, cropped.pixel_height), (120, 50), "crop = element box");
         assert_eq!(cropped.rects.len(), 1);
@@ -680,7 +719,7 @@ mod tests {
         assert_eq!(all_red, 120 * 50, "every cropped pixel is the target's red");
 
         // selector_all: no crop, rects for every match.
-        let rects = render_html_to_png_diting(html, "https://example.com/", 300, 200, 1.0, false, Some("div"), true, None)
+        let rects = render_html_to_png_diting(html, "https://example.com/", 300, 200, 1.0, false, Some("div"), true, &[], None)
             .expect("diting selector_all");
         assert_eq!(rects.pixel_width, 300, "selector_all does not crop");
         assert_eq!(rects.rects.len(), 2, "both divs match in document order");
@@ -1307,7 +1346,7 @@ mod opacity_pipeline_tests {
         </style></head><body>
             <div id="rot"><span id="hl">MMMMMMMMMM</span></div>
         </body></html>"#;
-        let shot = render_html_to_png_diting(html, "http://probe.local/", 220, 180, 1.0, false, None, false, None)
+        let shot = render_html_to_png_diting(html, "http://probe.local/", 220, 180, 1.0, false, None, false, &[], None)
             .expect("render");
         // rotate(90°) about the div center (100,20) is x' = 120 − y,
         // y' = x − 80: the first line's horizontal band (x ∈ [0,165),
@@ -1352,7 +1391,7 @@ mod opacity_pipeline_tests {
             .h { color: #FFFFFF; font-size: 28px; opacity: 0; }
             .half { color: #FFFFFF; font-size: 28px; opacity: 0.5; }
         </style></head><body><div class="h">HIDDEN</div><div class="half">HALF</div></body></html>"#;
-        let shot = render_html_to_png_diting(html, "http://probe.local/", 300, 200, 1.0, false, None, false, None)
+        let shot = render_html_to_png_diting(html, "http://probe.local/", 300, 200, 1.0, false, None, false, &[], None)
             .expect("render");
         // Nothing fully bright: the opacity-0 line leaves zero ink and the
         // half-opacity line is mid-gray at worst.
@@ -1380,7 +1419,7 @@ mod opacity_pipeline_tests {
             let html = format!(
                 r#"<html><head><style>body {{ margin: 0; }} input {{ width: 120px; }}</style></head><body><input type="range" {attrs}></body></html>"#
             );
-            let shot = render_html_to_png_diting(&html, "http://probe.local/", 160, 60, 1.0, false, None, false, None)
+            let shot = render_html_to_png_diting(&html, "http://probe.local/", 160, 60, 1.0, false, None, false, &[], None)
                 .expect("render");
             let decoder = png::Decoder::new(std::io::Cursor::new(&shot.png));
             let mut reader = decoder.read_info().expect("png read_info");

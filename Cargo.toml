@@ -1,6 +1,6 @@
 [package]
 name = "aginxbrowser"
-version = "0.5.24"
+version = "0.5.25"
 edition = "2021"
 authors = ["OpenCarrier Team"]
 description = "Pure server-side browser engine with built-in V8. HTTP API for scraping, search, and interactive browsing. No Chromium required."
@@ -64,7 +64,7 @@ async-trait = "0.1"
 # `ws` enables axum's WebSocket extractor — the CDP bridge endpoint
 # (diting_cdp) upgrades /devtools/* requests to raw WebSocket frames.
 axum = { version = "0.7", features = ["ws"] }
-tower-http = { version = "0.5", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 uuid = { version = "1", features = ["v4"] }
 

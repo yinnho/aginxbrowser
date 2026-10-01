@@ -624,6 +624,100 @@
         );
     }
 
+    /// #204: click-by-index must run the mousedown default action for
+    /// text-entry controls (focus + caret) like the coordinate and touch
+    /// paths do — el.click() alone never focused anything, so focus-gated
+    /// pages (expand-on-focus search boxes, blur validation) diverged by
+    /// which click tool the agent used. Buttons stay unfocused: the
+    /// text-entry-only scoping documented on __diting_focusTextEntry.
+    #[tokio::test]
+    async fn click_by_index_focuses_text_entry_controls() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /p",
+            "<html><body><input id='q' value='abc'>\
+             <div id='log'></div><button id='go'>Go</button>\
+             <script>var L=document.getElementById('log');\
+             document.getElementById('q').addEventListener('focus',\
+             function(){L.textContent+='F,'});</script></body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/p")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        let state = mgr
+            .send(&sid, |reply| SessionCommand::State { reply })
+            .await
+            .unwrap();
+        let q = state_index_of(&state, "q");
+        let go = state_index_of(&state, "go");
+
+        // Scope check first, while focus is untouched: a button click runs
+        // no focusing steps.
+        let resp = mgr
+            .send(&sid, |reply| SessionCommand::Click { index: go, reply })
+            .await
+            .unwrap();
+        assert!(resp.clicked);
+        let after = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "document.activeElement.id || document.activeElement.tagName"
+                    .to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            after.as_str().unwrap_or(""),
+            "BODY",
+            "button clicks must not move focus (no focus-ring heuristic)"
+        );
+
+        let resp = mgr
+            .send(&sid, |reply| SessionCommand::Click { index: q, reply })
+            .await
+            .unwrap();
+        assert!(resp.clicked, "input click must dispatch");
+        let verdict = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "JSON.stringify({active: document.activeElement.id,\
+                         focusFired: document.getElementById('log').textContent})"
+                    .to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(verdict.as_str().unwrap_or("")).unwrap_or_default();
+        assert_eq!(
+            v["active"].as_str().unwrap_or(""),
+            "q",
+            "click-by-index must move focus to the text entry control"
+        );
+        assert_eq!(
+            v["focusFired"].as_str().unwrap_or(""),
+            "F,",
+            "the focus event must have fired"
+        );
+
+        assert!(
+            mgr.close_and_wait(&sid).await,
+            "session thread must ack close"
+        );
+    }
+
     /// Input half of the contract: readonly and disabled controls answer
     /// `filled:false` with a named reason. Hidden inputs are deliberately
     /// NOT refused — a display:none input paired with a custom widget is a
@@ -1508,6 +1602,92 @@
             "non-trivial image, got {} bytes",
             png.len()
         );
+
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    /// #210: a canvas's 2D buffer lives in the JS realm, so both screenshot
+    /// paths rendered the element box empty — a merchant QR went gray while
+    /// `toDataURL` stayed correct. The canvas bitmaps now ride into the
+    /// layout (live band) and across the re-parse by document order
+    /// (selector/full-page), so a checkerboard canvas must come back with
+    /// both ink colors on either path.
+    #[cfg(feature = "screenshot")]
+    #[tokio::test]
+    async fn screenshot_paints_canvas_pixels_on_both_paths() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /canvas",
+            "<html><body style='margin:0'>\
+             <canvas id='probe' width='120' height='120' style='width:120px;height:120px'></canvas>\
+             <script>\
+             (function(){var x=document.getElementById('probe').getContext('2d');\
+             x.fillStyle='#ffffff';x.fillRect(0,0,120,120);\
+             x.fillStyle='#000000';\
+             for(var i=0;i<4;i++)for(var j=0;j<4;j++)\
+             if((i+j)%2===0)x.fillRect(i*30,j*30,30,30);})();\
+             </script></body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/canvas")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        // Both paths: the no-request default (live band) and the selector
+        // request (re-parsed tree, pixels paired by document order).
+        for (label, selector) in [
+            ("live band", None::<String>),
+            ("selector", Some("#probe".to_string())),
+        ] {
+            let shot = mgr
+                .send(&sid, |reply| SessionCommand::Screenshot {
+                    width: selector.as_ref().map(|_| 200),
+                    height: selector.as_ref().map(|_| 200),
+                    full_page: false,
+                    selector: selector.clone(),
+                    selector_all: false,
+                    dpr: None,
+                    reply,
+                })
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&shot).expect("screenshot JSON");
+            use base64::{engine::general_purpose::STANDARD, Engine as _};
+            let png = STANDARD
+                .decode(v["image_base64"].as_str().expect("base64 body"))
+                .expect("decodable base64");
+            let decoder = png::Decoder::new(std::io::Cursor::new(&png));
+            let mut reader = decoder.read_info().expect("png read_info");
+            let mut buf = vec![0; reader.output_buffer_size().expect("png buffer size")];
+            let info = reader.next_frame(&mut buf).expect("png decode");
+            let px = &buf[..info.buffer_size()];
+            let mut dark = 0usize;
+            let mut light = 0usize;
+            for y in 0..info.height {
+                for x in 0..info.width {
+                    let i = ((y * info.width + x) * 4) as usize;
+                    let lum = px[i] as u32 + px[i + 1] as u32 + px[i + 2] as u32;
+                    if lum < 120 {
+                        dark += 1;
+                    } else if lum > 600 {
+                        light += 1;
+                    }
+                }
+            }
+            assert!(
+                dark > 100 && light > 100,
+                "{label}: checkerboard must paint (dark={dark}, light={light})"
+            );
+        }
 
         assert!(mgr.close_and_wait(&sid).await);
     }

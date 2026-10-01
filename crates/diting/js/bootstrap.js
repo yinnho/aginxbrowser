@@ -7602,10 +7602,25 @@ globalThis.Navigator = class Navigator {
 for (const _nk of Object.getOwnPropertyNames(__navStore)) {
   const _d = Object.getOwnPropertyDescriptor(__navStore, _nk);
   const _k = _nk;
-  Object.defineProperty(globalThis.Navigator.prototype, _k, {
-    configurable: true, enumerable: true,
-    get: _d.get ? function () { return _d.get.call(__navStore); } : function () { return __navStore[_k]; },
-  });
+  if (_d.get || typeof _d.value !== 'function') {
+    // Attributes stay getter-only prototype accessors — page writes no-op,
+    // exactly like Chrome's readonly navigator attributes (#117).
+    Object.defineProperty(globalThis.Navigator.prototype, _k, {
+      configurable: true, enumerable: true,
+      get: _d.get ? function () { return _d.get.call(__navStore); } : function () { return __navStore[_k]; },
+    });
+  } else {
+    // WebIDL operations are writable data properties on the prototype.
+    // #203: instrumentation SDKs (抖店 secsdk's createAspectByPath) reassign
+    // navigator.sendBeacon to wrap it; a getter-only accessor turned that
+    // strict-mode assignment into a TypeError. Assignment shadows via an
+    // own property on `navigator` — the store and __diting_navSet stay
+    // untouched, like Chrome.
+    Object.defineProperty(globalThis.Navigator.prototype, _k, {
+      configurable: true, enumerable: true, writable: true,
+      value: _d.value,
+    });
+  }
 }
 __def(globalThis.Navigator.prototype, Symbol.toStringTag, 'Navigator');
 __def(globalThis, Symbol.toStringTag, 'Window');
@@ -9085,6 +9100,7 @@ globalThis.ResizeObserver = class ResizeObserver {
   }
   unobserve(el) { this._targets.delete(el); }
   disconnect() { this._connected = false; this._targets.clear(); }
+  takeRecords() { return []; }
 };
 
 if (typeof TextEncoder === 'undefined') {
@@ -10320,6 +10336,7 @@ globalThis.PerformanceObserver = class {
   constructor(){}
   observe(){}
   disconnect(){}
+  takeRecords() { return []; }
   // Honest set: exactly the entry types the Performance timeline records
   // (mark/measure via user timing, navigation, paint). Web-vitals wrappers
   // gate their LCP/CLS/longtask setup on this list — advertising types we
@@ -11944,12 +11961,22 @@ _markNative(FontFace);
 
 Object.defineProperty(Document.prototype, 'fonts', {
   get() {
+    // Identity: Chrome hands back the same FontFaceSet object every access
+    // (`document.fonts === document.fonts`), so listeners/ready registered
+    // through one access are visible on the next. The getter used to build a
+    // fresh array per read (#208 追溯).
+    if (this.__diting_fonts) return this.__diting_fonts;
     const _set = _commonFonts.map((name, i) => ({
       family: name, style: 'normal', weight: '400', stretch: 'normal',
       status: 'loaded', loaded: Promise.resolve(this),
       [Symbol.toStringTag]: 'FontFace',
     }));
-    _set.forEach = (fn) => { _set.forEach(fn); };
+    // Set semantics (value, value, set) with an index loop — the naive
+    // `_set.forEach = (fn) => _set.forEach(fn)` shadowed Array.prototype and
+    // recursed into itself (RangeError on any call; #208).
+    _set.forEach = (fn, thisArg) => {
+      for (let i = 0; i < _set.length; i++) fn.call(thisArg, _set[i], _set[i], _set);
+    };
     _set.has = (f) => typeof f === 'string'
       ? _commonFonts.some(n => n.toLowerCase() === f.toLowerCase())
       : _set.some(ff => ff.family === f?.family);
@@ -11966,6 +11993,7 @@ Object.defineProperty(Document.prototype, 'fonts', {
     _set.addEventListener = () => {};
     _set.removeEventListener = () => {};
     _set.dispatchEvent = () => true;
+    Object.defineProperty(this, '__diting_fonts', { value: _set, configurable: true });
     return _set;
   },
   configurable: true,
@@ -14349,7 +14377,32 @@ HTMLCanvasElement.prototype.toBlob = function(cb, type, q) {
     });
   }
 })();
-// Chrome desktop media support matrix — WorkOS Radar's mediaMime collector
+// Canvas compositing (#210): the 2D buffer is a JS-side array, so the page
+// painter has no way to see it — screenshots rendered canvas boxes empty
+// (the merchant QR went gray while toDataURL stayed correct). The host
+// evaluates this before a render: every drawn canvas snapshots its buffer
+// into the engine's bitmap table (op_canvas_store), which marks a
+// paint-only invalidation so the frame actually repaints. Absent in
+// builds without the screenshot feature — the guard keeps this a no-op.
+globalThis.__diting_flush_canvas_bitmaps = function __diting_flush_canvas_bitmaps() {
+  try {
+    if (!_OPS.op_canvas_store) return 0;
+    const els = document.querySelectorAll('canvas');
+    let n = 0;
+    for (let i = 0; i < els.length; i++) {
+      const el = els[i];
+      const ctx = el._ctx;
+      if (!ctx || !ctx._buf || el._nid === undefined) continue;
+      try {
+        // Uint8ClampedArray is rejected by the #[buffer] arg — re-view the
+        // same memory as Uint8Array, zero-copy (same reason as toDataURL).
+        const px = new Uint8Array(ctx._buf.buffer, ctx._buf.byteOffset, ctx._buf.byteLength);
+        if (_OPS.op_canvas_store(el._nid, ctx._w, ctx._h, px)) n++;
+      } catch (_e) {}
+    }
+    return n;
+  } catch (_e) { return 0; }
+};
 // probes audio/video elements with canPlayType over a fixed codec list and
 // hashes the non-empty answers (real Chrome: 8 of 9).
 Element.prototype.canPlayType = function(type) {
@@ -15198,12 +15251,28 @@ function _idbErr(name, msg) {
   try { return new DOMException(msg || name, name); } catch (e) { const err = new Error(msg || name); err.name = name; return err; }
 }
 function _idbStrList(namesView) {
-  return {
+  const base = {
     contains(n) { return namesView().indexOf(String(n)) >= 0; },
     get length() { return namesView().length; },
     item(i) { return namesView()[i] ?? null; },
     [Symbol.iterator]() { return namesView()[Symbol.iterator](); },
   };
+  Object.defineProperty(base, Symbol.toStringTag, { value: 'DOMStringList' });
+  // Chrome's DOMStringList exposes names through an indexed getter. #203:
+  // idb's transaction proxy reads objectStoreNames[0]/[1] to auto-pick the
+  // lone store, and a list without index access resolved undefined into
+  // "NotFoundError: undefined is not in this transaction's scope". The
+  // proxy keeps indices live against the closure view.
+  return new Proxy(base, {
+    get(t, k, r) {
+      if (typeof k === 'string' && k !== '' && /^\d+$/.test(k)) {
+        const names = namesView();
+        const i = Number(k);
+        return i < names.length ? names[i] : undefined;
+      }
+      return Reflect.get(t, k, r);
+    },
+  });
 }
 // Key ordering across types (number < date < string), per the IDB spec's
 // comparability ladder. Arrays/binary keep insertion order — good enough for
@@ -15230,6 +15299,7 @@ function _idbNewRequest(source, tx) {
     addEventListener(type, fn) { req['on' + type] = fn; },
     removeEventListener(type, fn) { if (req['on' + type] === fn) req['on' + type] = null; },
   };
+  Object.setPrototypeOf(req, IDBRequest.prototype); // #209: instanceof IDBRequest
   return req;
 }
 // Requests settle asynchronously; after `onsuccess`/`onerror` dispatch (so a
@@ -15403,7 +15473,7 @@ function _idbStore(name, keyPath, autoIncrement) {
           if (tx) { tx._live.delete(req); _idbMaybeComplete(tx); }
         } else {
           const k = keys[idx];
-          req.result = {
+          req.result = Object.setPrototypeOf({ // #209
             key: k,
             primaryKey: k,
             direction: direction || 'next',
@@ -15413,7 +15483,7 @@ function _idbStore(name, keyPath, autoIncrement) {
             advance(n) { idx += n; fire(); },
             update(v) { return _idbReqTx(tx, () => { st._data.set(k, v); return k; }, st); },
             delete() { return _idbReqTx(tx, () => { st._data.delete(k); return undefined; }, st); },
-          };
+          }, IDBCursorWithValue.prototype);
         }
         if (typeof req.onsuccess === 'function') { try { req.onsuccess({ target: req, type: 'success' }); } catch (e) {} }
       });
@@ -15430,7 +15500,7 @@ function _idbStore(name, keyPath, autoIncrement) {
   st.createIndex = function (idxName, idxKeyPath, opts) {
     const n = String(idxName);
     if (st._indexes.has(n)) throw _idbErr('ConstraintError', 'index ' + n + ' already exists');
-    const idx = { name: n, keyPath: idxKeyPath ?? n, unique: !!(opts && opts.unique), multiEntry: !!(opts && opts.multiEntry) };
+    const idx = Object.setPrototypeOf({ name: n, keyPath: idxKeyPath ?? n, unique: !!(opts && opts.unique), multiEntry: !!(opts && opts.multiEntry) }, IDBIndex.prototype); // #209
     const scan = () => {
       const pairs = [];
       st._data.forEach((v, k) => pairs.push([_idbExtractKeyPath(idx.keyPath, v), v, k]));
@@ -15452,6 +15522,7 @@ function _idbStore(name, keyPath, autoIncrement) {
     return idx;
   };
   st.deleteIndex = function (idxName) { st._indexes.delete(String(idxName)); };
+  Object.setPrototypeOf(st, IDBObjectStore.prototype); // #209
   return st;
 }
 const _IDB_STORE_FACADE_METHODS = ['add', 'put', 'get', 'getAll', 'getAllKeys', 'getKey', 'delete', 'clear', 'count', 'openCursor', 'openKeyCursor', 'index', 'createIndex', 'deleteIndex'];
@@ -15462,6 +15533,7 @@ function _idbStoreFacade(tx, st) {
   const f = { name: st.name, keyPath: st.keyPath, autoIncrement: st.autoIncrement, indexNames: st.indexNames, transaction: tx };
   const bound = { __tx: tx };
   for (const m of _IDB_STORE_FACADE_METHODS) f[m] = st[m].bind(bound);
+  Object.setPrototypeOf(f, IDBObjectStore.prototype); // #209
   return f;
 }
 function _idbTransaction(rec, db, storeNames, mode) {
@@ -15508,6 +15580,7 @@ function _idbTransaction(rec, db, storeNames, mode) {
     removeEventListener(type, fn) { if (tx['on' + type] === fn) tx['on' + type] = null; },
   };
   _idbMaybeComplete(tx);
+  Object.setPrototypeOf(tx, IDBTransaction.prototype); // #209
   return tx;
 }
 function _idbVersionTx(rec, db) {
@@ -15556,14 +15629,88 @@ function _idbDatabase(rec) {
     addEventListener(type, fn) { db['on' + type] = fn; },
     removeEventListener(type, fn) { if (db['on' + type] === fn) db['on' + type] = null; },
   };
+  Object.setPrototypeOf(db, IDBDatabase.prototype); // #209
   return db;
 }
+// Standard IDB interface names (#209): real pages reference these directly
+// — `x instanceof IDBRequest`, bare identifiers in module scope (抖店's
+// "IDBRequest is not defined" loop). The engine's factories hand back plain
+// literals, so each interface is an illegal-constructor function whose
+// prototype those literals inherit: instanceof and Symbol.toStringTag hold,
+// and `new IDBRequest()` throws the same TypeError Chrome does. Only
+// IDBKeyRange and indexedDB are callable instances/namespaces, per spec.
+function _idbIface(name, parent) {
+  const f = function () { throw new TypeError('Illegal constructor'); };
+  Object.defineProperty(f, 'name', { value: name, configurable: true });
+  if (parent) Object.setPrototypeOf(f.prototype, parent.prototype);
+  Object.defineProperty(f.prototype, Symbol.toStringTag, { value: name, configurable: true });
+  _markNative(f);
+  return f;
+}
+const IDBRequest = _idbIface('IDBRequest');
+const IDBOpenDBRequest = _idbIface('IDBOpenDBRequest', IDBRequest);
+const IDBDatabase = _idbIface('IDBDatabase');
+const IDBTransaction = _idbIface('IDBTransaction');
+const IDBObjectStore = _idbIface('IDBObjectStore');
+const IDBIndex = _idbIface('IDBIndex');
+const IDBCursor = _idbIface('IDBCursor');
+const IDBCursorWithValue = _idbIface('IDBCursorWithValue', IDBCursor);
+const IDBKeyRange = _idbIface('IDBKeyRange');
+const IDBFactory = _idbIface('IDBFactory');
+globalThis.IDBRequest = IDBRequest;
+globalThis.IDBOpenDBRequest = IDBOpenDBRequest;
+globalThis.IDBDatabase = IDBDatabase;
+globalThis.IDBTransaction = IDBTransaction;
+globalThis.IDBObjectStore = IDBObjectStore;
+globalThis.IDBIndex = IDBIndex;
+globalThis.IDBCursor = IDBCursor;
+globalThis.IDBCursorWithValue = IDBCursorWithValue;
+globalThis.IDBFactory = IDBFactory;
+// #203: idb (jakearchibald/idb v7, bundled by 抖店's @ecom/browser-tcc)
+// synthesizes DB-level conveniences — `(await openDB(...)).put(store, v, k)`
+// — only when the operation names exist on the interface *prototypes*.
+// #209 gave the interfaces constructors and the instances prototypes, but
+// the methods stayed own props of the instance literals, so every
+// `m in Interface.prototype` gate failed and `.put` resolved undefined.
+// Prototype members forward to the receiver's own prop; calling one on a
+// non-instance throws Illegal invocation, as Chrome does.
+function _idbProtoOps(iface, names) {
+  for (const m of names) {
+    if (m in iface.prototype) continue;
+    Object.defineProperty(iface.prototype, m, {
+      writable: true, enumerable: true, configurable: true,
+      value: function (...a) {
+        if (!Object.prototype.hasOwnProperty.call(this, m)) {
+          throw new TypeError('Illegal invocation');
+        }
+        return this[m].apply(this, a);
+      },
+    });
+  }
+}
+_idbProtoOps(IDBFactory, ['open', 'deleteDatabase', 'databases', 'cmp']);
+_idbProtoOps(IDBDatabase, ['createObjectStore', 'deleteObjectStore', 'transaction', 'close', 'addEventListener', 'removeEventListener']);
+_idbProtoOps(IDBTransaction, ['abort', 'commit', 'objectStore', 'addEventListener', 'removeEventListener']);
+_idbProtoOps(IDBObjectStore, ['put', 'add', 'get', 'getKey', 'getAll', 'getAllKeys', 'count', 'delete', 'clear', 'openCursor', 'openKeyCursor', 'index', 'createIndex', 'deleteIndex']);
+_idbProtoOps(IDBIndex, ['get', 'getKey', 'getAll', 'getAllKeys', 'count', 'openCursor', 'openKeyCursor']);
+_idbProtoOps(IDBCursor, ['advance', 'continue', 'continuePrimaryKey', 'update', 'delete']);
+// Range instances inherit IDBKeyRange.prototype while keeping the existing
+// per-factory closed/open semantics verbatim.
+function _idbRangeShape(r) { Object.setPrototypeOf(r, IDBKeyRange.prototype); return r; }
+IDBKeyRange.only = (v) => _idbRangeShape({ lower: v, upper: v, lowerOpen: false, upperOpen: false, includes(x) { return x === v; } });
+IDBKeyRange.lowerBound = (v, open) => _idbRangeShape({ lower: v, upper: null, lowerOpen: !!open, upperOpen: false, includes(x) { return open ? x > v : x >= v; } });
+IDBKeyRange.upperBound = (v, open) => _idbRangeShape({ lower: null, upper: v, lowerOpen: false, upperOpen: !!open, includes(x) { return open ? x < v : x <= v; } });
+IDBKeyRange.bound = (l, u, lo, uo) => _idbRangeShape({ lower: l, upper: u, lowerOpen: !!lo, upperOpen: !!uo, includes(x) { return (lo ? x > l : x >= l) && (uo ? x < u : x <= u); } });
+_markNative(IDBKeyRange.only); _markNative(IDBKeyRange.lowerBound);
+_markNative(IDBKeyRange.upperBound); _markNative(IDBKeyRange.bound);
+globalThis.IDBKeyRange = IDBKeyRange;
 globalThis.indexedDB = {
   open(name, version) {
     if (version !== undefined && version !== null && (!Number.isInteger(version) || version < 1)) {
       throw new TypeError('The version provided (' + version + ') is not a positive integer');
     }
     const req = _idbNewRequest(null, null);
+    Object.setPrototypeOf(req, IDBOpenDBRequest.prototype); // #209: open()/deleteDatabase() hand back open requests
     Promise.resolve().then(() => {
       const rec = _idbRecord(String(name));
       rec.closed = false;
@@ -15615,6 +15762,7 @@ globalThis.indexedDB = {
   },
   deleteDatabase(name) {
     const req = _idbNewRequest(null, null);
+    Object.setPrototypeOf(req, IDBOpenDBRequest.prototype); // #209: open()/deleteDatabase() hand back open requests
     Promise.resolve().then(() => {
       const nm = String(name);
       const rec = _idbRegistryMap.get(nm);
@@ -15646,12 +15794,7 @@ globalThis.indexedDB = {
   },
   cmp(a, b) { return _idbCmp(a, b); },
 };
-globalThis.IDBKeyRange = {
-  only(v) { return { lower: v, upper: v, lowerOpen: false, upperOpen: false, includes(x) { return x === v; } }; },
-  lowerBound(v, open) { return { lower: v, upper: null, lowerOpen: !!open, upperOpen: false, includes(x) { return open ? x > v : x >= v; } }; },
-  upperBound(v, open) { return { lower: null, upper: v, lowerOpen: false, upperOpen: !!open, includes(x) { return open ? x < v : x <= v; } }; },
-  bound(l, u, lo, uo) { return { lower: l, upper: u, lowerOpen: !!lo, upperOpen: !!uo, includes(x) { return (lo ? x > l : x >= l) && (uo ? x < u : x <= u); } }; },
-};
+Object.setPrototypeOf(globalThis.indexedDB, IDBFactory.prototype);
 
 globalThis.caches = {
   open() { return Promise.resolve({ match(){return Promise.resolve(undefined);}, put(){return Promise.resolve();}, delete(){return Promise.resolve(false);}, keys(){return Promise.resolve([]);} }); },
@@ -16145,6 +16288,11 @@ function bootWorker(worker) {
           WebSocket: globalThis.WebSocket, Event: globalThis.Event,
           MessageEvent: globalThis.MessageEvent, ErrorEvent: globalThis.ErrorEvent,
           indexedDB: globalThis.indexedDB,
+          IDBFactory: globalThis.IDBFactory, IDBRequest: globalThis.IDBRequest,
+          IDBOpenDBRequest: globalThis.IDBOpenDBRequest, IDBDatabase: globalThis.IDBDatabase,
+          IDBTransaction: globalThis.IDBTransaction, IDBObjectStore: globalThis.IDBObjectStore,
+          IDBIndex: globalThis.IDBIndex, IDBCursor: globalThis.IDBCursor,
+          IDBCursorWithValue: globalThis.IDBCursorWithValue, IDBKeyRange: globalThis.IDBKeyRange,
           // Worker scope must expose OffscreenCanvas too: WorkOS Radar's
           // signals-worker runs its WebGL fingerprint collector in the worker
           // and crashed with `d.OffscreenCanvas is not a constructor` when
