@@ -1044,6 +1044,12 @@ const CLICK_RECHECK_SCRIPT: &str = r#"(function() {
         return JSON.stringify({clicked: false, reason: 'covered_by',
             covered_by: hit ? desc(hit) : 'nothing (center point outside the viewport)'});
     }
+    // Mousedown default action (#204): the coordinate and touch paths focus
+    // text-entry controls, but this path's el.click() has no mousedown — the
+    // same gate keeps focus-dependent pages (expand-on-focus, blur
+    // validation, :focus styles) behaving identically however the agent
+    // clicks. Scoping stays the helper's own text-entry-only discipline.
+    if (globalThis.__diting_focusTextEntry) globalThis.__diting_focusTextEntry(el);
     el.click();
     return JSON.stringify({clicked: true});
 })()"#;
@@ -1056,6 +1062,10 @@ pub(super) async fn click_by_index(
     let nid = *element_map
         .get(&index)
         .ok_or_else(|| format!("invalid index: {}", index))?;
+    // The recheck script's focus step rides in INPUT_HELPERS; a fresh session
+    // has no earlier click/input to have injected them (same pattern as
+    // input_by_index — idempotent, one evaluate).
+    page.evaluate_with_timeout(INPUT_HELPERS, crate::page::INTERACTION_EVAL_TIMEOUT);
     let js = CLICK_RECHECK_SCRIPT.replacen("NID", &nid.to_string(), 1);
     let result = page.evaluate_with_timeout(&js, crate::page::INTERACTION_EVAL_TIMEOUT);
     // A non-string/non-JSON result is an engine hiccup, not a click — read

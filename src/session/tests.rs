@@ -624,6 +624,100 @@
         );
     }
 
+    /// #204: click-by-index must run the mousedown default action for
+    /// text-entry controls (focus + caret) like the coordinate and touch
+    /// paths do — el.click() alone never focused anything, so focus-gated
+    /// pages (expand-on-focus search boxes, blur validation) diverged by
+    /// which click tool the agent used. Buttons stay unfocused: the
+    /// text-entry-only scoping documented on __diting_focusTextEntry.
+    #[tokio::test]
+    async fn click_by_index_focuses_text_entry_controls() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /p",
+            "<html><body><input id='q' value='abc'>\
+             <div id='log'></div><button id='go'>Go</button>\
+             <script>var L=document.getElementById('log');\
+             document.getElementById('q').addEventListener('focus',\
+             function(){L.textContent+='F,'});</script></body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/p")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        let state = mgr
+            .send(&sid, |reply| SessionCommand::State { reply })
+            .await
+            .unwrap();
+        let q = state_index_of(&state, "q");
+        let go = state_index_of(&state, "go");
+
+        // Scope check first, while focus is untouched: a button click runs
+        // no focusing steps.
+        let resp = mgr
+            .send(&sid, |reply| SessionCommand::Click { index: go, reply })
+            .await
+            .unwrap();
+        assert!(resp.clicked);
+        let after = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "document.activeElement.id || document.activeElement.tagName"
+                    .to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            after.as_str().unwrap_or(""),
+            "BODY",
+            "button clicks must not move focus (no focus-ring heuristic)"
+        );
+
+        let resp = mgr
+            .send(&sid, |reply| SessionCommand::Click { index: q, reply })
+            .await
+            .unwrap();
+        assert!(resp.clicked, "input click must dispatch");
+        let verdict = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "JSON.stringify({active: document.activeElement.id,\
+                         focusFired: document.getElementById('log').textContent})"
+                    .to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(verdict.as_str().unwrap_or("")).unwrap_or_default();
+        assert_eq!(
+            v["active"].as_str().unwrap_or(""),
+            "q",
+            "click-by-index must move focus to the text entry control"
+        );
+        assert_eq!(
+            v["focusFired"].as_str().unwrap_or(""),
+            "F,",
+            "the focus event must have fired"
+        );
+
+        assert!(
+            mgr.close_and_wait(&sid).await,
+            "session thread must ack close"
+        );
+    }
+
     /// Input half of the contract: readonly and disabled controls answer
     /// `filled:false` with a named reason. Hidden inputs are deliberately
     /// NOT refused — a display:none input paired with a custom widget is a
