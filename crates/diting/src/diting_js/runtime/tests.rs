@@ -16924,6 +16924,130 @@ async fn idb_interfaces_are_exposed_with_prototypes() {
     assert_eq!(v["inst"]["tag"], serde_json::json!("[object IDBOpenDBRequest]"));
 }
 
+/// #203: idb v7 (bundled by 抖店's @ecom/browser-tcc) synthesizes its
+/// `(await openDB()).put(store, value, key)` conveniences only when the
+/// operation names are members of the interface *prototypes*. #209 stopped
+/// at constructors + instance prototypes; the ops must now sit on the
+/// interface prototypes as writable data props that forward to the
+/// receiver's own implementation.
+#[tokio::test(flavor = "current_thread")]
+async fn idb_proto_ops_forward_and_gate_idb() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    rt.evaluate("localStorage.removeItem('__diting_idb__proto-ops')").unwrap();
+    rt.evaluate(r#"
+        (function () {
+          const out = { gates: {}, desc: {}, fwd: {}, illegal: {} };
+          out.gates.put = 'put' in IDBObjectStore.prototype;
+          out.gates.getFromIndex = 'getKey' in IDBIndex.prototype;
+          out.gates.tx = 'transaction' in IDBDatabase.prototype;
+          out.gates.objectStore = 'objectStore' in IDBTransaction.prototype;
+          out.gates.factoryOpen = 'open' in IDBFactory.prototype;
+          const d = Object.getOwnPropertyDescriptor(IDBObjectStore.prototype, 'put');
+          out.desc = { w: d.writable, e: d.enumerable, c: d.configurable, f: typeof d.value };
+          out.gates.cursor = 'continue' in IDBCursor.prototype;
+          try { IDBObjectStore.prototype.put.call({}, 1); out.illegal.bare = 'no-throw'; }
+          catch (e) { out.illegal.bare = e.name; }
+          const r = indexedDB.open('proto-ops', 1);
+          r.onupgradeneeded = function (e) {
+            e.target.result.createObjectStore('s', { keyPath: 'id' });
+          };
+          r.onsuccess = function (e) {
+            const db = e.target.result;
+            const tx = db.transaction('s', 'readwrite');
+            const st = tx.objectStore('s');
+            // Detached calls through the prototype forward to the instance's
+            // own op — the exact shape idb's wrapped stores use.
+            IDBObjectStore.prototype.put.call(st, { id: 7, n: 'x' });
+            const req = IDBObjectStore.prototype.get.call(st, 7);
+            req.onsuccess = function () {
+              out.fwd.shape = (req.result instanceof Object && req.result.n === 'x');
+              db.close();
+              globalThis.__out = JSON.stringify(out);
+            };
+          };
+        })();
+    "#).unwrap();
+    let _ = rt.run_event_loop_bounded(300).await;
+    let out = rt.evaluate("globalThis.__out").unwrap();
+    let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+    for k in ["put", "getFromIndex", "tx", "objectStore", "factoryOpen", "cursor"] {
+        assert_eq!(v["gates"][k], serde_json::json!(true), "{k} gate must hold for idb's synthesis");
+    }
+    assert_eq!(v["desc"], serde_json::json!({"w": true, "e": true, "c": true, "f": "function"}));
+    assert_eq!(v["illegal"]["bare"], serde_json::json!("TypeError"));
+    assert_eq!(v["fwd"]["shape"], serde_json::json!(true), "proto put/get must forward to the store's own ops");
+}
+
+/// #203: WebIDL operations are writable data properties on the prototype.
+/// The 抖店 secsdk monkey-patches navigator.sendBeacon (createAspectByPath)
+/// and the getter-only accessors #117 installed turned that strict-mode
+/// assignment into a TypeError. Attributes stay getter-only.
+#[test]
+fn navigator_methods_are_writable_data_props() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    let out = rt.evaluate(r#"
+        (function () {
+          const out = {};
+          const d = Object.getOwnPropertyDescriptor(Navigator.prototype, 'sendBeacon');
+          out.desc = { w: d.writable, e: d.enumerable, c: d.configurable, t: typeof d.value };
+          out.ownKeysBefore = Object.keys(navigator).length;
+          out.orig = navigator.sendBeacon;
+          out.strictAssign = (function () {
+            'use strict';
+            try { navigator.sendBeacon = function () { return 99; }; return 'ok'; }
+            catch (e) { return e.name; }
+          })();
+          out.shadowed = navigator.sendBeacon();
+          out.shadowOwn = Object.keys(navigator);
+          delete navigator.sendBeacon;
+          out.restored = (navigator.sendBeacon === out.orig);
+          out.attrWrite = (function () {
+            'use strict';
+            try { navigator.userAgent = 'spoof'; return 'no-throw'; }
+            catch (e) { return e.name; }
+          })();
+          out.attrKept = (navigator.userAgent !== 'spoof');
+          return JSON.stringify(out);
+        })()
+    "#).unwrap();
+    let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+    assert_eq!(v["desc"], serde_json::json!({"w": true, "e": true, "c": true, "t": "function"}));
+    assert_eq!(v["ownKeysBefore"], serde_json::json!(0), "#117 invariant: no own enumerable props");
+    assert_eq!(v["strictAssign"], serde_json::json!("ok"), "secsdk's strict-mode patch must succeed");
+    assert_eq!(v["shadowed"], serde_json::json!(99));
+    assert_eq!(v["shadowOwn"], serde_json::json!(["sendBeacon"]), "assignment shadows via an own prop, like Chrome");
+    assert_eq!(v["restored"], serde_json::json!(true), "delete falls back to the prototype op");
+    assert_eq!(v["attrWrite"], serde_json::json!("TypeError"), "attributes stay getter-only");
+    assert_eq!(v["attrKept"], serde_json::json!(true));
+}
+
+/// #203: all four observer families carry takeRecords — the 抖店 SDK calls
+/// it on its PerformanceObserver instance at startup.
+#[test]
+fn observer_take_records_on_all_families() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    let out = rt.evaluate(r#"
+        (function () {
+          const out = {};
+          for (const n of ['MutationObserver', 'IntersectionObserver', 'ResizeObserver', 'PerformanceObserver']) {
+            const C = globalThis[n];
+            out[n] = { proto: typeof C.prototype.takeRecords };
+          }
+          const po = new PerformanceObserver(function () {});
+          out.perfCall = Array.isArray(po.takeRecords());
+          const ro = new ResizeObserver(function () {});
+          out.roCall = Array.isArray(ro.takeRecords());
+          return JSON.stringify(out);
+        })()
+    "#).unwrap();
+    let v: serde_json::Value = serde_json::from_str(out.as_str().unwrap()).unwrap();
+    for n in ["MutationObserver", "IntersectionObserver", "ResizeObserver", "PerformanceObserver"] {
+        assert_eq!(v[n]["proto"], serde_json::json!("function"), "{n}.prototype.takeRecords missing");
+    }
+    assert_eq!(v["perfCall"], serde_json::json!(true));
+    assert_eq!(v["roCall"], serde_json::json!(true));
+}
+
 /// #48: window named access. Elements with an id (and form/iframe/embed/
 /// object/img with a name) are reachable as bare identifiers and window
 /// properties, live at read time, shadowed by real globals, and ceded on

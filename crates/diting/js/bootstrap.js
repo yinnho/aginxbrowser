@@ -7602,10 +7602,25 @@ globalThis.Navigator = class Navigator {
 for (const _nk of Object.getOwnPropertyNames(__navStore)) {
   const _d = Object.getOwnPropertyDescriptor(__navStore, _nk);
   const _k = _nk;
-  Object.defineProperty(globalThis.Navigator.prototype, _k, {
-    configurable: true, enumerable: true,
-    get: _d.get ? function () { return _d.get.call(__navStore); } : function () { return __navStore[_k]; },
-  });
+  if (_d.get || typeof _d.value !== 'function') {
+    // Attributes stay getter-only prototype accessors — page writes no-op,
+    // exactly like Chrome's readonly navigator attributes (#117).
+    Object.defineProperty(globalThis.Navigator.prototype, _k, {
+      configurable: true, enumerable: true,
+      get: _d.get ? function () { return _d.get.call(__navStore); } : function () { return __navStore[_k]; },
+    });
+  } else {
+    // WebIDL operations are writable data properties on the prototype.
+    // #203: instrumentation SDKs (抖店 secsdk's createAspectByPath) reassign
+    // navigator.sendBeacon to wrap it; a getter-only accessor turned that
+    // strict-mode assignment into a TypeError. Assignment shadows via an
+    // own property on `navigator` — the store and __diting_navSet stay
+    // untouched, like Chrome.
+    Object.defineProperty(globalThis.Navigator.prototype, _k, {
+      configurable: true, enumerable: true, writable: true,
+      value: _d.value,
+    });
+  }
 }
 __def(globalThis.Navigator.prototype, Symbol.toStringTag, 'Navigator');
 __def(globalThis, Symbol.toStringTag, 'Window');
@@ -9085,6 +9100,7 @@ globalThis.ResizeObserver = class ResizeObserver {
   }
   unobserve(el) { this._targets.delete(el); }
   disconnect() { this._connected = false; this._targets.clear(); }
+  takeRecords() { return []; }
 };
 
 if (typeof TextEncoder === 'undefined') {
@@ -10320,6 +10336,7 @@ globalThis.PerformanceObserver = class {
   constructor(){}
   observe(){}
   disconnect(){}
+  takeRecords() { return []; }
   // Honest set: exactly the entry types the Performance timeline records
   // (mark/measure via user timing, navigation, paint). Web-vitals wrappers
   // gate their LCP/CLS/longtask setup on this list — advertising types we
@@ -15234,12 +15251,28 @@ function _idbErr(name, msg) {
   try { return new DOMException(msg || name, name); } catch (e) { const err = new Error(msg || name); err.name = name; return err; }
 }
 function _idbStrList(namesView) {
-  return {
+  const base = {
     contains(n) { return namesView().indexOf(String(n)) >= 0; },
     get length() { return namesView().length; },
     item(i) { return namesView()[i] ?? null; },
     [Symbol.iterator]() { return namesView()[Symbol.iterator](); },
   };
+  Object.defineProperty(base, Symbol.toStringTag, { value: 'DOMStringList' });
+  // Chrome's DOMStringList exposes names through an indexed getter. #203:
+  // idb's transaction proxy reads objectStoreNames[0]/[1] to auto-pick the
+  // lone store, and a list without index access resolved undefined into
+  // "NotFoundError: undefined is not in this transaction's scope". The
+  // proxy keeps indices live against the closure view.
+  return new Proxy(base, {
+    get(t, k, r) {
+      if (typeof k === 'string' && k !== '' && /^\d+$/.test(k)) {
+        const names = namesView();
+        const i = Number(k);
+        return i < names.length ? names[i] : undefined;
+      }
+      return Reflect.get(t, k, r);
+    },
+  });
 }
 // Key ordering across types (number < date < string), per the IDB spec's
 // comparability ladder. Arrays/binary keep insertion order — good enough for
@@ -15633,6 +15666,34 @@ globalThis.IDBIndex = IDBIndex;
 globalThis.IDBCursor = IDBCursor;
 globalThis.IDBCursorWithValue = IDBCursorWithValue;
 globalThis.IDBFactory = IDBFactory;
+// #203: idb (jakearchibald/idb v7, bundled by 抖店's @ecom/browser-tcc)
+// synthesizes DB-level conveniences — `(await openDB(...)).put(store, v, k)`
+// — only when the operation names exist on the interface *prototypes*.
+// #209 gave the interfaces constructors and the instances prototypes, but
+// the methods stayed own props of the instance literals, so every
+// `m in Interface.prototype` gate failed and `.put` resolved undefined.
+// Prototype members forward to the receiver's own prop; calling one on a
+// non-instance throws Illegal invocation, as Chrome does.
+function _idbProtoOps(iface, names) {
+  for (const m of names) {
+    if (m in iface.prototype) continue;
+    Object.defineProperty(iface.prototype, m, {
+      writable: true, enumerable: true, configurable: true,
+      value: function (...a) {
+        if (!Object.prototype.hasOwnProperty.call(this, m)) {
+          throw new TypeError('Illegal invocation');
+        }
+        return this[m].apply(this, a);
+      },
+    });
+  }
+}
+_idbProtoOps(IDBFactory, ['open', 'deleteDatabase', 'databases', 'cmp']);
+_idbProtoOps(IDBDatabase, ['createObjectStore', 'deleteObjectStore', 'transaction', 'close', 'addEventListener', 'removeEventListener']);
+_idbProtoOps(IDBTransaction, ['abort', 'commit', 'objectStore', 'addEventListener', 'removeEventListener']);
+_idbProtoOps(IDBObjectStore, ['put', 'add', 'get', 'getKey', 'getAll', 'getAllKeys', 'count', 'delete', 'clear', 'openCursor', 'openKeyCursor', 'index', 'createIndex', 'deleteIndex']);
+_idbProtoOps(IDBIndex, ['get', 'getKey', 'getAll', 'getAllKeys', 'count', 'openCursor', 'openKeyCursor']);
+_idbProtoOps(IDBCursor, ['advance', 'continue', 'continuePrimaryKey', 'update', 'delete']);
 // Range instances inherit IDBKeyRange.prototype while keeping the existing
 // per-factory closed/open semantics verbatim.
 function _idbRangeShape(r) { Object.setPrototypeOf(r, IDBKeyRange.prototype); return r; }
