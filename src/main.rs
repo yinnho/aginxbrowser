@@ -10,10 +10,6 @@ use serde::{Deserialize, Serialize};
 mod account;
 mod auth;
 mod browser;
-// CDP bridge (faces layer): /json discovery, the /devtools WebSocket face
-// and the domain dispatch. Rides the engine's Page API; a product concern
-// since the workspace split (ARCHITECTURE.md §4 — "CDP is a face riding
-// core/engine").
 mod captcha;
 mod config;
 mod cookie;
@@ -337,13 +333,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // #162: opt-in token gate. Validated here — a mis-shaped token is a
-    // hard refusal, never a silently half-open surface. The ambient copy
-    // feeds CDP discovery's webSocketDebuggerUrl embedding.
+    // hard refusal, never a silently half-open surface.
     let auth_token = auth::token_from_env().map_err(|e| anyhow::anyhow!(e))?;
     if auth_token.is_some() {
         tracing::info!(
-            "auth gate on ({}): every route except /health requires the token; \
-             CDP discovery embeds it into webSocketDebuggerUrl",
+            "auth gate on ({}): every route except /health requires the token",
             auth::TOKEN_ENV
         );
     }

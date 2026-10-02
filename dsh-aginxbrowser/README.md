@@ -87,7 +87,7 @@ curl -fsSL https://browser.aginx.net/install.sh | sh   # single static binary
 aginxbrowser --bind 127.0.0.1:8788
 ```
 
-Also on Docker (`ghcr.io/yinnho/aginxbrowser`), Homebrew (`brew install yinnho/tap/aginxbrowser`), and as an [Umbrel app](https://apps.umbrel.com/app/aginxbrowser). Then set `baseUrl: http://127.0.0.1:8788`.
+Homebrew also works (`brew install yinnho/tap/aginxbrowser`). Then set `baseUrl: http://127.0.0.1:8788`.
 
 ## Security notes
 

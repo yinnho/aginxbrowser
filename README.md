@@ -172,10 +172,6 @@ Self-hosting:
 brew install yinnho/aginxbrowser/aginxbrowser
 aginxbrowser doctor   # features + fonts + egress self-check
 
-# Docker (Docker Hub, mirrored on GHCR)
-docker run -p 8089:8089 yinnho/aginxbrowser:latest
-# (or ghcr.io/yinnho/aginxbrowser:latest)
-
 # Or the prebuilt binary (platform detect + sha256 + mirror fallback + doctor self-check)
 # macOS / Linux / Windows (git-bash; prebuilt Windows ships from v0.3.1, full `stealth`+`screenshot` feature set from v0.4.0)
 # Cautious: download -> inspect -> run (never blind-run network scripts)
