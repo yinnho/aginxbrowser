@@ -84,7 +84,7 @@ Typical loop: `agx_fetch` for one-shot reads; for interaction, `agx_session_crea
 
 ```bash
 curl -fsSL https://browser.aginx.net/install.sh | sh   # single static binary
-aginxbrowser --bind 127.0.0.1:8788
+AGINXBROWSER_BIND=127.0.0.1:8788 aginxbrowser
 ```
 
 Homebrew also works (`brew install yinnho/tap/aginxbrowser`). Then set `baseUrl: http://127.0.0.1:8788`.
