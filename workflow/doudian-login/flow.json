@@ -1,0 +1,36 @@
+{
+  "vars": {
+    "authorize_url": "https://open.snssdk.com/oauth/authorize/?client_key=ttae0f96cae89a91&state=toutiao&response_type=code&scope=mobile%2Cuser_info&redirect_uri=https%3A%2F%2Ffxg.jinritemai.com%2Flogin%2Fcommon",
+    "login_timeout_ms": 180000
+  },
+  "create": { "url": "{{authorize_url}}", "width": 1440, "height": 900 },
+  "steps": [
+    {
+      "op": "wait",
+      "args": { "selector": ".qrcode-box img[src^='data:image']", "timeout_ms": 20000 },
+      "save": "qr_ready",
+      "note": "the SSO authorize URL renders 今日头条授权登录 with a client-generated QR — data:png img inside .qrcode-box, ~1.8s wall on a clean session vs 12-20s through the fxg marketing front. client_key must be exactly ttae0f96cae89a91: a typo'd key returns error 10003 配置无效 on the page and reads like a server outage. Do not route through fxg /login/common's own 扫码登录 toggle — its QR (account-center SDK, data:gif background) never mounts without extra SSO state"
+    },
+    {
+      "op": "screenshot",
+      "args": { "selector": ".qrcode-box" },
+      "save": "qr_shot",
+      "note": "cropped to the QR box (282×240) — what the human scans with 抖店 App 扫一扫. The SSO page polls scan state itself; on scan+confirm it redirects to redirect_uri (fxg /login/common) with the code attached"
+    },
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "location.hostname === 'fxg.jinritemai.com' && !location.pathname.startsWith('/login')",
+        "timeout_ms": "{{login_timeout_ms}}"
+      },
+      "save": "login_done",
+      "note": "scan + confirm on the phone → SSO redirects to redirect_uri → fxg exchanges the code and lands off /login. 180s default; if the exchange bounces back to /login the predicate times out and the receipt screenshot shows where it stuck"
+    },
+    {
+      "op": "eval",
+      "args": { "script": "JSON.stringify({url: location.href, title: document.title})" },
+      "save": "landing",
+      "note": "logged-in landing evidence; the session stays alive after the flow — session_id on the receipt is the export handle (cookies land on .jinritemai.com)"
+    }
+  ]
+}

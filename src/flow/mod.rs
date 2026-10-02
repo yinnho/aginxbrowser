@@ -252,9 +252,11 @@ fn json_interpolate(v: &Value, vars: &Map<String, Value>) -> Result<Value, Strin
 /// new ones; that stays the drop-a-directory deploy path, no rebuild.
 const BUILTIN_FLOWS: &[(&str, &str)] = &[
     ("bsky-post", include_str!("../../workflow/bsky-post/flow.json")),
+    ("doudian-login", include_str!("../../workflow/doudian-login/flow.json")),
     ("juejin-post", include_str!("../../workflow/juejin-post/flow.json")),
     ("juejin-publish", include_str!("../../workflow/juejin-publish/flow.json")),
     ("taobao-live", include_str!("../../workflow/taobao-live/flow.json")),
+    ("taobao-login", include_str!("../../workflow/taobao-login/flow.json")),
     ("wechat-oa-post", include_str!("../../workflow/wechat-oa-post/flow.json")),
     ("x-follow", include_str!("../../workflow/x-follow/flow.json")),
     ("x-notifs", include_str!("../../workflow/x-notifs/flow.json")),

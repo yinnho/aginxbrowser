@@ -27,6 +27,8 @@ before it touches the filesystem.
 | name | site | state | notes |
 |---|---|---|---|
 | `bsky-post` | bsky.social | runs green | app password (`creds_json` vars) → createRecord → verify; page-context xrpc, no cookies — see flow.md |
+| `doudian-login` | fxg.jinritemai.com (via open.snssdk.com) | runs green to QR handoff | direct SSO authorize URL: QR in ~1.8s vs 12-20s via the fxg front; human scans `qr_shot`, session lands logged-in — see flow.md |
+| `taobao-login` | login.taobao.com | runs green to QR handoff | direct login.jhtml (3.7s vs 13.5s via homepage); QR canvas needs no click; cookie lands on .taobao.com — see flow.md |
 | `taobao-live` | live.taobao.com | runs green logged-out | verdict-gated front probe: delivers "no wall + telemetry"; room list awaits engine hydration — see flow.md |
 | `wechat-oa-post` | api.weixin.qq.com | runs green (certified OA) / draft-only (uncertified) | 5 pure http steps (token→cover→draft→publish→verify); account = `creds {app_id, app_secret}` via vars, never in flow.json — see flow.md |
 | `xcom-profile` | x.com | runs green logged-out | needs foreign egress (`use_proxy: true` baked in) |

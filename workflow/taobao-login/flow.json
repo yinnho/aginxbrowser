@@ -1,0 +1,40 @@
+{
+  "vars": {
+    "login_url": "https://login.taobao.com/member/login.jhtml",
+    "login_timeout_ms": 180000
+  },
+  "create": {
+    "url": "{{login_url}}",
+    "width": 1440,
+    "height": 900
+  },
+  "steps": [
+    {
+      "op": "wait",
+      "args": { "selector": ".qrcode-img canvas", "timeout_ms": 15000 },
+      "save": "qr_ready",
+      "note": "login.jhtml 302s to havanaone/login.htm; the QR canvas is the page's only canvas, rendered ~0.8s after doc start (qrCode/generate.do fires at ~0.17s) — no tab click needed, it sits beside the password/SMS form. Direct URL skips the 9.8s www.taobao.com front"
+    },
+    {
+      "op": "screenshot",
+      "args": { "selector": ".qrcode-img" },
+      "save": "qr_shot",
+      "note": "cropped to the QR element — what the human scans (淘宝 App 扫一扫). qrCode/query.do polls scan state from ~0.8s automatically"
+    },
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "!location.hostname.includes('login.taobao.com')",
+        "timeout_ms": "{{login_timeout_ms}}"
+      },
+      "save": "login_done",
+      "note": "on scan+confirm havana navigates off login.taobao.com (mid-login hops stay on that host, so this fires on the real landing). Cookie lands on .taobao.com — any taobao session can import it afterwards"
+    },
+    {
+      "op": "eval",
+      "args": { "script": "JSON.stringify({url: location.href, title: document.title})" },
+      "save": "landing",
+      "note": "logged-in landing evidence; session stays alive after the flow — session_id on the receipt is the export handle (GET /session/:id/cookies, /storage)"
+    }
+  ]
+}
