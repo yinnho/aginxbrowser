@@ -53,13 +53,12 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then bin=aginxbrowser.exe; fi
           cp "target/${{ matrix.target }}/release/$bin" "$dir/"
           cp README.md docs/install.md "$dir/"
-          # The wechat-oa-post article composer rides along: the flow itself
-          # is baked into the binary (BUILTIN_FLOWS), but md_to_args.py +
-          # templates/ are caller-side tooling — an agent composes args_json
-          # from markdown on the machine it unpacked the archive on. Repo
-          # layout is preserved so the flow.md paths stay valid.
-          mkdir -p "$dir/workflow/wechat-oa-post"
-          cp -R workflow/wechat-oa-post/md_to_args.py workflow/wechat-oa-post/templates "$dir/workflow/wechat-oa-post/"
+          # The workflow samples ride along as files — the engine binary
+          # carries no flows inside the exe (browser stays out of business
+          # logic). Repo layout is preserved so the flow.md paths stay
+          # valid, and md_to_args.py + templates/ are caller-side tooling
+          # for wechat-oa-post either way.
+          cp -R workflow "$dir/"
           tar czf "$dir.tar.gz" "$dir"
           # macOS has shasum (no sha256sum); git-bash has sha256sum — try both.
           if command -v shasum >/dev/null 2>&1; then

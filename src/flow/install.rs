@@ -214,10 +214,6 @@ pub(crate) async fn install_from(
         "steps": steps.len(),
         "eval_steps": eval_steps,
         "installed_at": target.display().to_string(),
-        // On-disk beats baked-in: an install over a built-in name overrides
-        // it (existing workflow semantics) — say so instead of implying
-        // both exist.
-        "overrides_builtin": super::BUILTIN_FLOWS.iter().any(|(n, _)| *n == name),
         "available_now": target.join("flow.json").is_file(),
         "disclosure": "third-party flow: its scripts execute with this engine's privileges \
              inside session pages on flow_run — review the steps before running",
@@ -433,7 +429,6 @@ mod tests {
         assert_eq!(receipt["bytes"], (flow_len + 9) as u64); // + b"<p>hi</p>"
         assert_eq!(receipt["files"].as_array().map(Vec::len), Some(2));
         assert_eq!(receipt["available_now"], true);
-        assert_eq!(receipt["overrides_builtin"], false);
         // The auxiliary file rode along into its subdirectory.
         let landed = std::fs::read(dir.join("third-party-flow/templates/body.html")).unwrap();
         assert_eq!(landed, b"<p>hi</p>");

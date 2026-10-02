@@ -1252,7 +1252,7 @@ Run a flow — a recorded/edited JSON session script — to completion server-si
 | Field | Type | Default | Description |
 |------|------|------|------|
 | flow | object | — | Inline flow document (see below) |
-| name | string | — | Or run a named server-side workflow: the samples ship baked into the binary, and a `workflow/<name>/flow.json` on disk (override the directory with `AGINXBROWSER_WORKFLOW_DIR`) replaces or adds one without a rebuild. An unknown name errors back with the list of installed workflows — that error is the discovery call |
+| name | string | — | Or run a named server-side workflow: `workflow/<name>/flow.json` on disk (override the directory with `AGINXBROWSER_WORKFLOW_DIR`). The engine binary carries no flows — the repo's samples and the release tarball ship the `workflow/` directory as files beside the binary. An unknown name errors back with the list of installed workflows — that error is the discovery call |
 | vars | object | `{}` | Values for `{{placeholders}}`; wins over the flow's own `vars` defaults |
 | session_id | string | — | Reuse a live session (e.g. from `POST /import/curl`) instead of creating a fresh one — that's how login state and flows compose |
 
@@ -1316,7 +1316,7 @@ Install semantics, in order — every failure leaves the filesystem untouched:
 2. **manifest validation** — non-empty, contains `flow.json`, every path relative with ordinary components only (`..`, leading `/`, backslashes die here), ≤ 64 files
 3. **fetch + verify** — each file's bytes must sha256-match the manifest's promise (≤ 4 MiB a file, ≤ 8 MiB total); a package that fails anywhere is not installed
 4. **flow.json validation** — must parse and carry a `steps` array, before anything is written
-5. **atomic landing** — everything stages in `workflow/.installing-<name>/`, then swaps into `workflow/<name>/`, replacing any previous install; a same-named built-in is overridden (on-disk beats baked-in, the same rule as a dropped directory)
+5. **atomic landing** — everything stages in `workflow/.installing-<name>/`, then swaps into `workflow/<name>/`, replacing any previous install
 
 | Body | Type | Default | Notes |
 |---|---|---|---|
@@ -1334,7 +1334,6 @@ Install semantics, in order — every failure leaves the filesystem untouched:
   "steps": 9,
   "eval_steps": 4,
   "installed_at": "workflow/xhs-post",
-  "overrides_builtin": true,
   "available_now": true,
   "disclosure": "third-party flow: its scripts execute with this engine's privileges inside session pages on flow_run — review the steps before running"
 }
@@ -1698,7 +1697,7 @@ curl -sS -X POST http://127.0.0.1:8089/render_markdown \
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL (seconds); `0` disables |
 | `AGINXBROWSER_DOWNLOAD_DIR` | `.` | Directory where `/download` saves files |
 | `AGINXBROWSER_MAX_BODY_BYTES` | `67108864` (64 MiB) | Max request body for `/eval`-family POST endpoints (`/session/{id}/eval`, `/screenshot`, `/video`, `/pdf`). Oversized bodies get a structured `413 EVAL_BODY_TOO_LARGE` naming the limit |
-| `AGINXBROWSER_WORKFLOW_DIR` | `./workflow` | Where `flow_run(name=…)` looks for on-disk `<name>/flow.json` overrides — the sample flows are baked into the binary, a file here beats the same-named built-in and new names add to the list; drop a directory in to deploy, no rebuild. `POST /flow/install` lands installed flows here too |
+| `AGINXBROWSER_WORKFLOW_DIR` | `./workflow` | Where `flow_run(name=…)` looks for `<name>/flow.json` — the engine binary carries no built-in flows, this directory is the whole story; drop a directory in to deploy, no rebuild. `POST /flow/install` lands installed flows here too |
 | `AGINXBROWSER_DUPHUB_URL` | `https://duphub.com` | Base remote for `POST /flow/install` — a private DupHub instance replaces this. Env-only, never a request parameter |
 | `AGINXBROWSER_PROXY` | None | Proxy address (used when `use_proxy:true`, and applied automatically for browser/session navigations to known-blocked domains) |
 | `CAPTCHA_SOLVER_API_KEY` | None | 2captcha API key; enables automatic CAPTCHA solving when set |

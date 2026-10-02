@@ -13,11 +13,11 @@
 //!    calling agent can repair the flow or take the session over manually.
 //!    The engine itself stays LLM-free — the repair loop is the caller's.
 //!
-//! Flows live as data assets in `workflow/<name>/flow.json` — the repo's
-//! samples are baked into the binary (`BUILTIN_FLOWS`), so every install
-//! carries them inside the exe. A deployed instance still gains or
-//! overrides a workflow by dropping a file into `workflow/` (or
-//! `AGINXBROWSER_WORKFLOW_DIR`), no rebuild: on disk beats baked.
+//! Flows live as data assets in `workflow/<name>/flow.json` beside the
+//! binary — the engine carries none of them inside the exe. A deployed
+//! instance gains or overrides a workflow by dropping a file into
+//! `workflow/` (or `AGINXBROWSER_WORKFLOW_DIR`); the repo's samples and
+//! the release tarball ship that directory as files.
 
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -245,32 +245,9 @@ fn json_interpolate(v: &Value, vars: &Map<String, Value>) -> Result<Value, Strin
 // Workflow directory
 // ---------------------------------------------------------------------------
 
-/// Flows baked into the binary at build time from the repo's `workflow/`
-/// samples — every package (tarball, Docker, brew, a bare binary) ships
-/// them inside the exe, no sibling directory to lose on install. The
-/// workflow dir (`workflow_dir`) overrides a same-named built-in and adds
-/// new ones; that stays the drop-a-directory deploy path, no rebuild.
-const BUILTIN_FLOWS: &[(&str, &str)] = &[
-    ("bsky-post", include_str!("../../workflow/bsky-post/flow.json")),
-    ("doudian-login", include_str!("../../workflow/doudian-login/flow.json")),
-    ("juejin-post", include_str!("../../workflow/juejin-post/flow.json")),
-    ("juejin-publish", include_str!("../../workflow/juejin-publish/flow.json")),
-    ("taobao-live", include_str!("../../workflow/taobao-live/flow.json")),
-    ("taobao-login", include_str!("../../workflow/taobao-login/flow.json")),
-    ("wechat-oa-post", include_str!("../../workflow/wechat-oa-post/flow.json")),
-    ("x-follow", include_str!("../../workflow/x-follow/flow.json")),
-    ("x-notifs", include_str!("../../workflow/x-notifs/flow.json")),
-    ("x-read", include_str!("../../workflow/x-read/flow.json")),
-    ("x-reply", include_str!("../../workflow/x-reply/flow.json")),
-    ("x-search", include_str!("../../workflow/x-search/flow.json")),
-    ("xcom-profile", include_str!("../../workflow/xcom-profile/flow.json")),
-    ("xhs-post", include_str!("../../workflow/xhs-post/flow.json")),
-    ("zhihu-answer", include_str!("../../workflow/zhihu-answer/flow.json")),
-];
-
 /// Where on-disk `name`-addressed flows live: server-side assets, sibling
-/// of the binary's working directory by default. A file here beats the
-/// same-named built-in — drop a directory in to deploy, no rebuild.
+/// of the binary's working directory by default — drop a directory in to
+/// deploy, no rebuild.
 pub fn workflow_dir() -> PathBuf {
     std::env::var_os("AGINXBROWSER_WORKFLOW_DIR")
         .map(PathBuf::from)
@@ -287,12 +264,11 @@ fn is_workflow_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-/// Names of flows available to `name=`: the built-ins baked into the binary
-/// plus the on-disk ones (discovery-by-error: an unknown name in runFlow
+/// Names of flows available to `name=`: every `workflow/<name>/flow.json`
+/// under the workflow dir (discovery-by-error: an unknown name in runFlow
 /// lists these).
 pub fn available_workflows() -> Vec<String> {
-    let mut names: Vec<String> = BUILTIN_FLOWS.iter().map(|(n, _)| n.to_string()).collect();
-    let on_disk: Vec<String> = std::fs::read_dir(workflow_dir())
+    let names: Vec<String> = std::fs::read_dir(workflow_dir())
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok())
@@ -300,13 +276,7 @@ pub fn available_workflows() -> Vec<String> {
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|n| is_workflow_name(n))
         .collect();
-    // A same-named on-disk flow replaces the built-in, it doesn't duplicate
-    // it in the listing.
-    for name in on_disk {
-        if !names.contains(&name) {
-            names.push(name);
-        }
-    }
+    let mut names = names;
     names.sort();
     names
 }
@@ -334,10 +304,6 @@ pub fn resolve_flow_doc(flow: Option<Value>, name: Option<&str>) -> Result<Value
     let path = workflow_dir().join(name).join("flow.json");
     if let Ok(text) = std::fs::read_to_string(&path) {
         return serde_json::from_str(&text).map_err(|e| format!("workflow {name:?} is not valid JSON: {e}"));
-    }
-    if let Some((_, text)) = BUILTIN_FLOWS.iter().find(|(n, _)| *n == name) {
-        return serde_json::from_str(text)
-            .map_err(|e| format!("built-in workflow {name:?} is not valid JSON: {e}"));
     }
     Err(format!(
         "workflow {name:?} not found at {} (available: {})",

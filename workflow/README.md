@@ -1,13 +1,14 @@
 # workflow/ — server-side flow assets
 
 Each subdirectory is one named flow: `<name>/flow.json` (plus optional docs).
-The samples here are baked into the binary at build (`BUILTIN_FLOWS` in
-`src/flow/mod.rs`), so every install — tarball, Docker, brew, a bare binary —
-carries them inside the exe. At runtime a `<name>/flow.json` on disk (this
-directory, or `AGINXBROWSER_WORKFLOW_DIR`) beats the same-named built-in and
-new names add to the list — drop a directory in to deploy, no rebuild. A name
-is one path segment of lowercase/digits/dashes; anything else is rejected
-before it touches the filesystem.
+These are data assets deployed beside the binary — the engine carries none of
+them inside the exe (browser stays out of business logic). At runtime a
+`<name>/flow.json` under this directory (or `AGINXBROWSER_WORKFLOW_DIR`) is
+what `flow_run(name=…)` loads — drop a directory in to deploy, no rebuild.
+The release tarball ships this directory as files so a fresh unpack has the
+samples; brew/agpkg installs ship the bare binary (grab `workflow/` from the
+repo when needed). A name is one path segment of lowercase/digits/dashes;
+anything else is rejected before it touches the filesystem.
 
 ## Authoring loop
 

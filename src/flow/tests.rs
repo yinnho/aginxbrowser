@@ -95,21 +95,33 @@ fn resolve_flow_doc_requires_source() {
     assert!(resolve_flow_doc(None, Some("../secrets")).is_err());
 }
 
+/// The repo's `workflow/` samples are deploy-time assets, not baked-ins —
+/// CI still catches a broken sample the moment it lands in the directory.
 #[test]
-fn builtin_flows_are_valid_named_documents() {
-    for (name, text) in BUILTIN_FLOWS {
-        assert!(is_workflow_name(name), "built-in name {name:?} fails the name rules");
-        let doc: Value = serde_json::from_str(text)
-            .unwrap_or_else(|e| panic!("built-in {name:?} is not valid JSON: {e}"));
+fn repo_workflow_samples_are_valid_named_documents() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("workflow");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&root).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().into_string().unwrap();
+        if !is_workflow_name(&name) {
+            continue;
+        }
+        let text = std::fs::read_to_string(entry.path().join("flow.json"))
+            .unwrap_or_else(|e| panic!("sample {name:?}: {e}"));
+        let doc: Value = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("sample {name:?} is not valid JSON: {e}"));
         assert!(
             doc.get("steps").and_then(|s| s.as_array()).is_some(),
-            "built-in {name:?} has no steps array"
+            "sample {name:?} has no steps array"
         );
+        checked += 1;
     }
+    assert!(checked > 0, "no samples found under {}", root.display());
 }
 
 #[test]
-fn workflow_dir_adds_names_and_overrides_builtins() {
+fn workflow_dir_lists_and_resolves_disk_flows() {
     use std::fs;
     let _guard = crate::test_support::workflow_dir_env_guard();
     let dir = std::env::temp_dir().join(format!("aginxbrowser-flow-{}", std::process::id()));
@@ -121,25 +133,11 @@ fn workflow_dir_adds_names_and_overrides_builtins() {
         r#"{"steps":[{"op":"eval","args":{"script":"1"}}]}"#,
     )
     .unwrap();
-    // A same-named disk file replaces the baked sample.
-    fs::create_dir_all(dir.join("bsky-post")).unwrap();
-    fs::write(
-        dir.join("bsky-post").join("flow.json"),
-        r#"{"steps":[{"op":"eval","args":{"script":"disk-wins"}}]}"#,
-    )
-    .unwrap();
 
-    // Listing = built-ins ∪ disk names, no duplicates.
     let names = available_workflows();
-    assert!(names.contains(&"my-own".to_string()), "disk-only name missing");
-    assert_eq!(names.iter().filter(|n| n.as_str() == "bsky-post").count(), 1);
+    assert!(names.contains(&"my-own".to_string()), "disk name missing");
+    assert_eq!(names.iter().filter(|n| n.as_str() == "my-own").count(), 1);
 
-    // Disk overrides built-in of the same name; a built-in resolves with the
-    // dir pointing at a temp dir that never carried it; disk-only resolves.
-    let overridden = resolve_flow_doc(None, Some("bsky-post")).unwrap();
-    assert_eq!(overridden["steps"][0]["args"]["script"], "disk-wins");
-    let baked = resolve_flow_doc(None, Some("xcom-profile")).unwrap();
-    assert!(baked["create"]["url"].as_str().is_some(), "xcom-post built-in lost its create block");
     let own = resolve_flow_doc(None, Some("my-own")).unwrap();
     assert_eq!(own["steps"][0]["op"], "eval");
     assert!(resolve_flow_doc(None, Some("zzz-not-installed")).is_err());
