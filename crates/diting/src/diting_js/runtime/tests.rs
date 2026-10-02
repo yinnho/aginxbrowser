@@ -7480,6 +7480,142 @@
         );
     }
 
+    // #213: the SharedWorker stub swallowed every port.postMessage and never
+    // replied. 抖店's sif-dxs security layer builds its request-signing channel
+    // on exactly this shape (self.onconnect → event.ports[0] → port.start(),
+    // then every page request waits on it), so the page boot died on the SDK's
+    // own timeout with a blank screen. Messages posted before the script
+    // attached its handler must be buffered, not dropped.
+    #[tokio::test(flavor = "current_thread")]
+    async fn shared_worker_port_roundtrips_messages() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate_for_cdp(
+                r#"new Promise((resolve, reject) => {
+                    const body = "self.onconnect = function(e) {"
+                        + "  const p = e.ports[0];"
+                        + "  p.onmessage = function(ev) { p.postMessage('sw|' + ev.data); };"
+                        + "  p.start();"
+                        + "};";
+                    const w = new SharedWorker(URL.createObjectURL(new Blob([body])), 'probe');
+                    const got = [];
+                    w.port.onmessage = e => { got.push(e.data); if (got.length === 2) resolve(got); };
+                    w.port.postMessage('a');
+                    w.port.postMessage('b');
+                    setTimeout(() => reject(new Error('no reply: ' + JSON.stringify(got))), 2000);
+                })"#,
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!(["sw|a", "sw|b"]));
+    }
+
+    // Same (url, name) is ONE shared script instance, not one copy per
+    // construction: its connect counter advances across both clients. The id
+    // is captured at connect time — reading the shared self.__n at reply time
+    // would give 2 to both clients whether or not they share a scope, so it
+    // could not tell sharing from not-sharing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn shared_worker_same_key_shares_one_instance() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate_for_cdp(
+                r#"new Promise((resolve, reject) => {
+                    const body = "self.__n = 0;"
+                        + "self.onconnect = function(e) {"
+                        + "  const id = ++self.__n;"
+                        + "  const p = e.ports[0];"
+                        + "  p.onmessage = function() { p.postMessage(id); };"
+                        + "};";
+                    const u = URL.createObjectURL(new Blob([body]));
+                    const a = new SharedWorker(u, 'shared');
+                    const b = new SharedWorker(u, 'shared');
+                    const seen = [];
+                    const done = v => { seen.push(v); if (seen.length === 2) resolve(seen); };
+                    a.port.onmessage = e => done(e.data);
+                    b.port.onmessage = e => done(e.data);
+                    a.port.postMessage('x');
+                    b.port.postMessage('x');
+                    setTimeout(() => reject(new Error('no reply: ' + JSON.stringify(seen))), 2000);
+                })"#,
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([1, 2]),
+            "both clients must reach the same scope"
+        );
+    }
+
+    // A different name is a different instance, so neither client sees the
+    // other's connects.
+    #[tokio::test(flavor = "current_thread")]
+    async fn shared_worker_distinct_names_are_distinct_instances() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate_for_cdp(
+                r#"new Promise((resolve, reject) => {
+                    const body = "self.__n = 0;"
+                        + "self.onconnect = function(e) {"
+                        + "  const id = ++self.__n;"
+                        + "  const p = e.ports[0];"
+                        + "  p.onmessage = function() { p.postMessage(id); };"
+                        + "};";
+                    const u = URL.createObjectURL(new Blob([body]));
+                    const a = new SharedWorker(u, 'one');
+                    const b = new SharedWorker(u, 'two');
+                    const seen = [];
+                    const done = v => { seen.push(v); if (seen.length === 2) resolve(seen); };
+                    a.port.onmessage = e => done(e.data);
+                    b.port.onmessage = e => done(e.data);
+                    a.port.postMessage('x');
+                    b.port.postMessage('x');
+                    setTimeout(() => reject(new Error('no reply: ' + JSON.stringify(seen))), 2000);
+                })"#,
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!([1, 1]));
+    }
+
+    // MessagePort was a no-op stub too: a listener registered through
+    // addEventListener never heard anything. Delivery starts on start() (or on
+    // the first listener), and messages posted before that are buffered.
+    #[tokio::test(flavor = "current_thread")]
+    async fn message_port_buffers_until_start_and_supports_listeners() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate_for_cdp(
+                r#"new Promise((resolve) => {
+                    const ch = new MessageChannel();
+                    const got = [];
+                    ch.port2.addEventListener('message', e => got.push(e.data));
+                    ch.port1.postMessage('one');
+                    ch.port1.postMessage('two');
+                    setTimeout(() => resolve([
+                        got,
+                        ch.port1 instanceof MessagePort,
+                        ch.port2 instanceof MessagePort,
+                    ]), 50);
+                })"#,
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([["one", "two"], true, true])
+        );
+    }
+
     // Anti-fraud SDKs probe the worker's HTTP surface before using it and
     // bail with "no supported http request object" when it is bare. fetch is
     // on the synthetic scope; XMLHttpRequest resolves through to the shared

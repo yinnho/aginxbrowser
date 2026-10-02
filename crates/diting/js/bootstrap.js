@@ -741,26 +741,98 @@ globalThis.webkitRequestAnimationFrame = globalThis.requestAnimationFrame;
 globalThis.cancelAnimationFrame = globalThis.clearTimeout;
 globalThis.queueMicrotask = globalThis.queueMicrotask || ((fn) => Promise.resolve().then(fn));
 
+// MessagePort: a real two-end channel (#213). Spec shape — postMessage /
+// onmessage / addEventListener('message') / start / close — with a per-port
+// buffer that drains on start. Assigning onmessage starts the port, matching
+// Chromium (a handler on the port IS the start signal), and so does adding a
+// 'message' listener; postMessage before that queues instead of dropping, so
+// a message sent while the far side is still booting is delivered, not lost.
+// The delivery scheduler is per-port: MessageChannel below keeps the
+// macrotask cadence React's scheduler depends on, while SharedWorker pairs
+// default to a microtask — a signing channel sits on a booting SPA's critical
+// path, where the main thread is busy for seconds and setTimeout delivery
+// starves exactly while the SDK's own request timeout is counting down.
+class MessagePort {
+  constructor(deliver) {
+    this._deliver = deliver || ((fn) => Promise.resolve().then(fn));
+    this._onmessage = null;
+    this._onmessageerror = null;
+    this._other = null;
+    this._started = false;
+    this._closed = false;
+    this._queue = [];
+    this._listeners = [];
+    __hideOwn(this);
+  }
+  get onmessage() { return this._onmessage; }
+  set onmessage(fn) { this._onmessage = fn; if (typeof fn === 'function') this.start(); }
+  get onmessageerror() { return this._onmessageerror; }
+  set onmessageerror(fn) { this._onmessageerror = fn; }
+  postMessage(data) {
+    const other = this._other;
+    if (!other || this._closed) return;
+    other._enqueue(data);
+  }
+  _enqueue(data) {
+    if (this._closed) return;
+    if (!this._started) { this._queue.push(data); return; }
+    this._dispatch(data);
+  }
+  _dispatch(data) {
+    const self = this;
+    this._deliver(() => {
+      if (self._closed) return;
+      const evt = { type: 'message', data, target: self, currentTarget: self };
+      const h = self._onmessage;
+      if (typeof h === 'function') {
+        try { h.call(self, evt); } catch (e) { console.error('MessagePort onmessage error:', e && e.message); }
+      }
+      for (const fn of self._listeners.slice()) {
+        try { _invokeListener(fn, self, evt); } catch (e) {}
+      }
+    });
+  }
+  start() {
+    if (this._started) return;
+    this._started = true;
+    const q = this._queue;
+    this._queue = [];
+    for (const d of q) this._dispatch(d);
+  }
+  addEventListener(type, fn) {
+    if (type !== 'message') return;
+    __listenerGate(fn);
+    this._listeners.push(fn);
+    this.start();
+  }
+  removeEventListener(type, fn) { if (type === 'message') this._listeners = this._listeners.filter(f => f !== fn); }
+  close() { this._closed = true; this._queue = []; }
+}
+Object.defineProperty(MessagePort.prototype, Symbol.toStringTag, { value: 'MessagePort', configurable: true });
+function _newPortPair(deliver) {
+  const a = new MessagePort(deliver);
+  const b = new MessagePort(deliver);
+  a._other = b;
+  b._other = a;
+  return [a, b];
+}
 class MessageChannel {
   constructor() {
-    this.port1 = { onmessage: null, postMessage: () => {}, close() {}, addEventListener() {}, removeEventListener() {} };
-    this.port2 = { onmessage: null, postMessage: () => {}, close() {}, addEventListener() {}, removeEventListener() {} };
     // Message delivery is a macrotask, exactly like a real browser: React's
     // Scheduler posts work through a MessageChannel port precisely because
     // delivery lands on a fresh task after the microtask queue drains.
     // Microtask delivery interleaves scheduler work with unrelated promise
     // chains and deterministically wedges transitions (observed as "server
     // actions dispatch from some realms and never from others").
-    this.port1.postMessage = (data) => {
-      _scheduleAfter(0, () => { if (this.port2.onmessage) this.port2.onmessage({ data }); });
-    };
-    this.port2.postMessage = (data) => {
-      _scheduleAfter(0, () => { if (this.port1.onmessage) this.port1.onmessage({ data }); });
-    };
+    const [p1, p2] = _newPortPair((fn) => _scheduleAfter(0, fn));
+    this.port1 = p1;
+    this.port2 = p2;
   }
 }
 globalThis.MessageChannel = MessageChannel;
-globalThis.MessagePort = class MessagePort { constructor(){} postMessage(){} close(){} addEventListener(){} removeEventListener(){} };
+globalThis.MessagePort = MessagePort;
+_markNative(MessagePort);
+_markNative(MessageChannel);
 
 // Custom property names are case-sensitive and carry no camelCase IDL form
 // (--mainColor must round-trip verbatim through style.setProperty/getPropertyValue).
@@ -16075,6 +16147,32 @@ if (typeof navigator.credentials === 'undefined') {
 
 globalThis.opener = null;
 
+// Shared source resolver for Worker and SharedWorker: blob-store text, blob
+// object reference (readable immediately — Blob.text resolves as a microtask,
+// before any setTimeout(0) macrotask), or fetch for an http(s) URL INCLUDING
+// RELATIVE ones like "/workers/signals-worker.js", which WorkOS Radar and many
+// SDKs use. `code` is the script text (null when it could not be resolved);
+// `fetchUrl` is the http(s) URL the script came from, which is what relative
+// importScripts() resolve against.
+function _workerSourceFor(url) {
+  if (typeof url !== 'string') return Promise.resolve({ code: null, fetchUrl: null, error: null });
+  const text = globalThis.__blobStore?.[url];
+  if (text !== undefined) return Promise.resolve({ code: text, fetchUrl: null, error: null });
+  const obj = globalThis.__blobObjs?.[url];
+  if (obj && typeof obj.text === 'function') return obj.text().then(code => ({ code, fetchUrl: null, error: null }));
+  let abs = url;
+  if (!/^(https?|blob|data):/i.test(url)) {
+    try { abs = new URL(url, globalThis.location?.href || 'https://example.com/').href; }
+    catch { return Promise.resolve({ code: null, fetchUrl: null, error: null }); }
+  }
+  if (/^https?:/i.test(abs)) {
+    return fetch(abs).then(r => r.text())
+      .then(code => ({ code, fetchUrl: abs, error: null }))
+      .catch(e => ({ code: null, fetchUrl: abs, error: e }));
+  }
+  return Promise.resolve({ code: null, fetchUrl: null, error: null });
+}
+
 globalThis.Worker = class Worker {
   constructor(url, options) {
     this.onmessage = null;
@@ -16095,21 +16193,11 @@ globalThis.Worker = class Worker {
     // so relative-script workers silently resolved to null and the page
     // timed out waiting for onmessage.
     const resolveCode = () => {
-      if (typeof url !== 'string') return Promise.resolve(null);
-      const text = globalThis.__blobStore?.[url];
-      if (text !== undefined) return Promise.resolve(text);
-      const obj = globalThis.__blobObjs?.[url];
-      if (obj && typeof obj.text === 'function') return obj.text();
-      let abs = url;
-      if (!/^(https?|blob|data):/i.test(url)) {
-        try { abs = new URL(url, globalThis.location?.href || 'https://example.com/').href; }
-        catch { return Promise.resolve(null); }
-      }
-      if (/^https?:/i.test(abs)) {
-        worker._url = abs;
-        return fetch(abs).then(r => r.text()).catch(e => { worker._fetchError = e; return null; });
-      }
-      return Promise.resolve(null);
+      return _workerSourceFor(url).then(res => {
+        if (res.fetchUrl) worker._url = res.fetchUrl;
+        if (res.error) worker._fetchError = res.error;
+        return res.code;
+      });
     };
     resolveCode()
       .then(code => preloadWorkerImports(worker, code).then(() => code))
@@ -16241,27 +16329,14 @@ async function preloadWorkerImports(worker, code) {
   }
 }
 
-// Build the worker scope and execute the body's top level. Idempotent —
-// the constructor calls it once the source is ready, and every delivered
-// message lands here first.
-function bootWorker(worker) {
-  if (worker._workerSelf) return;
-    // WorkerGlobalScope-shaped `self`: real workers expose ~40 props
-    // and NO window/document. Parameter shadowing in the Function
-    // wrapper keeps the page realm's DOM out of the worker's scope,
-    // so `typeof window` inside the worker reads "undefined".
-    const workerSelf = {
-          onmessage: null,
-          postMessage: (msg) => {
-            const evt = { data: msg };
-            if (worker.onmessage) worker.onmessage(evt);
-            const wl = __evtStore.get(worker);
-            const handlers = (wl && wl['message']) || [];
-            for (const h of handlers) _invokeListener(h, worker, evt);
-          },
-          addEventListener: (type, fn) => { workerSelf['on' + type] = fn; },
-          removeEventListener: () => {},
-          close: () => { worker._terminated = true; },
+// The WorkerGlobalScope surface that Worker and SharedWorker scopes both
+// expose. Kept in one place so a global missing from the worker realm (the
+// OffscreenCanvas gap that wedged WorkOS Radar, the IDB family that 抖店's SDK
+// feature-detects) is fixed for both realms at once. `importScripts` is
+// injected: each instance resolves imports against its own script URL and
+// import cache.
+function _workerSurfaceCommon(importScripts) {
+    return {
           crypto: globalThis.crypto,
           TextEncoder: globalThis.TextEncoder,
           TextDecoder: globalThis.TextDecoder,
@@ -16287,6 +16362,7 @@ function bootWorker(worker) {
           AbortController: globalThis.AbortController, AbortSignal: globalThis.AbortSignal,
           WebSocket: globalThis.WebSocket, Event: globalThis.Event,
           MessageEvent: globalThis.MessageEvent, ErrorEvent: globalThis.ErrorEvent,
+          MessageChannel: globalThis.MessageChannel, MessagePort: globalThis.MessagePort,
           indexedDB: globalThis.indexedDB,
           IDBFactory: globalThis.IDBFactory, IDBRequest: globalThis.IDBRequest,
           IDBOpenDBRequest: globalThis.IDBOpenDBRequest, IDBDatabase: globalThis.IDBDatabase,
@@ -16303,19 +16379,47 @@ function bootWorker(worker) {
           caches: { open: () => Promise.reject(new DOMException('NotFoundError')), keys: () => Promise.resolve([]) },
           isSecureContext: true,
           origin: (globalThis.location && globalThis.location.origin) || 'https://example.com',
-          importScripts: (...urls) => {
-            for (const raw of urls) {
-              const u = resolveWorkerImportUrl(raw, worker);
-              const text = worker._imported && worker._imported[u];
-              if (typeof text !== 'string') {
-                throw new Error('importScripts: failed to load "' + raw + '"');
-              }
-              (0, eval)(text);
-            }
-          },
+          importScripts,
           queueMicrotask: globalThis.queueMicrotask,
           structuredClone: globalThis.structuredClone,
         };
+}
+
+// The importScripts() body shared by both realms: replay preloaded sources
+// (see preloadWorkerImports) in order through indirect eval so top-level
+// declarations land in the global lexical scope.
+function _workerImportScripts(importShim) {
+  return (...urls) => {
+    for (const raw of urls) {
+      const u = resolveWorkerImportUrl(raw, importShim);
+      const text = importShim._imported && importShim._imported[u];
+      if (typeof text !== 'string') {
+        throw new Error('importScripts: failed to load "' + raw + '"');
+      }
+      (0, eval)(text);
+    }
+  };
+}
+
+// Build the worker scope and execute the body's top level. Idempotent —
+// the constructor calls it once the source is ready, and every delivered
+// message lands here first.
+function bootWorker(worker) {
+  if (worker._workerSelf) return;
+    const workerSelf = _workerSurfaceCommon(_workerImportScripts(worker));
+    // `onmessage` is pre-declared so the `with (self)` wrapper below catches a
+    // bare `onmessage = fn` and lands it on the worker scope.
+    workerSelf.onmessage = null;
+    workerSelf.postMessage = (msg) => {
+      const evt = { data: msg };
+      if (worker.onmessage) worker.onmessage(evt);
+      const wl = __evtStore.get(worker);
+      const handlers = (wl && wl['message']) || [];
+      for (const h of handlers) _invokeListener(h, worker, evt);
+    };
+    workerSelf.addEventListener = (type, fn) => { workerSelf['on' + type] = fn; };
+    workerSelf.removeEventListener = () => {};
+    workerSelf.close = () => { worker._terminated = true; };
         workerSelf.self = workerSelf;
         worker._workerSelf = workerSelf;
         // `with` puts the worker scope object in front of the scope chain so
@@ -18005,10 +18109,95 @@ if (typeof Range === 'undefined') {
   };
 }
 
+// SharedWorker (#213): one script instance per (url, name), with a real
+// MessagePort pair bridging every constructor call to it. The old stub
+// swallowed each port.postMessage and never replied, so an SDK that
+// coordinates or signs through a worker hung on its first request — 抖店's
+// sif-dxs security layer builds exactly that channel (self.onconnect →
+// event.ports[0] → port.start(), then every page request waits on it) and the
+// page died on the SDK's own timeout with a blank screen. Scripts execute in
+// the page realm like the dedicated-worker path; sharing is per page and per
+// (url, name), which is what a single document can observe.
 if (typeof SharedWorker === 'undefined') {
+  globalThis.__sharedWorkerInstances = globalThis.__sharedWorkerInstances || new Map();
+  function _sharedWorkerKey(url, name) {
+    let abs = String(url == null ? '' : url);
+    try { abs = new URL(abs, (globalThis.location && globalThis.location.href) || 'https://example.com/').href; } catch {}
+    return abs + '\u0000' + (name == null ? '' : String(name));
+  }
+  // SharedWorkerGlobalScope shape: the common worker surface plus onconnect.
+  // No postMessage on the global — messages travel on connected ports, which
+  // arrive as the connect event's ports[0], exactly as Chrome delivers them.
+  function _sharedWorkerScope(shim) {
+    const scope = _workerSurfaceCommon(_workerImportScripts(shim));
+    scope.onconnect = null;
+    scope.onmessage = null;
+    scope.addEventListener = (type, fn) => { scope['on' + type] = fn; };
+    scope.removeEventListener = (type, fn) => { if (scope['on' + type] === fn) scope['on' + type] = null; };
+    scope.close = () => { shim._closed = true; };
+    scope.self = scope;
+    return scope;
+  }
+  function _runSharedScript(inst) {
+    const scope = inst.scope;
+    const fn = new Function('self', 'window', 'document', 'navigator', 'location', 'importScripts',
+      'with (self) {\n' + inst.code + '\n}');
+    fn(scope, undefined, undefined, scope.navigator, scope.location, scope.importScripts);
+  }
+  function _connectSharedPort(inst, workerEnd) {
+    const scope = inst.scope;
+    if (!scope) return;
+    const evt = { type: 'connect', ports: [workerEnd], target: scope, currentTarget: scope };
+    try {
+      // A SharedWorker script may register onconnect (the spec path) or, in
+      // the wild, a plain onmessage; either way the port is what carries the
+      // traffic, and the worker-side port buffers page messages sent before
+      // the handler attached.
+      if (typeof scope.onconnect === 'function') scope.onconnect(evt);
+      else if (typeof scope.onmessage === 'function') scope.onmessage(evt);
+    } catch (e) {
+      console.error('SharedWorker error:', e && e.message);
+      if (typeof inst.onerror === 'function') { try { inst.onerror({ message: String((e && e.message) || e), error: e }); } catch (_) {} }
+    }
+  }
   globalThis.SharedWorker = class SharedWorker {
-    constructor() { this.port = { postMessage(){}, onmessage:null, start(){}, close(){}, addEventListener(){}, removeEventListener(){} }; this.onerror = null; }
+    constructor(url, name) {
+      this.onerror = null;
+      __hideOwn(this);
+      const key = _sharedWorkerKey(url, name);
+      let inst = globalThis.__sharedWorkerInstances.get(key);
+      if (!inst) {
+        inst = { code: null, scope: null, ready: false, onerror: null, shim: { _url: null, _imported: {} }, pendingPorts: [] };
+        globalThis.__sharedWorkerInstances.set(key, inst);
+        _workerSourceFor(url)
+          .then(res => {
+            inst.shim._url = res.fetchUrl;
+            return preloadWorkerImports(inst.shim, res.code).then(() => res.code);
+          })
+          .then(code => {
+            inst.code = code;
+            if (typeof code === 'string') {
+              try {
+                inst.scope = _sharedWorkerScope(inst.shim);
+                _runSharedScript(inst);
+              } catch (e) {
+                console.error('SharedWorker error:', e && e.message);
+                inst.error = e;
+              }
+            }
+            inst.ready = true;
+            const ports = inst.pendingPorts;
+            inst.pendingPorts = [];
+            for (const p of ports) _connectSharedPort(inst, p);
+          });
+      }
+      const [pageEnd, workerEnd] = _newPortPair();
+      if (inst.ready && inst.scope) _connectSharedPort(inst, workerEnd);
+      else inst.pendingPorts.push(workerEnd);
+      this.port = pageEnd;
+    }
   };
+  try { _markNative(globalThis.SharedWorker); } catch (_) {}
 }
 if (typeof ServiceWorkerContainer === 'undefined') {
   globalThis.ServiceWorkerContainer = class { register(){return Promise.resolve();} getRegistrations(){return Promise.resolve([]);} };
