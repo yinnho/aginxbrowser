@@ -870,6 +870,29 @@ mod tests {
         assert!(!jar.get_cookie_header(&other).contains("cookie2"));
     }
 
+    // #203 (taobao half): the account record / session snapshot carries the
+    // session `Cookies` export form. Before Expires rode along, every
+    // revived session replayed cookies the server had already retired —
+    // taobao's risk face answers that with sessionExpired + a havana login
+    // bounce. Seeding must drop dead-dated entries like Chrome does.
+    #[test]
+    fn seed_jar_honors_expires_from_the_export_form() {
+        let jar = CookieJar::new();
+        seed_jar(
+            &jar,
+            &[
+                "dead=old; Domain=.taobao.com; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT".to_string(),
+                "live=fresh; Domain=.taobao.com; Path=/; Expires=Fri, 01 Jan 2027 00:00:00 GMT".to_string(),
+                "session=ok; Domain=.taobao.com; Path=/".to_string(),
+            ],
+        );
+        let url = url::Url::parse("https://item.upload.taobao.com/").unwrap();
+        let header = jar.get_cookie_header(&url);
+        assert!(header.contains("live=fresh"), "got: {header}");
+        assert!(header.contains("session=ok"), "got: {header}");
+        assert!(!header.contains("dead="), "expired entry must not replay: {header}");
+    }
+
     #[test]
     fn classify_gates_maps_probe_counts_to_needs() {
         let probe = |pw, sms, qr, sl| {

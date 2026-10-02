@@ -11,6 +11,35 @@
 
 use super::*;
 
+/// Inverse of diting's `parse_http_date` for the export form: epoch seconds
+/// → "Wdy, DD Mon YYYY HH:MM:SS GMT". Dates outside the parser's accepted
+/// year range surface as None (the entry then round-trips as a session
+/// cookie — the old behavior — rather than a broken date).
+fn http_date(secs: i64) -> Option<String> {
+    if !(0..=253_402_300_799).contains(&secs) {
+        return None;
+    }
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    // civil_from_days (Hinnant): epoch-day → (year, month, day)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mth = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if mth <= 2 { y + 1 } else { y };
+    // Day 0 of the epoch was a Thursday.
+    let wd = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][days.rem_euclid(7) as usize];
+    let mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        [(mth - 1) as usize];
+    Some(format!("{wd}, {d:02} {mon} {year:04} {h:02}:{m:02}:{s:02} GMT"))
+}
+
 /// Drain `pending` web-storage into the current page, origin-gated
 /// (issue #141). A blob carrying an `"origin"` key (record- or
 /// snapshot-sourced — captured storage always knows where it came from)
@@ -760,6 +789,17 @@ pub(super) fn session_thread(
                                         "{}={}; Domain={}; Path={}",
                                         c.name, c.value, c.domain, c.path
                                     );
+                                    if let Some(exp) = c.expires {
+                                        // #203 (taobao half): the export IS
+                                        // the account record / snapshot
+                                        // format — dropping Expires turned
+                                        // every revived session into a
+                                        // replay of server-retired tokens
+                                        // (sessionExpired + havana bounce).
+                                        if let Some(date) = http_date(exp) {
+                                            s.push_str(&format!("; Expires={date}"));
+                                        }
+                                    }
                                     if c.secure {
                                         s.push_str("; Secure");
                                     }
@@ -1047,3 +1087,28 @@ pub(super) fn session_thread(
     });
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::http_date;
+
+    #[test]
+    fn http_date_formats_epoch_as_rfc1123_gmt() {
+        // Day 0 of the epoch was a Thursday.
+        assert_eq!(http_date(0).as_deref(), Some("Thu, 01 Jan 1970 00:00:00 GMT"));
+        // Day 53: Monday, 23 Feb 1970 (Jan 1 1970 = Thursday, Jan = 31 days).
+        assert_eq!(
+            http_date(53 * 86_400).as_deref(),
+            Some("Mon, 23 Feb 1970 00:00:00 GMT")
+        );
+        // Leap-day boundary: 29 Feb 2000 12:34:56 = 951827696.
+        assert_eq!(
+            http_date(951_827_696).as_deref(),
+            Some("Tue, 29 Feb 2000 12:34:56 GMT")
+        );
+        // Outside the parser's accepted year range → None (round-trips as a
+        // session cookie instead of a broken date).
+        assert_eq!(http_date(-1), None);
+        assert_eq!(http_date(253_402_300_800), None);
+    }
+}
