@@ -1,12 +1,12 @@
-# 给 AI Agent 写了个浏览器，实测比 Chrome 快 7.6 倍、内存只有十分之一
+# 给 AI Agent 写了个浏览器，实测比 Chrome 快 5~7.6 倍，内存只要几分之一
 
-先说结论：我们做了个专门给 AI Agent 用的浏览器 aginxbrowser（Rust 写的，Apache-2.0 开源，MCP 原生）。8 月 28 号在本机跑了一轮基准，20 个真实网页、双轮、对照无头 Chrome `--dump-dom`：
+先说结论：我们做了个专门给 AI Agent 用的浏览器 aginxbrowser（Rust 写的，Apache-2.0 开源）。跑过两轮基准，20 个真实网页、双轮、对照无头 Chrome `--dump-dom`：
 
-- 耗时中位数：我们 532ms，Chrome 4053ms，差 7.6 倍
-- 内存：我们单进程全程峰值 227MB；Chrome 每开一个页，进程树加起来约 2.1GB
+- 耗时中位数：好天（8·28）我们 532ms、Chrome 4053ms，差 7.6 倍；差天（9·29，网络烂）我们 2192ms、Chrome 11854ms，比例守住 5.4 倍。合起来的诚实区间：我们 0.5~2.2s，Chrome 4~12s
+- 内存：好天我们单进程全程峰值 227MB，Chrome 每开一个页进程树约 2.1GB；差天我们 468MB（慢网络把 fetch buffer 拖大了，我们在盯），Chrome 每页中位 1753MB
 - 可靠性：Chrome 有 5/40 次返回 0 字节的 DOM（python.org 两轮全挂，react.dev、bun.sh、vitejs.dev 偶发挂），我们 0 失败
 
-机器是 Apple Silicon macOS，网络是国内普通出口。测试脚本就在仓库 `bench/` 目录里，`python3 bench/run.py` 可以原样复现。
+机器是 Apple Silicon macOS，网络是国内普通出口。测试脚本就在仓库 `bench/` 目录里，`python3 bench/run.py` 可以原样复现，两轮的原始 TSV 也都提交在仓库里——只引好天数字的基准都是耍流氓。
 
 ## 为什么要单独造一个？Chrome 不是有 headless 吗
 
@@ -22,7 +22,7 @@
 
 aginxbrowser 是分层的。一个 URL 进来，先走 Tier 1：纯 HTTP 抓取 + HTML 解析 + 正文提取。实测下来 36/40 的页面到这一层内容就够了，根本不需要执行 JS——那 532ms 里大头其实就是网络往返。
 
-只有当页面真的是 JS 渲染的（内容启发式判断正文不够），才升到 Tier 2，起我们内置的 JS 引擎把页面真正跑一遍。引擎叫谛听（diting），技术谱系来自开源社区 obscura/blitz 这条线，我们在上面做了大量面向 Agent 场景的改造：stealth TLS 指纹、有状态 session、CDP 兼容接口、MCP 工具直接暴露给 Agent。
+只有当页面真的是 JS 渲染的（内容启发式判断正文不够），才升到 Tier 2，起我们内置的 JS 引擎把页面真正跑一遍。引擎叫谛听（diting），技术谱系来自开源社区 obscura/blitz 这条线，我们在上面做了大量面向 Agent 场景的改造：stealth TLS 指纹、有状态 session，以及一套纯 HTTP 接口——curl 就能直接调，不绑任何客户端。
 
 输出是 Markdown 或结构化提取结果，直接喂给模型，不用 Agent 自己再剥一遍 HTML。
 
@@ -58,7 +58,7 @@ aginxbrowser 是分层的。一个 URL 进来，先走 Tier 1：纯 HTTP 抓取 
 
 ## 现状
 
-v0.2.5 已发布，macOS/Linux 都有预编译二进制，Homebrew、Docker、MCP Registry、Smithery 都能装。也挂了个公网托管实例 browser.aginx.net，不想自己部署可以直接试。
+这篇文章从初稿到发出改了一个月，引擎也从 v0.2.5 走到了 v0.5.27（今天刚发）：stealth TLS 指纹、20 个搜索引擎、账户会话管理、截图/视频出片、容器查询和 RTL 这种深水区 CSS 都在路上补。macOS/Linux 都有预编译二进制（GitHub Release），`brew install yinnho/aginxbrowser/aginxbrowser` 一行装。也挂了个公网托管实例 browser.aginx.net，不想自己部署可以直接试。
 
 GitHub: github.com/yinnho/aginxbrowser
 
