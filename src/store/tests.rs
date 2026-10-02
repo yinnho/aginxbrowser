@@ -204,3 +204,60 @@ fn split_cjk_produces_per_char_tokens() {
     assert_eq!(split_cjk("浏览器go"), "浏 览 器 go");
     assert_eq!(split_cjk("plain"), "plain");
 }
+
+struct SavedEnv(&'static str, Option<std::ffi::OsString>);
+impl SavedEnv {
+    fn pin(k: &'static str, v: &str) -> Self {
+        let prev = std::env::var_os(k);
+        std::env::set_var(k, v);
+        SavedEnv(k, prev)
+    }
+    fn unset(k: &'static str) -> Self {
+        let prev = std::env::var_os(k);
+        std::env::remove_var(k);
+        SavedEnv(k, prev)
+    }
+}
+impl Drop for SavedEnv {
+    fn drop(&mut self) {
+        match self.1.take() {
+            Some(v) => std::env::set_var(self.0, v),
+            None => std::env::remove_var(self.0),
+        }
+    }
+}
+
+/// #203: the store db ignored every isolation knob — an instance with a
+/// pinned private STORAGE_DIR/COOKIE_STORE_DIR still read the shared
+/// ~/.aginxbrowser/cache.db, so startup `restore_all()` revived foreign
+/// sessions (stale localStorage IDB ghosts included) straight into the
+/// "fresh" instance. Ephemeral is the no-disk-state contract and outranks
+/// even an explicitly pinned store path.
+#[test]
+fn db_path_honors_ephemeral_and_isolation_dirs() {
+    let _env = crate::config::EPHEMERAL_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let base = std::env::temp_dir().join(format!("agx-dbpath-test-{}", uuid::Uuid::new_v4()));
+    let _eph = SavedEnv::unset("AGINXBROWSER_EPHEMERAL");
+    let _store = SavedEnv::unset("AGINXBROWSER_STORE_PATH");
+    let _storage = SavedEnv::unset("AGINXBROWSER_STORAGE_DIR");
+    let _cookie = SavedEnv::unset("AGINXBROWSER_COOKIE_STORE_DIR");
+
+    let iso = base.join("iso");
+    let _pin_storage = SavedEnv::pin("AGINXBROWSER_STORAGE_DIR", iso.to_str().unwrap());
+    assert_eq!(db_path(), iso.join("cache.db"));
+
+    std::env::remove_var("AGINXBROWSER_STORAGE_DIR");
+    let cookies = base.join("cookies");
+    let _pin_cookie = SavedEnv::pin("AGINXBROWSER_COOKIE_STORE_DIR", cookies.to_str().unwrap());
+    assert_eq!(db_path(), cookies.join("cache.db"));
+
+    std::env::set_var("AGINXBROWSER_STORE_PATH", "/definitely/pinned.db");
+    std::env::set_var("AGINXBROWSER_EPHEMERAL", "1");
+    assert_eq!(
+        db_path(),
+        std::path::PathBuf::from(":memory:"),
+        "ephemeral must outrank an explicit store path"
+    );
+}

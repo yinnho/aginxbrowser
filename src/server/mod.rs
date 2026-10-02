@@ -53,8 +53,12 @@ static SHARED_COOKIE_JAR: std::sync::LazyLock<Arc<CookieJar>> = std::sync::LazyL
 });
 
 fn cookie_store_path() -> std::path::PathBuf {
+    // STORAGE_DIR sits in the chain so an isolated instance (#203's
+    // "private database" setup) doesn't import the shared cookie jar —
+    // same isolation contract the local store honors for cache.db.
     let dir = std::env::var("AGINXBROWSER_COOKIE_STORE_DIR")
         .ok()
+        .or_else(|| std::env::var("AGINXBROWSER_STORAGE_DIR").ok())
         .or_else(|| crate::config::app_data_dir().map(|p| p.to_string_lossy().into_owned()))
         .unwrap_or_else(|| ".".to_string());
     std::path::PathBuf::from(dir).join("cookie-store.json")

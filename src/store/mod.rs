@@ -48,9 +48,27 @@ fn enabled() -> bool {
 }
 
 fn db_path() -> PathBuf {
+    // Ephemeral is the no-disk-state contract — it outranks every path
+    // knob. :memory: works because with_store holds one connection for the
+    // process lifetime.
+    if crate::config::ephemeral() {
+        return PathBuf::from(":memory:");
+    }
     if let Ok(p) = std::env::var("AGINXBROWSER_STORE_PATH") {
         if !p.is_empty() {
             return PathBuf::from(p);
+        }
+    }
+    // An isolated instance (STORAGE_DIR / COOKIE_STORE_DIR pinned by e.g.
+    // the "isolated private database" repro in #203) must not reach into
+    // the shared store: session snapshots live here, and restore_all()
+    // would otherwise revive foreign sessions — stale localStorage ghosts
+    // included — straight into the "fresh" instance.
+    if let Ok(dir) = std::env::var("AGINXBROWSER_STORAGE_DIR")
+        .or_else(|_| std::env::var("AGINXBROWSER_COOKIE_STORE_DIR"))
+    {
+        if !dir.is_empty() {
+            return PathBuf::from(dir).join("cache.db");
         }
     }
     let home = std::env::var("HOME")

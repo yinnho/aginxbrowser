@@ -16857,6 +16857,53 @@ async fn idb_open_dispatches_upgrade_then_success_and_skips_on_reopen() {
     );
 }
 
+/// #203: `close()` used to set a closed flag on the shared per-name record,
+/// so one connection's close poisoned every other connection — 抖店's
+/// @ecom/browser-tcc opens its DB from several modules and died with
+/// `Uncaught (in promise) InvalidStateError: database is closed` ×2 per
+/// navigation. Chrome semantics: closed is per-connection; siblings keep
+/// transacting, the closed one throws.
+#[tokio::test(flavor = "current_thread")]
+async fn idb_close_is_per_connection_not_per_database() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    rt.evaluate("localStorage.removeItem('__diting_idb__close-db')").unwrap();
+    rt.evaluate(r#"
+        function openDb() {
+          return new Promise(function (resolve, reject) {
+            const req = indexedDB.open('close-db', 1);
+            req.onupgradeneeded = function (e) {
+              e.target.result.createObjectStore('kv', { keyPath: 'k' });
+            };
+            req.onsuccess = function (e) { resolve(e.target.result); };
+            req.onerror = function () { reject(req.error); };
+          });
+        }
+        globalThis.__log = null;
+        globalThis.__p = openDb().then(function (a) {
+          return openDb().then(function (b) {
+            a.close();
+            const out = [];
+            try {
+              b.transaction('kv', 'readwrite').objectStore('kv').put({ k: 'x', v: 42 });
+              out.push('b-tx-ok');
+            } catch (e) { out.push('b-tx-throw:' + e.name); }
+            try {
+              a.transaction('kv');
+              out.push('a-tx-ok');
+            } catch (e) { out.push('a-tx-throw:' + e.name + ':' + e.message); }
+            globalThis.__log = out;
+          });
+        });
+    "#).unwrap();
+    let _ = rt.run_event_loop_bounded(300).await;
+    let log = rt.evaluate("globalThis.__log").unwrap();
+    assert_eq!(
+        log,
+        serde_json::json!(["b-tx-ok", "a-tx-throw:InvalidStateError:database is closed"]),
+        "closing one connection must leave sibling connections transacting; only the closed one throws"
+    );
+}
+
 /// #54: the open request's `.transaction` stayed null through the upgrade
 /// window — the event object carried the versionchange tx, but IDB libraries
 /// (Dexie) read `e.target.transaction`, then dereferenced it inside their

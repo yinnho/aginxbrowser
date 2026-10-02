@@ -15418,7 +15418,7 @@ function _idbPersistMeta(rec) {
 function _idbRecord(name) {
   let rec = _idbRegistryMap.get(name);
   if (!rec) {
-    rec = { name, version: 0, stores: new Map(), closed: false };
+    rec = { name, version: 0, stores: new Map() };
     try {
       const raw = globalThis.localStorage.getItem('__diting_idb__' + name);
       if (raw) {
@@ -15674,6 +15674,11 @@ function _idbVersionTx(rec, db) {
 }
 function _idbDatabase(rec) {
   const db = {
+    // Per-connection, not on the shared rec: one connection's close() must
+    // not poison the others' transactions (抖店 tcc opens @ecom/browser-tcc
+    // from several modules — a shared flag killed the page with
+    // InvalidStateError ×2 per navigation).
+    _closed: false,
     name: rec.name,
     get version() { return rec.version; },
     get objectStoreNames() { return _idbStrList(() => Array.from(rec.stores.keys())); },
@@ -15690,10 +15695,10 @@ function _idbDatabase(rec) {
     },
     deleteObjectStore(n) { rec.stores.delete(String(n)); },
     transaction(storeNames, mode) {
-      if (rec.closed) throw _idbErr('InvalidStateError', 'database is closed');
+      if (db._closed) throw _idbErr('InvalidStateError', 'database is closed');
       return _idbTransaction(rec, db, storeNames, mode);
     },
-    close() { rec.closed = true; },
+    close() { db._closed = true; },
     onversionchange: null,
     onabort: null,
     onerror: null,
@@ -15785,7 +15790,6 @@ globalThis.indexedDB = {
     Object.setPrototypeOf(req, IDBOpenDBRequest.prototype); // #209: open()/deleteDatabase() hand back open requests
     Promise.resolve().then(() => {
       const rec = _idbRecord(String(name));
-      rec.closed = false;
       const current = rec.version;
       const target = version === undefined || version === null ? (current || 1) : version;
       if (target < current) {
