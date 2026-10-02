@@ -1152,7 +1152,7 @@ Close the session and release its resources. For a `persistent` session this als
 
 ### GET /session/{id}/cookies
 
-Export the session's cookies as full Set-Cookie strings (`["name=value; Domain=example.com; Path=/", ...]`, flags included). Use it to persist login state — store it, then pass `cookies` to a future `session_create` to start the session already logged in, no re-login needed. The full form (not bare `name=value` pairs) is what makes cross-subdomain logins survive the round-trip: a `.taobao.com` cookie re-anchors at its own domain on the way back in, where a bare pair would be scoped to whatever page you happen to open.
+Export the session's cookies as full Set-Cookie strings (`["name=value; Domain=example.com; Path=/", ...]`, flags and `Expires` included). Use it to persist login state — store it, then pass `cookies` to a future `session_create` to start the session already logged in, no re-login needed. The full form (not bare `name=value` pairs) is what makes cross-subdomain logins survive the round-trip: a `.taobao.com` cookie re-anchors at its own domain on the way back in, where a bare pair would be scoped to whatever page you happen to open. `Expires` rides along too, so a stored snapshot never revives a cookie the server already retired (#203 — risk-control faces like taobao's answer a stale-token replay with `sessionExpired`).
 
 **Response:**
 
