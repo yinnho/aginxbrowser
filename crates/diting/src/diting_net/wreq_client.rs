@@ -472,7 +472,14 @@ impl StealthHttpClient {
                     .flat_map(|h| h.keys())
                     .any(|k| k.eq_ignore_ascii_case(name))
             };
-            let extra = self.extra_headers.read().await;
+            // Owned clone, not a held guard: the guard's block spans
+            // `req.send().await` and `resp.bytes().await` below, and one
+            // request parked on a dead h2 stream would hold the read lock
+            // forever — `scripted_stealth_hop`'s per-hop `set_extra_headers`
+            // write then queues, and tokio RwLock fairness parks every later
+            // reader behind it: one stalled fetch wedges the whole session
+            // (the fxg mcs-beacon shape).
+            let extra = self.extra_headers.read().await.clone();
             if !request_local("user-agent") {
                 req = req.header("User-Agent", &ua);
             }
