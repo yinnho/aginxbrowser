@@ -912,6 +912,7 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "white-space", "text-overflow",
         "object-fit", "object-position", "z-index", "border-radius",
         "float", "clear", "border-collapse", "vertical-align", "opacity", "transform",
+        "list-style-type", "list-style",
     ];
     if !SUPPORTED.contains(&name.to_ascii_lowercase().as_str()) {
         return false;
@@ -979,6 +980,20 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
                 || t.starts_with('\'')
         }
         "border-collapse" => matches!(value, "collapse" | "separate"),
+        "list-style-type" => matches!(
+            value,
+            "none" | "disc" | "circle" | "square" | "decimal" | "decimal-leading-zero"
+                | "lower-roman" | "upper-roman" | "lower-alpha" | "lower-latin"
+                | "upper-alpha" | "upper-latin"
+        ),
+        "list-style" => value.split_whitespace().any(|t| {
+            matches!(
+                t,
+                "none" | "disc" | "circle" | "square" | "decimal" | "decimal-leading-zero"
+                    | "lower-roman" | "upper-roman" | "lower-alpha" | "lower-latin"
+                    | "upper-alpha" | "upper-latin" | "inside" | "outside"
+            ) || t.starts_with("url(")
+        }),
         "vertical-align" => matches!(
             value,
             "top" | "middle" | "bottom" | "baseline" | "sub" | "super"
@@ -1305,6 +1320,12 @@ pub struct ComputedStyle {
     /// widths) and later-row content never widens a column; `auto` = the
     /// initial content-measured layout. `None` = not declared (auto).
     pub table_layout: Option<TableLayout>,
+    /// `list-style-type`, INHERITED (every browser UA sheet declares it on
+    /// the list containers and li picks it up through inheritance). `None`
+    /// = nothing declared anywhere — the CSS initial `disc` applies at the
+    /// marker use site. `Some(None)` is the author reset (`list-style:
+    /// none`), which suppresses the marker.
+    pub list_style_type: Option<ListStyleType>,
     /// `vertical-align` on table cells (blitz#508); None = not declared
     /// (the UA middle default applies at the cell alignment site). The
     /// valign attribute feeds the same slot as a presentational hint, so
@@ -1805,6 +1826,34 @@ pub enum BorderCollapse {
 pub enum TableLayout {
     Auto,
     Fixed,
+}
+
+/// `list-style-type` (#206 v1). Every numbering style beyond the geometric
+/// trio collapses onto Decimal — the marker exists, the numbering is right;
+/// roman/alpha glyph work is a later batch. `None` is the author's
+/// `list-style: none` reset (and its own value).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListStyleType {
+    None,
+    Disc,
+    Circle,
+    Square,
+    Decimal,
+}
+
+impl ListStyleType {
+    /// The marker's text run. Outside markers paint as text in the item's
+    /// own typography; Chrome draws the geometric trio from the UA font,
+    /// whose glyph shapes these codepoints mirror.
+    pub fn marker_text(self, index: usize) -> String {
+        match self {
+            ListStyleType::None => String::new(),
+            ListStyleType::Disc => "\u{2022}".into(),
+            ListStyleType::Circle => "\u{25E6}".into(),
+            ListStyleType::Square => "\u{25AA}".into(),
+            ListStyleType::Decimal => format!("{index}."),
+        }
+    }
 }
 
 /// `vertical-align` modeled subset. On table cells (blitz#508)
@@ -3643,10 +3692,39 @@ pub fn ua_padding(tag: &str) -> Option<[CssLength; 4]> {
 /// and paints as our uniform solid band; the `inset` style distinction is
 /// a later batch. Buttons carry their 2px UA border from the same sheet
 /// (#159) — the border box completes the shrink-to-fit chrome.
+/// Parse one `list-style-type` value. Every numbering keyword maps onto
+/// Decimal (v1 collapse — the marker shows and numbers correctly; roman/
+/// alpha glyphs are a later batch); the geometric trio and none keep their
+/// own slots. Unrecognized values return None (declaration drops, the
+/// inherited slot survives — Chrome parse-time behavior).
+fn parse_list_style_type(v: &str) -> Option<ListStyleType> {
+    match v {
+        "none" => Some(ListStyleType::None),
+        "disc" => Some(ListStyleType::Disc),
+        "circle" => Some(ListStyleType::Circle),
+        "square" => Some(ListStyleType::Square),
+        "decimal" | "decimal-leading-zero" | "lower-roman" | "upper-roman" | "lower-alpha"
+        | "lower-latin" | "upper-alpha" | "upper-latin" => Some(ListStyleType::Decimal),
+        _ => None,
+    }
+}
+
 pub fn ua_border(tag: &str) -> Option<(f32, BorderStyle)> {
     match tag {
         "iframe" => Some((2.0, BorderStyle::Solid)),
         "button" => Some((2.0, BorderStyle::Solid)),
+        _ => None,
+    }
+}
+
+/// UA `list-style-type` on the list containers (every browser UA sheet):
+/// the disc family for ul/menu/dir, decimal for ol. `li` declares nothing
+/// — it inherits from its container, and a bare li (no list ancestor)
+/// keeps the CSS initial `disc`, which the marker use site fills in.
+pub fn ua_list_style(tag: &str) -> Option<ListStyleType> {
+    match tag {
+        "ul" | "menu" | "dir" => Some(ListStyleType::Disc),
+        "ol" => Some(ListStyleType::Decimal),
         _ => None,
     }
 }
@@ -4217,6 +4295,27 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 _ => return false,
             };
             true
+        }
+        "list-style-type" => {
+            style.list_style_type = parse_list_style_type(v);
+            true
+        }
+        "list-style" => {
+            // Shorthand: each token feeds its own slot; position
+            // (inside/outside) parses but has no v1 paint distinction,
+            // images (url()) drop. `none` alone is the classic marker
+            // reset.
+            let mut seen = false;
+            for tok in v.split_whitespace() {
+                if matches!(tok, "inside" | "outside") || tok.starts_with("url(") {
+                    continue;
+                }
+                if let Some(t) = parse_list_style_type(tok) {
+                    style.list_style_type = Some(t);
+                    seen = true;
+                }
+            }
+            seen
         }
         "vertical-align" => {
             match v {
@@ -6394,6 +6493,7 @@ pub fn cascade_element(
         display_from_ua: true,
         font_weight: ua_font_weight(tag),
         text_align: ua_text_align(tag),
+        list_style_type: ua_list_style(tag),
         ..Default::default()
     };
     if let Some((px, line)) = ua_border(tag) {
@@ -6426,6 +6526,10 @@ pub fn cascade_element(
         // direction inherits the same way (#188-3): an ancestor's rtl
         // flows down until an element declares its own.
         style.direction = style.direction.or(parent.direction);
+        // list-style-type inherits, with the element's own UA declaration
+        // beating the inherited value — a nested <ol> stays decimal inside
+        // a disc <ul>.
+        style.list_style_type = style.list_style_type.or(parent.list_style_type);
         // Number keeps its multiplier for descendants (spec computed value);
         // Px inherits as absolute px — both copy straight through.
         style.line_height = parent.line_height;

@@ -7174,6 +7174,131 @@ pub fn layout_collect_with_images(
         }
     }
 
+    /// #206 (blitz #1003 absorption, marker v1): an `li` paints its list
+    /// marker OUTSIDE the border box, hanging off the outer left edge (the
+    /// outer right edge under rtl) and sharing the first text line's
+    /// typography so the baselines align. Layout never sees the marker —
+    /// Chrome's outside marker box takes no space in the principal box, and
+    /// the ul's UA padding is what visually hosts the bullets. The index is
+    /// the li's position among same-parent li siblings (css-lists item
+    /// counter); the typography comes from the first Run/Word leaf in the
+    /// laid-out subtree. Called only on the prebaked (diagonal) path — a
+    /// transformed li under a SetXf bracket skips its marker.
+    #[allow(clippy::too_many_arguments)]
+    fn push_list_marker(
+        tree: &DomTree,
+        taffy_tree: &TaffyTree<TextLeaf>,
+        node: taffy::tree::NodeId,
+        dom_id: NodeId,
+        cs: &crate::diting_css::ComputedStyle,
+        rect: Rect,
+        fonts: &FontBook,
+        alpha: f32,
+        xf: Xf,
+        items: &mut Vec<PaintItem>,
+    ) {
+        let is_li = tree
+            .with_node(dom_id, |n| n.as_element().is_some_and(|e| &*e.local == "li"))
+            .unwrap_or(false);
+        if !is_li {
+            return;
+        }
+        // Author display changes de-list the item (display:flex/inline li
+        // generates no marker in Chrome); the UA Block keeps one.
+        if !matches!(cs.display, Some(CssDisplay::Block)) {
+            return;
+        }
+        let ty = cs
+            .list_style_type
+            .unwrap_or(crate::diting_css::ListStyleType::Disc);
+        if ty == crate::diting_css::ListStyleType::None {
+            return;
+        }
+        let mut index = 1usize;
+        let mut sib = tree.with_node(dom_id, |n| n.prev_sibling).flatten();
+        while let Some(s) = sib {
+            if tree
+                .with_node(s, |n| n.as_element().is_some_and(|e| &*e.local == "li"))
+                .unwrap_or(false)
+            {
+                index += 1;
+            }
+            sib = tree.with_node(s, |n| n.prev_sibling).flatten();
+        }
+        let text = ty.marker_text(index);
+        // First text leaf in the laid-out subtree: its line-box top and
+        // font params carry the marker (baseline alignment for free). An
+        // li with no text falls back to the content box's first line.
+        let mut fs = cs.font_size.unwrap_or(crate::diting_css::DEFAULT_ROOT_FONT_SIZE);
+        let mut lh = fs * 1.2;
+        let mut bold = cs.font_weight.unwrap_or(400) >= 600;
+        let mut mono = false;
+        let mut han = None;
+        let mut first_line_y = rect.y + side_px(cs.border_width.top) + side_px(cs.padding.top);
+        let mut stack: Vec<(taffy::tree::NodeId, f32, f32)> = vec![(node, 0.0, 0.0)];
+        while let Some((n, ox, oy)) = stack.pop() {
+            let kids = taffy_tree.children(n).unwrap_or_default();
+            for &c in kids.iter().rev() {
+                let Ok(l) = taffy_tree.layout(c) else { continue };
+                let (cx, cy) = (ox + l.location.x, oy + l.location.y);
+                let leaf = match taffy_tree.get_node_context(c) {
+                    Some(leaf @ TextLeaf::Run { .. }) | Some(leaf @ TextLeaf::Word { .. }) => {
+                        Some(leaf)
+                    }
+                    _ => None,
+                };
+                if let Some(leaf) = leaf {
+                    match leaf {
+                        TextLeaf::Run { font_size, line_height, bold: b, mono: m, han: h, .. }
+                        | TextLeaf::Word { font_size, line_height, bold: b, mono: m, han: h, .. } => {
+                            fs = *font_size;
+                            lh = *line_height;
+                            bold = *b;
+                            mono = *m;
+                            han = *h;
+                        }
+                        _ => unreachable!(),
+                    }
+                    first_line_y = rect.y + cy;
+                    stack.clear();
+                    break;
+                }
+                stack.push((c, cx, cy));
+            }
+        }
+        if text.is_empty() || fs <= 0.0 {
+            return;
+        }
+        let advance = fonts.advance_width(&text, fs, bold, mono, han);
+        let gap = fs * 0.25;
+        let rtl = matches!(cs.direction, Some(crate::diting_css::TextDirection::Rtl));
+        let x = if rtl { rect.x + rect.width + gap } else { rect.x - advance - gap };
+        let color = cs
+            .color
+            .map(|c| [c.0, c.1, c.2, c.3])
+            .unwrap_or([0, 0, 0, 255]);
+        items.push(PaintItem::Text {
+            text,
+            font_size: fs * xf.d,
+            bold,
+            color: with_alpha(color, alpha),
+            line_height: lh * xf.d,
+            x: x * xf.a + xf.e,
+            y: first_line_y * xf.d + xf.f,
+            wrap_at: f32::INFINITY,
+            gradient: None,
+            decorations: crate::diting_css::TextDecorations::default(),
+            mono,
+            word_spacing: 0.0,
+            truncate_at: None,
+            tokens: None,
+            ws: WhiteSpace::Normal,
+            text_shadow: None,
+            small_caps: false,
+            han,
+        });
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn collect(
         tree: &DomTree,
@@ -7375,6 +7500,15 @@ pub fn layout_collect_with_images(
             // Items under a SetXf bracket paint in LOCAL coordinates (raw
             // `rect`); the prebaked path uses the mapped box.
             let bg_rect = if prebake { mrect } else { rect };
+            // Outside list marker (#206): laid out with the box, painted
+            // hanging off the border box's outer edge.
+            if prebake {
+                if let Some(cs) = styles.get(dom_id) {
+                    push_list_marker(
+                        tree, taffy_tree, node, *dom_id, cs, rect, fonts, alpha, child_xf, items,
+                    );
+                }
+            }
             // CSS2.1 paints cell > row > row-group backgrounds. Row groups
             // have their own wrapper boxes since the sticky-group batch, so
             // the group's bg paints on its own band (under the rows, which

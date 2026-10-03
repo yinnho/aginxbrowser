@@ -2268,3 +2268,62 @@ fn absolute_containing_block_is_padding_box_of_positioned_ancestor() {
         "target anchors at outer's PADDING box (border 2 + inset 10 = 12,12), got {target:?}"
     );
 }
+
+/// #206 (blitz #1003 absorption): UA list markers did not exist at all —
+/// every bullet/number on unstyled lists was missing ink. v1 paints the
+/// marker as text OUTSIDE the li's border box (hanging off the outer left
+/// edge), sharing the first line's typography; `list-style: none` (and
+/// `list-style-type: none`) suppresses it; `<ol>` numbers 1., 2. by
+/// same-parent sibling count.
+#[test]
+fn outside_list_markers_paint_outside_the_border_box() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_layout::PaintItem;
+    use crate::diting_dom::tree_sink::parse_html;
+
+    let html = r#"<html><body style="margin:0">
+        <ul style="padding-left:0"><li id="a" style="border:2px solid red;width:120px">item</li></ul>
+        <ul style="padding-left:0"><li id="b">one</li><li id="c">two</li></ul>
+        <ol style="padding-left:0"><li id="d">first</li><li id="e">second</li></ol>
+        <ul style="padding-left:0;list-style:none"><li id="f">plain</li></ul>
+        </body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
+    let (rects, items) = crate::diting_layout::layout_dom_with_paint(
+        &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0,
+    );
+    let li_rect = |sel: &str| {
+        let id = tree.query_selector_all(sel).unwrap()[0];
+        rects.get(&id).copied().unwrap_or_else(|| panic!("{sel} owns a box"))
+    };
+    let marker_left_edge = |item_text: &str| -> Option<f32> {
+        items.iter().find_map(|it| match it {
+            PaintItem::Text { text, x, .. } if text == item_text => Some(*x),
+            _ => None,
+        })
+    };
+    // The bullet hangs OUTSIDE the bordered li: its whole advance starts
+    // left of the border box (Chrome: ink at border.x-12..-7).
+    let a = li_rect("#a");
+    let bullet_x = marker_left_edge("\u{2022}").expect("disc bullet paints");
+    assert!(
+        bullet_x < a.x - 6.0,
+        "outside marker starts left of the border box (got x={bullet_x}, li.x={}): {a:?}",
+        a.x
+    );
+    // Two-lis list: exactly two bullets.
+    let bullets = items.iter().filter(|it| matches!(it, PaintItem::Text { text, .. } if text == "\u{2022}")).count();
+    assert_eq!(bullets, 3, "three disc items across #a/#b/#c: {bullets}");
+    // ol numbers by sibling position.
+    let one = marker_left_edge("1.").expect("ol first marker");
+    let two = marker_left_edge("2.").expect("ol second marker");
+    let d = li_rect("#d");
+    assert!(one < d.x, "decimal marker outside: one={one} li.x={}", d.x);
+    assert_eq!(one, two, "tabular digits: 1. and 2. share the advance, so the same edge");
+    // list-style:none kills the marker: the bullets total stays at three
+    // (#a/#b/#c; the reset list adds none), and the reset list's own text
+    // run still paints.
+    assert!(items.iter().any(|it| matches!(it, PaintItem::Text { text, .. } if text == "plain")),
+        "the reset list's text still paints");
+}

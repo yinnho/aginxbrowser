@@ -9722,7 +9722,7 @@ globalThis.getComputedStyle = (el, pseudoElt) => {
     'background-position': '0% 0%', 'background-repeat': 'repeat',
     'font-style': 'normal', 'word-spacing': '0px',
     'text-decoration': 'none', 'text-decoration-line': 'none', 'text-indent': '0px',
-    'list-style-position': 'outside', 'border-spacing': '0px', 'caption-side': 'top',
+    'list-style-position': 'outside', 'list-style-type': 'disc', 'border-spacing': '0px', 'caption-side': 'top',
     'align-self': 'auto', 'flex-grow': '0', 'flex-shrink': '1',
     'flex-basis': 'auto', 'grid-column': 'auto', 'grid-row': 'auto',
     'transition-property': 'all', 'transition-duration': '0s',
