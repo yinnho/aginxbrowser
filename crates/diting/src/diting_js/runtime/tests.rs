@@ -273,6 +273,43 @@
         );
     }
 
+    /// #207: the border style/color longhands on the computed face. Declared
+    /// keywords round-trip, undeclared style reports the CSS initial `none`,
+    /// and the color resolves currentcolor Chrome-style (declared border
+    /// color, else the element's color, else black).
+    #[test]
+    fn computed_style_reports_border_style_color() {
+        let mut rt = setup_runtime(
+            "<html><body>\
+             <div id='a' style='border: 2px dashed #ff0000'>x</div>\
+             <div id='b' style='color: rgb(0, 128, 0)'>y</div>\
+             <div id='c'>z</div>\
+             </body></html>",
+        );
+        let out = rt
+            .evaluate(
+                r#"
+            var a = getComputedStyle(document.getElementById('a'));
+            var b = getComputedStyle(document.getElementById('b'));
+            var c = getComputedStyle(document.getElementById('c'));
+            [a.getPropertyValue('border-top-style'),
+             a.getPropertyValue('border-left-style'),
+             a.getPropertyValue('border-top-color'),
+             a.getPropertyValue('border-bottom-color'),
+             a.getPropertyValue('border-top-width'),
+             b.getPropertyValue('border-top-color'),
+             c.getPropertyValue('border-top-style'),
+             c.getPropertyValue('border-top-color')].join('|');
+        "#,
+            )
+            .unwrap();
+        assert_eq!(
+            out.as_str().unwrap(),
+            "dashed|dashed|rgb(255, 0, 0)|rgb(255, 0, 0)|2px|rgb(0, 128, 0)|none|rgb(0, 0, 0)",
+            "declared longhands round-trip, undeclared style is none, color resolves currentcolor"
+        );
+    }
+
     /// Issue #29: `Emulation.setEmulatedMedia` (Playwright's
     /// page.emulateMedia) must flip all three faces together — the
     /// matchMedia script face, its change events, AND the @media cascade

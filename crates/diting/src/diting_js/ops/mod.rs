@@ -3109,6 +3109,14 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "border-right-width",
     "border-bottom-width",
     "border-left-width",
+    "border-top-style",
+    "border-right-style",
+    "border-bottom-style",
+    "border-left-style",
+    "border-top-color",
+    "border-right-color",
+    "border-bottom-color",
+    "border-left-color",
     "margin-top",
     "margin-right",
     "margin-bottom",
@@ -3517,6 +3525,28 @@ fn computed_style_value(
         "border-right-width" => Some(if s.border_style.is_some() { side_css(&s.border_width.right) } else { "0px".into() }),
         "border-bottom-width" => Some(if s.border_style.is_some() { side_css(&s.border_width.bottom) } else { "0px".into() }),
         "border-left-width" => Some(if s.border_style.is_some() { side_css(&s.border_width.left) } else { "0px".into() }),
+        // #207: the style/color longhands were absent, so the JS mask served
+        // "" where Chrome answers the keyword / resolved color. Style is the
+        // declared keyword (uniform across sides — per-side styles are a later
+        // batch) with `none` for the initial; color is currentcolor resolved
+        // Chrome-style (declared border color, else the element's color, else
+        // black).
+        "border-top-style" | "border-right-style" | "border-bottom-style" | "border-left-style" => Some(
+            match s.border_style {
+                Some(BorderStyle::Solid) => "solid",
+                Some(BorderStyle::Dashed) => "dashed",
+                Some(BorderStyle::Dotted) => "dotted",
+                Some(BorderStyle::Double) => "double",
+                None => "none",
+            }
+            .into(),
+        ),
+        "border-top-color" | "border-right-color" | "border-bottom-color" | "border-left-color" => Some(
+            match s.border_color.or(s.color) {
+                Some(c) => color(&c),
+                None => "rgb(0, 0, 0)".into(),
+            },
+        ),
         "margin-top" => Some(side_css(&s.margin.top)),
         "margin-right" => Some(side_css(&s.margin.right)),
         "margin-bottom" => Some(side_css(&s.margin.bottom)),
