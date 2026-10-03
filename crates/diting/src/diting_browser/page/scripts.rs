@@ -505,6 +505,7 @@ impl Page {
                         let _ = js.execute_script("<current-script>", &format!(
                             "globalThis.__currentScriptNid={nid};globalThis.__parserScriptCeiling={ceiling};",
                             nid = script.nid, ceiling = ceiling));
+                        let script_t0 = std::time::Instant::now();
                         if let Err(e) = js.execute_script_guarded(&url, &code) {
                             tracing::warn!("Script error ({}): {}", url, e);
                             // Chrome parity (#17): the uncaught throw must
@@ -523,7 +524,41 @@ impl Page {
                                 );
                             }
                         }
+                        let exec_ms = script_t0.elapsed().as_millis();
+                        if exec_ms >= 100 {
+                            // #29: name the CPU hogs eating the classic budget
+                            // — cumulative 10s exhaustion skips the rest of the
+                            // SPA's scripts and the page never finishes booting.
+                            tracing::warn!(
+                                "slow script: {url} took {exec_ms}ms (classic budget {script_deadline_ms}ms)"
+                            );
+                        }
                         let _ = js.execute_script("<current-script>", "globalThis.__currentScriptNid=0;");
+                        // Chrome parity: an executed parser <script src> fires
+                        // its element 'load' as a task. doudian's SSR bootstrap
+                        // hooks `document.currentScript.previousSibling
+                        // .addEventListener('load', ...)` and resolves its
+                        // firstReadyDefer from there — without this event the
+                        // publish sub-app never mounts (#203).
+                        let _ = js.execute_script(
+                            "<script-load-event>",
+                            &format!(
+                                "globalThis.__fireParserScriptEvent&&__fireParserScriptEvent({nid},'load');",
+                                nid = script.nid
+                            ),
+                        );
+                    }
+                } else {
+                    // Fetch failed or was blocked: Chrome fires 'error' on the
+                    // element. Listeners gating on load/error must not hang.
+                    if let Some(js) = &mut self.js {
+                        let _ = js.execute_script(
+                            "<script-error-event>",
+                            &format!(
+                                "globalThis.__fireParserScriptEvent&&__fireParserScriptEvent({nid},'error');",
+                                nid = script.nid
+                            ),
+                        );
                     }
                 }
             } else if !script.inline.is_empty() {
@@ -546,6 +581,7 @@ impl Page {
                             }
                         ),
                     );
+                    let inline_t0 = std::time::Instant::now();
                     if let Err(e) = js.execute_script_guarded("<inline>", &script.inline) {
                         tracing::warn!("Inline script error: {}", e);
                         // Same window-error reporting as external scripts
@@ -563,6 +599,13 @@ impl Page {
                                 ),
                             );
                         }
+                    }
+                    let inline_ms = inline_t0.elapsed().as_millis();
+                    if inline_ms >= 100 {
+                        tracing::warn!(
+                            "slow inline script [nid {}] took {inline_ms}ms (classic budget {script_deadline_ms}ms)",
+                            script.nid
+                        );
                     }
                     let _ = js.execute_script("<current-script>", "globalThis.__currentScriptNid=0;");
                 }

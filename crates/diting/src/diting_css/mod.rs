@@ -821,8 +821,60 @@ fn eval_supports(condition: &str) -> Option<bool> {
         let results: Option<Vec<bool>> = parts.iter().map(|p| eval_supports(p)).collect();
         return results.map(|rs| rs.iter().all(|&b| b));
     }
+    // Leaf: selector probes. `CSS.supports(':hover')` / `selector(:has(a))`
+    // are true in Chrome for every pseudo this engine matches; an unknown
+    // pseudo fails like a real browser.
+    let probe = condition.trim();
+    let selector_probe = probe
+        .strip_prefix("selector(")
+        .and_then(|rest| rest.strip_suffix(')'))
+        .map(str::trim)
+        .unwrap_or(probe);
+    if let Some(pseudo) = selector_probe.strip_prefix(':') {
+        let head = pseudo.split('(').next().unwrap_or(pseudo);
+        let known = matches!(
+            head,
+            "hover"
+                | "focus"
+                | "focus-visible"
+                | "focus-within"
+                | "active"
+                | "visited"
+                | "link"
+                | "checked"
+                | "disabled"
+                | "enabled"
+                | "placeholder-shown"
+                | "read-only"
+                | "read-write"
+                | "required"
+                | "optional"
+                | "first-child"
+                | "last-child"
+                | "only-child"
+                | "first-of-type"
+                | "last-of-type"
+                | "only-of-type"
+                | "root"
+                | "empty"
+                | "nth-child"
+                | "nth-last-child"
+                | "nth-of-type"
+                | "nth-last-of-type"
+                | "not"
+                | "is"
+                | "where"
+                | "has"
+                | "before"
+                | "after"
+                | "first-line"
+                | "first-letter"
+                | "selection"
+        );
+        return Some(known);
+    }
     // Leaf: `(prop: value)` declaration probe.
-    let probe = condition.trim().trim_start_matches('(').trim_end_matches(')').trim();
+    let probe = probe.trim_start_matches('(').trim_end_matches(')').trim();
     let (name, value) = probe.split_once(':')?;
     Some(supports_declaration(name.trim(), value.trim()))
 }
@@ -913,10 +965,25 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "object-fit", "object-position", "z-index", "border-radius",
         "float", "clear", "border-collapse", "vertical-align", "opacity", "transform",
         "list-style-type", "list-style", "text-align-last",
+        // Feature-detection staples (doudian's SSR shell probes these;
+        // answering false flipped its render branch and broke hydration #418,
+        // #203). position:sticky renders since the sticky batch (#434).
+        "position", "inset", "top", "right", "bottom", "left",
+        "aspect-ratio", "visibility", "cursor", "user-select", "pointer-events",
+        "flex-wrap", "flex-grow", "flex-shrink", "align-items", "justify-content",
+        "min-width", "max-width", "min-height", "max-height",
+        "letter-spacing", "text-decoration", "box-sizing",
     ];
-    if !SUPPORTED.contains(&name.to_ascii_lowercase().as_str()) {
+    let name_l = name.to_ascii_lowercase();
+    // Custom-property declarations always probe true when the value parses
+    // (css-variables-1); every other unknown property stays false.
+    if name_l.starts_with("--") {
+        return !value.is_empty();
+    }
+    if !SUPPORTED.contains(&name_l.as_str()) {
         return false;
     }
+    let name = name_l.as_str();
     // Unitless nonzero lengths are invalid everywhere (upstream 2c12b5a) —
     // EXCEPT line-height, where a bare number is the canonical form, and
     // opacity, which IS a bare number.

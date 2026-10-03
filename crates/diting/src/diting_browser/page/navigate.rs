@@ -257,12 +257,23 @@ impl Page {
         }
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(ms);
         if self.busy_frozen {
-            // #66: the busy window already tripped for this realm. Park the
-            // full slice without re-entering V8 — the storm's callbacks are
-            // what's burning the core, and each one stays under every
-            // watchdog budget, so termination-based defenses never see it.
-            // Commands still preempt via the session select!; a Navigate or
-            // SetContent rebuilds the realm and unfreezes.
+            // #66: the busy window tripped for this realm. Throttle, don't
+            // park: a parking freeze turned heavy-but-legitimate SPAs into
+            // vegetables (doudian's create page measures 83-88% duty for 30s+
+            // after boot — real work, just slow in this engine) because a
+            // parked realm never runs the JS that completes module loads, so
+            // the page stuck half-rendered and every later fetch hung (#203).
+            // Chrome throttles heavy pages rather than killing them: a 50ms
+            // bounded work burst, then park out the rest of the slice ≈ 25%
+            // duty. Forward progress continues (~4× slower); a burner is
+            // contained to a quarter core. Each burst stays inside the
+            // watchdog-guarded path, and commands still preempt via the
+            // session select!; a Navigate or SetContent rebuilds the realm
+            // and unfreezes.
+            let work_ms = 50u64.min(ms);
+            if let Some(js) = &mut self.js {
+                let _ = js.run_event_loop_bounded(work_ms).await;
+            }
             tokio::time::sleep_until(deadline).await;
             return;
         }
@@ -329,18 +340,23 @@ impl Page {
         // burned for half a minute, which no legitimate idle page does.
         let hot = gained as u128 >= elapsed.as_nanos() * 2 / 5;
         self.busy_mark = Some((now, active));
+        // Duty % rides every freeze (and near-freeze) line: the threshold is
+        // tuned against real page measurements, and this number is the only
+        // way to see how close a legitimate heavy page came to the cliff.
+        let duty_pct = (gained as u128 * 100 / elapsed.as_nanos().max(1)) as u64;
+        tracing::warn!("#66 busy window: {duty_pct}% duty over {}s", elapsed.as_secs());
         if hot {
             self.busy_frozen = true;
             let secs = elapsed.as_secs();
             tracing::error!(
-                "#66: freezing realm after {secs}s at ≥40% V8 busy \
+                "#66: throttling realm to 25% duty after {secs}s at {duty_pct}% V8 busy \
                  (AGINXBROWSER_JS_BUSY_LIMIT_SECS={limit_secs}); \
                  navigate/setContent to unfreeze"
             );
             if let Some(js) = &self.js {
                 js.push_console_entry(
                     "error",
-                    "aginxbrowser: JS frozen after sustained busy loop \
+                    "aginxbrowser: JS throttled to 25% duty after sustained busy loop \
                      (see AGINXBROWSER_JS_BUSY_LIMIT_SECS); navigate or \
                      setContent to restart the page",
                 );

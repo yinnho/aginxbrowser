@@ -18028,3 +18028,239 @@ fn document_evaluate_xpath_subset() {
         let got = server.await.unwrap();
         assert_eq!(got, vec!["early-1".to_string(), "early-2".to_string()], "queued frames flush in order");
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_webidl_to_string_tag_brands() {
+        // #203: every engine shim class used to answer '[object Object]', and
+        // doudian's deep-clone helper treated that string as "plain data, walk
+        // own keys" — it recursed into an Event (target→node→ownerDocument
+        // back-edges) and died with RangeError, taking the whole publish app
+        // down. Chrome brands every platform object with its interface name.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"() => {
+            const ots = Object.prototype.toString;
+            return [
+                ots.call(new Event('x')),
+                ots.call(new CustomEvent('x')),          // subclass: own tag, not Event's
+                ots.call(new XMLHttpRequest()),
+                ots.call(new WebSocket('ws://x')),        // no throw: brand read only
+                ots.call(document.createElement('div')),
+                ots.call(document.createElement('input')),
+                ots.call(document),                       // '[object HTMLDocument]'
+                ots.call(location),
+                ots.call(console),
+                ots.call(localStorage),
+                ots.call(history),
+                ots.call(performance),
+            ];
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([
+                "[object Event]",
+                "[object CustomEvent]",
+                "[object XMLHttpRequest]",
+                "[object WebSocket]",
+                "[object HTMLDivElement]",
+                "[object HTMLInputElement]",
+                "[object HTMLDocument]",
+                "[object Location]",
+                "[object Console]",
+                "[object Storage]",
+                "[object History]",
+                "[object Performance]",
+            ])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_html_unknown_element_is_real_interface() {
+        // #203: HTMLUnknownElement used to be a bare alias of Element, and the
+        // toStringTag brand sweep then stamped Element.prototype with THAT
+        // name — every element answered '[object HTMLUnknownElement]'. It is
+        // its own interface below HTMLElement with an Illegal constructor.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"() => {
+            let threw = '';
+            try { new HTMLUnknownElement(); } catch (e) { threw = e.name; }
+            return [
+                typeof HTMLUnknownElement,
+                HTMLUnknownElement.prototype instanceof HTMLElement,
+                document.createElement('div') instanceof HTMLUnknownElement,
+                threw,
+            ];
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!(["function", true, false, "TypeError"])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_close_event_interface() {
+        // doudian's WS wrapper constructs CloseEvent on its reconnect path —
+        // the class didn't exist and the ReferenceError killed the socket
+        // layer. Chrome shape: code/reason/wasClean with WebIDL defaults, and
+        // createEvent('CloseEvent') maps to the real class.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"() => {
+            const e1 = new CloseEvent('close', { code: 1005, reason: 'gone', wasClean: true });
+            const e2 = new CloseEvent('close');
+            return [
+                e1 instanceof CloseEvent, e1 instanceof Event,
+                e1.code, e1.reason, e1.wasClean,
+                e2.code, e2.reason, e2.wasClean,
+                document.createEvent('CloseEvent') instanceof CloseEvent,
+                Object.prototype.toString.call(e1),
+            ];
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([
+                true, true, 1005, "gone", true, 0, "", false, true,
+                "[object CloseEvent]"
+            ])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_timer_nesting_clamps_past_level_four() {
+        // HTML spec: chained setTimeout(0) past nesting level 4 floors at 4ms.
+        // The clamp must NOT fire on ordinary top-level timers — an
+        // unconditional clamp stalled the doudian boot (later ruled out as the
+        // freeze root cause, but the nesting gate stays spec-pinned).
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"() => {
+            const p = new Promise((resolve) => {
+                const stamps = [];
+                const t0 = performance.now();
+                let level = 0;
+                const tick = () => {
+                    stamps.push(performance.now() - t0);
+                    level += 1;
+                    if (level >= 10) { resolve(stamps); return; }
+                    setTimeout(tick, 0);
+                };
+                setTimeout(tick, 0);
+            });
+            return Promise.race([p, new Promise((r) => setTimeout(() => r(null), 5000))]);
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        assert!(v.is_array(), "chain must finish inside 5s");
+        let stamps: Vec<f64> = serde_json::from_value(v).unwrap();
+        assert_eq!(stamps.len(), 10, "stamps: {:?}", stamps);
+        // Fires 1-5 (nesting ≤4) are unclamped; fire 6 onward each wait ≥4ms.
+        let diffs: Vec<String> = stamps.windows(2).map(|w| format!("{:.2}", w[1] - w[0])).collect();
+        assert!(
+            stamps[5] - stamps[4] >= 3.5,
+            "first clamped step must wait the 4ms floor, diffs={:?}",
+            diffs
+        );
+        assert!(
+            stamps[9] - stamps[5] >= 14.0,
+            "four clamped steps must each floor at 4ms, diffs={:?}",
+            diffs
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_css_supports_probes() {
+        // CSS.supports routes to the Rust @supports evaluator. doudian probes
+        // it ~15k times during boot; a throw or a wrong answer there detours
+        // the app into polyfill paths.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"() => [
+            CSS.supports('display', 'flex'),
+            CSS.supports('display', 'not-a-real-value'),
+            CSS.supports('(display: flex)'),
+            CSS.supports('(display: bogus)'),
+            CSS.supports('not (display: flex)'),
+            CSS.supports('not (display: bogus)'),
+            CSS.supports('(display: flex) and (display: bogus)'),
+            CSS.supports('(display: flex) or (display: bogus)'),
+            CSS.supports(':hover'),
+            CSS.supports(':bogus-pseudo'),
+        ]"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([true, false, true, false, false, true, false, true, true, false])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_date_to_string_pads_day_of_month() {
+        // Date.prototype.toString zero-pads the day (spec TimeString step 9).
+        // The unpadded 'Oct 4' broke doudian's SSR text-node comparison — the
+        // server rendered 'Oct 04', React threw #418 and discarded the server
+        // DOM. Pick a single-digit day and pin both forms.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"() => {
+            const d = new Date(2026, 9, 4, 5, 6, 7);
+            return [d.toDateString(), /^[A-Za-z]{3} Oct 04 2026$/.test(d.toDateString()),
+                    /^Sun Oct 04 2026 05:06:07/.test(d.toString())];
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        assert_eq!(v[1], serde_json::json!(true), "toDateString pads the day: {:?}", v[0]);
+        assert_eq!(v[2], serde_json::json!(true), "toString pads the day: {:?}", v[0]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_local_fetch_resolves_on_task_boundary() {
+        // data:/blob: fetch must resolve on a task, never inline as a microtask.
+        // Resolving inline let `while (true) { await fetch('data:...') }` run
+        // ~27k iterations/sec inside one microtask drain, starving every timer
+        // and event on the page (measured: 50ms timer dead for 3+ seconds
+        // while 111k inline fetches resolved in 4s). Chrome delivers even a
+        // local response on a task; the 50ms timer armed before the cascade
+        // must fire WHILE the cascade runs, not after it drains.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"() => {
+            const p = new Promise((resolve) => {
+                let fired = null;
+                const t0 = performance.now();
+                setTimeout(() => { fired = performance.now() - t0; }, 50);
+                (async () => {
+                    let n = 0;
+                    while (n < 2000) { await fetch('data:text/plain,x'); n += 1; }
+                    resolve({ fired: fired === null ? -1 : Math.round(fired) });
+                })();
+            });
+            return Promise.race([p, new Promise((r) => setTimeout(() => r(null), 10000))]);
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        assert!(v.is_object(), "cascade must finish inside 10s");
+        let fired = v["fired"].as_i64().unwrap();
+        assert!(
+            fired >= 50 && fired <= 1000,
+            "50ms timer must fire mid-cascade (task-per-fetch), fired={}ms",
+            fired
+        );
+    }

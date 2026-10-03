@@ -3221,8 +3221,9 @@ ms.addEventListener('sourceopen', function(){ \
     /// every watchdog budget — settle never fires, no RangeError (bounded
     /// depth), the loop never idles. Before the fix this pinned the session
     /// thread for its whole life (measured 45-48% of a core, zero watchdog
-    /// fires). After: the trailing busy window freezes the realm, the pump
-    /// parks without re-entering V8, and a navigation unfreezes.
+    /// fires). After: the trailing busy window trips the throttle, the pump
+    /// runs bounded 50ms bursts instead of free-running, and a navigation
+    /// unfreezes.
     #[tokio::test(flavor = "current_thread")]
     async fn busy_storm_freezes_park_and_navigation_unfreezes() {
         let _g = busy_limit_guard("2");
@@ -3250,18 +3251,30 @@ ms.addEventListener('sourceopen', function(){ \
         // watchdog ever fired on this realm.
         assert_eq!(p.js.as_ref().unwrap().watchdog_fired_total(), 0);
 
-        // Frozen realm parks instead of re-entering V8: cumulative active
-        // time stops moving.
+        // Frozen realm throttles instead of running free: cumulative active
+        // time grows (forward progress — a parked realm could never finish
+        // module loads, which is how #203's page stuck half-rendered), but
+        // bounded to the 50ms burst of a 300ms slice. Watchdog still armed
+        // inside every burst, and a burner that pins V8 sync would trip it.
         let active = p.js.as_ref().unwrap().v8_active_ns();
         p.pump_event_loop_slice(300).await;
-        assert_eq!(p.js.as_ref().unwrap().v8_active_ns(), active);
+        let gained_throttled = p.js.as_ref().unwrap().v8_active_ns() - active;
+        assert!(
+            gained_throttled > 0,
+            "throttled realm must still make forward progress"
+        );
+        assert!(
+            gained_throttled <= 150_000_000,
+            "throttled burst must stay bounded (≤150ms of a 300ms slice), gained {}ms",
+            gained_throttled / 1_000_000
+        );
 
         // session_console face: the freeze left an error entry.
         let entries = p.take_pending_console_calls();
         assert!(
             entries
                 .iter()
-                .any(|(level, msg, _)| level == "error" && msg.contains("frozen")),
+                .any(|(level, msg, _)| level == "error" && msg.contains("throttled")),
             "freeze must explain itself in the console ring, got {:?}",
             entries
         );

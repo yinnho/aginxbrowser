@@ -679,9 +679,23 @@ globalThis.console = {
 let _tid = 0;
 const _clearedTimers = new Set();
 const _intervals = new Set();
+// HTML spec timer nesting: a chain of timers each scheduled from inside a
+// timer callback gets its delay floored at 4ms after 5 nesting levels.
+// Without the floor a setInterval(fn, 1) self-chain runs at op_sleep
+// resolution (~450/s), starving every other macrotask on the event loop —
+// doudian's publish page ships exactly such an interval in its telemetry SDK
+// and rendered permanently blank (#203).
+let _timerNesting = 0;
+const _TIMER_FLOOR_MS = 4;
 
-const _scheduleAfter = (delay, fn) => {
-  const d = Math.max(0, Number(delay) || 0);
+const _scheduleAfter = (delay, level, fn) => {
+  const d0 = Math.max(0, Number(delay) || 0);
+  // Per HTML's timer-initialisation steps, a timer whose nesting level is
+  // greater than 4 has its timeout clamped to 4ms. The level travels with the
+  // CHAIN — a timer scheduled from inside a level-N timer task is level N+1 —
+  // so reading a live counter at fire time would see it restored between
+  // fires and never exceed 1; it must be captured at schedule time.
+  const d = level > 4 ? Math.max(_TIMER_FLOOR_MS, d0) : d0;
   // setTimeout(0) must be a MACROtask: it runs on a later event-loop turn,
   // after the current task's entire microtask queue has drained — the same
   // task boundary a real browser provides. Delivering it as a microtask
@@ -711,9 +725,13 @@ globalThis.setTimeout = (fn, delay = 0, ...args) => {
   const handler = _coerceTimerFn(fn);
   if (!handler) return ++_tid;
   const id = ++_tid;
-  _scheduleAfter(delay, () => {
+  const level = _timerNesting + 1;
+  _scheduleAfter(delay, level, () => {
     if (_clearedTimers.has(id)) return;
+    const prev = _timerNesting;
+    _timerNesting = level;
     try { handler(...args); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
+    finally { _timerNesting = prev; }
   });
   return id;
 };
@@ -724,14 +742,23 @@ globalThis.setInterval = (fn, delay = 0, ...args) => {
   const handler = _coerceTimerFn(fn);
   if (!handler) return ++_tid;
   const id = ++_tid;
+  const base = Math.max(0, Number(delay) || 0);
   _intervals.add(id);
+  let fires = 0;
   const tick = () => {
     if (!_intervals.has(id)) return;
+    fires++;
+    const prev = _timerNesting;
+    _timerNesting = fires;
     try { handler(...args); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
+    finally { _timerNesting = prev; }
     if (!_intervals.has(id)) return;
-    _scheduleAfter(delay, tick);
+    // An interval's self-chain keeps counting as nested, so its cadence
+    // floors at the nesting limit after the first few fires — matching how
+    // Chrome tames setInterval(fn, 1).
+    _scheduleAfter(base, fires + 1, tick);
   };
-  _scheduleAfter(delay, tick);
+  _scheduleAfter(base, 1, tick);
   return id;
 };
 
@@ -824,7 +851,9 @@ class MessageChannel {
     // Microtask delivery interleaves scheduler work with unrelated promise
     // chains and deterministically wedges transitions (observed as "server
     // actions dispatch from some realms and never from others").
-    const [p1, p2] = _newPortPair((fn) => _scheduleAfter(0, fn));
+    // Level 0: message delivery is a task, not a timer — it never joins a
+    // setTimeout chain, so the 4ms nesting floor must not apply to it.
+    const [p1, p2] = _newPortPair((fn) => _scheduleAfter(0, 0, fn));
     this.port1 = p1;
     this.port2 = p2;
   }
@@ -2330,6 +2359,25 @@ function __prepareInitialStylesheets() {
   __prepareInsertedStylesIn(root);
   __prepareInsertedStylesheetLinksIn(root);
 }
+
+// --- parser-path script load events --------------------------------------
+// Parser-discovered <script src> never passes through the dynamic insertion
+// hooks, so its element never received a 'load' event after execution. Pages
+// bootstrap off sibling script elements that way — doudian's SSR emits
+// <script defer src=main.js></script><script>document.currentScript
+// .previousSibling.addEventListener('load', ...)</script> and its whole
+// publish sub-app waits on the defer that hook resolves. Chrome fires the
+// event as a task once the script has executed; the 0ms timer keeps that
+// "an inline script running later in the parse still catches it" ordering.
+// scripts.rs calls this after each external parser script executes ('load')
+// and for fetches that never landed ('error').
+globalThis.__fireParserScriptEvent = function(nid, type) {
+  const el = _wrapEl(+nid);
+  if (!el) return;
+  setTimeout(function() {
+    try { el.dispatchEvent(new Event(type)); } catch (e) {}
+  }, 0);
+};
 
 class Node {
   static ELEMENT_NODE = 1;
@@ -5967,6 +6015,7 @@ class Document extends Node {
       'hashchangeevent': HashChangeEvent,
       'inputevent': InputEvent,
       'messageevent': MessageEvent,
+      'closeevent': CloseEvent,
       'uievent': UIEvent, 'uievents': UIEvent,
       'compositionevent': CompositionEvent,
       'wheelevent': WheelEvent,
@@ -8183,38 +8232,59 @@ globalThis.fetch = async (input, init = {}) => {
     if (method !== 'GET') {
       throw new TypeError("Fetching data: URLs with a method other than GET is unsupported");
     }
-    const r = _dataUrlBytes(url);
-    __recordFetchTiming(_rtT0, url, _rtInit, { status: 200 }, {
-      encodedBodySize: r.bytes.length, decodedBodySize: r.bytes.length, transferSize: 0,
-    });
-    return new Response(r.bytes, {
-      status: 200,
-      statusText: "OK",
-      headers: { 'content-type': r.mime },
-      type: "basic",
-      url,
-      redirected: false,
+    // Chrome delivers even a local response on a task, never inline: resolving
+    // here as a microtask lets `while (true) { await fetch('data:...') }` run
+    // ~27k iterations/sec inside one microtask drain, starving every timer and
+    // event on the page (measured: a 50ms timer dead for 3+ seconds). Same
+    // shape as the XHR data:/blob: path's setTimeout(applyLocal, 0) hop.
+    return await new Promise((resolve, reject) => {
+      _scheduleAfter(0, 0, () => {
+        let r;
+        try {
+          r = _dataUrlBytes(url);
+        } catch (e) {
+          __recordFetchTiming(_rtT0, url, _rtInit, null);
+          reject(e);
+          return;
+        }
+        __recordFetchTiming(_rtT0, url, _rtInit, { status: 200 }, {
+          encodedBodySize: r.bytes.length, decodedBodySize: r.bytes.length, transferSize: 0,
+        });
+        resolve(new Response(r.bytes, {
+          status: 200,
+          statusText: "OK",
+          headers: { 'content-type': r.mime },
+          type: "basic",
+          url,
+          redirected: false,
+        }));
+      });
     });
   }
   if (/^blob:/i.test(url)) {
     const blob = globalThis.__blobObjs && globalThis.__blobObjs[url];
-    if (!blob || !(blob._bytes instanceof Uint8Array)) {
-      __recordFetchTiming(_rtT0, url, _rtInit, null);
-      throw new TypeError('Failed to fetch: ' + url);
-    }
-    // Copy: Chrome snapshots blob contents at fetch time; sharing the stored
-    // buffer would let one consumed Response's detach alias every later one.
-    const bytes = new Uint8Array(blob._bytes);
-    __recordFetchTiming(_rtT0, url, _rtInit, { status: 200 }, {
-      encodedBodySize: bytes.length, decodedBodySize: bytes.length, transferSize: 0,
-    });
-    return new Response(bytes, {
-      status: 200,
-      statusText: "OK",
-      headers: blob.type ? { 'content-type': blob.type } : {},
-      type: "basic",
-      url,
-      redirected: false,
+    return await new Promise((resolve, reject) => {
+      _scheduleAfter(0, 0, () => {
+        if (!blob || !(blob._bytes instanceof Uint8Array)) {
+          __recordFetchTiming(_rtT0, url, _rtInit, null);
+          reject(new TypeError('Failed to fetch: ' + url));
+          return;
+        }
+        // Copy: Chrome snapshots blob contents at fetch time; sharing the stored
+        // buffer would let one consumed Response's detach alias every later one.
+        const bytes = new Uint8Array(blob._bytes);
+        __recordFetchTiming(_rtT0, url, _rtInit, { status: 200 }, {
+          encodedBodySize: bytes.length, decodedBodySize: bytes.length, transferSize: 0,
+        });
+        resolve(new Response(bytes, {
+          status: 200,
+          statusText: "OK",
+          headers: blob.type ? { 'content-type': blob.type } : {},
+          type: "basic",
+          url,
+          redirected: false,
+        }));
+      });
     });
   }
   const hdrObj = init.headers instanceof Headers ? Object.fromEntries(init.headers.entries()) : Object.assign({}, init.headers || {});
@@ -10251,7 +10321,6 @@ class CustomElementRegistry {
 }
 globalThis.CustomElementRegistry = CustomElementRegistry;
 globalThis.customElements = new CustomElementRegistry();
-globalThis.HTMLUnknownElement = Element;
 // ElementInternals: form-associated custom element internals. Validity/state
 // are JS-observable; ARIA reflection that needs the accessibility tree is not.
 globalThis.ElementInternals = class ElementInternals {
@@ -10645,7 +10714,8 @@ globalThis.PopStateEvent = class extends Event {
   }
 };
 globalThis.HashChangeEvent = class extends Event {};
-globalThis.MessageEvent = class extends Event { constructor(t,o={}) { super(t,o);this.data=o.data; } };
+globalThis.MessageEvent = class extends Event { constructor(t,o={}) { super(t,o);this.data=o.data;this.origin=o.origin===undefined?'':String(o.origin);this.lastEventId=o.lastEventId===undefined?'':String(o.lastEventId);this.source=o.source===undefined?null:o.source;this.ports=o.ports===undefined?[]:o.ports; } };
+globalThis.CloseEvent = class extends Event { constructor(t,o={}) { super(t,o);this.wasClean=!!o.wasClean;this.code=o.code===undefined?0:(o.code|0);this.reason=o.reason===undefined?'':String(o.reason); } };
 globalThis.ProgressEvent = class ProgressEvent extends Event {
   constructor(type, init) {
     super(type, init || {});
@@ -12467,7 +12537,23 @@ globalThis.screenLeft = 0; globalThis.screenTop = 0;
 globalThis.pageXOffset = 0; globalThis.pageYOffset = 0;
 globalThis.scrollX = 0; globalThis.scrollY = 0;
 
-globalThis.CSS = { supports(){return false;}, escape(s){return s;} };
+// CSS.supports routes to the Rust @supports evaluator (op_css_supports).
+// The old `return false` stub answered "unsupported" to every probe, so
+// feature-detecting pages took fallback render branches that diverged from
+// their SSR HTML — doudian's publish page then failed React hydration
+// (#418) and discarded the whole server DOM (#203).
+globalThis.CSS = {
+  supports(a, b) {
+    try {
+      if (typeof b === 'string') return _OPS.op_css_supports(a + ':' + b);
+      return _OPS.op_css_supports(String(a));
+    } catch { return false; }
+  },
+  escape(s) {
+    s = String(s);
+    return s.replace(/[^a-zA-Z0-9_-]/g, (c) => '\\' + c);
+  },
+};
 
 // (#27) HTMLElement is a REAL layer between Element and the per-tag
 // interfaces — Chrome's chain is HTMLDivElement → HTMLElement → Element →
@@ -12649,6 +12735,24 @@ globalThis.HTMLAnchorElement = _htmlInterface('HTMLAnchorElement', ['a']);
 globalThis.HTMLImageElement = _htmlInterface('HTMLImageElement', ['img']);
 globalThis.HTMLInputElement = _htmlInterface('HTMLInputElement', ['input']);
 globalThis.HTMLButtonElement = _htmlInterface('HTMLButtonElement', ['button']);
+// (#203) HTMLUnknownElement is its own interface in Chrome — prototype
+// below HTMLElement, '[object HTMLUnknownElement]' brand, Illegal
+// constructor. It used to be a bare alias of Element, which the brand
+// sweep below then obeyed by stamping Element.prototype with THIS name
+// (every element answered '[object HTMLUnknownElement]'). Wrapping of
+// unlisted known tags (h1, table, …) still routes to HTMLElement, so no
+// instance is minted here — the class exists for identity, instanceof
+// against the real chain, and the brand.
+globalThis.HTMLUnknownElement = {
+  HTMLUnknownElement: class HTMLUnknownElement extends globalThis.HTMLElement {
+    constructor(nid) {
+      if (typeof nid !== "number") {
+        throw new DOMException("Failed to construct 'HTMLUnknownElement': Illegal constructor.", "TypeError");
+      }
+      super(nid);
+    }
+  },
+}.HTMLUnknownElement;
 globalThis.HTMLFormElement = class HTMLFormElement extends globalThis.HTMLElement {
   get elements() { return HTMLCollection._from(this.querySelectorAll("input, select, textarea, button, fieldset, output, object")); }
   get length() { return this.elements.length; }
@@ -16031,7 +16135,12 @@ function __ditingFormatZoned(date, kind) {
   off = off.replace(/GMT([+-])(\d{1,2}):(\d{2})/, (_, s, h, m) => 'GMT' + s + h.padStart(2, '0') + m);
   off = off.replace(/GMT([+-])(\d{1,2})$/, (_, s, h) => 'GMT' + s + h.padStart(2, '0') + '00');
   const name = long ? long.value : tz;
-  const day = String(bag.day);
+  // Date.prototype.toString zero-pads the day-of-month ("Oct 04", spec
+  // step 9 of TimeString: ToTwoDigit). 'numeric' above yields "4", and the
+  // unpadded form broke SSR text-node comparison on doudian (#203): the
+  // server rendered "04", we rendered "4", React threw #418 and discarded
+  // the whole server DOM for the client fallback path.
+  const day = String(bag.day).padStart(2, '0');
   const clock = bag.hour + ':' + bag.minute + ':' + bag.second;
   const datePart = bag.weekday + ' ' + bag.month + ' ' + day + ' ' + bag.year;
   if (kind === 'date') return datePart;
@@ -17673,8 +17782,7 @@ if (typeof WebSocket === 'undefined') {
       this._fireCloseEvent(code, reason, wasClean);
     }
     _fireCloseEvent(code, reason, wasClean) {
-      const ev = new Event('close');
-      ev.code = code; ev.reason = reason; ev.wasClean = wasClean;
+      const ev = new CloseEvent('close', { code, reason, wasClean });
       this._emit(ev);
     }
     async _pump(id) {
@@ -19541,5 +19649,52 @@ if (k === "constructor" || k.charCodeAt(0) === 95) continue; // #30: engine-inte
       if (!d || d.enumerable || !d.configurable) continue;
       try { Object.defineProperty(P, k, { enumerable: true }); } catch (e) {}
     }
+  }
+})();
+
+// (#203) WebIDL brands. Chrome answers Object.prototype.toString with the
+// interface name for every platform object — '[object Event]',
+// '[object HTMLDivElement]', '[object XMLHttpRequest]' — because WebIDL
+// places Symbol.toStringTag on each interface prototype. The shims above
+// are plain classes, so they all read '[object Object]', and page code
+// that separates data from platform objects by that string misroutes:
+// doudian's deep-clone helper treats '[object Object]' as "plain data,
+// walk own keys", recursed into an Event (target→node→ownerDocument→…
+// back-edges) and died with RangeError: Maximum call stack size exceeded,
+// killing the goods-store boot. Tag every interface-shaped constructor;
+// native builtins already carrying a tag are skipped, as are the
+// %Object.prototype% family (Chrome leaves those untagged on purpose) and
+// the legacy element factories Image/Option/Audio (instances carry the
+// per-tag interface's brand instead).
+(function () {
+  const SKIP = new Set([
+    "Object", "Function", "Array", "String", "Number", "Boolean", "Symbol",
+    "BigInt", "Math", "JSON", "Image", "Option", "Audio",
+  ]);
+  for (const name of Object.getOwnPropertyNames(globalThis)) {
+    if (!/^[A-Z][A-Za-z0-9]*$/.test(name) || SKIP.has(name)) continue;
+    let C;
+    try { C = globalThis[name]; } catch (e) { continue; }
+    if (typeof C !== "function" || !C.prototype || typeof C.prototype !== "object") continue;
+    let has;
+    try { has = Object.getOwnPropertyDescriptor(C.prototype, Symbol.toStringTag) !== undefined; } catch (e) { continue; }
+    if (has) continue;
+    try {
+      Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, enumerable: false, writable: false, configurable: true });
+    } catch (e) { /* page froze the prototype first */ }
+  }
+  // Singleton platform objects built as literals rather than instances of
+  // an exposed interface: Chrome reports '[object Console]',
+  // '[object Location]', '[object History]', '[object Performance]',
+  // '[object Crypto]', '[object Storage]'.
+  const SINGLETONS = [
+    [globalThis.console, "Console"], [globalThis.location, "Location"],
+    [globalThis.history, "History"], [globalThis.performance, "Performance"],
+    [globalThis.crypto, "Crypto"],
+    [globalThis.localStorage, "Storage"], [globalThis.sessionStorage, "Storage"],
+  ];
+  for (const [obj, tag] of SINGLETONS) {
+    if (!obj || obj[Symbol.toStringTag] !== undefined) continue;
+    try { Object.defineProperty(obj, Symbol.toStringTag, { value: tag, enumerable: false, writable: false, configurable: true }); } catch (e) {}
   }
 })();
