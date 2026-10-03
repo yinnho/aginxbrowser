@@ -3652,6 +3652,131 @@ fn build_table(
         return Some(table_node);
     }
 
+    // --- collapsed-border gutters (blitz #1005 absorption, #205) ---------
+    // Under collapse the cell borders ARE the grid lines: their space is a
+    // shared gutter between cells, not per-cell border-box inflation.
+    // Chrome lays `2×(width:100;border:10)` out at 220px; the per-cell
+    // border model computed 240 (#205). Model: every grid line's gutter =
+    // the max of the adjacent cell borders on it; each cell side reserves
+    // HALF its gutters as padding, the layout border drops to zero, and
+    // the paint walk's collapsed-edge halving centers internal lines on
+    // the seam (each neighbor paints its half inside its own gutter).
+    // Outer lines read at half weight — Chrome centers them on the table
+    // edge with the outer half outside the box; v1 keeps them inside.
+    let mut col_gutter: Vec<f32> = Vec::new();
+    let mut row_gutter: Vec<f32> = vec![0.0; n_rows + 1];
+    if matches!(style.border_collapse, Some(crate::diting_css::BorderCollapse::Collapse)) {
+        let edge_px = |dom: NodeId| -> [f32; 4] {
+            styles.get(&dom).map(|s| {
+                if s.border_style.is_some() {
+                    [
+                        side_px(s.border_width.top),
+                        side_px(s.border_width.right),
+                        side_px(s.border_width.bottom),
+                        side_px(s.border_width.left),
+                    ]
+                } else {
+                    [0.0; 4]
+                }
+            }).unwrap_or([0.0; 4])
+        };
+        // (edges, col, col_span, row, row_span) — real cells only; anon
+        // cells own no border style and phantoms paint nothing.
+        let mut all: Vec<([f32; 4], usize, usize, usize, usize)> = Vec::new();
+        let mut total_cols = 0usize;
+        for (_, _, cells) in &row_wrappers {
+            for cell in cells {
+                if cell.phantom || cell.anon {
+                    continue;
+                }
+                total_cols = total_cols.max(cell.col + cell.col_span);
+                all.push((edge_px(cell.dom), cell.col, cell.col_span, cell.row, cell.row_span));
+            }
+        }
+        for cell in &span_cells {
+            total_cols = total_cols.max(cell.col + cell.col_span);
+            all.push((edge_px(cell.dom), cell.col, cell.col_span, cell.row, cell.row_span));
+        }
+        col_gutter = vec![0.0; total_cols + 1];
+        for (e, col, cspan, row, rspan) in &all {
+            col_gutter[*col] = col_gutter[*col].max(e[3]);
+            col_gutter[*col + *cspan] = col_gutter[*col + *cspan].max(e[1]);
+            row_gutter[*row] = row_gutter[*row].max(e[0]);
+            row_gutter[*row + *rspan] = row_gutter[*row + *rspan].max(e[2]);
+        }
+        let patch_cell = |taffy_tree: &mut TaffyTree<TextLeaf>,
+                          node: taffy::tree::NodeId,
+                          cell_dom: Option<NodeId>,
+                          col: usize,
+                          cspan: usize,
+                          row: usize,
+                          rspan: usize| {
+            let Ok(mut st) = taffy_tree.style(node).cloned() else { return };
+            let gl = col_gutter[col] / 2.0;
+            let gr = col_gutter[col + cspan] / 2.0;
+            let gt = row_gutter[row] / 2.0;
+            let gb = row_gutter[row + rspan] / 2.0;
+            st.border = taffy::geometry::Rect {
+                top: LengthPercentage::length(0.0),
+                right: LengthPercentage::length(0.0),
+                bottom: LengthPercentage::length(0.0),
+                left: LengthPercentage::length(0.0),
+            };
+            let widen = |cur: &LengthPercentage, half: f32| -> LengthPercentage {
+                match cur.expand() {
+                    taffy::style::ExpandedLengthPercentage::Length(v) => {
+                        LengthPercentage::length(v + half)
+                    }
+                    _ => *cur,
+                }
+            };
+            st.padding.top = widen(&st.padding.top, gt);
+            st.padding.right = widen(&st.padding.right, gr);
+            st.padding.bottom = widen(&st.padding.bottom, gb);
+            st.padding.left = widen(&st.padding.left, gl);
+            // A content-box authored px size was mapped over by the OLD
+            // border and padding at build time — retarget it at the new
+            // gutter halves so the authored CONTENT size survives.
+            if let Some(dom) = cell_dom {
+                if let Some(cs) = styles.get(&dom) {
+                    let border_box =
+                        matches!(cs.box_sizing, Some(crate::diting_css::BoxSizing::BorderBox));
+                    let e = edge_px(dom);
+                    if !border_box && matches!(cs.width, Some(crate::diting_css::Length::Px(_))) {
+                        if let taffy::style::ExpandedDimension::Length(w) = st.size.width.expand() {
+                            st.size.width = Dimension::length(w - e[1] - e[3] + gl + gr);
+                        }
+                    }
+                    if !border_box && matches!(cs.height, Some(crate::diting_css::Length::Px(_))) {
+                        if let taffy::style::ExpandedDimension::Length(h) = st.size.height.expand() {
+                            st.size.height = Dimension::length(h - e[0] - e[2] + gt + gb);
+                        }
+                    }
+                }
+            }
+            let _ = taffy_tree.set_style(node, st);
+        };
+        for (_, _, cells) in &row_wrappers {
+            for cell in cells {
+                if cell.phantom {
+                    continue;
+                }
+                patch_cell(
+                    taffy_tree,
+                    cell.taffy,
+                    (!cell.anon).then_some(cell.dom),
+                    cell.col,
+                    cell.col_span,
+                    cell.row,
+                    cell.row_span,
+                );
+            }
+        }
+        for cell in &span_cells {
+            patch_cell(taffy_tree, cell.taffy, Some(cell.dom), cell.col, cell.col_span, cell.row, cell.row_span);
+        }
+    }
+
     // Pre-measure each row wrapper at max-content and harvest per-column
     // maxima. The measured closure is the same TextLeaf dispatch as the
     // root pass — a plain compute_layout would zero the text runs.
@@ -3876,12 +4001,14 @@ fn build_table(
     }
 
     // --- collapsed-border edge marks (spans batch) -----------------------
-    // Under collapse an edge on a shared grid line paints at half width:
-    // two adjacent 2px borders then read as one 2px line centered on the
-    // line (Chrome's resolved-border rendering for equal widths). Marks are
-    // index-based (neighbor-by-position, not neighbor-by-existence).
+    // Under collapse each cell side paints at half width inside its own
+    // gutter padding: internal lines from the two neighbors meet centered
+    // on the grid line (Chrome's resolved-border rendering for equal
+    // widths; unequal widths keep the documented proportional-halves
+    // approximation), and outer sides stay inside the table box. A side
+    // with no gutter paints nothing — there is no reserved space for it.
+    // Marks key off the gutter widths, not grid indices.
     if matches!(style.border_collapse, Some(crate::diting_css::BorderCollapse::Collapse)) {
-        let total_cols = col_max.len();
         for (_, _, cells) in &row_wrappers {
             for cell in cells {
                 // Phantoms paint nothing (no node_map entry); the lifted cell
@@ -3891,13 +4018,15 @@ fn build_table(
                 if cell.phantom || cell.anon {
                     continue;
                 }
+                let cend = (cell.col + cell.col_span).min(col_gutter.len().saturating_sub(1));
+                let rend = (cell.row + cell.row_span).min(n_rows);
                 meta.collapsed_edges.insert(
                     cell.dom,
                     [
-                        cell.row > 0,
-                        cell.col + cell.col_span < total_cols,
-                        cell.row + cell.row_span < n_rows,
-                        cell.col > 0,
+                        row_gutter.get(cell.row).copied().unwrap_or(0.0) > 0.0,
+                        col_gutter.get(cend).copied().unwrap_or(0.0) > 0.0,
+                        row_gutter.get(rend).copied().unwrap_or(0.0) > 0.0,
+                        col_gutter.get(cell.col).copied().unwrap_or(0.0) > 0.0,
                     ],
                 );
             }

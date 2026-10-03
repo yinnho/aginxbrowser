@@ -247,3 +247,51 @@ fn row_background_beats_row_group_background() {
         "group red ({reds:?}) must paint under the row's blue ({blues:?})"
     );
 }
+
+/// #205 (blitz #1005 absorption): under border-collapse the cell borders
+/// ARE the grid lines — shared gutters between cells, not per-cell
+/// border-box inflation. Chrome lays `2×(width:100;border:10)` out at a
+/// 220px table with 110px cells (outer lines half inside, the middle line
+/// shared); the per-cell border model computed 240/120. A single bordered
+/// cell counts its border once (110, not 120).
+#[test]
+fn collapsed_borders_merge_into_shared_gutters() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    let html = r#"<html><body>
+        <table id="t2" style="border-collapse:collapse"><tr>
+            <td id="a">x</td><td id="b">y</td>
+        </tr></table>
+        <table id="t1" style="border-collapse:collapse"><tr><td id="c">z</td></tr></table>
+        </body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for(
+        "td { width: 100px; border: 10px solid black; }",
+        (1280.0, 800.0),
+        CssMediaType::Screen,
+    );
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
+    let rects = crate::diting_layout::layout_dom(
+        &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0,
+    );
+    let cell = |sel: &str| {
+        let id = tree.query_selector_all(sel).unwrap()[0];
+        rects.get(&id).unwrap_or_else(|| panic!("{sel} owns a box"))
+    };
+    let (a, b) = (cell("#a"), cell("#b"));
+    assert!(
+        (a.width - 110.0).abs() <= 2.0 && (b.width - 110.0).abs() <= 2.0,
+        "collapsed cells count the shared middle line once: {a:?} {b:?}"
+    );
+    let t2 = cell("#t2");
+    assert!(
+        (t2.width - 220.0).abs() <= 2.0,
+        "two-cell collapsed table = 220 (was 240 under the per-cell border model): {t2:?}"
+    );
+    let (c, t1) = (cell("#c"), cell("#t1"));
+    assert!(
+        (c.width - 110.0).abs() <= 2.0 && (t1.width - 110.0).abs() <= 2.0,
+        "single bordered cell counts its border once: {c:?} {t1:?}"
+    );
+}
