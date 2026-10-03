@@ -4005,6 +4005,9 @@
             row["age_ms"].as_u64().unwrap_or(u64::MAX) < 10_000,
             "age must be wall-clock sane: {row}"
         );
+        // Young in-flight is "slow, still waiting", not hung — the flag
+        // only flips past every engine-side timeout (see actor tests).
+        assert_eq!(row["hung"], false, "fresh entry must not read as hung: {row}");
     }
 
     /// (#130) Both Network keys are always present — `in_flight: []` and

@@ -656,6 +656,17 @@ impl Page {
         let client = self.http_client.clone();
         let css_callbacks = self.callbacks.clone();
         let doc_referrer = self.url.as_ref().map(|u| u.to_string());
+        // A stylesheet whose connection silently dies must not hold the
+        // commit hostage: the collect() below waits for every sheet, and a
+        // black-holed fetch parks the whole navigation in "document
+        // received, not yet committed" until the 30s nav deadline — or, on
+        // a page-initiated hop, longer (#203 retest shape). Real browsers
+        // commit the DOM regardless and let a dead sheet fail quietly.
+        let sheet_budget_ms = std::env::var("AGINXBROWSER_STYLESHEET_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&ms| ms > 0)
+            .unwrap_or(10_000);
         let css_futures: Vec<_> = css_fetch_urls.iter().map(|full_url| {
             let client = client.clone();
             let css_callbacks = css_callbacks.clone();
@@ -671,16 +682,26 @@ impl Page {
                     .map(|d| d.as_secs_f64() * 1000.0)
                     .unwrap_or(0.0);
                 let rt_t0 = std::time::Instant::now();
-                match client
-                    .fetch_with_callbacks(&parsed, Some(css_callbacks.as_ref()), crate::diting_net::ResourceType::Stylesheet, doc_referrer.as_deref())
-                    .await
-                {
-                    Ok(resp) => {
+                let fetched = tokio::time::timeout(
+                    tokio::time::Duration::from_millis(sheet_budget_ms),
+                    client.fetch_with_callbacks(&parsed, Some(css_callbacks.as_ref()), crate::diting_net::ResourceType::Stylesheet, doc_referrer.as_deref()),
+                )
+                .await;
+                match fetched {
+                    Ok(Ok(resp)) => {
                         let dur_ms = rt_t0.elapsed().as_secs_f64() * 1000.0;
                         Some((url_str, resp, rt_start_ms, dur_ms))
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         tracing::debug!("Failed to fetch stylesheet {}: {}", url_str, e);
+                        None
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "stylesheet {} exceeded {}ms budget — committing without it",
+                            url_str,
+                            sheet_budget_ms
+                        );
                         None
                     }
                 }

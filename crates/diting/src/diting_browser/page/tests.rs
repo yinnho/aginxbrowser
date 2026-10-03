@@ -51,6 +51,23 @@
         BusyLimitGuard(guard)
     }
 
+    /// #203 stylesheet budget knob: the commit-hostage test shrinks the
+    /// budget to 300ms and must restore the unset ambient state so other
+    /// navigations don't commit without sheets that merely load slowly.
+    #[allow(dead_code)] // holding the guard is the effect
+    struct SheetBudgetGuard(std::sync::MutexGuard<'static, ()>);
+    impl Drop for SheetBudgetGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("AGINXBROWSER_STYLESHEET_TIMEOUT_MS");
+        }
+    }
+    static SHEET_BUDGET_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn sheet_budget_guard(ms: &str) -> SheetBudgetGuard {
+        let guard = SHEET_BUDGET_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("AGINXBROWSER_STYLESHEET_TIMEOUT_MS", ms);
+        SheetBudgetGuard(guard)
+    }
+
     /// Multi-path local HTTP server on 127.0.0.1. Bodies are owned Strings so
     /// a route can embed the port of another server (cross-origin tests).
     /// Answers up to 64 requests: one navigation may pull the document plus
@@ -931,6 +948,39 @@ ms.addEventListener('sourceopen', function(){ \
     }
 
     // ---- wait semantics & network events ---------------------------------
+
+    /// #203 retest shape: a stylesheet whose connection silently dies held
+    /// the whole commit hostage — navigate() stayed parked in "document
+    /// received, not yet committed" until the 30s nav deadline. The per-sheet
+    /// budget must let the document commit without the sheet.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dead_stylesheet_cannot_hold_commit_hostage() {
+        let _g = net_test_guard();
+        let _budget = sheet_budget_guard("300");
+        // A socket that accepts and never answers: the fetch connects, then
+        // waits on headers that never arrive.
+        let stall = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stall_port = stall.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut held: Vec<std::net::TcpStream> = Vec::new();
+            while let Ok((stream, _)) = stall.accept() {
+                held.push(stream); // parked for the test's lifetime
+            }
+        });
+        let port = local_http_server(vec![(
+            "/a",
+            200,
+            format!(
+                "<html><head><link rel=\"stylesheet\" href=\"http://127.0.0.1:{stall_port}/s.css\"></head><body>ok</body></html>"
+            ),
+        )]);
+        let mut p = test_page();
+        // Before the budget this returned Err("navigation exceeded …
+        // not yet committed") after the full nav deadline.
+        p.navigate(&format!("http://127.0.0.1:{port}/a")).await.unwrap();
+        assert_eq!(p.url_string(), format!("http://127.0.0.1:{port}/a"));
+        assert_eq!(p.evaluate("document.body.textContent"), serde_json::json!("ok"));
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn subresources_recorded_as_network_events() {

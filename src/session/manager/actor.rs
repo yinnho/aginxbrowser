@@ -11,6 +11,26 @@
 
 use super::*;
 
+/// A script-initiated request older than this is not "slow", it is hung —
+/// every transport the engine rides carries a 30s read timeout and a 120s
+/// sync-XHR cap, so a 13-minute in-flight entry (the #203 taobao submit
+/// shape) means the completion never reached JS at all. `hung: true` tells
+/// the reading agent that waiting longer is pointless and the page's own
+/// handler will never fire — the honest signal before a re-issue decision.
+const HUNG_INFLIGHT_AFTER_MS: u64 = 300_000;
+
+/// One `in_flight` row for the Network payload: url/method/age, plus the
+/// `hung` verdict once the age crosses [`HUNG_INFLIGHT_AFTER_MS`].
+fn in_flight_row(f: &diting::diting_net::InFlightScripted, now_ms: u64) -> serde_json::Value {
+    let age_ms = now_ms.saturating_sub(f.dispatched_at_ms);
+    json!({
+        "url": f.url,
+        "method": f.method,
+        "age_ms": age_ms,
+        "hung": age_ms >= HUNG_INFLIGHT_AFTER_MS,
+    })
+}
+
 /// Inverse of diting's `parse_http_date` for the export form: epoch seconds
 /// → "Wdy, DD Mon YYYY HH:MM:SS GMT". Dates outside the parser's accepted
 /// year range surface as None (the entry then round-trips as a session
@@ -888,11 +908,7 @@ pub(super) fn session_thread(
                                     .map(|d| d.as_millis() as u64)
                                     .unwrap_or(0);
                                 payload["in_flight"] = json!(
-                                    in_flight.iter().map(|f| json!({
-                                        "url": f.url,
-                                        "method": f.method,
-                                        "age_ms": now_ms.saturating_sub(f.dispatched_at_ms),
-                                    })).collect::<Vec<_>>()
+                                    in_flight.iter().map(|f| in_flight_row(f, now_ms)).collect::<Vec<_>>()
                                 );
                                 // Anti-bot challenges answer 200, so they
                                 // hide among successful rows — surface the
@@ -1090,7 +1106,38 @@ pub(super) fn session_thread(
 
 #[cfg(test)]
 mod tests {
-    use super::http_date;
+    use super::{http_date, in_flight_row, HUNG_INFLIGHT_AFTER_MS};
+    use diting::diting_net::InFlightScripted;
+
+    /// The #203 taobao submit shape: an entry aged past every engine-side
+    /// timeout must read `hung: true` — the reading agent's stop-waiting
+    /// signal. A young entry stays `hung: false` even though it is already
+    /// surfaced (slow ≠ hung).
+    #[test]
+    fn in_flight_row_flags_entries_older_than_the_hung_threshold() {
+        let now = 1_000_000u64;
+        let young = in_flight_row(
+            &InFlightScripted {
+                url: "https://x/slow".into(),
+                method: "POST".into(),
+                dispatched_at_ms: now - 5_000,
+            },
+            now,
+        );
+        assert_eq!(young["hung"], false, "a 5s-old entry is slow, not hung");
+        assert_eq!(young["age_ms"], 5_000);
+
+        let hung = in_flight_row(
+            &InFlightScripted {
+                url: "https://x/submit.htm".into(),
+                method: "POST".into(),
+                dispatched_at_ms: now - HUNG_INFLIGHT_AFTER_MS,
+            },
+            now,
+        );
+        assert_eq!(hung["hung"], true, "age == threshold counts as hung");
+        assert_eq!(hung["age_ms"], HUNG_INFLIGHT_AFTER_MS);
+    }
 
     #[test]
     fn http_date_formats_epoch_as_rfc1123_gmt() {
