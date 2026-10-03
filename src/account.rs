@@ -103,7 +103,7 @@ fn seed_jar(jar: &CookieJar, cookies: &[String]) {
         let Ok(url) = url::Url::parse(&format!("https://{domain}/")) else {
             continue;
         };
-        jar.set_cookie(c, &url);
+        jar.set_cookie_seeded(c, &url);
     }
 }
 

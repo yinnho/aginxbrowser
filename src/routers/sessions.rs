@@ -1091,6 +1091,22 @@ pub(crate) async fn session_cookies_handler(
     Ok((StatusCode::OK, Json(val)))
 }
 
+/// The session's cookie mutation ring (#203): every observed Set-Cookie
+/// write, replacement and expiry-delete — source-tagged (http response /
+/// js document.cookie / import seeding), with the URL the write rode on
+/// and full metadata. Values never enter the rows; this is the desensitized
+/// capture path for "which response deleted the session cookie".
+pub(crate) async fn session_cookie_trace_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let text = session::send_command(&id, |reply| session::SessionCommand::CookieTrace { reply })
+        .await
+        .map_err(session_err)?;
+    let val: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| AppError::Internal(format!("cookie_trace parse error: {}", e)))?;
+    Ok((StatusCode::OK, Json(val)))
+}
+
 /// Wait for a selector/predicate with the page's event loop driven between
 /// polls. Errors (timeout) surface as 500 with the message, matching the
 /// other session error paths.

@@ -104,6 +104,15 @@ pub enum SessionCommand {
     CookieMeta {
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// The cookie mutation ring (#203): every observed write, replacement
+    /// and expiry-delete, oldest first — each row carrying the source
+    /// ("http" response Set-Cookie incl. redirect hops / "js" document.cookie
+    /// write / "import" seeded state), the URL the write rode on, and the
+    /// full metadata of what changed. No values, ever. The "who deleted
+    /// unb/sn, which hop minted the SSO" answer.
+    CookieTrace {
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     /// Snapshot localStorage/sessionStorage for the page's current origin as
     /// `{"url","origin","local_storage":{k:v},"session_storage":{k:v}}`.
     /// Round-trips with `session_create`'s `storage` field to replay a

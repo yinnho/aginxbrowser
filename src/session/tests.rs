@@ -358,6 +358,84 @@
         );
     }
 
+    /// #203: the CookieTrace face — the desensitized capture path for the
+    /// merchant's "which response deleted unb/sn" question. One navigation
+    /// to an origin that sets, deletes and JS-writes cookies must surface
+    /// all three as ring rows, source-tagged, URL-joined, value-free.
+    #[tokio::test]
+    async fn cookie_trace_ring_captures_set_delete_and_js_writes() {
+        let _net = crate::server::test_util::net_env_guard();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut buf = [0u8; 1024];
+                    let _ = std::io::Read::read(&mut stream, &mut buf);
+                    let body = "<html><body><script>\
+                        document.cookie = 'jsrow=1; Path=/';\
+                        document.cookie = 'unb=REALTOKEN; Path=/';\
+                        </script>done</body></html>";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\
+                         Set-Cookie: unb=REALTOKEN; Path=/\r\n\
+                         Set-Cookie: gone=old; Path=/; Max-Age=0\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = std::io::Write::write_all(&mut stream, resp.as_bytes());
+                });
+            }
+        });
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(Some(&format!("http://127.0.0.1:{port}/")), false, vec![], None, None, None, false, false, None);
+        let text = mgr
+            .send(&sid, |reply| SessionCommand::CookieTrace { reply })
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let rows = val["trace"].as_array().expect("trace array");
+
+        // http rows: the document response's set + delete, in order.
+        let http_unb = rows
+            .iter()
+            .find(|r| r["source"] == "http" && r["name"] == "unb")
+            .expect("http set row for unb");
+        assert_eq!(http_unb["deleted"], false);
+        assert!(
+            http_unb["request_url"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("http://127.0.0.1:{port}/")),
+            "the row names the response that carried the Set-Cookie: {http_unb}"
+        );
+        let gone = rows
+            .iter()
+            .find(|r| r["name"] == "gone")
+            .expect("delete row for gone");
+        assert_eq!(gone["source"], "http");
+        assert_eq!(gone["deleted"], true);
+
+        // js rows: the page's own document.cookie writes.
+        let jsrow = rows
+            .iter()
+            .find(|r| r["source"] == "js" && r["name"] == "jsrow")
+            .expect("js write row");
+        assert_eq!(jsrow["deleted"], false);
+
+        assert!(
+            !text.contains("REALTOKEN"),
+            "values must never ride the trace face: {text}"
+        );
+        assert!(
+            mgr.close_and_wait(&sid).await,
+            "session thread must ack close"
+        );
+    }
+
     /// #102: a clean challenges report must say what zero means — absence
     /// of a wall, not a login verdict. `total: 0` reads as "passed" to a
     /// caller who can't see the detector's scope.

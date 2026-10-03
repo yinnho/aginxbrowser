@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::RwLock;
 use url::Url;
 
@@ -9,8 +9,39 @@ const DEFAULT_SAME_SITE: &str = "Lax";
 /// cookies with different paths must coexist.
 type DomainCookies = HashMap<(String, String), CookieEntry>;
 
+/// The mutation ring's length. A long merchant session (telemetry rotates
+/// msToken every few seconds, analytics stacks js writes, SSO chains mint
+/// dozens per navigation) needs thousands; rows are ~200 bytes, so the cap
+/// is memory noise next to one retained response body.
+const COOKIE_TRACE_CAP: usize = 4000;
+
+/// One observed cookie mutation, metadata-only (issue #203: "which response
+/// deleted `unb`/`sn`, which hop minted the fxg SSO" — answerable without a
+/// single value leaving the jar). `source` names the write path: "http" is
+/// a response's Set-Cookie (redirect hops included — the URL is the hop the
+/// header rode on), "js" a document.cookie write, "import" seeded state
+/// (CDP/import_curl).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CookieTraceEntry {
+    pub ts_ms: u64,
+    pub source: &'static str,
+    pub request_url: String,
+    pub name: String,
+    pub domain: String,
+    pub path: String,
+    pub host_only: bool,
+    pub secure: bool,
+    pub http_only: bool,
+    pub same_site: String,
+    pub expires: Option<i64>,
+    /// An expiry-delete (past Expires/Max-Age): the row that removed a
+    /// cookie rather than replaced it.
+    pub deleted: bool,
+}
+
 pub struct CookieJar {
     cookies: RwLock<HashMap<String, DomainCookies>>,
+    trace: RwLock<VecDeque<CookieTraceEntry>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -30,10 +61,58 @@ impl CookieJar {
     pub fn new() -> Self {
         CookieJar {
             cookies: RwLock::new(HashMap::new()),
+            trace: RwLock::new(VecDeque::new()),
         }
     }
 
+    fn record_trace(
+        &self,
+        source: &'static str,
+        request_url: &str,
+        entry: &CookieEntry,
+        deleted: bool,
+    ) {
+        let ts_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let mut trace = self.trace.write().unwrap();
+        if trace.len() == COOKIE_TRACE_CAP {
+            trace.pop_front();
+        }
+        trace.push_back(CookieTraceEntry {
+            ts_ms,
+            source,
+            request_url: request_url.to_string(),
+            name: entry.name.clone(),
+            domain: entry.domain.clone(),
+            path: entry.path.clone(),
+            host_only: entry.host_only,
+            secure: entry.secure,
+            http_only: entry.http_only,
+            same_site: entry.same_site.clone(),
+            expires: entry.expires.map(|e| e as i64),
+            deleted,
+        });
+    }
+
+    /// The mutation ring, oldest first. Metadata only — never a value.
+    pub fn cookie_trace(&self) -> Vec<CookieTraceEntry> {
+        self.trace.read().unwrap().iter().cloned().collect()
+    }
+
     pub fn set_cookie(&self, set_cookie_str: &str, url: &Url) {
+        self.set_cookie_inner(set_cookie_str, url, "http")
+    }
+
+    /// The seeded-state twin of [`CookieJar::set_cookie`]: same parsing and
+    /// storage rules, but the mutation ring records the write as "import" —
+    /// session-create injection and account seeding carried no response.
+    pub fn set_cookie_seeded(&self, set_cookie_str: &str, url: &Url) {
+        self.set_cookie_inner(set_cookie_str, url, "import")
+    }
+
+    fn set_cookie_inner(&self, set_cookie_str: &str, url: &Url, source: &'static str) {
         let parts: Vec<&str> = set_cookie_str.splitn(2, ';').collect();
         let name_value = parts[0].trim();
         let (name, value) = match name_value.split_once('=') {
@@ -134,6 +213,23 @@ impl CookieJar {
                 if let Some(domain_cookies) = cookies.get_mut(&domain) {
                     domain_cookies.remove(&(name.clone(), path.clone()));
                 }
+                drop(cookies);
+                self.record_trace(
+                    source,
+                    url.as_str(),
+                    &CookieEntry {
+                        name: name.clone(),
+                        value: String::new(),
+                        path: path.clone(),
+                        domain: domain.clone(),
+                        host_only,
+                        secure,
+                        http_only,
+                        expires,
+                        same_site: same_site.clone(),
+                    },
+                    true,
+                );
                 return;
             }
         }
@@ -147,11 +243,14 @@ impl CookieJar {
             secure,
             http_only,
             expires,
-            same_site,
+            same_site: same_site.clone(),
         };
 
-        let mut cookies = self.cookies.write().unwrap();
-        cookies.entry(domain).or_default().insert((name, path), entry);
+        {
+            let mut cookies = self.cookies.write().unwrap();
+            cookies.entry(domain.clone()).or_default().insert((name.clone(), path.clone()), entry.clone());
+        }
+        self.record_trace(source, url.as_str(), &entry, false);
     }
 
     pub fn get_cookie_header(&self, url: &Url) -> String {
@@ -251,31 +350,41 @@ impl CookieJar {
     }
 
     pub fn set_cookies_from_cdp(&self, cookies: Vec<CookieInfo>) {
-        let mut jar = self.cookies.write().unwrap();
-        for cookie in cookies {
-            let same_site = if cookie.same_site.is_empty() {
-                DEFAULT_SAME_SITE.to_string()
-            } else {
-                cookie.same_site
-            };
-            let expires = cookie.expires.and_then(|e| if e > 0 { Some(e as u64) } else { None });
-            if let Some(domain_cookies) = jar.get_mut(&cookie.domain) {
-                domain_cookies.retain(|_key, entry| {
-                    entry.name != cookie.name || entry.path != cookie.path
-                });
+        // Seeded state (import/curl, account revival): no response URL rode
+        // these in, but the ring still owes the reader the login-state
+        // baseline — when each cookie appeared.
+        let mut seeded: Vec<CookieEntry> = Vec::with_capacity(cookies.len());
+        {
+            let mut jar = self.cookies.write().unwrap();
+            for cookie in cookies {
+                let same_site = if cookie.same_site.is_empty() {
+                    DEFAULT_SAME_SITE.to_string()
+                } else {
+                    cookie.same_site
+                };
+                let expires = cookie.expires.and_then(|e| if e > 0 { Some(e as u64) } else { None });
+                if let Some(domain_cookies) = jar.get_mut(&cookie.domain) {
+                    domain_cookies.retain(|_key, entry| {
+                        entry.name != cookie.name || entry.path != cookie.path
+                    });
+                }
+                let entry = CookieEntry {
+                    name: cookie.name.clone(),
+                    value: cookie.value,
+                    path: cookie.path.clone(),
+                    domain: cookie.domain.clone(),
+                    host_only: false,
+                    secure: cookie.secure,
+                    http_only: cookie.http_only,
+                    expires,
+                    same_site,
+                };
+                jar.entry(cookie.domain.clone()).or_default().insert((cookie.name.clone(), cookie.path.clone()), entry.clone());
+                seeded.push(entry);
             }
-            let entry = CookieEntry {
-                name: cookie.name.clone(),
-                value: cookie.value,
-                path: cookie.path.clone(),
-                domain: cookie.domain.clone(),
-                host_only: false,
-                secure: cookie.secure,
-                http_only: cookie.http_only,
-                expires,
-                same_site,
-            };
-            jar.entry(cookie.domain.clone()).or_default().insert((cookie.name, cookie.path), entry);
+        }
+        for entry in seeded {
+            self.record_trace("import", "", &entry, false);
         }
     }
 
@@ -427,6 +536,23 @@ impl CookieJar {
                 if let Some(domain_cookies) = cookies.get_mut(&domain) {
                     domain_cookies.remove(&(name.clone(), path.clone()));
                 }
+                drop(cookies);
+                self.record_trace(
+                    "js",
+                    url.as_str(),
+                    &CookieEntry {
+                        name: name.clone(),
+                        value: String::new(),
+                        path: path.clone(),
+                        domain: domain.clone(),
+                        host_only,
+                        secure,
+                        http_only: false,
+                        expires,
+                        same_site: same_site.clone(),
+                    },
+                    true,
+                );
                 return;
             }
         }
@@ -440,11 +566,14 @@ impl CookieJar {
             secure,
             http_only: false,
             expires,
-            same_site,
+            same_site: same_site.clone(),
         };
 
-        let mut cookies = self.cookies.write().unwrap();
-        cookies.entry(domain).or_default().insert((name, path), entry);
+        {
+            let mut cookies = self.cookies.write().unwrap();
+            cookies.entry(domain.clone()).or_default().insert((name.clone(), path.clone()), entry.clone());
+        }
+        self.record_trace("js", url.as_str(), &entry, false);
     }
 
     pub fn delete_cookies_filtered(&self, name: &str, domain: &str, path: Option<&str>) {

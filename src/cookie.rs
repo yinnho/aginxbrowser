@@ -28,10 +28,13 @@ impl CookieStore {
     /// Set a cookie via Set-Cookie header string.
     ///
     /// Example: `store.set("session=abc123; Domain=example.com; Path=/; HttpOnly")?;`
+    ///
+    /// Seeded, not observed: the mutation ring tags these writes "import"
+    /// (session-create injection / account seeding carried no response).
     pub fn set(&self, set_cookie_str: &str, url: &str) -> Result<(), crate::error::Error> {
         let parsed = url::Url::parse(url)
             .map_err(|e| crate::error::Error::Internal(e.into()))?;
-        self.jar.set_cookie(set_cookie_str, &parsed);
+        self.jar.set_cookie_seeded(set_cookie_str, &parsed);
         Ok(())
     }
 

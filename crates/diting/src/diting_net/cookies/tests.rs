@@ -739,3 +739,106 @@ fn test_secure_cookie_prefixes_unlock_on_loopback_http() {
         "plain HTTP on a public host must still refuse Secure cookies entirely"
     );
 }
+
+/// #203: the mutation ring answers "who deleted unb/sn" — every accepted
+/// write and every expiry-delete lands as a metadata-only row carrying the
+/// URL the write rode on and the source path. Rejected writes (bad Domain,
+/// prefix violations) stay out: the ring records what the jar actually did.
+#[test]
+fn cookie_trace_records_http_write_and_expiry_delete() {
+    let jar = CookieJar::new();
+    let url = Url::parse("https://fxg.example.com/hop2").unwrap();
+    jar.set_cookie(
+        "unb=REALTOKEN; Domain=example.com; Path=/; Secure",
+        &url,
+    );
+    // Different (name, domain) pair — a subdomain's host-only copy, the
+    // taobao shape where host-only and domain-wide coexist.
+    jar.set_cookie("unb=hostcopy; Path=/", &url);
+
+    let trace = jar.cookie_trace();
+    assert_eq!(trace.len(), 2, "one row per accepted write");
+
+    let first = &trace[0];
+    assert_eq!(first.source, "http");
+    assert_eq!(first.request_url, "https://fxg.example.com/hop2");
+    assert_eq!(first.name, "unb");
+    assert_eq!(first.domain, "example.com");
+    assert!(!first.host_only);
+    assert!(first.secure);
+    assert!(!first.deleted);
+    assert!(first.ts_ms > 0, "rows are timestamped for timeline joins");
+
+    let second = &trace[1];
+    assert_eq!(second.domain, "fxg.example.com");
+    assert!(second.host_only, "no Domain attr = host-anchored row");
+
+    // The deleting write: past Max-Age on the domain-wide pair.
+    jar.set_cookie(
+        "unb=x; Domain=example.com; Path=/; Max-Age=0",
+        &url,
+    );
+    let trace = jar.cookie_trace();
+    assert_eq!(trace.len(), 3);
+    let del = &trace[2];
+    assert!(del.deleted, "past expiry is the delete row");
+    assert_eq!(del.domain, "example.com");
+    assert_eq!(del.source, "http");
+    // The host-only copy survived — deletion is (name, domain, path)-scoped.
+    assert!(
+        jar.get_cookie_header(&url).contains("unb=hostcopy"),
+        "delete must not take the host-only sibling down with it"
+    );
+
+    // Metadata-only contract: no value key, no value bytes, anywhere.
+    let face = serde_json::to_string(&trace).unwrap();
+    assert!(!face.contains("value"), "{face}");
+    assert!(!face.contains("REALTOKEN"), "{face}");
+    assert!(!face.contains("hostcopy"), "{face}");
+}
+
+/// The document.cookie write path lands in the ring tagged "js", deletes
+/// included — the page's own session-clearing writes are as suspect as any
+/// response's.
+#[test]
+fn cookie_trace_tags_document_cookie_writes_as_js() {
+    let jar = CookieJar::new();
+    let url = Url::parse("https://fxg.example.com/app").unwrap();
+    jar.set_cookie_from_js("sdk_state=1; Path=/", &url);
+    jar.set_cookie_from_js("sdk_state=; Path=/; Max-Age=0", &url);
+
+    let trace = jar.cookie_trace();
+    assert_eq!(trace.len(), 2);
+    assert!(trace.iter().all(|t| t.source == "js"));
+    assert!(!trace[0].deleted);
+    assert!(trace[1].deleted);
+    let face = serde_json::to_string(&trace).unwrap();
+    assert!(!face.contains("value"), "{face}");
+}
+
+/// Seeded state (import/revival) is the ring's baseline: tagged "import",
+/// no response URL. The jar's own load_from_file path must NOT re-trace —
+/// a restart would otherwise drown the ring in a full re-seed.
+#[test]
+fn cookie_trace_tags_import_seeding_and_stays_empty_on_new_jar() {
+    let jar = CookieJar::new();
+    assert!(jar.cookie_trace().is_empty(), "fresh jar = empty ring");
+
+    jar.set_cookies_from_cdp(vec![CookieInfo {
+        name: "sso_passport".to_string(),
+        value: "SEEDSECRET".to_string(),
+        domain: ".example.com".to_string(),
+        path: "/".to_string(),
+        secure: true,
+        http_only: true,
+        same_site: String::new(),
+        expires: None,
+    }]);
+    let trace = jar.cookie_trace();
+    assert_eq!(trace.len(), 1);
+    assert_eq!(trace[0].source, "import");
+    assert_eq!(trace[0].request_url, "");
+    assert_eq!(trace[0].name, "sso_passport");
+    let face = serde_json::to_string(&trace).unwrap();
+    assert!(!face.contains("SEEDSECRET"), "{face}");
+}

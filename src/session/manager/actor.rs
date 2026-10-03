@@ -849,6 +849,21 @@ pub(super) fn session_thread(
                             let _ = reply.send(Ok(resp.to_string()));
                         }
 
+                        SessionCommand::CookieTrace { reply } => {
+                            // #203: the mutation ring — the metadata-only
+                            // answer to "which response deleted unb/sn",
+                            // "which redirect hop minted the SSO cookie".
+                            // Read-only, values never enter the rows.
+                            let url_str = page.url();
+                            let trace = page.context.cookie_jar.cookie_trace();
+                            let resp = serde_json::json!({
+                                "url": url_str,
+                                "total": trace.len(),
+                                "trace": trace,
+                            });
+                            let _ = reply.send(Ok(resp.to_string()));
+                        }
+
                         SessionCommand::Export { reply } => {
                             let jsonl = recorder
                                 .iter()

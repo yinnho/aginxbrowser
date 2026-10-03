@@ -102,7 +102,8 @@ use routers::sessions::{
     account_delete_handler, account_login_handler, account_verify_handler, accounts_handler,
     flow_install_handler, flow_run_handler, flow_search_handler, import_curl_handler, max_body_bytes, session_challenges_handler, session_click_handler,
     session_click_xy_handler, session_clone_handler, session_close_handler,
-    session_console_handler, session_cookies_handler, session_create_handler,
+    session_console_handler, session_cookies_handler, session_cookie_trace_handler,
+    session_create_handler,
     session_dialog_handler, session_drag_handler, session_eval_handler, session_export_handler,
     session_har_handler, session_input_handler, session_list_handler, session_navigate_handler,
     session_network_handler, session_preload_handler, session_screenshot_handler, session_scroll_handler,
@@ -371,6 +372,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/:id/preload", post(session_preload_handler))
         .route("/session/:id/state", post(session_state_handler))
         .route("/session/:id/cookies", get(session_cookies_handler))
+        .route("/session/:id/cookie_trace", get(session_cookie_trace_handler))
         .route("/session/:id/storage", get(session_storage_handler))
         .route("/session/:id/console", get(session_console_handler))
         .route("/session/:id/dialog", post(session_dialog_handler))
