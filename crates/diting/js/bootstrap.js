@@ -3761,7 +3761,7 @@ class Element extends Node {
   // focus() on "focusable area" (tabindex/controls/links); we keep the old
   // engine permissiveness — anything can hold focus — because typing and
   // click targeting flow through activeElement and page scripts rely on it.
-  focus() {
+  focus(options) {
     if (_isFormControlDisabled(this)) return;
     if (globalThis.__diting_focused === this) return;
     if (globalThis.__diting_focused) _fireBlurFamily(globalThis.__diting_focused);
@@ -3778,6 +3778,12 @@ class Element extends Node {
     }
     this.dispatchEvent(new FocusEvent("focus"));
     this.dispatchEvent(new FocusEvent("focusin", {bubbles: true}));
+    // #215: focus() implies scrollIntoView nearest/nearest (CSSOM View
+    // §3) — the login/form flows that focus an off-screen control expect
+    // the viewport to follow. preventScroll opts out.
+    if (!(options && options.preventScroll)) {
+      try { this.scrollIntoView({block: 'nearest', inline: 'nearest'}); } catch (e) {}
+    }
   }
   blur() {
     if (globalThis.__diting_focused !== this) return;
@@ -5208,7 +5214,9 @@ class Element extends Node {
   scrollIntoView(arg) {
     globalThis.__diting_click_target = this;
     var opts = (arg && typeof arg === 'object') ? arg : {};
-    var block = opts.block || 'start';
+    // scrollIntoView(false) is {block: 'end', inline: 'nearest'} per CSSOM
+    // View; anything else non-object behaves like () = start/nearest.
+    var block = opts.block || (arg === false ? 'end' : 'start');
     var inline = opts.inline || 'nearest';
     var doc = globalThis.document;
     var root = doc && doc.documentElement;

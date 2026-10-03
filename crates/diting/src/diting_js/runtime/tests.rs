@@ -12969,6 +12969,45 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn test_focus_and_scrollintoview_move_viewport() {
+        // #215 (obscura #1133): focus() implies scrollIntoView
+        // nearest/nearest, and explicit scrollIntoView modes align the box
+        // in the scrollport. Tall page so the root scroller has a real range.
+        let mut rt = setup_runtime(
+            r#"<html><body><div style="height:4000px"></div><input id="f"><div style="height:6000px"></div></body></html>"#,
+        );
+        let script = r#"async () => {
+            const f = document.getElementById('f');
+            f.focus();
+            const r1 = f.getBoundingClientRect();
+            const nearestBottom = Math.abs(r1.bottom - innerHeight) < 2;
+            f.scrollIntoView({block: 'center'});
+            const r2 = f.getBoundingClientRect();
+            const centered = Math.abs((r2.top + r2.bottom) / 2 - innerHeight / 2) < 2;
+            f.scrollIntoView(true);
+            const r3 = f.getBoundingClientRect();
+            const atTop = Math.abs(r3.top) < 2;
+            f.scrollIntoView(false);
+            const r4 = f.getBoundingClientRect();
+            const atBottom = Math.abs(r4.bottom - innerHeight) < 2;
+            window.scrollTo(0, 0);
+            f.blur();
+            f.focus({preventScroll: true});
+            const afterPrevent = window.scrollY;
+            f.blur();
+            f.focus();
+            const afterRefocus = window.scrollY;
+            return [nearestBottom, centered, atTop, atBottom, afterPrevent, afterRefocus > 0];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([true, true, true, true, 0, true]),
+            "focus scrolls nearest, block:center/start/end align, preventScroll opts out, refocus scrolls again"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     #[cfg(feature = "screenshot")]
     async fn test_root_scroll_mirrors_to_native_band_paint_state() {
         // AginxOS P0: the CDP band painter reads the root scroll offset from
