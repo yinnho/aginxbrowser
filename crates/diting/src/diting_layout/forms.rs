@@ -198,6 +198,7 @@ pub(super) fn paint_form_control(
             WhiteSpace::Normal, // control labels always collapse (textarea value editing is a v2 face)
             false, // control labels never synthesize small-caps
             None, // no lang slot: control labels use the plain cascade
+            None, // control labels carry no text-align-last (their own anchoring above)
         );
         out.push_clip(x + 1, y + 1, x + w - 1, y + h - 1);
         out.blit_text(&r, tx.round() as i64, (ty + r.top).round() as i64);

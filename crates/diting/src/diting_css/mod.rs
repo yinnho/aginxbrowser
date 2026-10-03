@@ -912,7 +912,7 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "white-space", "text-overflow",
         "object-fit", "object-position", "z-index", "border-radius",
         "float", "clear", "border-collapse", "vertical-align", "opacity", "transform",
-        "list-style-type", "list-style",
+        "list-style-type", "list-style", "text-align-last",
     ];
     if !SUPPORTED.contains(&name.to_ascii_lowercase().as_str()) {
         return false;
@@ -941,6 +941,9 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
             || value.starts_with("url(")
             || value.contains("gradient"),
         "text-align" => matches!(value, "left" | "start" | "center" | "right" | "end" | "justify"),
+        "text-align-last" => {
+            matches!(value, "auto" | "left" | "start" | "center" | "right" | "end" | "justify")
+        }
         "white-space" => matches!(
             value,
             "normal" | "nowrap" | "pre" | "pre-wrap" | "pre-line" | "break-spaces"
@@ -1176,6 +1179,11 @@ pub struct ComputedStyle {
     /// read in [`ComputedStyle::resolved_overflow`].
     pub overflow_x: Option<Overflow>,
     pub overflow_y: Option<Overflow>,
+    /// `text-align-last` (#214, blitz#998), inherited; None = the initial
+    /// `auto` (defer to text-align). Paint consumes it via
+    /// [`ComputedStyle::physical_text_align_last`] as a per-run last-line
+    /// offset.
+    pub text_align_last: Option<TextAlignLast>,
     // --- flex/grid pass-through (batch 2c): px/fr-only, non-inherited ---
     pub flex_direction: Option<FlexDirection>,
     pub flex_wrap: Option<FlexWrapMode>,
@@ -2308,6 +2316,24 @@ impl ComputedStyle {
             Some(TextAlign::Start) | None => Some(if rtl { TextAlign::Right } else { TextAlign::Left }),
             Some(TextAlign::End) => Some(if rtl { TextAlign::Left } else { TextAlign::Right }),
             other => other,
+        }
+    }
+
+    /// Consume-time physical LAST-line alignment (#214, blitz#998): `auto`
+    /// — the initial — defers to `text-align` (no override, so None);
+    /// start/end resolve against direction like [`Self::physical_text_align`].
+    /// `justify` consumes as None too: there is no stretch machinery to
+    /// justify the last line against (the computed face still reports the
+    /// keyword verbatim).
+    pub fn physical_text_align_last(&self) -> Option<TextAlign> {
+        let rtl = self.direction == Some(TextDirection::Rtl);
+        match self.text_align_last {
+            None | Some(TextAlignLast::Auto) | Some(TextAlignLast::Justify) => None,
+            Some(TextAlignLast::Left) => Some(TextAlign::Left),
+            Some(TextAlignLast::Right) => Some(TextAlign::Right),
+            Some(TextAlignLast::Center) => Some(TextAlign::Center),
+            Some(TextAlignLast::Start) => Some(if rtl { TextAlign::Right } else { TextAlign::Left }),
+            Some(TextAlignLast::End) => Some(if rtl { TextAlign::Left } else { TextAlign::Right }),
         }
     }
 
@@ -3467,6 +3493,26 @@ pub enum TextAlign {
     /// resolution (#188-3).
     Start,
     End,
+    /// Parsed and reported by the computed face, but line stretching is
+    /// NOT painted (#214): layout consumes justify as start (no promote),
+    /// which is also exactly the canvas `text-align-last` needs to move
+    /// the last line off.
+    Justify,
+}
+
+/// `text-align-last` (css-text-3 §8.2, #214, blitz#998), inherited; the
+/// initial value `auto` defers to `text-align` (no override). Consumed
+/// paint-side as a per-run last-line x offset — see
+/// [`ComputedStyle::physical_text_align_last`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextAlignLast {
+    Auto,
+    Start,
+    End,
+    Left,
+    Right,
+    Center,
+    Justify,
 }
 
 /// CSS Writing Modes §2.1: the inline base direction (`direction`),
@@ -4691,6 +4737,23 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 "center" => Some(TextAlign::Center),
                 "right" => Some(TextAlign::Right),
                 "end" => Some(TextAlign::End),
+                // Consumed as start by layout (no stretch machinery, #214) —
+                // parsing it keeps the computed face honest and lets
+                // text-align-last target justify paragraphs' last line.
+                "justify" => Some(TextAlign::Justify),
+                _ => return false,
+            };
+            true
+        }
+        "text-align-last" => {
+            style.text_align_last = match v {
+                "auto" => Some(TextAlignLast::Auto),
+                "left" => Some(TextAlignLast::Left),
+                "start" => Some(TextAlignLast::Start),
+                "center" => Some(TextAlignLast::Center),
+                "right" => Some(TextAlignLast::Right),
+                "end" => Some(TextAlignLast::End),
+                "justify" => Some(TextAlignLast::Justify),
                 _ => return false,
             };
             true
@@ -6526,6 +6589,9 @@ pub fn cascade_element(
         // direction inherits the same way (#188-3): an ancestor's rtl
         // flows down until an element declares its own.
         style.direction = style.direction.or(parent.direction);
+        // text-align-last inherits (css-text-3); no UA sheet declares it,
+        // so a plain `.or` is the whole rule (#214).
+        style.text_align_last = style.text_align_last.or(parent.text_align_last);
         // list-style-type inherits, with the element's own UA declaration
         // beating the inherited value — a nested <ol> stays decimal inside
         // a disc <ul>.

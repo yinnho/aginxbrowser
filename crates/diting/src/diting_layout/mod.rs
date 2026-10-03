@@ -5614,6 +5614,12 @@ pub enum PaintItem {
         /// #139 (Han unification): the run's Han slot (nearest ancestor
         /// lang) — rides the item so measure and paint segment identically.
         han: Option<text::HanSlot>,
+        /// `text-align-last` (#214, blitz#998), resolved PHYSICAL against
+        /// the owning block's direction at collect time: only Center/Right
+        /// arrive (auto/start/left fold to None). Paint offsets the run's
+        /// LAST line inside its tile; word leaves carry None — the flex row
+        /// breaks mixed runs, and per-line alignment there is a later face.
+        last_line_align: Option<TextAlign>,
     },
 }
 
@@ -7296,6 +7302,9 @@ pub fn layout_collect_with_images(
             text_shadow: None,
             small_caps: false,
             han,
+            // A marker is a single line anchored at its own x — alignment
+            // inside the tile never applies.
+            last_line_align: None,
         });
     }
 
@@ -8174,6 +8183,24 @@ pub fn layout_collect_with_images(
                     .collect()
             });
         if let Some(TextLeaf::Run { text, font_size, bold, color, line_height, decorations, mono, word_spacing, ws, ellipsis, tokens, small_caps, han, .. }) = taffy_tree.get_node_context(node) {
+            // text-align-last (#214, blitz#998): inherited, so the run's
+            // OWNING block carries the computed value — walk taffy ancestors
+            // to the first boxed element (pure runs hang directly off their
+            // block; mixed-run wrappers sit a level deeper, but a mixed run
+            // wraps via word leaves and never reaches here as one Run).
+            // Physical resolution folds direction in.
+            let last_line_align = {
+                let mut anc = taffy_tree.parent(node);
+                let mut resolved = None;
+                while let Some(a) = anc {
+                    if let Some(dom) = node_map.get(&a) {
+                        resolved = styles.get(dom).and_then(|s| s.physical_text_align_last());
+                        break;
+                    }
+                    anc = taffy_tree.parent(a);
+                }
+                resolved
+            };
             // The wrap width the containing block offered at measure time:
             // the direct taffy parent's content box (the run wrapper for
             // mixed runs, the block itself for pure runs — same width).
@@ -8222,6 +8249,7 @@ pub fn layout_collect_with_images(
                     text_shadow: run_text_shadow.clone(),
                     small_caps: *small_caps,
                     han: *han,
+                    last_line_align,
                 });
             } else {
                 let wrap_at = taffy_tree
@@ -8250,6 +8278,7 @@ pub fn layout_collect_with_images(
                     text_shadow: run_text_shadow.clone(),
                     small_caps: *small_caps,
                     han: *han,
+                    last_line_align,
                 });
             }
         }
@@ -8279,6 +8308,7 @@ pub fn layout_collect_with_images(
                     // Word leaves are pre-uppercased at build time.
                     small_caps: false,
                     han: *han,
+                    last_line_align: None,
                 });
             } else {
                 items.push(PaintItem::Text {
@@ -8301,6 +8331,7 @@ pub fn layout_collect_with_images(
                     // Word leaves are pre-uppercased at build time.
                     small_caps: false,
                     han: *han,
+                    last_line_align: None,
                 });
             }
         }

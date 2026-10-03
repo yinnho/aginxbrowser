@@ -155,6 +155,28 @@ pub struct WrapLine {
     pub width: f32,
 }
 
+/// Per-line x offset for `text-align-last` (#214, blitz#998): only the
+/// LAST line moves, anchored to the widest line's advance (the run tile
+/// hugs that width, so for a full-width first line this is the container's
+/// content edge exactly; for <br>-broken short lines it is the longest
+/// line's right edge — same anchor class as the whole-run center/right
+/// flex promotion). `auto`/`start`/left resolve to None upstream, so only
+/// Center/Right arrive here. Shared by the raster tile, the decorations
+/// painter and the PDF vector layer so all three move the same ink.
+pub fn last_line_offset(lines: &[WrapLine], idx: usize, align: Option<crate::diting_css::TextAlign>) -> f32 {
+    let Some(a) = align else { return 0.0 };
+    if lines.is_empty() || idx != lines.len() - 1 {
+        return 0.0;
+    }
+    let max_line = lines.iter().map(|l| l.width).fold(0.0, f32::max);
+    let slack = (max_line - lines[idx].width).max(0.0);
+    match a {
+        crate::diting_css::TextAlign::Right => slack,
+        crate::diting_css::TextAlign::Center => slack / 2.0,
+        _ => 0.0,
+    }
+}
+
 /// The greedy line breaker — the single wrap truth shared by the measure
 /// path (`measure_text_leaf`) and the paint path (`rasterize_wrapped`),
 /// locked by the batch-3a probes: break before a token that would overflow

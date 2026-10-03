@@ -241,6 +241,38 @@
         assert_eq!(out.as_str().unwrap(), "true|legacy:true");
     }
 
+    /// #214 (blitz#998): `text-align-last` on the computed face — declared
+    /// keywords round-trip verbatim, undeclared reports the css-text-3
+    /// initial `auto`, and inheritance rides the cascade (a child sees the
+    /// ancestor's value until it declares its own). `text-align: justify`
+    /// parses too — reported verbatim; the stretch itself is not painted
+    /// (consumed as start by layout).
+    #[test]
+    fn computed_style_reports_text_align_last() {
+        let mut rt = setup_runtime(
+            "<html><body>\
+             <div id='a' style='text-align:justify;text-align-last:right'>x</div>\
+             <div id='b' style='text-align-last:center'><span id='c'>y</span></div>\
+             </body></html>",
+        );
+        let out = rt
+            .evaluate(
+                r#"
+            var a = getComputedStyle(document.getElementById('a'));
+            var c = getComputedStyle(document.getElementById('c'));
+            [a.getPropertyValue('text-align-last'),
+             a.getPropertyValue('text-align'),
+             c.getPropertyValue('text-align-last')].join('|');
+        "#,
+            )
+            .unwrap();
+        assert_eq!(
+            out.as_str().unwrap(),
+            "right|justify|center",
+            "declared right round-trips, justify parses on text-align, the span inherits center"
+        );
+    }
+
     /// Issue #29: `Emulation.setEmulatedMedia` (Playwright's
     /// page.emulateMedia) must flip all three faces together — the
     /// matchMedia script face, its change events, AND the @media cascade

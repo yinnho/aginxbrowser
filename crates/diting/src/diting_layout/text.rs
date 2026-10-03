@@ -639,10 +639,11 @@ impl FontBook {
         ws: crate::diting_css::WhiteSpace,
         small_caps: bool,
         han: Option<han::HanSlot>,
+        last_line_align: Option<crate::diting_css::TextAlign>,
     ) -> Arc<TextRaster> {
         self.rasterize_wrapped_with(
             text, font_size, bold, color, wrap_at, line_height, mono, word_spacing, truncate_at,
-            ws, None, small_caps, han,
+            ws, None, small_caps, han, last_line_align,
         )
     }
 
@@ -669,6 +670,7 @@ impl FontBook {
         tokens: Option<std::rc::Rc<[Token]>>,
         small_caps: bool,
         han: Option<han::HanSlot>,
+        last_line_align: Option<crate::diting_css::TextAlign>,
     ) -> Arc<TextRaster> {
         let key = RasterKey {
             fingerprint: self.fingerprint,
@@ -676,6 +678,11 @@ impl FontBook {
                 wrap_at_bits: wrap_at.to_bits(),
                 truncate_at_bits: truncate_at.unwrap_or(0.0).to_bits(),
                 ws_bits: ws as u32,
+                last_align: match last_line_align {
+                    Some(crate::diting_css::TextAlign::Center) => 1,
+                    Some(crate::diting_css::TextAlign::Right) => 2,
+                    _ => 0,
+                },
             },
             text: text.into(),
             font_size_bits: font_size.to_bits(),
@@ -702,6 +709,7 @@ impl FontBook {
                 tokens.as_deref(),
                 small_caps,
                 han,
+                last_line_align,
             )
         })
     }
@@ -722,6 +730,7 @@ impl FontBook {
         pre_shaped: Option<&[Token]>,
         small_caps: bool,
         han: Option<han::HanSlot>,
+        last_line_align: Option<crate::diting_css::TextAlign>,
     ) -> TextRaster {
         let empty = || TextRaster {
             width: 0,
@@ -783,13 +792,14 @@ impl FontBook {
         // the mono coverage once.
         let mut layer = self.color_layer_for(&tokens.iter().map(|t| t.text.as_str()).collect::<String>(), bold, mono, han, width, height);
         if word_spacing == 0.0 && tokens.iter().all(|t| t.scale == 1.0) {
-            for (line, baseline) in lines.iter().zip(&baselines) {
+            for (li, (line, baseline)) in lines.iter().zip(&baselines).enumerate() {
                 if line.token_idx.is_empty() {
                     continue;
                 }
                 let s: String =
                     line.token_idx.iter().map(|&i| tokens[i].text.as_str()).collect();
-                self.blit_line(&mut alpha, layer.as_deref_mut(), width, height, &s, font_size, bold, mono, han, 0.0, baseline - top);
+                let off = wrap::last_line_offset(&lines, li, last_line_align);
+                self.blit_line(&mut alpha, layer.as_deref_mut(), width, height, &s, font_size, bold, mono, han, off, baseline - top);
             }
         } else {
             // Word-spacing or small-caps run: blit token by token at the
@@ -797,8 +807,8 @@ impl FontBook {
             // the words and reduced-size caps segments shape at their own
             // scale (the whole-line shape above would draw them uniform).
             // Same token model measurement uses — one shape per token.
-            for (line, baseline) in lines.iter().zip(&baselines) {
-                let mut pen = 0.0f32;
+            for (li, (line, baseline)) in lines.iter().zip(&baselines).enumerate() {
+                let mut pen = wrap::last_line_offset(&lines, li, last_line_align);
                 for &i in &line.token_idx {
                     let t = &tokens[i];
                     if !t.is_space {
@@ -987,7 +997,7 @@ fn colorize_layered(alpha: &[u8], layer: Option<&[u8]>, color: [u8; 4]) -> Vec<u
 // `text::Token` / `super::text::greedy_wrap` path working unchanged.
 mod wrap;
 
-pub use wrap::{greedy_wrap, tokens_of, Token, WrapLine};
+pub use wrap::{greedy_wrap, last_line_offset, tokens_of, Token, WrapLine};
 pub(crate) use wrap::{caps_case_runs, truncate_tokens, SMALL_CAPS_RATIO};
 
 /// 批240 / blitz#924: `text-transform` case mapping, Chrome-grounded via a
@@ -1145,6 +1155,10 @@ enum RasterKind {
         /// `nowrap` (collapse, one line) from `pre` (preserve, hard breaks),
         /// and the token shapes themselves diverge.
         ws_bits: u32,
+        /// `text-align-last` (#214): 0 = none/start, 1 = center, 2 = right —
+        /// the last line blits at a different x, so aligned and unaligned
+        /// rasters of the same run must memo independently.
+        last_align: u8,
     },
 }
 

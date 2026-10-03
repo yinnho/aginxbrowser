@@ -2327,3 +2327,110 @@ fn outside_list_markers_paint_outside_the_border_box() {
     assert!(items.iter().any(|it| matches!(it, PaintItem::Text { text, .. } if text == "plain")),
         "the reset list's text still paints");
 }
+
+/// #214 (blitz#998): `text-align-last` moves ONLY the run's last line.
+/// The offset lives inside the rasterized tile (nothing changes at the
+/// item level), so the probe reads ink columns per line band out of two
+/// rasters of the same two-line run — plain vs `last_line_align: Right`:
+/// the first line's ink must stay byte-identical while the last line's
+/// ink shifts right by the line's slack.
+#[test]
+fn text_align_last_moves_only_the_last_line_ink() {
+    let fonts = crate::diting_fonts::font_book();
+    // Two lines at wrap 100: "aaaa aaaa aaaa" breaks after the second word
+    // group — whatever the exact break, ink lands in two distinct bands.
+    let text = "aaaa aaaa aaaa";
+    let lh = 24.0f32;
+    let plain = fonts.rasterize_wrapped(
+        text, 16.0, false, [0, 0, 0, 255], 100.0, lh, false, 0.0, None,
+        crate::diting_css::WhiteSpace::Normal, false, None, None,
+    );
+    let right = fonts.rasterize_wrapped(
+        text, 16.0, false, [0, 0, 0, 255], 100.0, lh, false, 0.0, None,
+        crate::diting_css::WhiteSpace::Normal, false, None,
+        Some(crate::diting_css::TextAlign::Right),
+    );
+    // (min_x, max_x) ink columns of the rows in [y0, y1).
+    let band_cols = |r: &crate::diting_layout::text::TextRaster, y0: usize, y1: usize| -> (usize, usize) {
+        let mut lo = usize::MAX;
+        let mut hi = 0usize;
+        for y in y0..y1.min(r.height) {
+            for x in 0..r.width {
+                if r.data[(y * r.width + x) * 4 + 3] > 0 {
+                    lo = lo.min(x);
+                    hi = hi.max(x);
+                }
+            }
+        }
+        (lo, hi)
+    };
+    assert!(plain.height > lh as usize, "the run must wrap to two lines (h={})", plain.height);
+    let mid = lh as usize;
+    let (p0, p1) = (band_cols(&plain, 0, mid), band_cols(&plain, mid, mid * 2));
+    let (r0, r1) = (band_cols(&right, 0, mid), band_cols(&right, mid, mid * 2));
+    assert_eq!((p0.0, p0.1), (r0.0, r0.1), "the FIRST line's ink is untouched");
+    assert!(
+        r1.0 > p1.0 && r1.1 > p1.1,
+        "the LAST line moves right (plain {p1:?} → right {r1:?})"
+    );
+    // Center halves the slack: its offset sits strictly between plain and
+    // right, and the tile never widens (the offset anchors inside it).
+    let center = fonts.rasterize_wrapped(
+        text, 16.0, false, [0, 0, 0, 255], 100.0, lh, false, 0.0, None,
+        crate::diting_css::WhiteSpace::Normal, false, None,
+        Some(crate::diting_css::TextAlign::Center),
+    );
+    let (_, c1) = (band_cols(&center, 0, mid), band_cols(&center, mid, mid * 2));
+    assert!(c1.0 > p1.0 && c1.0 < r1.0, "center sits between start and right (plain {} center {} right {})", p1.0, c1.0, r1.0);
+    assert_eq!(plain.width, right.width, "alignment changes no tile geometry");
+}
+
+/// #214 collect wiring: the run's PaintItem carries the owning block's
+/// resolved `text-align-last` (inherited down, physical fold included),
+/// and `text-align: justify` parses (consumed as start — no promote, no
+/// last-line override) without breaking the block's own run.
+#[test]
+fn text_align_last_resolves_onto_the_run_item() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType, TextAlign};
+    use crate::diting_layout::PaintItem;
+    use crate::diting_dom::tree_sink::parse_html;
+
+    let html = r#"<html><body style="margin:0">
+        <div id="r" style="width:120px;text-align:justify;text-align-last:right">aaaa aaaa aaaa</div>
+        <div id="c" style="width:120px">head <span style="text-align-last:center">tail</span></div>
+        </body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (1280.0, 800.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (1280.0, 720.0));
+    // Declared keyword round-trips in the cascade; justify parses on
+    // text-align itself.
+    let rid = tree.query_selector_all("#r").unwrap()[0];
+    let rs = styles.get(&rid).expect("#r styles");
+    assert_eq!(rs.text_align, Some(TextAlign::Justify), "text-align: justify parses");
+    assert_eq!(rs.text_align_last, Some(crate::diting_css::TextAlignLast::Right));
+    // Inheritance: the span declares its own value; #c's block runs carry
+    // none (the property targets the run's owning block — the span's
+    // inline style rides its own run machinery, word-leaf v1 boundary).
+    let sid = tree.query_selector_all("#c span").unwrap()[0];
+    assert_eq!(
+        styles.get(&sid).unwrap().text_align_last,
+        Some(crate::diting_css::TextAlignLast::Center)
+    );
+    // The justify paragraph's run item resolves last:right; an undeclared
+    // block's run resolves None (auto).
+    let (_, items, _, _, _, _) = crate::diting_layout::layout_dom_with_paint_order_and_images(
+        &tree, &styles, &crate::diting_fonts::font_book(), 1280.0, 800.0, None, None,
+    );
+    let run_align = |needle: &str| -> Option<Option<TextAlign>> {
+        items.iter().find_map(|it| match it {
+            PaintItem::Text { text, last_line_align, .. } if text.contains(needle) => Some(*last_line_align),
+            _ => None,
+        })
+    };
+    assert_eq!(
+        run_align("aaaa aaaa aaaa"),
+        Some(Some(TextAlign::Right)),
+        "the justify+last:right paragraph's run carries the physical override"
+    );
+    assert_eq!(run_align("head").flatten(), None, "an undeclared block stays auto (no override)");
+}

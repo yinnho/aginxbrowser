@@ -49,12 +49,12 @@ fn repeated_rasterize_shares_the_cached_tile() {
     let (reg, bold) = production_pair();
     let book = FontBook::from_pairs(reg, bold).unwrap();
     let _held = isolated();
-    let black = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false, None);
-    let again = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false, None);
+    let black = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false, None, None);
+    let again = book.rasterize_wrapped("缓存命中", 16.0, false, [0, 0, 0, 255], 20.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false, None, None);
     assert!(Arc::ptr_eq(&black, &again), "repeat must hand back the cached Arc");
     assert!(black.ink_bbox().is_some(), "the tile has real ink");
 
-    let red = book.rasterize_wrapped("缓存命中", 16.0, false, [255, 0, 0, 255], 20.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false, None);
+    let red = book.rasterize_wrapped("缓存命中", 16.0, false, [255, 0, 0, 255], 20.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false, None, None);
     assert!(!Arc::ptr_eq(&black, &red), "color rides the key — a new tile");
     let ink = |r: &TextRaster| {
         r.data
@@ -79,7 +79,7 @@ fn line_and_wrapped_rasters_cache_separately() {
     let line = book.rasterize(text, 16.0, false, [0, 0, 0, 255], 24.0, false, None);
     // Narrow wrap: the same text breaks across 4+ lines, so the wrapped
     // tile is much taller than the single-line one.
-    let wrapped = book.rasterize_wrapped(text, 16.0, false, [0, 0, 0, 255], 40.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false, None);
+    let wrapped = book.rasterize_wrapped(text, 16.0, false, [0, 0, 0, 255], 40.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false, None, None);
     assert!(!Arc::ptr_eq(&line, &wrapped), "kinds must not collide");
     assert!(
         wrapped.height > line.height * 2,
@@ -245,8 +245,8 @@ fn rasterize_wrapped_word_spacing_shifts_ink() {
     let (reg, bold) = production_pair();
     let book = FontBook::from_pairs(reg, bold).unwrap();
     let _held = isolated();
-    let tight = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false, None);
-    let loose = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 12.0, None, crate::diting_css::WhiteSpace::Normal, false, None);
+    let tight = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, false, None, None);
+    let loose = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 12.0, None, crate::diting_css::WhiteSpace::Normal, false, None, None);
     assert_eq!(tight.height, loose.height, "one line either way");
     let ink_right = |r: &TextRaster| r.ink_bbox().map(|b| b.2).unwrap_or(0);
     assert!(
@@ -255,7 +255,7 @@ fn rasterize_wrapped_word_spacing_shifts_ink() {
         ink_right(&tight), ink_right(&loose)
     );
     // Negative spacing tightens toward overlap — still deterministic.
-    let tight2 = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, -8.0, None, crate::diting_css::WhiteSpace::Normal, false, None);
+    let tight2 = book.rasterize_wrapped("ab cd", 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, -8.0, None, crate::diting_css::WhiteSpace::Normal, false, None, None);
     assert!(ink_right(&tight2) < ink_right(&tight), "negative ws pulls the second word left");
 }
 
@@ -370,13 +370,13 @@ fn rasterize_wrapped_pre_shaped_matches_reshaped() {
     let text = "淘宝商品列表页的一段中文文本需要折行处理".repeat(4);
     let tokens = tokens_of(&text, 16.0, false, &fonts, false, 0.0, crate::diting_css::WhiteSpace::Normal, false, None);
 
-    let plain = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, None, false, None);
-    let pre = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, Some(&tokens), false, None);
+    let plain = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, None, false, None, None);
+    let pre = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, None, crate::diting_css::WhiteSpace::Normal, Some(&tokens), false, None, None);
     assert_eq!((plain.width, plain.height, plain.baseline), (pre.width, pre.height, pre.baseline));
     assert_eq!(plain.data, pre.data);
 
-    let plain_t = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, Some(320.0), crate::diting_css::WhiteSpace::Normal, None, false, None);
-    let pre_t = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, Some(320.0), crate::diting_css::WhiteSpace::Normal, Some(&tokens), false, None);
+    let plain_t = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, Some(320.0), crate::diting_css::WhiteSpace::Normal, None, false, None, None);
+    let pre_t = fonts.rasterize_wrapped_uncached(&text, 16.0, false, [0, 0, 0, 255], 200.0, 24.0, false, 0.0, Some(320.0), crate::diting_css::WhiteSpace::Normal, Some(&tokens), false, None, None);
     assert_eq!((plain_t.width, plain_t.height, plain_t.baseline), (pre_t.width, pre_t.height, pre_t.baseline));
     assert_eq!(plain_t.data, pre_t.data);
 }

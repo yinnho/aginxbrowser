@@ -9710,7 +9710,7 @@ globalThis.getComputedStyle = (el, pseudoElt) => {
     'border-radius': '0px',
     'z-index': 'auto', 'pointer-events': 'auto',
     'box-sizing': 'content-box', cursor: 'auto',
-    'white-space': 'normal', 'text-align': 'start', 'text-transform': 'none',
+    'white-space': 'normal', 'text-align': 'start', 'text-align-last': 'auto', 'text-transform': 'none',
     'flex-direction': 'row', 'flex-wrap': 'nowrap', 'align-items': 'normal',
     'justify-content': 'normal', gap: 'normal',
     'grid-template-columns': 'none', 'grid-template-rows': 'none',

@@ -14,8 +14,8 @@
 
 use super::forms::{paint_form_control, paint_form_widget};
 use super::text::{
-    baseline_offset, greedy_wrap, tokens_of, truncate_tokens, HanSlot, PdfGlyph, ScaledMetrics,
-    TextRaster, Token,
+    baseline_offset, greedy_wrap, last_line_offset, tokens_of, truncate_tokens, HanSlot, PdfGlyph,
+    ScaledMetrics, TextRaster, Token,
 };
 use super::{FontBook, PaintItem, Rect, TextGradient};
 use crate::diting_css::{TextDecorations, TextShadow, WhiteSpace};
@@ -1402,6 +1402,10 @@ fn paint_text_decorations(
     pre_shaped: Option<&[Token]>,
     dx: f32,
     dy: f32,
+    // #214: the item's text-align-last — the last line's stroke follows the
+    // glyphs' offset, else an underlined last line would keep its stroke on
+    // the start edge while the ink moved.
+    last_line_align: Option<crate::diting_css::TextAlign>,
 ) {
     if decorations.is_empty() || text.trim().is_empty() {
         return;
@@ -1461,14 +1465,15 @@ fn paint_text_decorations(
             continue;
         }
         let baseline = y + (i as f32 * line_height).round() + b0;
+        let lx = x + last_line_offset(&lines, i, last_line_align);
         if decorations.underline {
-            stroke(x, baseline + (m.descent * 0.5).max(1.0), line.width);
+            stroke(lx, baseline + (m.descent * 0.5).max(1.0), line.width);
         }
         if decorations.overline {
-            stroke(x, baseline - m.ascent, line.width);
+            stroke(lx, baseline - m.ascent, line.width);
         }
         if decorations.line_through {
-            stroke(x, baseline - font_size * 0.28, line.width);
+            stroke(lx, baseline - font_size * 0.28, line.width);
         }
     }
 }
@@ -1614,6 +1619,7 @@ pub(crate) fn pdf_text_ops(items: &[PaintItem], fonts: &FontBook) -> (Vec<PdfOp>
                 text_shadow,
                 small_caps,
                 han,
+                last_line_align,
             } => {
                 // Vector gate: the shaper must cover every segment (fallback
                 // faces are emoji color bitmaps with no outlines), the fill
@@ -1635,6 +1641,7 @@ pub(crate) fn pdf_text_ops(items: &[PaintItem], fonts: &FontBook) -> (Vec<PdfOp>
                 let Some(line) = pdf_vectorize_line(
                     text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at,
                     *decorations, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), fonts,
+                    *last_line_align,
                 ) else {
                     continue;
                 };
@@ -1670,6 +1677,7 @@ fn pdf_vectorize_line(
     han: Option<HanSlot>,
     pre_shaped: Option<&[Token]>,
     fonts: &FontBook,
+    last_line_align: Option<crate::diting_css::TextAlign>,
 ) -> Option<PdfLine> {
     let owned;
     let tokens: &[Token] = match pre_shaped {
@@ -1737,13 +1745,13 @@ fn pdf_vectorize_line(
             }
             let s: String = line.token_idx.iter().map(|&i| painted[i].text.as_str()).collect();
             let baseline = y + (li as f32 * line_height).round() + b0;
-            if !shape_run(&s, 0.0, baseline, &mut glyphs) {
+            if !shape_run(&s, last_line_offset(&lines, li, last_line_align), baseline, &mut glyphs) {
                 return None;
             }
         }
     } else {
         for (li, line) in lines.iter().enumerate() {
-            let mut pen = 0.0f32;
+            let mut pen = last_line_offset(&lines, li, last_line_align);
             let baseline = y + (li as f32 * line_height).round() + b0;
             for &i in &line.token_idx {
                 let t = &painted[i];
@@ -1769,14 +1777,15 @@ fn pdf_vectorize_line(
                 continue;
             }
             let baseline = y + (i as f32 * line_height).round() + b0;
+            let sx = x + last_line_offset(&dlines, i, last_line_align);
             if decorations.underline {
-                strokes.push((x, baseline + (m.descent * 0.5).max(1.0), line.width));
+                strokes.push((sx, baseline + (m.descent * 0.5).max(1.0), line.width));
             }
             if decorations.overline {
-                strokes.push((x, baseline - m.ascent, line.width));
+                strokes.push((sx, baseline - m.ascent, line.width));
             }
             if decorations.line_through {
-                strokes.push((x, baseline - font_size * 0.28, line.width));
+                strokes.push((sx, baseline - font_size * 0.28, line.width));
             }
         }
     }
@@ -2314,6 +2323,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                                     WhiteSpace::Normal,
                                     false,
                                     None,
+                                    None,
                                 );
                                 scratch.blit_text(&r, 0, r.top.round() as i64);
                                 scratch.pop_clip();
@@ -2365,6 +2375,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                                     WhiteSpace::Normal,
                                     false,
                                     None,
+                                    None,
                                 );
                                 out.blit_text(&r, x, (y as f32 + r.top).round() as i64);
                                 out.pop_clip();
@@ -2405,7 +2416,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     super::svg::paint_svg(render, rect, fonts, out, dx, dy, *alpha);
                 }
             }
-            PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at, gradient, decorations, mono, word_spacing, truncate_at, tokens, ws, text_shadow, small_caps, han } => {
+            PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at, gradient, decorations, mono, word_spacing, truncate_at, tokens, ws, text_shadow, small_caps, han, last_line_align } => {
                 // background-clip: text: the fill color is ignored entirely
                 // (CSS paints the background through the glyphs; the
                 // transparent-text-fill half of the idiom is free by
@@ -2444,7 +2455,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     }
                     if let Some(shadows) = text_shadow {
                         for sh in shadows.iter().rev() {
-                            stamp_text_shadow(out, fonts, text, *font_size, *bold, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), sh, true, (*x + sh.dx) as f64, (*y + sh.dy) as f64);
+                            stamp_text_shadow(out, fonts, text, *font_size, *bold, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), sh, true, (*x + sh.dx) as f64, (*y + sh.dy) as f64, *last_line_align);
                             // Chrome shadows the decorations with the text
                             // (blitz#984): each hard layer restamps the
                             // strokes in the shadow color at the same offset.
@@ -2452,11 +2463,11 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                             // line beside a feathered glyph reads as a bug,
                             // not a shadow.
                             if sh.blur <= 0.0 {
-                                paint_text_decorations(out, fonts, text, *font_size, *bold, [sh.color.0, sh.color.1, sh.color.2, sh.color.3], *line_height, *x + sh.dx, *y + sh.dy, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), 0.0, 0.0);
+                                paint_text_decorations(out, fonts, text, *font_size, *bold, [sh.color.0, sh.color.1, sh.color.2, sh.color.3], *line_height, *x + sh.dx, *y + sh.dy, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), 0.0, 0.0, *last_line_align);
                             }
                         }
                     }
-                    let r = fonts.rasterize_wrapped_with(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, *ws, tokens.clone(), *small_caps, *han);
+                    let r = fonts.rasterize_wrapped_with(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, *ws, tokens.clone(), *small_caps, *han, *last_line_align);
                     // Gradient recolor rewrites pixels in place — the cache
                     // hands out Arcs, so that path clones first (#399).
                     let mut owned;
@@ -2468,7 +2479,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                         &r
                     };
                     out.blit_rgba_affine(&r.data, r.width, r.height, *x as f64, (*y + r.top) as f64);
-                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), 0.0, 0.0);
+                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), 0.0, 0.0, *last_line_align);
                 } else {
                     let pad = shadow_pad.unwrap_or(0.0);
                     if !text_reaches_band(*y, text, *font_size, *wrap_at, *line_height, dy, out.height as i64, pad) {
@@ -2476,13 +2487,13 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     }
                     if let Some(shadows) = text_shadow {
                         for sh in shadows.iter().rev() {
-                            stamp_text_shadow(out, fonts, text, *font_size, *bold, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), sh, false, (*x + sh.dx - dx) as f64, (*y + sh.dy - dy) as f64);
+                            stamp_text_shadow(out, fonts, text, *font_size, *bold, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), sh, false, (*x + sh.dx - dx) as f64, (*y + sh.dy - dy) as f64, *last_line_align);
                             if sh.blur <= 0.0 {
-                                paint_text_decorations(out, fonts, text, *font_size, *bold, [sh.color.0, sh.color.1, sh.color.2, sh.color.3], *line_height, *x + sh.dx, *y + sh.dy, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), dx, dy);
+                                paint_text_decorations(out, fonts, text, *font_size, *bold, [sh.color.0, sh.color.1, sh.color.2, sh.color.3], *line_height, *x + sh.dx, *y + sh.dy, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), dx, dy, *last_line_align);
                             }
                         }
                     }
-                    let r = fonts.rasterize_wrapped_with(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, *ws, tokens.clone(), *small_caps, *han);
+                    let r = fonts.rasterize_wrapped_with(text, *font_size, *bold, fill, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, *ws, tokens.clone(), *small_caps, *han, *last_line_align);
                     let mut owned;
                     let r = if let Some(g) = gradient {
                         owned = (*r).clone();
@@ -2493,7 +2504,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     };
                     // Tile row 0 sits `top` px above the leaf's line-box top.
                     out.blit_text(r, (x - dx).round() as i64, (y - dy + r.top).round() as i64);
-                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), dx, dy);
+                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), dx, dy, *last_line_align);
                 }
             }
         }
@@ -2544,6 +2555,7 @@ fn stamp_text_shadow(
     affine: bool,
     ox: f64,
     oy: f64,
+    last_line_align: Option<crate::diting_css::TextAlign>,
 ) {
     let r = fonts.rasterize_wrapped_with(
         text,
@@ -2559,6 +2571,7 @@ fn stamp_text_shadow(
         tokens.map(std::rc::Rc::from),
         small_caps,
         han,
+        last_line_align,
     );
     if sh.blur <= 0.0 {
         if affine {

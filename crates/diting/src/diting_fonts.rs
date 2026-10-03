@@ -341,6 +341,7 @@ mod tests {
             crate::diting_css::WhiteSpace::Normal,
             false,
             None,
+            None,
         );
         assert!(wrapped.ink_bbox().is_some(), "wrapped mixed run must have ink");
     }

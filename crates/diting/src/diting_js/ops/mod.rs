@@ -3083,6 +3083,7 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "font-size",
     "font-weight",
     "text-align",
+    "text-align-last",
     "direction",
     "line-height",
     "word-spacing",
@@ -3402,6 +3403,21 @@ fn computed_style_value(
                 Some(TextAlign::Start) | None => "start",
                 Some(TextAlign::End) => "end",
                 Some(TextAlign::Left) => "left",
+                // #214: parsed/reported verbatim; the stretch itself is not
+                // painted (consumed as start by layout).
+                Some(TextAlign::Justify) => "justify",
+            }
+            .into(),
+        ),
+        "text-align-last" => Some(
+            match s.text_align_last {
+                Some(crate::diting_css::TextAlignLast::Start) => "start",
+                Some(crate::diting_css::TextAlignLast::End) => "end",
+                Some(crate::diting_css::TextAlignLast::Left) => "left",
+                Some(crate::diting_css::TextAlignLast::Right) => "right",
+                Some(crate::diting_css::TextAlignLast::Center) => "center",
+                Some(crate::diting_css::TextAlignLast::Justify) => "justify",
+                Some(crate::diting_css::TextAlignLast::Auto) | None => "auto",
             }
             .into(),
         ),
