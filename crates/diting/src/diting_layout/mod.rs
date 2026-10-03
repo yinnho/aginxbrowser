@@ -466,7 +466,27 @@ fn to_taffy_style(style: &ComputedStyle, pct_h_resolves: bool) -> Style {
     // resolves at layout time, same posture as the slots above.
     if let Some(fb) = style.flex_basis {
         s.flex_basis = match fb {
-            crate::diting_css::Length::Px(px) => Dimension::length(px),
+            // The content-box carry-over the size slots apply, on the main
+            // axis: taffy sizes border-box, so an authored content-box
+            // flex-basis must measure to the border edge — padding/border px
+            // ride on top of the basis (Chrome: flex-basis 50px + padding
+            // 20px in a column is 90px tall; without the carry it stayed 50,
+            // #216). % parts can't ride (same "no Dimension shape" limit as
+            // the size slots), and under authored border-box the basis
+            // already measures border-edge.
+            crate::diting_css::Length::Px(px) => {
+                // Main-axis side pair follows flex_direction (set above):
+                // column pairs top/bottom, row pairs left/right.
+                let (a, b, ba, bb2) = if matches!(
+                    s.flex_direction,
+                    FlexDirection::Column | FlexDirection::ColumnReverse
+                ) {
+                    (side_px(style.padding.top), side_px(style.padding.bottom), bt, bb)
+                } else {
+                    (side_px(style.padding.left), side_px(style.padding.right), bl, br)
+                };
+                Dimension::length(if border_box { px } else { px + a + b + ba + bb2 })
+            }
             crate::diting_css::Length::Percent(p) => Dimension::percent(p / 100.0),
             crate::diting_css::Length::Calc { percent, .. } => Dimension::percent(percent / 100.0),
             // Gap's grammar never stores auto/sizing keywords here; auto is

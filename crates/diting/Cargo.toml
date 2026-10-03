@@ -65,7 +65,7 @@ screenshot = [
 # taffy_tree is additionally listed because the unified graph already enables
 # it (Cargo.lock shows taffy pulling slotmap) — an explicit no-op.
 # Used by diting_layout box layout and the fork-delta tests (docs/engine/render.md).
-taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "c17b313cd1be5a4def91522cf3ea5995e664ebf7", optional = true, default-features = false, features = [
+taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "22f941e19e05d1b29621703b4f3a9d96d7839886", optional = true, default-features = false, features = [
     "std",
     "taffy_tree",
     "flexbox",

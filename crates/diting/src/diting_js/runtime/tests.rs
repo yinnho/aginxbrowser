@@ -13008,6 +13008,32 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn taffy_main_rev_flex_percent_padding_and_intrinsic_column() {
+        // #216: taffy c17b313 → 22f941e absorbs the upstream flexbox fixes
+        // (percentage padding resolved against the container, taffy #1209;
+        // cross-clamped intrinsic measurement, taffy #1208), plus our own
+        // flex-basis content-box carry-over (the size slots pre-bake padding
+        // into border-box taffy sizes; the basis slot didn't, so
+        // `flex-basis:50px;padding:20px` sized to 50 instead of Chrome's 90).
+        // Chrome oracle: padding:10% in a 400px row is a 40px ring = an
+        // 80x80 empty box; basis 50 + padding 20 is 90 tall; a width:100%
+        // child clamps at max-width.
+        let mut rt = setup_runtime(
+            r#"<html><body><div id="row" style="display:flex;width:400px"><div id="pad" style="padding:10%"></div></div><div id="col" style="display:flex;flex-direction:column;width:400px"><div id="it" style="flex-basis:50px;padding:20px"></div></div><div id="clamp" style="display:flex;flex-direction:column;width:300px"><div id="w" style="width:100%;max-width:200px"></div></div></body></html>"#,
+        );
+        let script = r#"async () => {
+            const g = id => { const r = document.getElementById(id).getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height)]; };
+            return [g('pad'), Math.round(g('it')[1]), g('w')];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!([[80, 80], 90, [200, 0]]),
+            "flex % padding resolves against the container; basis carries padding; max-width clamps"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     #[cfg(feature = "screenshot")]
     async fn test_root_scroll_mirrors_to_native_band_paint_state() {
         // AginxOS P0: the CDP band painter reads the root scroll offset from
