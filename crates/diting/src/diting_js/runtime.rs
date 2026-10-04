@@ -121,6 +121,12 @@ pub struct JsRuntime {
     /// op-delivery tick and drops the batch. `run_event_loop` consults THIS
     /// flag at every poll boundary and cancels the stale termination.
     stale_termination: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// #39: set by the `run_event_loop` poll heal whenever it clears a
+    /// termination. A terminate_execution unwinds the JS stack without
+    /// running finally blocks, so any trampoline bracket open at the fire
+    /// leaks — the next loop entry (nothing JS executing then) resets it
+    /// via the bootstrap recovery hook.
+    termination_unwound: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Per-module evaluation outcome cache (upstream 4f6d256): browsers
     /// evaluate a module script exactly once per document. deno_core 0.350
     /// asserts on a second mod_evaluate of the same ModuleId instead of
@@ -254,6 +260,9 @@ impl JsRuntime {
             watchdog_fired_total: std::cell::Cell::new(0),
             v8_active_ns: std::cell::Cell::new(0),
             stale_termination: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
+            termination_unwound: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                 false,
             )),
             module_evaluations: HashMap::new(),
@@ -1316,6 +1325,32 @@ impl JsRuntime {
 
     pub async fn run_event_loop(&mut self) -> Result<(), String> {
         self.recover_heap_limit();
+        // #39: a termination that unwound a synchronous window (payload or
+        // dispatch bracket) skipped its finally — the trampoline's depth
+        // stays leaked and its drain chain defers into infinity while
+        // looking alive. At loop entry nothing JS is executing, so an
+        // unwind notification (set by the poll heal below) or a stale flag
+        // still pending from a fire-while-parked means every bracket is
+        // leaked. Clear the flag and reset the depth before this loop's
+        // pumps wake the chain.
+        let unwound = self
+            .termination_unwound
+            .swap(false, std::sync::atomic::Ordering::SeqCst);
+        let stale_entry = self
+            .stale_termination
+            .swap(false, std::sync::atomic::Ordering::SeqCst);
+        if stale_entry {
+            self.runtime.v8_isolate().cancel_terminate_execution();
+        }
+        if unwound || stale_entry {
+            let _ = self.runtime.execute_script(
+                "<mt-recover>",
+                "if (globalThis.__diting_mt_recover_termination) \
+                 globalThis.__diting_mt_recover_termination()"
+                    .to_string(),
+            );
+            tracing::warn!("#39: reset macrotask depth after V8 termination");
+        }
         // #50: the watchdog armed around an await window can fire while the
         // session task is parked with no JS on the stack (in the captured
         // repro the task was starved 14.65s past the wall-clock deadline).
@@ -1333,6 +1368,7 @@ impl JsRuntime {
         // top of that poll). Clear both.
         let isolate = self.isolate_handle.clone();
         let stale = self.stale_termination.clone();
+        let unwound_flag = self.termination_unwound.clone();
         let active_ns = &self.v8_active_ns;
         let mut inner = std::pin::pin!(self
             .runtime
@@ -1340,6 +1376,7 @@ impl JsRuntime {
         let result = std::future::poll_fn(|cx| {
             if stale.swap(false, std::sync::atomic::Ordering::SeqCst) {
                 isolate.cancel_terminate_execution();
+                unwound_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 tracing::warn!("#50: cleared stale V8 termination before event-loop poll");
             }
             // #66: time the poll itself. Ready tasks (timers, promise

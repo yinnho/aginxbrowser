@@ -90,7 +90,7 @@ globalThis.dispatchEvent = function(event) {
   event.currentTarget = globalThis;
   event.eventPhase = 2;
   const handlers = globalThis.__windowListeners[event.type] || [];
-  for (const h of handlers) { try { _invokeListener(h, globalThis, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); } }
+  _mtWindow(() => { for (const h of handlers) { try { _invokeListener(h, globalThis, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); } } });
   return !event.defaultPrevented;
 };
 
@@ -291,7 +291,7 @@ function __lboxProto(C) {
     dispatchEvent(event) {
       const b = this._lbox.get(event && event.type);
       if (!b) return true;
-      for (const fn of b.slice()) { try { _invokeListener(fn, this, event); } catch (e) {} }
+      _mtWindow(() => { for (const fn of b.slice()) { try { _invokeListener(fn, this, event); } catch (e) { globalThis.__diting_reportUncaughtError(e); } } });
       return true;
     },
   });
@@ -706,6 +706,128 @@ const _scheduleAfter = (delay, level, fn) => {
   _OPS.op_sleep(d).then(fn);
 };
 
+// A timer/message delivery must land at a TASK BOUNDARY, never at a
+// microtask checkpoint inside another task's synchronous window. The
+// op_sleep continuation a MessageChannel post resolves to is a microtask:
+// it fires at the next checkpoint, which on heavy pages is routinely
+// INSIDE a synchronous event dispatch — React 16's scheduler then runs
+// performSyncWorkOnRoot while CommitContext is set and throws #327
+// ("This root is already working"), after which the root stops committing
+// anything: every setState queues forever and the page looks frozen
+// (taobao publish form, 2026-10-04). Browsers get this discipline free
+// from the task queue; here the delivery itself re-arms until the
+// dispatch/timer window it landed in has closed.
+//
+// #30, 2026-10-04: the first cut re-armed as `_OPS.op_sleep(0).then(attempt)`
+// per checkpoint. A synchronous handler that itself makes many op calls
+// triggers a checkpoint PER OP, each spawning another armed chain — fan-out,
+// not deferral: fxg.jinritemai.com burned a full core re-arming ~320×/s
+// (Promise.then counter: 2560 calls in 8s, all named `attempt`), starving
+// the very event loop the trampoline was supposed to protect. The fix:
+// exactly ONE armed chain (the `_mtArmed` gate), a FIFO the chain drains
+// one item per turn, and a backoff past 8 consecutive defers so an
+// op-heavy window cannot turn waiting into spinning. `_mtDepth` now also
+// brackets the page's own synchronous dispatch loops (`_mtWindow`), so a
+// delivery that would land mid-dispatchEvent defers instead — which is the
+// #327 case the timer-only guard missed.
+// #37, 2026-10-04: the drain is an async loop that yields to a microtask
+// checkpoint between items (a browser drains microtasks after EVERY task) and
+// to one true op turn every 64 items so the Rust side can deliver the op
+// completions (fetch bodies, timer wheels) that feed the queue.
+// #39, 2026-10-05: the #37 escape hatch was PUSH-COUNTED (retire after 1000
+// stale pushes) — it needs the page to keep pushing. fxg's telemetry is a
+// self-chained setTimeout: once the chain dies its callbacks stop running,
+// so nothing ever schedules the next push. Observed live on a wedged create
+// page: {qlen:160819, stale:0, armed:true} — 160k payloads rotting with the
+// staleness counter frozen at zero, no re-arm ever. Healing now rests on a
+// timestamp instead: the drain stamps every loop iteration, a push retires
+// a chain that has made no progress for 250ms, and every arm launches an
+// independent patrol sleep that heals an armed-but-silent chain even on a
+// page with zero pushes. A patrol from generation N dies on any later arm,
+// so retries cannot accumulate.
+let _mtDepth = 0;
+let _mtArmed = false;
+const _mtQueue = [];
+let _mtDefers = 0;
+let _mtBeats = 0;      // every drain-loop iteration
+let _mtItems = 0;      // every payload executed (shift()())
+let _mtRearms = 0;     // every arm of a fresh chain
+let _mtGen = 0;        // bumped to retire a chain that stopped progressing
+let _mtStale = 0;      // pushes since an item last ran (diagnostics only)
+let _mtLastBeat = 0;   // last drain-loop iteration (chain liveness timestamp)
+const _mtDrain = async () => {
+  const gen = _mtGen;
+  let tick = 0;
+  for (;;) {
+    if (gen !== _mtGen) return;   // retired: a fresher chain owns the queue
+    _mtLastBeat = Date.now();
+    if (_mtDepth > 0) {
+      _mtDefers++;
+      await _OPS.op_sleep(_mtDefers > 8 ? 4 : 0);
+      continue;
+    }
+    _mtDefers = 0;
+    if (!_mtQueue.length) { _mtArmed = false; return; }
+    _mtDepth++;
+    _mtItems++;
+    _mtStale = 0;
+    try { _mtQueue.shift()(); }
+    catch (e) { globalThis.__diting_reportUncaughtError(e); }
+    finally { _mtDepth--; }
+    _mtBeats++;
+    await Promise.resolve();
+    if ((++tick & 63) === 0) await _OPS.op_sleep(0);
+  }
+};
+const _mtArm = () => {
+  _mtStale = 0;
+  _mtArmed = true;
+  _mtRearms++;
+  _mtGen++;
+  _mtLastBeat = Date.now();
+  const gen = _mtGen;
+  // The arm's op_sleep continuation can vanish (interrupt unwinds pending
+  // ops without settling them); swallow a rejection the same way — the
+  // patrol below is what recovers, never this .then itself.
+  _OPS.op_sleep(0).then(_mtDrain, () => {});
+  _OPS.op_sleep(1500).then(() => {
+    if (_mtArmed && gen === _mtGen && Date.now() - _mtLastBeat > 1200) {
+      _mtArm();
+    }
+  }, () => {});
+};
+const _runAsMacrotask = (fn) => {
+  _mtQueue.push(fn);
+  _mtStale++;
+  // `armed` alone can lie about liveness: a chain whose op continuations
+  // vanished stays armed forever. The timestamp is the truth — a healthy
+  // chain iterates (draining or deferring) every few ms, so one push more
+  // than 250ms after the last iteration is a dead chain. Retire and re-arm.
+  if (_mtArmed && Date.now() - _mtLastBeat < 250) return;
+  _mtArm();
+};
+// Bracket a synchronous dispatch window (listener loops): deliveries
+// armed while the window is open defer until after it closes.
+const _mtWindow = (body) => {
+  _mtDepth++;
+  try { return body(); } finally { _mtDepth--; }
+};
+// #39: terminate_execution unwinds the JS stack WITHOUT running finally
+// blocks, so a bracket open at the fire (a payload or a dispatch window)
+// leaks _mtDepth>0 forever and every later drain defers into infinity
+// while looking alive (observed: defers climbing, qlen rotting). The
+// engine calls this from its termination recovery points, where nothing
+// JS is executing and any positive depth is necessarily leaked.
+globalThis.__diting_mt_recover_termination = () => { _mtDepth = 0; };
+// Debug probe for the trampoline's live state (#30 follow-up: macrotask
+// deliveries dying while op+microtask paths stay alive — 2026-10-04 fxg).
+// Read-only snapshot; keep names short, it rides on globalThis.
+globalThis.__MT_STATE = () => ({
+  depth: _mtDepth, armed: _mtArmed, qlen: _mtQueue.length, defers: _mtDefers,
+  beats: _mtBeats, items: _mtItems, rearms: _mtRearms,
+  gen: _mtGen, stale: _mtStale, lag: Date.now() - _mtLastBeat,
+});
+
 // Per HTML, a string timer handler is compiled and run as a classic script in
 // global scope *at fire time*. Indirect eval ((0, eval)) runs in the true
 // global scope, so top-level var/function declarations become globals (a
@@ -727,11 +849,16 @@ globalThis.setTimeout = (fn, delay = 0, ...args) => {
   const id = ++_tid;
   const level = _timerNesting + 1;
   _scheduleAfter(delay, level, () => {
-    if (_clearedTimers.has(id)) return;
-    const prev = _timerNesting;
-    _timerNesting = level;
-    try { handler(...args); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
-    finally { _timerNesting = prev; }
+    // The cleared check must live INSIDE the delivered payload: the
+    // trampoline runs it one event-loop turn after this callback, and a
+    // clearTimeout that lands in that window must still win.
+    _runAsMacrotask(() => {
+      if (_clearedTimers.has(id)) return;
+      const prev = _timerNesting;
+      _timerNesting = level;
+      try { handler(...args); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
+      finally { _timerNesting = prev; }
+    });
   });
   return id;
 };
@@ -748,10 +875,16 @@ globalThis.setInterval = (fn, delay = 0, ...args) => {
   const tick = () => {
     if (!_intervals.has(id)) return;
     fires++;
-    const prev = _timerNesting;
-    _timerNesting = fires;
-    try { handler(...args); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
-    finally { _timerNesting = prev; }
+    _runAsMacrotask(() => {
+      // Same one-turn window as setTimeout: clearInterval called after
+      // this payload queued but before it ran must still suppress the
+      // tick (the string-handler interval test catches exactly this).
+      if (!_intervals.has(id)) return;
+      const prev = _timerNesting;
+      _timerNesting = fires;
+      try { handler(...args); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
+      finally { _timerNesting = prev; }
+    });
     if (!_intervals.has(id)) return;
     // An interval's self-chain keeps counting as nested, so its cadence
     // floors at the nesting limit after the first few fires — matching how
@@ -807,15 +940,29 @@ class MessagePort {
   }
   _dispatch(data) {
     const self = this;
+    this._pendCount = (this._pendCount || 0) + 1;
+    if (this._pendCount === 1) this._pendSince = Date.now();
     this._deliver(() => {
-      if (self._closed) return;
-      const evt = { type: 'message', data, target: self, currentTarget: self };
-      const h = self._onmessage;
-      if (typeof h === 'function') {
-        try { h.call(self, evt); } catch (e) { console.error('MessagePort onmessage error:', e && e.message); }
+      this._pendCount--;
+      if (this._closed) return;
+      if (this._inflight) {
+        console.error('[PORT-REENTRY] new delivery while one in flight (' +
+          (Date.now() - this._inflightT) + 'ms); fn=' + String(this._onmessage).slice(0, 100));
       }
-      for (const fn of self._listeners.slice()) {
-        try { _invokeListener(fn, self, evt); } catch (e) {}
+      this._inflight = true; this._inflightT = Date.now();
+      try {
+        const evt = { type: 'message', data, target: self, currentTarget: self };
+        const h = self._onmessage;
+        if (typeof h === 'function') {
+          try { h.call(self, evt); } catch (e) { console.error('MessagePort onmessage error:', e && e.message, e && e.stack ? '\n' + e.stack : ''); }
+        }
+        for (const fn of self._listeners.slice()) {
+          try { _invokeListener(fn, self, evt); } catch (e) { globalThis.__diting_reportUncaughtError(e); }
+        }
+      } finally {
+        const dur = Date.now() - this._inflightT;
+        this._inflight = false;
+        if (dur > 2000) console.error('[PORT-SLOW] handler ran ' + dur + 'ms; fn=' + String(this._onmessage).slice(0, 100));
       }
     });
   }
@@ -852,8 +999,10 @@ class MessageChannel {
     // chains and deterministically wedges transitions (observed as "server
     // actions dispatch from some realms and never from others").
     // Level 0: message delivery is a task, not a timer — it never joins a
-    // setTimeout chain, so the 4ms nesting floor must not apply to it.
-    const [p1, p2] = _newPortPair((fn) => _scheduleAfter(0, 0, fn));
+    // setTimeout chain, so the 4ms nesting floor must not apply to it —
+    // and per _runAsMacrotask it also refuses to fire inside another
+    // task's synchronous window (the #327 guard above).
+    const [p1, p2] = _newPortPair((fn) => _runAsMacrotask(fn));
     this.port1 = p1;
     this.port2 = p2;
   }
@@ -862,6 +1011,37 @@ globalThis.MessageChannel = MessageChannel;
 globalThis.MessagePort = MessagePort;
 _markNative(MessagePort);
 _markNative(MessageChannel);
+
+// Delivery-loss detector: a port whose armed delivery never runs (e.g. an
+// op_sleep(0) chain that died) wedges React's scheduler permanently —
+// isMessageLoopScheduled stays true and no callback ever fires again.
+// Armed lazily on the first runtime port pair: bootstrap top level runs
+// during snapshot creation, where no ops exist yet.
+const _portReg = new Set();
+let _sweepArmed = false;
+function _armPortSweep() {
+  if (_sweepArmed) return;
+  _sweepArmed = true;
+  setInterval(() => {
+    for (const p of _portReg) {
+      if (p._pendCount > 0 && Date.now() - p._pendSince > 5000) {
+        console.error('[PORT-LOST] ' + p._pendCount + ' undelivered message(s) for ' +
+          (Date.now() - p._pendSince) + 'ms; fn=' + String(p._onmessage).slice(0, 120));
+        p._pendSince = Date.now();
+      }
+      if (p._closed || ((p._pendCount || 0) === 0 && !p._onmessage && p._listeners.length === 0)) _portReg.delete(p);
+    }
+  }, 5000);
+}
+{
+  const origPair = _newPortPair;
+  _newPortPair = function (deliver) {
+    const pair = origPair(deliver);
+    _portReg.add(pair[0]); _portReg.add(pair[1]);
+    _armPortSweep();
+    return pair;
+  };
+}
 
 // Custom property names are case-sensitive and carry no camelCase IDL form
 // (--mainColor must round-trip verbatim through style.setProperty/getPropertyValue).
@@ -3724,6 +3904,7 @@ class Element extends Node {
         if (ret === false) event.preventDefault();
       } catch(e) { globalThis.__diting_reportUncaughtError(e); }
     }
+    _mtWindow(() => {
     // At-target listeners fire in both buckets (spec runs the target phase
     // for capture- and bubble-registered listeners alike).
     if (isOrigin) {
@@ -3738,6 +3919,7 @@ class Element extends Node {
       try { _invokeListener(h, this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
       if (event._immediatePropagationStopped) break;
     }
+    });
     if (event.bubbles && !event._propagationStopped && this.parentNode) {
       this.parentNode.dispatchEvent(event);
     }
@@ -6080,15 +6262,15 @@ class Document extends Node {
       if (this._nid !== undefined) {
         const caps = (_eventRegistryCap[this._nid] || {})[event.type] || [];
         event.currentTarget = this;
-        for (const h of caps.slice()) {
+        _mtWindow(() => { for (const h of caps.slice()) {
           try { _invokeListener(h, this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
-        }
+        } });
       }
     }
     const L = __evtStore.get(this);
     const handlers = ((L && L[event.type]) || []).slice();
     if (handlers.length) event.currentTarget = this;
-    for (const h of handlers) { try { _invokeListener(h, this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); } }
+    _mtWindow(() => { for (const h of handlers) { try { _invokeListener(h, this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); } } });
     return !event.defaultPrevented;
   }
   createTreeWalker(root, whatToShow, filter) {
@@ -6454,7 +6636,25 @@ class Document extends Node {
     return;
   }
   hasFocus() { return true; }
-  execCommand() { return false; }
+  execCommand(cmd, _showUI, value) {
+    cmd = String(cmd || '').toLowerCase();
+    if (cmd !== 'inserttext' || value == null) return false;
+    const el = this.activeElement;
+    if (!el || !_ns_isTextEntry(el) || el.disabled || el.readOnly) return false;
+    const text = String(value);
+    // Chrome's beforeinput is cancelable; a page veto aborts the insert but
+    // the command itself still ran (execCommand answers true).
+    const bi = new InputEvent('beforeinput', { inputType: 'insertText', data: text, bubbles: true, cancelable: true });
+    if (!el.dispatchEvent(bi)) return true;
+    const cur = String(el.value ?? '');
+    const s = _ns_selectionStart.get(el) ?? cur.length;
+    const e = _ns_selectionEnd.get(el) ?? cur.length;
+    el.value = cur.slice(0, s) + text + cur.slice(e);
+    const caret = s + text.length;
+    el.setSelectionRange(caret, caret);
+    el.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: text, bubbles: true }));
+    return true;
+  }
 }
 
 class DocumentFragment extends Node {
@@ -7182,9 +7382,9 @@ class NetworkInformation {
   dispatchEvent(event) {
     if (!event || !event.type) return true;
     const L = __evtStore.get(this);
-    for (const listener of (L && L[event.type]) || []) {
+    _mtWindow(() => { for (const listener of (L && L[event.type]) || []) {
       try { _invokeListener(listener, this, event); } catch (error) { console.error(error); }
-    }
+    } });
     const handler = this["on" + event.type];
     if (typeof handler === "function") {
       try { handler.call(this, event); } catch (error) { console.error(error); }
@@ -8440,7 +8640,7 @@ class XMLHttpRequestEventTarget {
     const type = ev.type;
     const L = __evtStore.get(this);
     const handlers = (L && L[type]) || [];
-    for (const h of handlers) { try { _invokeListener(h, this, ev); } catch (e) {} }
+    _mtWindow(() => { for (const h of handlers) { try { _invokeListener(h, this, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } } });
     const prop = 'on' + type;
     if (typeof this[prop] === 'function') {
       try { this[prop](ev); } catch (e) {}
@@ -8886,7 +9086,7 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     const type = ev.type;
     const L = __evtStore.get(this);
     const handlers = (L && L[type]) || [];
-    for (const h of handlers) { try { _invokeListener(h, this, ev); } catch (e) {} }
+    _mtWindow(() => { for (const h of handlers) { try { _invokeListener(h, this, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } } });
     const prop = 'on' + type;
     if (typeof this[prop] === 'function') {
       try { this[prop](ev); } catch (e) {}
@@ -8906,7 +9106,7 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     const event = { type, target: this, currentTarget: this, bubbles: false };
     const L = __evtStore.get(this);
     const handlers = (L && L[type]) || [];
-    for (const h of handlers) { try { _invokeListener(h, this, event); } catch(e) {} }
+    _mtWindow(() => { for (const h of handlers) { try { _invokeListener(h, this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); } } });
     const prop = 'on' + type;
     if (type !== 'readystatechange' && typeof this[prop] === 'function') {
       try { this[prop](event); } catch(e) {}
@@ -9232,7 +9432,7 @@ globalThis.ResizeObserver = class ResizeObserver {
         devicePixelContentBoxSize: [{ blockSize: r.height || 20, inlineSize: r.width || 100 }],
       };
     });
-    try { this._callback(records, this); } catch (e) { /* RO callbacks must not propagate */ }
+    try { this._callback(records, this); } catch (e) { globalThis.__diting_reportUncaughtError(e); }
   }
   observe(el) {
     if (!el || !this._connected) return;
@@ -9579,7 +9779,7 @@ _MediaQueryList.prototype.removeEventListener = function (type, fn) {
 _MediaQueryList.prototype.dispatchEvent = function (ev) {
   const handlers = this._change.slice();
   if (typeof this.onchange === 'function') handlers.push(this.onchange);
-  for (const h of handlers) { try { _invokeListener(h, this, ev); } catch (e) {} }
+  for (const h of handlers) { try { _invokeListener(h, this, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } }
   return true;
 };
 if (typeof MediaQueryList === 'undefined') globalThis.MediaQueryList = _MediaQueryList;
@@ -10127,7 +10327,7 @@ globalThis.MutationObserver = class MutationObserver {
     Promise.resolve().then(() => {
       if (this._records.length > 0) {
         const batch = this._records.splice(0);
-        try { this._callback(batch, this); } catch(e) { /* observer errors shouldn't propagate */ }
+        try { this._callback(batch, this); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
       }
     });
   }
@@ -10413,7 +10613,7 @@ globalThis.IntersectionObserver = class IntersectionObserver {
       rootBounds: { x: 0, y: 0, width: 1280, height: 720, top: 0, left: 0, right: 1280, bottom: 720 },
       time: Date.now(),
     }));
-    try { this._callback(records, this); } catch (e) { /* IO callbacks must not propagate */ }
+    try { this._callback(records, this); } catch (e) { globalThis.__diting_reportUncaughtError(e); }
   }
   observe(el) {
     if (!el || !this._connected) return;
@@ -13889,7 +14089,7 @@ class _IframeWindow {
   dispatchEvent(event) {
     const L = __evtStore.get(this);
     const handlers = (L && L[event?.type]) || [];
-    for (const h of handlers) { try { _invokeListener(h, this, event); } catch(e) {} }
+    for (const h of handlers) { try { _invokeListener(h, this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); } }
     return true;
   }
 
@@ -14783,7 +14983,7 @@ class _MseEventTarget {
     ev.currentTarget = ev.currentTarget || this;
     const L = __evtStore.get(this);
     const handlers = (L && L[ev.type]) || [];
-    for (const h of handlers) { try { _invokeListener(h, this, ev); } catch (e) {} }
+    for (const h of handlers) { try { _invokeListener(h, this, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } }
     const prop = 'on' + ev.type;
     if (typeof this[prop] === 'function') {
       try { this[prop](ev); } catch (e) {}
@@ -15214,7 +15414,7 @@ globalThis.BaseAudioContext = class BaseAudioContext {
   // on OfflineAudioContext).
   addEventListener(t, f) { __listenerGate(f); const l = this._ls || (this._ls = {}); (l[t] || (l[t] = [])).push(f); }
   removeEventListener(t, f) { const l = this._ls && this._ls[t]; if (l) { const i = l.indexOf(f); if (i >= 0) l.splice(i, 1); } }
-  dispatchEvent(ev) { const l = (this._ls && this._ls[ev.type]) || []; for (const f of l.slice()) { try { _invokeListener(f, this, ev); } catch (e) {} } return true; }
+  dispatchEvent(ev) { const l = (this._ls && this._ls[ev.type]) || []; for (const f of l.slice()) { try { _invokeListener(f, this, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } } return true; }
   createOscillator() { return _audioNode(this, {type:'sine',frequency:_audioParam(440),detune:_audioParam(0),start(){},stop(){},onended:null}); }
   createDynamicsCompressor() { return _audioNode(this, {threshold:_audioParam(_fp('compThreshold'),-100,0),knee:_audioParam(_fp('compKnee'),0,40),ratio:_audioParam(_fp('compRatio'),1,20),attack:_audioParam(0.003,0,1),release:_audioParam(0.25,0,1),reduction:0}); }
   createAnalyser() {
@@ -16570,7 +16770,7 @@ function fireWorkerError(worker, err, listeners) {
   const evt = { message, filename: '', lineno: 0, colno: 0, error: err };
   const handlers = ((listeners && listeners['error']) || []).slice();
   if (worker.onerror) handlers.unshift(worker.onerror);
-  for (const h of handlers) { try { _invokeListener(h, worker, evt); } catch {} }
+  for (const h of handlers) { try { _invokeListener(h, worker, evt); } catch (e) { globalThis.__diting_reportUncaughtError(e); } }
 }
 
 globalThis.__blobStore = globalThis.__blobStore || {};
@@ -17649,8 +17849,8 @@ if (typeof FileReader === 'undefined') {
     }
     _fire(type) {
       const ev = { type: type, target: this, currentTarget: this, lengthComputable: false, loaded: 0, total: 0 };
-      const h = this["on" + type]; if (typeof h === "function") { try { h.call(this, ev); } catch (e) {} }
-      const ls = __evtStore.get(this)?.[type]; if (ls) for (const fn of ls.slice()) { try { _invokeListener(fn, this, ev); } catch (e) {} }
+      const h = this["on" + type]; if (typeof h === "function") { try { h.call(this, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } }
+      const ls = __evtStore.get(this)?.[type]; if (ls) for (const fn of ls.slice()) { try { _invokeListener(fn, this, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } }
     }
     addEventListener(t, fn) { __listenerGate(fn); const L = __lmap(this); (L[t] = L[t] || []).push(fn); }
     removeEventListener(t, fn) { const ls = __evtStore.get(this)?.[t]; if (ls) { const i = ls.indexOf(fn); if (i >= 0) ls.splice(i, 1); } }
@@ -19533,6 +19733,32 @@ Document.prototype.dispatchEvent = function(event) {
   return _documentDispatch.call(this, event);
 };
 _markNative(Document.prototype.dispatchEvent);
+// Macrotask-boundary guard: mark every synchronous dispatch window so
+// timer/message deliveries re-arm instead of firing mid-dispatch (see
+// _runAsMacrotask). Real browsers never interleave the task queue with
+// an in-flight event dispatch; without this, a resolved op_sleep
+// continuation fires at an op checkpoint inside a listener — React 16's
+// scheduler re-entered its own commit this way and threw #327, freezing
+// every later update on the root.
+(function () {
+  for (const holder of [Node.prototype, Element.prototype, Document.prototype]) {
+    const orig = holder.dispatchEvent;
+    if (typeof orig !== 'function') continue;
+    holder.dispatchEvent = function (event) {
+      _mtDepth++;
+      try { return orig.call(this, event); } finally { _mtDepth--; }
+    };
+    _markNative(holder.dispatchEvent);
+  }
+  const origWin = globalThis.dispatchEvent;
+  if (typeof origWin === 'function') {
+    globalThis.dispatchEvent = function (event) {
+      _mtDepth++;
+      try { return origWin.call(this, event); } finally { _mtDepth--; }
+    };
+    _markNative(globalThis.dispatchEvent);
+  }
+})();
 const _windowDispatch = globalThis.dispatchEvent;
 globalThis.dispatchEvent = function(event) {
   if (event && event.type !== 'error') {

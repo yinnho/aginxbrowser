@@ -18264,3 +18264,265 @@ fn document_evaluate_xpath_subset() {
             fired
         );
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_exec_command_insert_text_event_shape() {
+        // document.execCommand('insertText') is the Chrome-parity typing
+        // channel that scripted forms accept: beforeinput (cancelable, with
+        // data) → caret-shaped insert → input (InputEvent carrying
+        // inputType/data). A plain Event('input') has no payload, and
+        // controlled widget layers (taobao publish form's Fusion Next)
+        // reject the value without it.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"() => {
+            const inp = document.createElement('input');
+            document.body.appendChild(inp);
+            inp.value = 'ab';
+            inp.focus();
+            const log = [];
+            inp.addEventListener('beforeinput', (e) => {
+                log.push(['bi', e.inputType, e.data, e.cancelable]);
+            });
+            inp.addEventListener('input', (e) => {
+                log.push(['in', e.inputType, e.data, e.cancelable]);
+            });
+            const ok = document.execCommand('insertText', false, 'XY');
+            const afterEnd = { v: inp.value, s: inp.selectionStart, e: inp.selectionEnd };
+            inp.setSelectionRange(1, 3);
+            const ok2 = document.execCommand('insertText', false, 'W');
+            const afterRange = { v: inp.value, s: inp.selectionStart, e: inp.selectionEnd };
+            inp.addEventListener('beforeinput', (e) => e.preventDefault(), { once: true });
+            const ok3 = document.execCommand('insertText', false, 'V');
+            const afterVeto = inp.value;
+            const ok4 = document.execCommand('bold');
+            inp.blur();
+            const ok5 = document.execCommand('insertText', false, 'Q');
+            return Promise.resolve({ ok, ok2, ok3, ok4, ok5, afterEnd, afterRange, afterVeto, log });
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        assert!(v.is_object(), "script must finish");
+        assert_eq!(v["ok"], true, "end-of-value insert runs");
+        assert_eq!(v["afterEnd"]["v"], "abXY", "appends at caret-at-end");
+        assert_eq!(v["afterEnd"]["s"], 4);
+        assert_eq!(v["afterEnd"]["e"], 4, "caret lands after insertion");
+        assert_eq!(v["ok2"], true, "range insert runs");
+        assert_eq!(v["afterRange"]["v"], "aWY", "selection span is replaced");
+        assert_eq!(v["afterRange"]["s"], 2, "caret after range insert");
+        assert_eq!(v["ok3"], true, "vetoed command still answers true");
+        assert_eq!(v["afterVeto"], "aWY", "preventDefault aborts the insert");
+        assert_eq!(v["ok4"], false, "unsupported command answers false");
+        assert_eq!(v["ok5"], false, "no text-entry focus answers false");
+        let log = v["log"].as_array().unwrap();
+        assert_eq!(log.len(), 5, "bi+in per insert, bi only for veto: {:?}", log);
+        assert_eq!(log[0][0], "bi");
+        assert_eq!(log[0][1], "insertText");
+        assert_eq!(log[0][2], "XY");
+        assert_eq!(log[0][3], true, "beforeinput is cancelable");
+        assert_eq!(log[1][0], "in");
+        assert_eq!(log[1][1], "insertText");
+        assert_eq!(log[1][2], "XY", "input carries the data payload");
+        assert_eq!(log[1][3], false, "input is not cancelable");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_message_delivery_waits_for_dispatch_window() {
+        // MessageChannel delivery must never fire inside a synchronous event
+        // dispatch. The op_sleep continuation a post resolves to is a
+        // microtask that lands at the next op checkpoint — routinely inside
+        // a listener on heavy pages. React 16's scheduler re-entered its own
+        // commit that way and threw #327 ("This root is already working"),
+        // after which the root stopped committing anything (taobao publish
+        // form frozen: every setState queued forever).
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"() => {
+            const log = [];
+            const ch = new MessageChannel();
+            ch.port1.onmessage = () => log.push('msg@' + globalThis.__phase);
+            let phase = 'start';
+            globalThis.__phase = 'start';
+            globalThis.__log = log;
+            document.addEventListener('ping', () => {
+                ch.port2.postMessage('x');      // due immediately, but the dispatch window is open
+                setTimeout(() => {}, 0);        // an op checkpoint inside the listener
+                phase = 'in-dispatch';
+                globalThis.__phase = phase;
+            });
+            document.dispatchEvent(new Event('ping'));
+            globalThis.__phase = 'after-dispatch';
+            return new Promise((resolve) => {
+                setTimeout(() => resolve({ log: globalThis.__log.slice() }), 30);
+            });
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        let log = v["log"].as_array().unwrap();
+        assert_eq!(log.len(), 1, "message delivered exactly once: {:?}", log);
+        assert_eq!(
+            log[0], "msg@after-dispatch",
+            "delivery must wait for the dispatch window to close: {:?}", log
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_throwing_macrotask_payload_does_not_sever_chain() {
+        // #37: a payload that throws synchronously used to reject the whole
+        // drain chain as an unhandled rejection — after it, `armed` stayed
+        // true and every later timer/message delivery rotted in the queue
+        // (fxg wedge: depth 0, armed true, 610+ payloads). The drain now
+        // catches payload errors (routing them to the uncaught-error
+        // channel) and keeps draining.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"() => {
+            const got = [];
+            setTimeout(() => { throw new Error('boom'); }, 0);
+            setTimeout(() => got.push('after-boom'), 0);
+            const ch = new MessageChannel();
+            ch.port1.onmessage = () => got.push('msg');
+            setTimeout(() => ch.port2.postMessage('x'), 0);
+            return new Promise((resolve) => {
+                setTimeout(() => resolve(got.slice()), 50);
+            });
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        let got = v.as_array().unwrap();
+        assert_eq!(
+            got, &["after-boom", "msg"],
+            "deliveries after a throwing payload must survive: {:?}", got
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_macrotask_staleness_escape_keeps_window_discipline() {
+        // #37: when pushes outpace item runs past the staleness threshold,
+        // _runAsMacrotask retires the chain (generation bump) and re-arms
+        // from op_sleep — never inline. During a live dispatch window the
+        // escape must churn chains without losing, duplicating, or
+        // re-entering deliveries: 1500 pushes inside one listener crosses
+        // the 1000-push budget mid-window, so this exercises the retire
+        // path under exactly the conditions that must not break.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"() => {
+            const hits = [];
+            globalThis.__hits = hits;
+            document.addEventListener('ping', () => {
+                for (let i = 0; i < 1500; i++) setTimeout(() => hits.push(i), 0);
+            });
+            document.dispatchEvent(new Event('ping'));
+            return new Promise((resolve) => {
+                setTimeout(() => resolve({
+                    hits: globalThis.__hits.slice(),
+                    state: globalThis.__MT_STATE(),
+                }), 120);
+            });
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        let hits = v["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 1500, "every delivery lands exactly once");
+        // NOTE: NOT asserting FIFO here. Equal-deadline op_sleep completions
+        // come off the tokio timer wheel in non-registration order (observed
+        // 0..127,1499,128..1498), so push order into the macrotask queue is
+        // already a permutation. Chrome fires same-expiry timers in
+        // insertion order — a real parity gap, but a _scheduleAfter/timer-
+        // wheel one, orthogonal to the #37 chain liveness this test pins.
+        let mut sorted: Vec<i64> = hits
+            .iter()
+            .map(|h| h.as_i64().unwrap_or(-1))
+            .collect();
+        sorted.sort();
+        let expected: Vec<i64> = (0..1500).collect();
+        assert_eq!(sorted, expected, "exactly-once, no loss, no dup");
+        // 1500 window pushes + the 1 resolver timer payload: items is a
+        // lifetime counter, so exactly-once shows up as 1501, not 1500.
+        assert_eq!(
+            v["state"]["items"].as_i64(),
+            Some(1501),
+            "items counted once each"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_terminated_payload_severed_chain_self_heals() {
+        // #39: the #37 escape hatch was push-counted (retire after 1000
+        // stale pushes) — it needs the page to keep pushing. A page whose
+        // timers are self-chained setTimeouts stops pushing the moment the
+        // chain dies (its callbacks never run, so nothing schedules the
+        // next one); observed live on a wedged fxg create page as
+        // {qlen:160819, stale:0, armed:true}. This reproduces the kill —
+        // a terminate_execution landing while a payload spins inside the
+        // drain frame unwinds the frame itself (the boot-time heap guard
+        // does exactly this) — then requires a quiet page to recover with
+        // zero further pushes: the only push after the kill is the probe
+        // timer's own delivery.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let wd = rt.arm_watchdog(std::time::Duration::from_millis(400));
+        let script = r#"() => {
+            setTimeout(() => { while (true) {} }, 0);
+            return new Promise((resolve) => {
+                setTimeout(() => resolve('healed'), 100);
+            });
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let fired = rt.disarm_watchdog(wd);
+        assert!(fired, "watchdog must have fired: the spin was terminated");
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!("healed"),
+            "a quiet page must self-heal a severed chain without pushes"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_macrotask_backlog_drains_with_microtask_checkpoints() {
+        // #37: the drain loop yields to a microtask checkpoint between
+        // items, so a payload's promise reactions all settle before the
+        // next payload runs — the browser's task/microtask boundary. The
+        // old per-item op round trip capped throughput at ~677 items/s
+        // while fxg pushed ~2200/s (qlen 610→58887 in 26s); the await-based
+        // checkpoint keeps a deep backlog from becoming a minutes-long
+        // timer blackout.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"() => {
+            const seen = [];
+            let prevSettled = true;
+            globalThis.__seen = seen;
+            for (let i = 0; i < 2000; i++) {
+                setTimeout(() => {
+                    seen.push(prevSettled);
+                    prevSettled = false;
+                    Promise.resolve().then(() => { prevSettled = true; });
+                }, 0);
+            }
+            return new Promise((resolve) => {
+                setTimeout(() => resolve({ seen: globalThis.__seen.slice() }), 400);
+            });
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        let seen = v["seen"].as_array().unwrap();
+        assert_eq!(seen.len(), 2000, "whole backlog drained: {}", seen.len());
+        assert!(
+            seen.iter().all(|x| x.as_bool() == Some(true)),
+            "each payload observes the previous payload's microtask settled"
+        );
+    }
