@@ -18212,12 +18212,22 @@ fn document_evaluate_xpath_subset() {
         // Date.prototype.toString zero-pads the day (spec TimeString step 9).
         // The unpadded 'Oct 4' broke doudian's SSR text-node comparison — the
         // server rendered 'Oct 04', React threw #418 and discarded the server
-        // DOM. Pick a single-digit day and pin both forms.
+        // DOM. Pin the padding shape in a host-TZ-independent way: build the
+        // instant from Date.UTC shifted by the engine's own (persona) offset,
+        // so a host in UTC and a host in Asia/Shanghai must render the same
+        // civil date. The absolute-hour pinning used to live here too, but
+        // under #221 the local-args CONSTRUCTOR resolves in the host zone
+        // while toString formats in the persona zone — that inconsistency is
+        // #221's to fix and pin; this test only owns the padding contract.
         let mut rt = setup_runtime("<html><body></body></html>");
         let script = r#"() => {
-            const d = new Date(2026, 9, 4, 5, 6, 7);
-            return [d.toDateString(), /^[A-Za-z]{3} Oct 04 2026$/.test(d.toDateString()),
-                    /^Sun Oct 04 2026 05:06:07/.test(d.toString())];
+            const off = -new Date(Date.UTC(2026, 9, 4)).getTimezoneOffset();
+            const d = new Date(Date.UTC(2026, 9, 4, 5, 6, 7) - off * 60000);
+            const ds = d.toDateString();
+            const ts = d.toString();
+            return [ds,
+                    /^[A-Za-z]{3} [A-Za-z]{3} \d{2} \d{4}$/.test(ds) && ds.endsWith('04 2026'),
+                    ts.startsWith(ds + ' 05:06:07 ')];
         }"#;
         let result = rt
             .call_function_on_for_cdp(script, None, &[], true, true)

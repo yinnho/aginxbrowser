@@ -343,34 +343,6 @@ impl JsRuntime {
             .unwrap_or("zh-CN");
         deno_core::v8::icu::set_default_locale(first_tag);
     }
-    /// `execute_script` that self-heals from a stray V8 termination. A
-    /// watchdog that fired without a paired disarm (the pre-Drop-token
-    /// cancellation race; see [`WatchdogToken`]) leaves the isolate's
-    /// termination flag set, after which *every* execute fails with
-    /// "Uncaught Error: execution terminated" forever. Clear the flag and
-    /// retry once: the caller's expression itself didn't run yet, so one
-    /// clean retry fully masks the hiccup.
-    fn execute_script_retry_terminated(
-        &mut self,
-        name: &'static str,
-        source: String,
-    ) -> Result<v8::Global<v8::Value>, String> {
-        match self.runtime.execute_script(name, source.clone()) {
-            Ok(v) => Ok(v),
-            Err(e) => {
-                let msg = e.to_string();
-                if !msg.contains("execution terminated") {
-                    return Err(format!("JS error: {}", msg));
-                }
-                tracing::warn!("cleared stray V8 termination flag before {}", name);
-                self.runtime.v8_isolate().cancel_terminate_execution();
-                self.runtime
-                    .execute_script(name, source)
-                    .map_err(|e| format!("JS error: {}", e))
-            }
-        }
-    }
-
 
     pub fn evaluate(&mut self, expression: &str) -> Result<serde_json::Value, String> {
         self.recover_heap_limit();
@@ -1325,32 +1297,7 @@ impl JsRuntime {
 
     pub async fn run_event_loop(&mut self) -> Result<(), String> {
         self.recover_heap_limit();
-        // #39: a termination that unwound a synchronous window (payload or
-        // dispatch bracket) skipped its finally — the trampoline's depth
-        // stays leaked and its drain chain defers into infinity while
-        // looking alive. At loop entry nothing JS is executing, so an
-        // unwind notification (set by the poll heal below) or a stale flag
-        // still pending from a fire-while-parked means every bracket is
-        // leaked. Clear the flag and reset the depth before this loop's
-        // pumps wake the chain.
-        let unwound = self
-            .termination_unwound
-            .swap(false, std::sync::atomic::Ordering::SeqCst);
-        let stale_entry = self
-            .stale_termination
-            .swap(false, std::sync::atomic::Ordering::SeqCst);
-        if stale_entry {
-            self.runtime.v8_isolate().cancel_terminate_execution();
-        }
-        if unwound || stale_entry {
-            let _ = self.runtime.execute_script(
-                "<mt-recover>",
-                "if (globalThis.__diting_mt_recover_termination) \
-                 globalThis.__diting_mt_recover_termination()"
-                    .to_string(),
-            );
-            tracing::warn!("#39: reset macrotask depth after V8 termination");
-        }
+        self.heal_termination_at_loop_entry();
         // #50: the watchdog armed around an await window can fire while the
         // session task is parked with no JS on the stack (in the captured
         // repro the task was starved 14.65s past the wall-clock deadline).
