@@ -30,7 +30,12 @@ impl ServerGuard {
             .spawn()
             .ok()?;
 
-        // Wait for the server to accept connections (max ~10s).
+        // Wait for the server to actually serve (max ~10s). A bare TCP
+        // connect is not proof: the smoke tests run in parallel, and one
+        // test's ephemeral probe listener can momentarily hold the port
+        // another test just handed its server — the connect then succeeds
+        // against the wrong socket and the real GET fails (CI flake,
+        // 2026-10-04). A GET /health round-trip proves it's our server.
         let deadline = Instant::now() + Duration::from_secs(10);
         let base = format!("http://127.0.0.1:{port}");
         loop {
@@ -38,12 +43,18 @@ impl ServerGuard {
                 eprintln!("smoke: server did not come up on port {port}");
                 return None;
             }
-            if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
-                break;
+            let probe = ureq::get(&format!("{base}/health"))
+                .timeout(Duration::from_secs(2))
+                .call();
+            if let Ok(resp) = probe {
+                if let Ok(body) = resp.into_string() {
+                    if body.contains(r#""status":"ok""#) {
+                        break;
+                    }
+                }
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        let _ = &base;
         Some(ServerGuard { child: Some(child), port })
     }
 
