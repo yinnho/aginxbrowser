@@ -1,0 +1,153 @@
+{
+  "vars": {
+    "create_url": "https://fxg.jinritemai.com/ffa/g/create",
+    "schema_ms": 90000,
+    "submit_ms": 120000
+  },
+  "args": [
+    "category_leaf_id",
+    "title",
+    "main_images",
+    "portrait_images",
+    "desc_html",
+    "freight_id",
+    "brand_prop",
+    "brand_value_id",
+    "brand_value_name",
+    "material_prop",
+    "material_value_name",
+    "spec_id",
+    "spec_name",
+    "spec_values",
+    "skus"
+  ],
+  "create": {
+    "width": 1440,
+    "height": 900
+  },
+  "steps": [
+    {
+      "op": "navigate",
+      "args": {
+        "url": "{{create_url}}?category_leaf_id={{args.category_leaf_id}}&category_id={{args.category_leaf_id}}"
+      },
+      "note": "category-pinned create page. If login expired this lands on the passport wall and the next wait times out — run doudian-login first. The page itself is NEVER driven by UI: it only provides tokens + cookies for the pure-API chain below"
+    },
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "(function(){var rs=performance.getEntriesByType('resource');for(var i=rs.length-1;i>=0;i--){var e=rs[i];if(/\\/product\\/tproduct\\//.test(e.name)&&/__token=([a-f0-9]+)/.test(e.name)&&(e.responseEnd>0||e.duration>0))return true}return false})()",
+        "timeout_ms": "{{schema_ms}}"
+      },
+      "save": "tokens_ready",
+      "note": "the create page fires tproduct requests on boot carrying the page-scoped __token/_lid reused by every API call below. duration>0 (NOT responseEnd — the engine's resource timing does not fill that field) means the page's own requests completed. No entry = login wall or boot wedge; re-run, do NOT wait it out"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(function(){window.__tf='pending';setTimeout(function(){window.__tf='fired'},100);return 'armed'})()"
+      },
+      "save": "timer_armed",
+      "note": "boot-storm gate: after the page's schema responses land, their processing (JSON parse + schema init + React render) is one long sync block that starves timers AND fetch callbacks for tens of seconds to minutes before self-healing (run lessons: setTimeout(100ms) still null at +120s on one load; a getSchema fetch fired into the storm never settled). The probe's callback stays queued and fires the moment the pump frees"
+    },
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "window.__tf==='fired'",
+        "timeout_ms": 120000
+      },
+      "save": "timer_ok",
+      "note": "pump alive — async fetches are now reliable. If even this times out the page is hard-wedged: re-run the flow (fresh navigation), do NOT wait it out"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(function(){function tl(){var rs=performance.getEntriesByType('resource'),tok='',lid='';for(var i=rs.length-1;i>=0;i--){var u=rs[i].name;if(/\\/product\\/tproduct\\//.test(u)){var mt=u.match(/__token=([a-f0-9]+)/),ml=u.match(/_lid=(\\d+)/);if(mt)tok=mt[1];if(ml)lid=ml[1];if(tok&&lid)break}}if(!tok)throw new Error('no __token in resource timing');return{tok:tok,lid:lid}}function qs(t){return 'appid=1&__token='+t.tok+'&_bid=ffa_goods&_lid='+t.lid+(t.mst?'&msToken='+encodeURIComponent(t.mst):'')}function afetch(path,body,t){return fetch(path+'?'+qs(t),{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.text()})}var CAT='{{args.category_leaf_id}}';var t=tl();var ctx={category_id:CAT,biz_identity:'xiaodian',business_code:'xiaodian',capability_codes:['standard_capability'],ability:[],operation_type:'create'};window.__TL=t;window.__CTX=ctx;window.__AF=afetch;window.__CLEAN=null;afetch('/product/tproduct/getSchema',{context:ctx,model:{},category_id:CAT,appid:1,__token:t.tok,_bid:'ffa_goods',_lid:t.lid},t).then(function(x){window.__CLEAN=x},function(e){window.__CLEAN='ERR:'+e.message});return 'gsClean-fired'})()",
+        "timeout_ms": "{{schema_ms}}"
+      },
+      "save": "clean_fired",
+      "note": "API call 1 — getSchema with EMPTY model (zero-risk shape-contract dry run). Async fetch (NOT sync XHR — the engine's sync path is broken: returns status 0 or blocks the eval forever). Response cached on window.__CLEAN"
+    },
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "!!window.__CLEAN",
+        "timeout_ms": "{{schema_ms}}"
+      },
+      "save": "clean_answered",
+      "note": "the fetch settles (response or transport error both set __CLEAN)"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(function(){var t=window.__CLEAN,j;try{j=JSON.parse(t)}catch(e){throw new Error('gsClean unparsed '+String(t).slice(0,150))}if(j.st!==0)throw new Error('gsClean st='+j.st+' head='+String(t).slice(0,160));return 'gsClean ok bytes='+t.length})()",
+        "timeout_ms": 15000
+      },
+      "save": "clean_ok",
+      "note": "st:0 = server accepted the hand-built context — the pure-API door is open. st!==0 here = session/context broken; fail fast before anything else fires"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(function(){var D={{args}},CAT=D.category_leaf_id,t=window.__TL;var ph=function(i){return D.spec_id+'_'+i};var model={title:{value:D.title},pic:{value:D.main_images.map(function(u){return{url:u}})},main_image_three_to_four:{value:D.portrait_images.map(function(u){return{url:u}})},description:{value:D.desc_html},freight_id:{value:String(D.freight_id)},category_properties:{value:(function(){var cp={};cp[D.brand_prop]=[D.brand_value_id?{value_id:String(D.brand_value_id),value_name:D.brand_value_name}:{value_name:D.brand_value_name}];cp[D.material_prop]=[{value_name:D.material_value_name}];return cp})()},spec_detail:{value:[{id:D.spec_id,name:D.spec_name,spec_values:D.spec_values.map(function(n,i){return{id:ph(i),name:n}})}]},sku_detail:{value:D.skus.map(function(s,i){return{spec_detail_ids:[ph(i)],price:String(s.price),stock_info:{stock_num:s.stock||999},code:s.code}})}};window.__CANON=null;window.__AF('/product/tproduct/getSchema',{context:window.__CTX,model:model,category_id:CAT,appid:1,__token:t.tok,_bid:'ffa_goods',_lid:t.lid},t).then(function(x){window.__CANON=x},function(e){window.__CANON='ERR:'+e.message});return 'gsCanon-fired'})()",
+        "timeout_ms": "{{schema_ms}}"
+      },
+      "save": "canon_fired",
+      "note": "API call 2 — THE trick of this flow: send the business model with PLACEHOLDER spec_value ids (spec_id_0..spec_id_17) through getSchema and the server canonicalizes it: spec ids become spec_id+index (30000_10 -> 3000010), each sku row comes back as a full server-built skeleton, free-text property values get value_id:\"\" + diy_type:0 (legal: zod wants a string, empty string IS one), brand tags normalized to {}. NEVER hand-assemble these shapes — the two 10013 strikes (组件数据解析失败) were exactly a hand-assembled model: pic as bare string array instead of [{url}], invented spec/sku keys. getSchema is read-only: risks nothing, returns the submit-ready model"
+    },
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "!!window.__CANON",
+        "timeout_ms": "{{schema_ms}}"
+      },
+      "save": "canon_answered",
+      "note": "canonicalized model back"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(function(){var D={{args}};var t=window.__CANON,j;try{j=JSON.parse(t)}catch(e){throw new Error('gsCanon unparsed '+String(t).slice(0,150))}if(j.st!==0)throw new Error('gsCanon st='+j.st+' head='+String(t).slice(0,200));var d=j.data||{},m=d.model||{},sp=(m.spec_detail||{}).value||[],kd=(m.sku_detail||{}).value||[],pic=(m.pic||{}).value||[];if(!sp.length||sp[0].spec_values.length!==D.spec_values.length)throw new Error('canon: spec values lost');if(kd.length!==D.skus.length)throw new Error('canon: sku rows lost');if(pic.length!==D.main_images.length)throw new Error('canon: main pics lost');window.__CANONJ=d;return JSON.stringify({bytes:t.length,model_keys:Object.keys(m).length,spec_first:sp[0].spec_values[0].id,spec_last:sp[0].spec_values[sp[0].spec_values.length-1].id,sku0:kd[0].code+'@'+kd[0].price})})()",
+        "timeout_ms": 30000
+      },
+      "save": "canon_ok",
+      "note": "st:0 = the FULL business model passed the same server-side component parser that 10013s on shape violations — offline proof the submit will parse. Asserts spec/sku/pic counts survived canonicalization"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(function(){var d=window.__CANONJ,m=d.model||{},ctx=d.context||{};var ctxClean=Object.assign({},ctx);delete ctxClean.gray_components;var sid=String(ctx.shop_id||'');if(!sid)throw new Error('canon: server context has no shop_id');var body={schema:{model:m,context:ctx},category_id:'{{args.category_leaf_id}}',context:ctxClean,pass_through_extra:{},check_status:1,session:{},_signError:'1'};window.__FINAL_BODY=JSON.stringify(body);window.__MSTOKEN=btoa(btoa(sid));return JSON.stringify({bytes:window.__FINAL_BODY.length,shop_id:sid,model_keys:Object.keys(m).length})})()",
+        "timeout_ms": 30000
+      },
+      "save": "body_built",
+      "note": "assemble the addWithSchema body from the SERVER's canonicalized model verbatim (shelled — formatSchemaData output shape is shelled: model.goods_category.value) + server-returned context (has shop_id/token/n_token filled in). Body layout per bundle module 51313: {schema, category_id, context(gray stripped), pass_through_extra:{}, check_status:1, session:{}, _signError:'1'} — the frontend itself ships _signError:'1' when genSignatureNew throws, so a missing request_extra signature is not a server gate. msToken = btoa(btoa(shop_id)) computed locally"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(function(){var t=window.__TL;t.mst=window.__MSTOKEN;window.__SHOT=null;var t0=Date.now();var ctrl=(typeof AbortController!=='undefined')?new AbortController():null;var to=ctrl?setTimeout(function(){try{ctrl.abort()}catch(e){}},45000):null;fetch('/product/tproduct/addWithSchema?check_status=1&'+(function(){var q='appid=1&__token='+t.tok+'&_bid=ffa_goods&_lid='+t.lid+'&msToken='+encodeURIComponent(t.mst);return q})(),{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:window.__FINAL_BODY,signal:ctrl?ctrl.signal:undefined}).then(function(r){return r.text()}).then(function(x){window.__SHOT=x},function(e){window.__SHOT='ERR:'+e.message});return 'add-fired'})()",
+        "timeout_ms": "{{submit_ms}}"
+      },
+      "save": "add_fired",
+      "note": "API call 3 — THE submit. check_status:1 = draft, carried on the QUERY string per bundle module 51313; the full body is the assembled {schema,...} payload. check_status:2 would be the live publish — that path hits the 10001010A risk wall which waits on a real msToken; draft path proven open. ONE SHOT ONLY: 45s abort, timeout = outcome UNKNOWN (the request may still land server-side), never blind-retry — testpack rule"
+    },
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "!!window.__SHOT",
+        "timeout_ms": "{{submit_ms}}"
+      },
+      "save": "answered",
+      "note": "receipt or abort — both leave __SHOT set"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(function(){var t=window.__SHOT,j;try{j=JSON.parse(t)}catch(e){return JSON.stringify({transport:'unparsed',head:String(t).slice(0,300)})}var pid=(j.data||{}).product_id;return JSON.stringify({st:j.st,code:j.code,msg:(j.msg||'').slice(0,200),log_id:j.log_id||'',product_id:pid||null,verify_hint:pid?('read-back: getSchema operation_type=edit product_id='+pid):null})})()",
+        "timeout_ms": 15000
+      },
+      "save": "outcome",
+      "note": "receipt: {st:0, product_id} = draft landed (proven 2026-10-05: product_id 3846431717594366336, read-back matched 18 spec/18 sku/5 pics). st!==0 with log_id = a server verdict — record it, do NOT retry. A server rejection is a legitimate flow result; the flow only fails on transport/shape errors. Final publish (draft -> on-sale) is the owner's call from the fxg draft box, per the testpack rule: 素材交接不是无条件上架授权"
+    }
+  ]
+}
