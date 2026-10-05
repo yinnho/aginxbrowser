@@ -15747,6 +15747,40 @@ async fn test_css_animation_start_end_events() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn test_css_animation_flood_epoch_cap_defers_not_starves() {
+    // #224: a MutationObserver-flooded page rebuilds subtrees every batch and
+    // the animation sweep pays a full-cascade computed-style read per
+    // candidate — capped at 512 per mutation epoch, so a flood defers NEW
+    // animations to the next epoch. Deferral must never become starvation:
+    // once the flood stops (or bumps the epoch), deferred starts land.
+    let mut rt = setup_runtime(
+        "<html><head><style>@keyframes fade{from{opacity:1}to{opacity:0}} .box{animation:fade 60ms linear;}</style></head><body></body></html>",
+    );
+    let script = r#"async () => {
+        let starts = 0, ends = 0;
+        document.body.addEventListener('animationstart', () => starts++);
+        document.body.addEventListener('animationend', () => ends++);
+        // 600 synchronous inserts > the 512/epoch cap: the tail defers.
+        for (let i = 0; i < 600; i++) {
+            const el = document.createElement('div');
+            el.setAttribute('class', 'box');
+            document.body.appendChild(el);
+        }
+        // Let the drain run, then bump the epoch (a data-* write is a
+        // mutation without touching class/style); the overflow macrotask
+        // (50ms) picks up the capped tail even without the bump.
+        await new Promise(r => setTimeout(r, 140));
+        document.body.setAttribute('data-bump', '1');
+        await new Promise(r => setTimeout(r, 50));
+        return { starts, ends };
+    }"#;
+    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    let v = result.value.unwrap();
+    assert_eq!(v["starts"], serde_json::json!(600), "all starts landed: {v}");
+    assert!(v["ends"].as_u64().unwrap() > 0, "ends flowing after cap: {v}");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn test_css_animation_cancel_on_class_removal() {
     // Removing the animation between start and end must fire animationcancel
     // and suppress animationend (the pending end timer is cleared).

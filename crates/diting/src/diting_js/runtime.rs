@@ -1372,12 +1372,43 @@ impl JsRuntime {
     /// storm that pins the thread is terminated WATCHDOG_HEADROOM_MS past the
     /// budget; a well-behaved page returns as soon as the loop goes idle.
     pub async fn run_event_loop_bounded(&mut self, budget_ms: u64) -> Result<(), String> {
+        self.run_event_loop_bounded_with_headroom(
+            budget_ms,
+            std::time::Duration::from_millis(Self::WATCHDOG_HEADROOM_MS),
+        )
+        .await
+    }
+
+    /// The busy-freeze (#66) variant of [`Self::run_event_loop_bounded`]:
+    /// symmetric headroom (budget + budget) instead of the 5s SPA patience.
+    /// The freeze only engages after a realm has already burned through the
+    /// duty threshold, so the "legitimate multi-second React commit" defense
+    /// of WATCHDOG_HEADROOM_MS no longer applies — and with the long headroom
+    /// the throttle was nominal anyway: a 50ms burst could pin the thread for
+    /// 5.05s before termination (#224's doudian livelock measured ~100% duty
+    /// while "frozen"). Symmetric headroom caps a 50ms burst at 100ms of spin;
+    /// a Navigate/SetContent rebuilds the realm and unfreezes as before.
+    pub async fn run_event_loop_bounded_throttled(
+        &mut self,
+        budget_ms: u64,
+    ) -> Result<(), String> {
+        self.run_event_loop_bounded_with_headroom(
+            budget_ms,
+            std::time::Duration::from_millis(budget_ms),
+        )
+        .await
+    }
+
+    async fn run_event_loop_bounded_with_headroom(
+        &mut self,
+        budget_ms: u64,
+        headroom: std::time::Duration,
+    ) -> Result<(), String> {
         if budget_ms == 0 {
             return self.run_event_loop().await;
         }
         let budget = std::time::Duration::from_millis(budget_ms);
-        let token =
-            self.arm_watchdog(budget + std::time::Duration::from_millis(Self::WATCHDOG_HEADROOM_MS));
+        let token = self.arm_watchdog(budget + headroom);
         let result = tokio::time::timeout(budget, self.run_event_loop()).await;
         self.disarm_watchdog(token);
         match result {

@@ -1880,9 +1880,46 @@ function _startAnimation(el, name) {
 
 // One element: cancel a tracked animation whose name went away or changed,
 // start a newly-observable one. Runs synchronously in the mutation.
+// Per-epoch budget (#224): a MutationObserver-flooded page rebuilds subtrees
+// every batch, and each candidate costs a full-cascade computed-style read
+// (every tree write dropped the layout cache) — the animation sweep alone
+// measured ~100% of a core on doudian's publish page. Past the cap, NEW
+// animations defer to the next epoch (animationstart is async in Chrome too,
+// and a flooding page bumps the epoch every batch, so the delay is a few ms);
+// tracked elements still get their cancel/change handling unthrottled, and
+// quiet pages never come near the cap — zero behavioral delta there.
+let _animEpochSpent = -1, _animEpochBudget = 0, _animOverflowQueued = false;
+const _animCappedTail = new Set();
+const _ANIM_EPOCH_CAP = 512;
 function _animationCheckOne(el) {
   if (!_nodeInDocument(el)) return;
   const existing = _animTracked.get(el._nid);
+  if (_animEpochSpent !== _ditingMutationEpoch) {
+    _animEpochSpent = _ditingMutationEpoch;
+    _animEpochBudget = 0;
+  }
+  if (!existing && _animEpochBudget >= _ANIM_EPOCH_CAP) {
+    // Park in a set the synchronous chain NEVER reads: pushing back into
+    // _animDeferredChecks here would couple with checkIn's tail drain into a
+    // drain↔checkIn mutual recursion on the capped element (stack overflow
+    // at 600 inserts). The overflow macrotask merges it back with the budget
+    // reset — a quiet page that batch-inserts past the cap still gets its
+    // starts (nothing else will bump the epoch), and a flooding page is
+    // throttled to ~one burst per tick with the loop yielded in between.
+    _animCappedTail.add(el);
+    if (!_animOverflowQueued) {
+      _animOverflowQueued = true;
+      setTimeout(() => {
+        _animOverflowQueued = false;
+        _animEpochBudget = 0;
+        for (const e of _animCappedTail) _animDeferredChecks.add(e);
+        _animCappedTail.clear();
+        _drainDeferredAnimationChecks();
+      }, 50);
+    }
+    return;
+  }
+  _animEpochBudget++;
   const name = _animationNameOf(el);
   if (existing && existing.name !== name) _cancelAnimation(el._nid, existing);
   if (name && (!existing || existing.name !== name)) _startAnimation(el, name);

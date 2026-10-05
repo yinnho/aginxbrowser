@@ -272,7 +272,9 @@ impl Page {
             // and unfreezes.
             let work_ms = 50u64.min(ms);
             if let Some(js) = &mut self.js {
-                let _ = js.run_event_loop_bounded(work_ms).await;
+                // Throttled variant (#224): symmetric headroom, else the 50ms
+                // burst pins the thread for 5s inside the long SPA patience.
+                let _ = js.run_event_loop_bounded_throttled(work_ms).await;
             }
             tokio::time::sleep_until(deadline).await;
             return;
