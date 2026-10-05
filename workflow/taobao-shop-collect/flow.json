@@ -1,0 +1,82 @@
+{
+  "vars": {
+    "shop_url": "https://shop128263208.taobao.com/search.htm?search=y",
+    "min_cards": 40
+  },
+  "create": {
+    "url": "{{shop_url}}",
+    "width": 1440,
+    "height": 900
+  },
+  "steps": [
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "(function(){ var n = document.querySelectorAll('div[class^=\"cardContainer--\"]').length; var pe = document.querySelector('.text-price'); if (pe && pe.shadowRoot && n >= {{min_cards}}) return { secfont: true, cards: n }; if (performance.now() > 15000) return { secfont: false, cards: n }; return false; })()",
+        "timeout_ms": 20000
+      },
+      "save": "boot",
+      "note": "软探测：wait 超时会 fail 整流，所以谓词到点(15s)必真返回 {secfont:false}。墙门只看=shadowRoot 存在 AND 卡数≥min_cards——punish 卡住 mtop containerfacade 时列表骨架照样挂 shadowRoot 但永远只有 30 张 SSR 卡（毒数据，s_9/s_17 实测）；干净列表页 1 是 60 张。shadow 挂满等不在这个门里管（挂载是分钟级慢过程），attach 步单独等"
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": { "var": "boot.detail", "is": "contains", "value": "\"secfont\":true" },
+        "goto": "attach"
+      },
+      "note": "干净列表页 → 跳去挂载等待。注意 wait 的 detail 是字符串（谓词返回值被 JSON.stringify 过），dotted path 查不进去，只能 contains 紧凑子串。刻意不放 verdict 门：verdict 数的是会话累计挑战行，reboot 后当前页明明干净也报 challenge（s_10 实测假阳性）；这个页族的墙只表现为数据缺席（30 卡），数据本身就是门"
+    },
+    {
+      "id": "reboot",
+      "op": "navigate",
+      "args": { "url": "{{shop_url}}" },
+      "note": "boot 轮盘：同 URL 首跳可能落在店铺首页/半 hydration 态，重导航同 URL 常起完整列表（s_6/s_7/s_10 三代会话实测）；但注意轮盘每跳独立——s_17 首跳 60 卡、二跳反而 30 卡，两轮都试过才算数"
+    },
+    {
+      "id": "boot2",
+      "op": "wait",
+      "args": {
+        "predicate": "(function(){ var n = document.querySelectorAll('div[class^=\"cardContainer--\"]').length; var pe = document.querySelector('.text-price'); if (pe && pe.shadowRoot && n >= {{min_cards}}) return { secfont: true, cards: n }; if (performance.now() > 15000) return { secfont: false, cards: n }; return false; })()",
+        "timeout_ms": 20000
+      },
+      "save": "boot2",
+      "note": "重导航后再探一轮；performance.now() 从新文档 nav 起算，预算重置"
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": { "var": "boot2.detail", "is": "contains", "value": "\"secfont\":true" },
+        "goto": "attach"
+      },
+      "note": "补集铁律（s_18 亲踩反例：条件写成「脏→goto takeover」，干净 boot2 直落 throw，60 卡好页被扔进接管）：必须正向「干净→goto attach」跳过 throw，脏（secfont:false）才直落 takeover"
+    },
+    {
+      "id": "takeover",
+      "op": "eval",
+      "args": {
+        "script": "throw new Error('taobao shop wall — boot=' + JSON.stringify({{boot}}).slice(0, 400) + ' boot2=' + JSON.stringify({{boot2}}).slice(0, 400) + ' — handoff: open /live?session=<id>, solve, re-run')"
+      },
+      "save": "takeover",
+      "note": "回执带两轮 boot 事实：人开 /live?session=<id> 解滑块后重跑（引擎只探测不自动解）"
+    },
+    {
+      "id": "attach",
+      "op": "wait",
+      "args": {
+        "predicate": "(function(){ var n = document.querySelectorAll('div[class^=\"cardContainer--\"]').length; var pes = document.querySelectorAll('.text-price'); var att = 0; for (var i = 0; i < pes.length; i++) if (pes[i].shadowRoot) att++; if (n > 0 && att >= n) return { done: true, attached: att, cards: n }; if (performance.now() > 40000) return { done: false, attached: att, cards: n }; return false; })()",
+        "timeout_ms": 45000
+      },
+      "save": "attach",
+      "note": "shadow cps 挂载是页面自己的 1s 轮询渐进挂的，挂满要分钟级（s_16：6.8s 时 30/60，run6 的 15s 门等不到挂满反把绿页误判成墙）。这步纯软等：等满 done:true，40s 等不满也 done:false 落地继续——cps 只是 token 解码的双保险（120/120 验证过 token 单独可用），缺一半不扣绿"
+    },
+    {
+      "id": "read",
+      "op": "eval",
+      "args": {
+        "script": "(() => { const cards = [...document.querySelectorAll('div[class^=\"cardContainer--\"]')]; const out = []; for (const el of cards) { let fiberKey = Object.keys(el).find(k => k.startsWith('__reactFiber')); let data = null; if (fiberKey) { let n = el[fiberKey]; for (let i = 0; i < 14 && n; i++) { const p = n.memoizedProps; if (p && p.itemCardData) { data = p.itemCardData; break; } n = n.return; } } const pe = el.querySelector('.text-price'); let token = null, cps = []; if (pe) { token = (pe.textContent || '').trim(); if (pe.shadowRoot) cps = [...(pe.shadowRoot.textContent || '')].map(c => c.codePointAt(0)); } if (!data) continue; out.push({ itemId: data.itemId, title: data.title, itemUrl: data.itemUrl, image: data.image, priceToken: data.discountPrice, priceEncoded: !!data.priceEncoded, sold: (data.vagueSold365 === undefined ? null : data.vagueSold365), benefits: (data.benefitPointList || []).map(b => b.text), skus: (data.skuInfoList || []).map(s => ({ skuId: s.skuId, text: s.skuPropertyText })), cps: cps, token: token }); } const MIN = {{min_cards}}; if (out.length < MIN) throw new Error('short page — extracted=' + out.length + ' want>=' + MIN + ' n=' + cards.length + ' url=' + location.href + ' title=' + document.title); return { url: location.href, title: document.title, n: cards.length, extracted: out.length, cards: out }; })()"
+      },
+      "save": "cards",
+      "note": "itemCardData 走 React fiber 上溯（__reactFiber key → ≤14 层 .return → memoizedProps.itemCardData）。返回必须直接给对象——包一层 JSON.stringify 的话 save 存字符串，dotted path 永远查不进（批内亲踩）。数据门内嵌：extracted<min_cards 就地 throw，绿回执必有足量真卡。价格不是明文：discountPrice 是 secfont token，解码=token 前缀家族的离线字体合成（见 flow.md），流把 token 和 shadow cps 都带回"
+    }
+  ]
+}

@@ -31,6 +31,7 @@ anything else is rejected before it touches the filesystem.
 | `doudian-login` | fxg.jinritemai.com (via open.snssdk.com) | runs green to QR handoff | direct SSO authorize URL: QR in ~1.8s vs 12-20s via the fxg front; human scans `qr_shot`, session lands logged-in — see flow.md |
 | `taobao-login` | login.taobao.com | runs green to QR handoff | direct login.jhtml (3.7s vs 13.5s via homepage); QR canvas needs no click; cookie lands on .taobao.com — see flow.md |
 | `taobao-live` | live.taobao.com | runs green logged-out | verdict-gated front probe: delivers "no wall + telemetry"; room list awaits engine hydration — see flow.md |
+| `taobao-shop-collect` | shop<N>.taobao.com | runs green (reboot handles boot roulette; wall receipt verified ×3) | buyer-side listing collect: 60 cards via React fiber walk + secfont price tokens/cps (offline decode companion in flow.md); data-level gates, no verdict (session-cumulative rows false-wall a rebooted-clean page) — see flow.md |
 | `wechat-oa-post` | api.weixin.qq.com | runs green (certified OA) / draft-only (uncertified) | 5 pure http steps (token→cover→draft→publish→verify); account = `creds {app_id, app_secret}` via vars, never in flow.json — see flow.md |
 | `xcom-profile` | x.com | runs green logged-out | needs foreign egress (`use_proxy: true` baked in) |
 | `juejin-post` | juejin.cn | runs green | read a post page; list pages stall (see flow.md) |
