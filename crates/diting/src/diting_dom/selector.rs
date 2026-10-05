@@ -103,6 +103,8 @@ pub enum PseudoClass {
     Link,
     Visited,
     Root,
+    ReadOnly,
+    ReadWrite,
 }
 
 impl parser::NonTSPseudoClass for PseudoClass {
@@ -145,6 +147,8 @@ impl ToCss for PseudoClass {
             PseudoClass::Link => dest.write_str(":link"),
             PseudoClass::Visited => dest.write_str(":visited"),
             PseudoClass::Root => dest.write_str(":root"),
+            PseudoClass::ReadOnly => dest.write_str(":read-only"),
+            PseudoClass::ReadWrite => dest.write_str(":read-write"),
         }
     }
 }
@@ -207,6 +211,8 @@ impl<'i> parser::Parser<'i> for DitingSelectorParser {
             "link" | "any-link" => Ok(PseudoClass::Link),
             "visited" => Ok(PseudoClass::Visited),
             "root" => Ok(PseudoClass::Root),
+            "read-only" => Ok(PseudoClass::ReadOnly),
+            "read-write" => Ok(PseudoClass::ReadWrite),
             _ => Err(cssparser::ParseError {
                 kind: cssparser::ParseErrorKind::Custom(
                     SelectorParseErrorKind::UnsupportedPseudoClassOrElement(name),
@@ -309,6 +315,77 @@ impl<'a> DomElement<'a> {
             })
             .flatten()
             .unwrap_or(false)
+    }
+
+    /// The :read-write face (#219 / lightpanda #3718). Chrome: an editable
+    /// text control (input of a text flavor / textarea, neither readonly
+    /// nor disabled), or ANY element inside an editing host — the
+    /// contenteditable chain walks ancestors, so an input inside a custom
+    /// element whose host is editable resolves through the host. Everything
+    /// else is :read-only (plain divs included).
+    fn is_read_write(&self) -> bool {
+        let control = self
+            .tree
+            .with_node(self.node_id, |n| {
+                let e = n.as_element()?;
+                let local = e.local.to_ascii_lowercase();
+                let editable_control = if local.as_str() == "textarea" {
+                    true
+                } else if local.as_str() == "input" {
+                    // Same text-family cut as is_text_entry_control minus
+                    // select (a usable <select> is still :read-only).
+                    let t = n
+                        .get_attribute("type")
+                        .map(|s| s.to_ascii_lowercase())
+                        .unwrap_or_else(|| "text".into());
+                    !matches!(
+                        t.as_str(),
+                        "button"
+                            | "submit"
+                            | "reset"
+                            | "image"
+                            | "checkbox"
+                            | "radio"
+                            | "file"
+                            | "hidden"
+                            | "range"
+                            | "color"
+                    )
+                } else {
+                    false
+                };
+                Some(
+                    editable_control
+                        && n.get_attribute("readonly").is_none()
+                        && n.get_attribute("disabled").is_none(),
+                )
+            })
+            .flatten()
+            .unwrap_or(false);
+        if control {
+            return true;
+        }
+        // Editing-host chain: contenteditable on self or any ancestor
+        // ("", "true", "plaintext-only" are truthy; "false" stops it).
+        let truthy = |v: &str| {
+            !matches!(v.trim().to_ascii_lowercase().as_str(), "false")
+        };
+        let mut cur = Some(self.node_id);
+        while let Some(id) = cur {
+            let hit = self
+                .tree
+                .with_node(id, |n| {
+                    n.get_attribute("contenteditable")
+                        .map(truthy)
+                })
+                .flatten()
+                .unwrap_or(false);
+            if hit {
+                return true;
+            }
+            cur = self.tree.get_node(id).and_then(|n| n.parent);
+        }
+        false
     }
 }
 
@@ -547,6 +624,11 @@ impl<'a> Element for DomElement<'a> {
             // is-this-document-alive sentinel (Playwright's waitForSelector
             // in a frame), so parse-fail here reads as a dead document.
             PseudoClass::Root => self.parent_element().is_none(),
+            // #219 / lightpanda #3718: :read-write is the editable face
+            // (text controls + the contenteditable host chain); :read-only
+            // is its negation over every element, not "has readonly attr".
+            PseudoClass::ReadWrite => self.is_read_write(),
+            PseudoClass::ReadOnly => !self.is_read_write(),
         }
     }
 

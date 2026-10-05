@@ -13034,6 +13034,64 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn read_only_read_write_face_matches_chrome() {
+        // #219 / lightpanda #3718: :read-only/:read-write used to fall out
+        // of the selector parser entirely (unknown pseudo → rule dropped,
+        // matches() false). Chrome oracle: :read-write = editable text
+        // controls (no readonly/disabled) or anything on the contenteditable
+        // host chain — the host-chain walk is the lightpanda knife (input
+        // inside a custom element resolves through its host); :read-only is
+        // the negation over every element, plain divs included.
+        let mut rt = setup_runtime(
+            r#"<html><body>
+<ul><li id=a1>1</li><li id=a2>2</li><li id=a3>3</li><li id=a4>4</li></ul>
+<div id="host"><input id="plain"></div>
+<input id="ro" readonly>
+<input id="dis" disabled>
+<input id="chk" type="checkbox">
+<div id="ce" contenteditable><span id="inner">x</span></div>
+<div id="cefalse" contenteditable="false"><span id="innerfalse">x</span></div>
+</body></html>"#,
+        );
+        let script = r#"async () => {
+            const m = (id, sel) => { try { return document.getElementById(id).matches(sel); } catch (e) { return 'throw: ' + e.message; } };
+            return {
+                nth: document.querySelectorAll('li:nth-child( 2n )').length,
+                ro_plain: m('plain', ':read-only'), rw_plain: m('plain', ':read-write'),
+                ro_ro: m('ro', ':read-only'), rw_ro: m('ro', ':read-write'),
+                ro_dis: m('dis', ':read-only'), rw_dis: m('dis', ':read-write'),
+                ro_chk: m('chk', ':read-only'), rw_chk: m('chk', ':read-write'),
+                ro_div: m('host', ':read-only'), rw_div: m('host', ':read-write'),
+                ro_ce: m('ce', ':read-only'), rw_ce: m('ce', ':read-write'),
+                ro_inner: m('inner', ':read-only'), rw_inner: m('inner', ':read-write'),
+                ro_cefalse: m('cefalse', ':read-only'), rw_innerfalse: m('innerfalse', ':read-write'),
+            };
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let v = result.value.unwrap();
+        // Whitespace-tolerant :nth-child arg (lightpanda #3722) — the
+        // selectors crate parses `( 2n )` natively; pinned so a parser
+        // regression can't slip through unnoticed.
+        assert_eq!(v["nth"], serde_json::json!(2), "li:nth-child( 2n ) matches a2+a4");
+        assert_eq!(v["ro_plain"], serde_json::json!(false), "plain input is editable");
+        assert_eq!(v["rw_plain"], serde_json::json!(true));
+        assert_eq!(v["ro_ro"], serde_json::json!(true), "readonly input");
+        assert_eq!(v["rw_ro"], serde_json::json!(false));
+        assert_eq!(v["ro_dis"], serde_json::json!(true), "disabled input is read-only");
+        assert_eq!(v["rw_dis"], serde_json::json!(false));
+        assert_eq!(v["ro_chk"], serde_json::json!(true), "checkbox is never editable");
+        assert_eq!(v["rw_chk"], serde_json::json!(false));
+        assert_eq!(v["ro_div"], serde_json::json!(true), "plain div is read-only");
+        assert_eq!(v["rw_div"], serde_json::json!(false));
+        assert_eq!(v["ro_ce"], serde_json::json!(false), "editing host itself");
+        assert_eq!(v["rw_ce"], serde_json::json!(true));
+        assert_eq!(v["ro_inner"], serde_json::json!(false), "descendant of editing host");
+        assert_eq!(v["rw_inner"], serde_json::json!(true));
+        assert_eq!(v["ro_cefalse"], serde_json::json!(true), "contenteditable=false is not an editing host");
+        assert_eq!(v["rw_innerfalse"], serde_json::json!(false));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn flex_basis_padding_carry_survives_longhand_and_incremental() {
         // #220: the #216 carry-over (basis + main-axis padding on the
         // border-box measure) worked for the one-value shorthand but the
