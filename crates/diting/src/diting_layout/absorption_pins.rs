@@ -244,3 +244,329 @@ fn text_align_last_resolves_onto_the_run_item() {
     );
     assert_eq!(run_align("head").flatten(), None, "an undeclared block stays auto (no override)");
 }
+
+/// #218: clip:text on a wrapping INLINE span — the span owns no taffy box,
+/// so the box-walk capture can't see it; the fill must reach the run leaf
+/// via the inline-chain walk and sample over the run's own line geometry.
+/// Also pins the band-path suppression: no opaque BgGradient covers the
+/// glyphs (that was the pre-fix page).
+#[test]
+fn clip_text_inline_span_wraps_with_gradient() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    let html = r#"<html><body style="margin:0">
+<div style="margin:0;width:130px;font-size:28px;background:#eee">
+<span id="w" style="background-image:linear-gradient(90deg,red,blue);-webkit-background-clip:text;color:rgb(0,128,0)">MMMMM MMMMM MMMMM</span>
+</div>
+</body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (400.0, 300.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (400.0, 300.0));
+    let (_, items) = crate::diting_layout::layout_dom_with_paint(
+        &tree, &styles, &crate::diting_fonts::font_book(), 400.0, 300.0,
+    );
+
+    let g = items
+        .iter()
+        .find_map(|it| match it {
+            PaintItem::Text { text, gradient: Some(g), .. } if text.contains('M') => Some(g.clone()),
+            _ => None,
+        })
+        .expect("wrapping inline span's run carries the clip:text fill");
+    assert!(g.clone_lines.is_empty(), "slice mode (initial) keeps one continuous area");
+    assert!((g.area.width - 113.68).abs() < 1.0, "area = the WIDEST wrapped line, not the full text: {:?}", g.area);
+    assert!(g.area.height > 80.0, "area spans all wrapped lines: {:?}", g.area);
+    assert!(
+        !items.iter().any(|it| matches!(it, PaintItem::BgGradient { .. })),
+        "the span's own band gradient is suppressed — nothing covers the glyphs"
+    );
+
+    // Pixel: line 1 runs red→blue across its own extent.
+    let mut c = crate::diting_layout::paint::Canvas::new_filled(200, 200, [255, 255, 255, 255]);
+    crate::diting_layout::paint::execute(&items, &crate::diting_fonts::font_book(), &mut c);
+    let p = |x: usize, y: usize| -> [u8; 4] {
+        let i = (y * c.width + x) * 4;
+        c.data[i..i + 4].try_into().unwrap()
+    };
+    let (mut red_max, mut blue_min) = (0usize, usize::MAX);
+    for y in 0..40 {
+        for x in 0..130 {
+            let [r, g_, b, a] = p(x, y);
+            if a > 200 && r > 120 && b < 120 && g_ < 120 {
+                red_max = red_max.max(x);
+            } else if a > 200 && b > 120 && r < 120 && g_ < 120 {
+                blue_min = blue_min.min(x);
+            }
+        }
+    }
+    assert!(red_max > 5, "line 1 starts red (red_max={red_max})");
+    assert!(blue_min < 110 && blue_min > red_max, "line 1 ends blue right of the red (blue_min={blue_min})");
+}
+
+/// #218: `box-decoration-break: clone` restarts the gradient at EVERY
+/// wrapped line. The visible knife needs a SHORT last line: slice mode
+/// samples it at the strip's left end (all red ink — its ink never reaches
+/// the blue end), clone mode gives the short line its own box and it runs
+/// red→blue across its own extent.
+#[test]
+fn box_decoration_clone_restarts_gradient_per_line() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    let html = |bdb: &str| {
+        format!(r#"<html><body style="margin:0"><div style="margin:0;width:130px;font-size:28px">
+<span id="w" style="background-image:linear-gradient(90deg,red,blue);-webkit-background-clip:text;color:rgb(0,128,0);box-decoration-break:{bdb}">MMMMM MMMMM MM</span>
+</div></body></html>"#)
+    };
+    let paint = |html: String| {
+        let tree = parse_html(&html);
+        let rules = parse_stylesheet_for("", (400.0, 300.0), CssMediaType::Screen);
+        let styles = crate::diting_layout::compute_styles(&tree, &rules, (400.0, 300.0));
+        crate::diting_layout::layout_dom_with_paint(&tree, &styles, &crate::diting_fonts::font_book(), 400.0, 300.0).1
+    };
+    let clone_items = paint(html("clone"));
+    let slice_items = paint(html("slice"));
+
+    let text_fill = |items: &Vec<PaintItem>| {
+        items
+            .iter()
+            .find_map(|it| match it {
+                PaintItem::Text { text, gradient: Some(g), .. } if text.contains('M') => Some(g.clone()),
+                _ => None,
+            })
+            .expect("run carries the clip:text fill")
+    };
+    let g = text_fill(&clone_items);
+    assert!(g.clone_per_line && g.clone_lines.len() == 3, "one fragment box per wrapped line: {:?}", g.clone_lines);
+
+    // Ink-class counters over a canvas, per line band and x window.
+    let scan = |items: &Vec<PaintItem>| {
+        let mut c = crate::diting_layout::paint::Canvas::new_filled(200, 200, [255, 255, 255, 255]);
+        crate::diting_layout::paint::execute(items, &crate::diting_fonts::font_book(), &mut c);
+        move |y0: usize, y1: usize, x0: usize, x1: usize| -> (usize, usize) {
+            let (mut reds, mut blues) = (0usize, 0usize);
+            for y in y0..y1.min(200) {
+                for x in x0..x1.min(200) {
+                    let i = (y * c.width + x) * 4;
+                    let [r, g_, b, a] = c.data[i..i + 4].try_into().unwrap();
+                    if a > 200 && r > 120 && b < 120 && g_ < 120 {
+                        reds += 1;
+                    } else if a > 200 && b > 120 && r < 120 && g_ < 120 {
+                        blues += 1;
+                    }
+                }
+            }
+            (reds, blues)
+        }
+    };
+    let clone_scan = scan(&clone_items);
+    for (line, (_, w)) in g.clone_lines.iter().enumerate() {
+        let (y0, y1) = (line * 40, (line + 1) * 40);
+        let w = *w as usize;
+        let (reds, blues) = clone_scan(y0, y1, 0, w / 4);
+        let (reds2, blues2) = clone_scan(y0, y1, w * 7 / 10, w);
+        assert!(
+            reds + reds2 > 3 && blues + blues2 > 3,
+            "clone: line {line} restarts red and ends blue within its own {w}px box (reds={} blues={})",
+            reds + reds2,
+            blues + blues2
+        );
+    }
+
+    // Control: the SHORT last line in slice mode never reaches the strip's
+    // blue end — its whole ink sits at t < 0.5.
+    let sg = text_fill(&slice_items);
+    assert!(sg.clone_lines.is_empty(), "slice stays one continuous strip");
+    let last_w = g.clone_lines.last().unwrap().1 as usize;
+    let slice_scan = scan(&slice_items);
+    let (reds, blues) = slice_scan(80, 120, last_w * 7 / 10, last_w + 40);
+    assert!(
+        reds > 3 && blues == 0,
+        "slice: short line 3 stays at the strip's red end (reds={reds} blues={blues})"
+    );
+}
+
+/// #218 pierce knives: clip:text on a BOX reaches every descendant run —
+/// direct text, nested inline spans, a nested block, and underlined text —
+/// and the decoration strokes stay SOLID (Chrome paints decorations in the
+/// text's own color, not the gradient).
+#[test]
+fn clip_text_pierces_nested_runs_decoration_stays_solid() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    let html = r#"<html><body style="margin:0">
+<div id="c" style="margin:0;width:420px;font-size:28px;background-image:linear-gradient(90deg,red,blue);-webkit-background-clip:text;color:rgb(0,128,0)">
+L1-direct <span id="s1">S1-span <span id="s2">S2-deep</span></span>
+<div id="nb" style="font-size:28px">NESTEDBOX</div>
+<span id="dec" style="text-decoration:underline">UNDERLINED</span>
+</div>
+</body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (400.0, 300.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (400.0, 300.0));
+    let (_, items) = crate::diting_layout::layout_dom_with_paint(
+        &tree, &styles, &crate::diting_fonts::font_book(), 400.0, 300.0,
+    );
+    for needle in ["L1-direct", "S1-span", "S2-deep", "NESTEDBOX", "UNDERLINED"] {
+        assert!(
+            items.iter().any(|it| matches!(it, PaintItem::Text { text, gradient: Some(_), .. } if text.contains(needle))),
+            "{needle} carries the ancestor's clip:text fill"
+        );
+    }
+
+    // The underline strokes solid green — the only pure-green ink on the
+    // page (the glyph fills are the red→blue gradient).
+    let mut c = crate::diting_layout::paint::Canvas::new_filled(500, 240, [255, 255, 255, 255]);
+    crate::diting_layout::paint::execute(&items, &crate::diting_fonts::font_book(), &mut c);
+    let mut green = 0usize;
+    for y in 0..240 {
+        for x in 0..500 {
+            let i = (y * c.width + x) * 4;
+            let [r, g_, b, a] = c.data[i..i + 4].try_into().unwrap();
+            if a > 200 && g_ > 90 && r < 90 && b < 90 {
+                green += 1;
+            }
+        }
+    }
+    assert!(green > 100, "underline paints solid green, outside the gradient: {green}px");
+}
+
+/// #218 (takumi #1802): the element that DECLARES the decoration owns its
+/// fill. When it also clips a gradient through its text, Chrome strokes
+/// the lines WITH the gradient — and an explicit `text-decoration-color`
+/// loses (Chrome probes 2026-10-05: `text-decoration-color:green` still
+/// painted red→blue; only without clip does `color:transparent` hide the
+/// stroke). The nested pin above is the complementary shape: a plain
+/// inner span declaring the underline under an outer clipping box stays
+/// solid currentcolor.
+#[test]
+fn clip_text_decoration_pierces_with_gradient() {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::PaintItem;
+
+    let html = r#"<html><body style="margin:0">
+<div id="a" style="width:340px;font-size:24px;background-image:linear-gradient(90deg,#ff0000,#0000ff);-webkit-background-clip:text;color:transparent;text-decoration:underline">underlined gradient text</div>
+<div id="b" style="width:340px;font-size:24px;background-image:linear-gradient(90deg,#ff0000,#0000ff);-webkit-background-clip:text;color:transparent;text-decoration:underline;text-decoration-color:#00ff00">explicit green ignored</div>
+</body></html>"#;
+    let tree = parse_html(html);
+    let rules = parse_stylesheet_for("", (500.0, 300.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (500.0, 300.0));
+    let (_, items) = crate::diting_layout::layout_dom_with_paint(
+        &tree, &styles, &crate::diting_fonts::font_book(), 500.0, 300.0,
+    );
+    for needle in ["underlined gradient text", "explicit green ignored"] {
+        assert!(
+            items.iter().any(|it| matches!(it, PaintItem::Text { text, decorations, gradient: Some(_), .. }
+                if text.contains(needle) && decorations.pierce)),
+            "{needle} carries both the clip fill and the pierce flag"
+        );
+    }
+    let mut c = crate::diting_layout::paint::Canvas::new_filled(500, 120, [255, 255, 255, 255]);
+    crate::diting_layout::paint::execute(&items, &crate::diting_fonts::font_book(), &mut c);
+    // Each band's underline: the row with the longest saturated run. Its
+    // left end must be red and right end blue — the gradient, not the
+    // (transparent) currentcolor, and not the explicit green longhand.
+    for (y0, y1) in [(0, 48), (48, 96)] {
+        let mut best = (0usize, 0usize, 0usize); // (len, y, x_end)
+        for y in y0..y1 {
+            let (mut run, mut mx, mut end) = (0usize, 0usize, 0usize);
+            for x in 0..500 {
+                let i = (y * c.width + x) * 4;
+                let [r, g, b, _] = c.data[i..i + 4].try_into().unwrap();
+                if r.max(g).max(b) - r.min(g).min(b) > 40 {
+                    run += 1;
+                    if run > mx {
+                        mx = run;
+                        end = x;
+                    }
+                } else {
+                    run = 0;
+                }
+            }
+            if mx > best.0 {
+                best = (mx, y, end);
+            }
+        }
+        let (len, y, xend) = best;
+        assert!(len > 200, "underline row exists in band {y0}: len={len}");
+        let at = |x: usize| -> [u8; 4] {
+            let i = (y * c.width + x) * 4;
+            c.data[i..i + 4].try_into().unwrap()
+        };
+        let l = at(xend + 1 - len);
+        let r = at(xend);
+        assert!(l[0] > 200 && l[1] < 60 && l[2] < 60, "left end red: {l:?}");
+        assert!(r[2] > 150 && r[0] < 120 && r[1] < 120, "right end blue: {r:?}");
+    }
+}
+
+/// #218 (takumi #1795): `initial`/`inherit`/`unset` (and the `all`
+/// shorthand) copy fields instead of parse-and-drop. Matrix pinned to
+/// Chrome headless ground truth (2026-10-05, getComputedStyle dump):
+/// inherited keywords take the parent's value, non-inherited keywords take
+/// the initial default (`None` here), and `all:inherit` even copies the
+/// parent's non-inherited `display: flex` down.
+#[test]
+fn css_wide_keyword_matrix_matches_chrome() {
+    use crate::diting_css::{parse_stylesheet_for, Color, CssMediaType, Display};
+    use crate::diting_dom::tree_sink::parse_html;
+
+    let html = r#"<html><head><style>
+#p1{color:rgb(255,0,0);font-size:32px;font-weight:700;text-decoration:underline}
+#c1{color:initial}
+#c2{color:inherit}
+#c3{color:unset}
+#f1{display:flex;color:green;font-size:20px}
+#f1i{display:initial}
+#f2{all:initial}
+#f3{all:unset}
+#f4{all:inherit}
+#b1{border-style:solid;border-width:2px;border-color:red}
+#b1u{border-style:unset}
+#w1{width:123px}
+#w1i{width:initial}
+#s1{font-size:inherit}
+</style></head><body>
+<div id="p1">P <span id="c1"></span><span id="c2"></span><span id="c3"></span><span id="s1"></span></div>
+<div id="f1"><div id="f1i"></div><div id="f2"></div><div id="f3"></div><div id="f4"></div></div>
+<div id="b1"><span id="b1u"></span></div>
+<div id="w1"><span id="w1i"></span></div>
+</body></html>"#;
+    let tree = parse_html(html);
+    let css = tree.query_selector_all("style").map(|els| {
+        els.iter().map(|&el| tree.text_content(el)).collect::<Vec<_>>().join("\n")
+    }).unwrap_or_default();
+    let rules = parse_stylesheet_for(&css, (500.0, 600.0), CssMediaType::Screen);
+    let styles = crate::diting_layout::compute_styles(&tree, &rules, (500.0, 600.0));
+    let s = |sel: &str| styles.get(&tree.query_selector_all(sel).unwrap()[0]).unwrap();
+
+    // Chrome: initial color rgb(0,0,0) — None here paints the same black.
+    assert_eq!(s("#c1").color, None, "color:initial drops the inherited red");
+    assert_eq!(s("#c2").color, Some(Color(255, 0, 0, 255)), "color:inherit");
+    assert_eq!(s("#c3").color, Some(Color(255, 0, 0, 255)), "color:unset inherits");
+    assert_eq!(s("#s1").font_size, Some(32.0), "font-size:inherit");
+    // Chrome: display:initial on a flex item computes block (None here).
+    assert_eq!(s("#f1").display, Some(Display::Flex));
+    assert_eq!(s("#f1i").display, None, "display:initial → block");
+    assert_eq!(s("#f1i").color, Some(Color(0, 128, 0, 255)), "flex line inherits green");
+    assert_eq!(s("#f2").color, None, "all:initial resets color to black");
+    assert_eq!(s("#f2").font_size, None, "all:initial resets font-size to 16px");
+    assert_eq!(s("#f2").text_decoration_line, None, "all:initial clears decorations");
+    assert_eq!(s("#f3").color, Some(Color(0, 128, 0, 255)), "all:unset keeps inherited green");
+    assert_eq!(s("#f3").display, None, "all:unset's display initial → block");
+    // Chrome: all:inherit copies the parent's NON-inherited display:flex too.
+    assert_eq!(s("#f4").display, Some(Display::Flex), "all:inherit carries display:flex down");
+    assert_eq!(s("#f4").font_size, Some(20.0), "all:inherit font-size");
+    assert!(s("#b1").border_style.is_some(), "solid border stays");
+    assert_eq!(s("#b1u").border_style, None, "border-style:unset → none (not inherited)");
+    assert!(s("#w1").width.is_some(), "width:123px parses");
+    assert_eq!(s("#w1i").width, None, "width:initial → auto");
+}
+
+

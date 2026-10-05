@@ -13034,6 +13034,61 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn css_wide_keywords_initial_inherit_unset() {
+        // #218 / takumi #1795: initial/inherit/unset used to fall through
+        // every per-property parser and get dropped — invisible wherever the
+        // property is naturally inherited (dropped ≈ inherit), but
+        // color:initial kept the parent's red and padding:inherit lost the
+        // parent's 8px. Chrome oracle: initial = the property's initial
+        // value, inherit = the parent's computed value, unset = inherited
+        // bit picks. var() delivery counts too (Chrome applies keywords
+        // arriving through substitution).
+        let mut rt = setup_runtime(
+            r#"<html><body>
+<div id="p" style="color: rgb(255,0,0); font-size: 24px; font-weight: 700">
+<span id="inh" style="color: inherit">x</span>
+<span id="ini" style="color: initial">x</span>
+<span id="uns" style="color: unset">x</span>
+<span id="varini" style="--k: initial; color: var(--k)">x</span><span id="allini" style="color: initial; all: initial">x</span>
+<span id="padp" style="padding: 8px"><b id="padini" style="padding: initial">y</b><b id="padinh" style="padding: inherit">y</b></span>
+<span id="linp" style="line-height: 40px"><b id="linini" style="line-height: initial">y</b><b id="linh" style="line-height: inherit">y</b></span>
+<b id="fwini" style="font-weight: initial">y</b>
+<b id="fwinh" style="font-weight: inherit">y</b>
+<span id="bgp" style="background-color: rgb(255,255,0)"><b id="bginh" style="background-color: inherit">y</b></span>
+</div>
+</body></html>"#,
+        );
+        let script = r#"async () => {
+            const c = id => getComputedStyle(document.getElementById(id));
+            return {
+                inh: c('inh').color, ini: c('ini').color, uns: c('uns').color,
+                varini: c('varini').color, allini: c('allini').color,
+                padini: c('padini').paddingTop, padinh: c('padinh').paddingTop,
+                linini: c('linini').lineHeight, linh: c('linh').lineHeight,
+                fwini: c('fwini').fontWeight, fwinh: c('fwinh').fontWeight,
+                bginh: c('bginh').backgroundColor,
+            };
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let v = result.value.unwrap();
+        assert_eq!(v["inh"], serde_json::json!("rgb(255, 0, 0)"), "inherit copies the parent");
+        assert_eq!(v["ini"], serde_json::json!("rgb(0, 0, 0)"), "initial beats inheritance: black, not parent red");
+        assert_eq!(v["uns"], serde_json::json!("rgb(255, 0, 0)"), "unset on an inherited property = inherit");
+        // --k: initial empties the slot; var(--k) with no fallback is then
+        // IACVT, and IACVT on an inherited property takes the INHERITED
+        // value (css-variables §3.1) — Chrome shows the parent red here.
+        assert_eq!(v["varini"], serde_json::json!("rgb(255, 0, 0)"), "var() over a guaranteed-invalid custom property is IACVT, not the initial keyword");
+        assert_eq!(v["allini"], serde_json::json!("rgb(0, 0, 0)"), "all: initial resets color");
+        assert_eq!(v["padini"], serde_json::json!("0px"), "padding: initial is 0");
+        assert_eq!(v["padinh"], serde_json::json!("8px"), "padding: inherit copies the parent (non-inherited prop)");
+        assert_eq!(v["linini"], serde_json::json!("normal"), "line-height: initial is normal");
+        assert_eq!(v["linh"], serde_json::json!("40px"), "line-height: inherit copies the parent");
+        assert_eq!(v["fwini"], serde_json::json!("400"), "font-weight: initial is 400");
+        assert_eq!(v["fwinh"], serde_json::json!("700"), "font-weight: inherit copies the parent");
+        assert_eq!(v["bginh"], serde_json::json!("rgb(255, 255, 0)"), "background-color: inherit copies the parent");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn read_only_read_write_face_matches_chrome() {
         // #219 / lightpanda #3718: :read-only/:read-write used to fall out
         // of the selector parser entirely (unknown pseudo → rule dropped,

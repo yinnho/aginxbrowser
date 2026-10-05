@@ -834,6 +834,102 @@ html,body{{margin:0;padding:0;width:400px;font-size:16px;line-height:20px;color:
             .any(|px| px[0] != 255 || px[1] != 255 || px[2] != 255)
     }
 
+    /// #218 (takumi #1804): a line taller than the page must not blow up
+    /// or truncate the pump — the pages covering it carry its fragments
+    /// (raster mode paints the partial tile per page; vector mode retains
+    /// the line op on each covering page, the PDF page box clipping it),
+    /// and content after the line keeps flowing onto later pages.
+    #[tokio::test(flavor = "current_thread")]
+    async fn print_line_taller_than_page_fragments_across_pages() {
+        let html: &'static str = r#"<!doctype html><html><head><style>
+html,body{margin:0;padding:0}
+#tall{width:400px;height:1000px;display:flex;background:#c0392b}
+#after{width:400px;height:120px;background:#27ae60}
+#giant{width:400px;font-size:500px;line-height:1;color:#2980b9}
+#tail{width:400px;height:80px;background:#8e44ad}
+</style></head><body>
+<div id="tall"><div style="width:100px;background:#2980b9"></div></div>
+<div id="after"></div>
+<div id="giant">M</div>
+<div id="tail"></div>
+</body></html>"#;
+        let blue_px = |p: &PageImage| {
+            p_rgba_frame(p)
+                .rgba
+                .chunks_exact(4)
+                .filter(|px| px[0] < 100 && px[1] < 130 && px[2] > 140)
+                .count()
+        };
+        // Raster mode: the giant glyph's ink splits across the two pages
+        // covering its line (1120-1700 document space).
+        let mut page = navigated(html, "tall.html").await;
+        let set = render_page_set(
+            &mut page,
+            &PagePumpOptions {
+                mode: PageMode::Print,
+                page_size: (400.0, 300.0),
+                max_pages: 30,
+                collect_text: false,
+            },
+        )
+        .await
+        .expect("oversized line does not error");
+        let shape: Vec<_> = set.pages.iter().map(|p| (p.origin_y, p.height)).collect();
+        assert_eq!(
+            shape,
+            vec![
+                (0.0, 300),
+                (300.0, 300),
+                (600.0, 300),
+                (900.0, 220),
+                (1120.0, 300),
+                (1420.0, 280)
+            ],
+            "greedy break at #after's bottom (1120), guillotine inside the giant line"
+        );
+        assert!(blue_px(&set.pages[4]) > 5000, "giant glyph top fragment paints");
+        assert!(blue_px(&set.pages[5]) > 5000, "giant glyph bottom fragment paints");
+        assert!(has_ink(&p_rgba_frame(&set.pages[5])), "tail block continues after the line");
+
+        // Vector mode: the line op is retained on both covering pages —
+        // band-local baseline below page 4's bottom (only the glyph's top
+        // shows there), on-page on page 5.
+        let mut page = navigated(html, "tall.html").await;
+        let set = render_page_set(
+            &mut page,
+            &PagePumpOptions {
+                mode: PageMode::Print,
+                page_size: (400.0, 300.0),
+                max_pages: 30,
+                collect_text: true,
+            },
+        )
+        .await
+        .expect("oversized line does not error (vector)");
+        let m_ops = |i: usize| {
+            set.text_ops[i]
+                .iter()
+                .filter_map(|op| match op {
+                    diting::diting_layout::paint::PdfOp::Line(l) if l.glyphs.iter().any(|g| g.unicode == "M") => {
+                        Some(l.glyphs[0].y)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let p4 = m_ops(4);
+        assert_eq!(p4.len(), 1, "page 4 retains the giant line op: {p4:?}");
+        assert!(
+            p4[0] > 300.0 && p4[0] < 300.0 + 500.0,
+            "page 4 baseline sits below the page bottom (glyph top fragment): {}",
+            p4[0]
+        );
+        let p5 = m_ops(5);
+        assert_eq!(p5.len(), 1, "page 5 retains the giant line op: {p5:?}");
+        assert!(p5[0] > 0.0 && p5[0] < 280.0, "page 5 baseline on-page: {}", p5[0]);
+        assert!(has_ink(&p_rgba_frame(&set.pages[5])), "tail continues (vector mode)");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn print_breaks_on_block_boundaries() {
         let mut page = navigated(PRINT_HTML, "print.html").await;

@@ -1197,6 +1197,11 @@ pub struct ComputedStyle {
     /// gradient-text idiom. `false` (the initial box fill) covers every box
     /// keyword; our background layers paint the border box regardless.
     pub background_clip_text: bool,
+    /// `box-decoration-break: clone` (non-inherited, initial `slice`).
+    /// V1 consumer: the inline background-clip: text fill, where clone
+    /// restarts the gradient at every wrapped line (each line fragment is
+    /// its own box). Block fragmentation effects are out of scope.
+    pub box_decoration_clone: bool,
     /// Font size in px (absolute keywords/units resolved by the caller's sheet
     /// context; here we accept px/em/% where em resolves against parent).
     pub font_size: Option<f32>,
@@ -1964,6 +1969,12 @@ pub struct TextDecorations {
     pub underline: bool,
     pub overline: bool,
     pub line_through: bool,
+    /// #218 (takumi #1802): the DECLARING element itself carries
+    /// `background-clip: text` — Chrome then strokes the lines with the
+    /// gradient (an explicit `text-decoration-color` loses too, probe
+    /// 2026-10-05) instead of currentcolor, which under clip:text is
+    /// usually `transparent` and would hide the stroke entirely.
+    pub pierce: bool,
 }
 
 impl TextDecorations {
@@ -1975,6 +1986,7 @@ impl TextDecorations {
             underline: self.underline || other.underline,
             overline: self.overline || other.overline,
             line_through: self.line_through || other.line_through,
+            pierce: self.pierce || other.pierce,
         }
     }
 }
@@ -4084,7 +4096,7 @@ pub fn apply_declarations_with(
     declarations: &str,
     fonts: &FontCtx,
 ) -> bool {
-    apply_declarations_importance(style, declarations, fonts, Importance::Any)
+    apply_declarations_importance(style, declarations, fonts, Importance::Any, None)
 }
 
 /// Which declarations an apply pass admits. The cascade runs the normal
@@ -4183,11 +4195,198 @@ pub(crate) fn scale_computed_px(c: &mut ComputedStyle, z: f32) {
 }
 
 
+/// The longhand table the css-wide keywords (#218, takumi #1795 lineage)
+/// copy at field level: `initial` = un-declare (a fresh default holds None
+/// everywhere, and the CSSOM + layout consumers already serve Chrome's
+/// initial values for None fields), `inherit` = the parent's field, `unset`
+/// = by the inherited bit. Deliberately OUT of the table: `display` (the
+/// cascade seeds the UA per-tag value and `display_from_ua` tracks it),
+/// `zoom` (the declared/accum twins must stay consistent), `content`/
+/// counters/grid placement (generated-content plumbing), `custom` (keywords
+/// on `--*` are handled in the custom-property branch), and the pseudos box
+/// (a pseudo pair must never copy down from the parent).
+macro_rules! css_wide_longhands {
+    ($( $name:literal => $field:ident $(.$seg:ident)*, $inh:literal ; )*) => {
+        fn css_wide_copy_field(
+            style: &mut ComputedStyle,
+            src: &ComputedStyle,
+            name: &str,
+        ) -> bool {
+            match name {
+                $( $name => {
+                    style.$field$(.$seg)* = src.$field$(.$seg)*.clone();
+                    true
+                } )*
+                _ => false,
+            }
+        }
+
+        fn css_wide_is_inherited(name: &str) -> bool {
+            match name {
+                $( $name => $inh, )*
+                _ => false,
+            }
+        }
+
+        /// Every covered longhand, for `all: initial/inherit/unset`.
+        const CSS_WIDE_ALL: &[&str] = &[ $( $name ),* ];
+    }
+}
+
+css_wide_longhands! {
+    // --- inherited (unset behaves like inherit) ---
+    "color" => color, true;
+    "font-size" => font_size, true;
+    "font-weight" => font_weight, true;
+    "font-family" => font_family, true;
+    "line-height" => line_height, true;
+    "word-spacing" => word_spacing, true;
+    "white-space" => white_space, true;
+    "font-variant-caps" => font_variant_caps, true;
+    "text-transform" => text_transform, true;
+    "text-align" => text_align, true;
+    "text-align-last" => text_align_last, true;
+    "direction" => direction, true;
+    "list-style-type" => list_style_type, true;
+    "quotes" => quotes, true;
+    "text-shadow" => text_shadow, true;
+    // --- non-inherited (unset behaves like initial) ---
+    "display" => display, false;
+    "background-color" => background_color, false;
+    "background-image" => background_image, false;
+    "background-clip" => background_clip_text, false;
+    "box-decoration-break" => box_decoration_clone, false;
+    "box-shadow" => box_shadow, false;
+    "backdrop-filter" => backdrop_blur, false;
+    "opacity" => opacity, false;
+    "transform" => transform, false;
+    "translate" => translate_prop, false;
+    "rotate" => rotate_prop, false;
+    "scale" => scale_prop, false;
+    "animation" => animation, false;
+    "transition" => transition, false;
+    "border-radius" => border_radius, false;
+    "float" => float_side, false;
+    "clear" => clear_side, false;
+    "border-collapse" => border_collapse, false;
+    "table-layout" => table_layout, false;
+    "vertical-align" => vertical_align, false;
+    "text-decoration-line" => text_decoration_line, false;
+    "text-overflow" => text_overflow, false;
+    "position" => position, false;
+    "top" => top, false;
+    "right" => right, false;
+    "bottom" => bottom, false;
+    "left" => left, false;
+    "z-index" => z_index, false;
+    "box-sizing" => box_sizing, false;
+    "width" => width, false;
+    "height" => height, false;
+    "min-width" => min_width, false;
+    "max-width" => max_width, false;
+    "min-height" => min_height, false;
+    "max-height" => max_height, false;
+    "aspect-ratio" => aspect_ratio, false;
+    "object-fit" => object_fit, false;
+    "object-position" => object_position, false;
+    "overflow-x" => overflow_x, false;
+    "overflow-y" => overflow_y, false;
+    "flex-direction" => flex_direction, false;
+    "flex-wrap" => flex_wrap, false;
+    "justify-content" => justify_content, false;
+    "align-items" => align_items, false;
+    "align-self" => align_self, false;
+    "justify-self" => justify_self, false;
+    "justify-items" => justify_items, false;
+    "flex-grow" => flex_grow, false;
+    "flex-shrink" => flex_shrink, false;
+    "flex-basis" => flex_basis, false;
+    "column-gap" => column_gap, false;
+    "row-gap" => row_gap, false;
+    "margin-top" => margin.top, false;
+    "margin-right" => margin.right, false;
+    "margin-bottom" => margin.bottom, false;
+    "margin-left" => margin.left, false;
+    "padding-top" => padding.top, false;
+    "padding-right" => padding.right, false;
+    "padding-bottom" => padding.bottom, false;
+    "padding-left" => padding.left, false;
+    "border-top-width" => border_width.top, false;
+    "border-right-width" => border_width.right, false;
+    "border-bottom-width" => border_width.bottom, false;
+    "border-left-width" => border_width.left, false;
+    "border-style" => border_style, false;
+    "border-color" => border_color, false;
+}
+
+/// Expand a property name to the longhands a css-wide keyword covers.
+/// `None` = not a shorthand in the table: a bare longhand (or anything
+/// unknown, so `@supports` stays honest) covers itself.
+fn css_wide_expand(name: &str) -> Option<&'static [&'static str]> {
+    const PADDING: &[&str] = &[
+        "padding-top", "padding-right", "padding-bottom", "padding-left",
+    ];
+    const MARGIN: &[&str] = &[
+        "margin-top", "margin-right", "margin-bottom", "margin-left",
+    ];
+    const BORDER_WIDTH: &[&str] = &[
+        "border-top-width", "border-right-width", "border-bottom-width",
+        "border-left-width",
+    ];
+    Some(match name {
+        "all" => CSS_WIDE_ALL,
+        "padding" => PADDING,
+        "margin" => MARGIN,
+        "border-width" => BORDER_WIDTH,
+        "border" => &[
+            "border-top-width", "border-right-width", "border-bottom-width",
+            "border-left-width", "border-style", "border-color",
+        ],
+        "background" => &["background-color", "background-image"],
+        "font" => &["font-size", "font-weight", "font-family", "line-height"],
+        "flex" => &["flex-grow", "flex-shrink", "flex-basis"],
+        "overflow" => &["overflow-x", "overflow-y"],
+        "text-decoration" => &["text-decoration-line"],
+        "list-style" => &["list-style-type"],
+        _ => return None,
+    })
+}
+
+/// Apply one css-wide keyword declaration (`initial`/`inherit`/`unset`) by
+/// copying fields: inherited posture copies the parent's field (rootless
+/// elements and standalone callers fall back to the initial default, which
+/// is what Chrome does for `inherit` on the root), otherwise the fresh
+/// default. Returns false when no covered longhand matched, so unknown
+/// properties keep reporting unapplied.
+fn apply_css_wide_keyword(
+    style: &mut ComputedStyle,
+    name: &str,
+    keyword: &str,
+    parent: Option<&ComputedStyle>,
+) -> bool {
+    let initial_src = ComputedStyle::default();
+    let mut applied = false;
+    let single = [name];
+    let expanded: &[&str] = css_wide_expand(name).unwrap_or(&single);
+    for long in expanded {
+        let inherits = keyword == "inherit"
+            || (keyword == "unset" && css_wide_is_inherited(long));
+        let src = if inherits {
+            parent.unwrap_or(&initial_src)
+        } else {
+            &initial_src
+        };
+        applied |= css_wide_copy_field(style, src, long);
+    }
+    applied
+}
+
 pub(crate) fn apply_declarations_importance(
     style: &mut ComputedStyle,
     declarations: &str,
     fonts: &FontCtx,
     imp: Importance,
+    parent: Option<&ComputedStyle>,
 ) -> bool {
     let mut applied = false;
     for (name, value) in split_declarations(declarations) {
@@ -4207,9 +4406,27 @@ pub(crate) fn apply_declarations_importance(
             // inheritance chain (custom props inherit computed wholesale);
             // make_mut clones only when THIS element re-declares (#109: a
             // 500-var design system made the per-element inheritance clone
-            // the dominant cost of a whole-document style pass).
+            // the dominant cost of a whole-document style pass). The
+            // css-wide keywords apply here too (#218): initial empties the
+            // slot; inherit/unset copy the parent's (custom props are
+            // inherited by default, so unset = inherit), or empty when the
+            // parent has nothing to give.
             let v = value.trim();
-            if v.is_empty() {
+            let kw = v.to_ascii_lowercase();
+            if kw == "initial" {
+                std::sync::Arc::make_mut(&mut style.custom).remove(&name);
+            } else if kw == "inherit" || kw == "unset" {
+                let inherited = parent.and_then(|p| p.custom.get(&name)).cloned();
+                match inherited {
+                    Some(pv) => {
+                        std::sync::Arc::make_mut(&mut style.custom)
+                            .insert(name.clone(), pv);
+                    }
+                    None => {
+                        std::sync::Arc::make_mut(&mut style.custom).remove(&name);
+                    }
+                }
+            } else if v.is_empty() {
                 std::sync::Arc::make_mut(&mut style.custom).remove(&name);
             } else {
                 std::sync::Arc::make_mut(&mut style.custom)
@@ -4231,6 +4448,20 @@ pub(crate) fn apply_declarations_importance(
         } else {
             value.to_string()
         };
+        // CSS-wide keywords (#218): initial/inherit/unset resolve by field
+        // copy before apply_one ever sees the value — the per-property
+        // parsers below would otherwise drop the declaration and the
+        // inherited/default value would survive (the accidental-correctness
+        // hole: dropped declarations match keyword semantics only where the
+        // property is naturally inherited). Checked after var()
+        // substitution so a fallback can substitute a keyword token too.
+        let kw = value.trim().to_ascii_lowercase();
+        if matches!(kw.as_str(), "initial" | "inherit" | "unset")
+            && apply_css_wide_keyword(style, &name, &kw, parent)
+        {
+            applied = true;
+            continue;
+        }
         if apply_one(style, &name, &value, fonts) {
             applied = true;
         }
@@ -5600,6 +5831,17 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             };
             true
         }
+        // box-decoration-break (#218): v1 consumed only by the inline
+        // background-clip: text fill — `clone` restarts the gradient per
+        // wrapped line, the initial `slice` keeps one continuous box.
+        "box-decoration-break" | "-webkit-box-decoration-break" => {
+            style.box_decoration_clone = match v {
+                "clone" => true,
+                "slice" => false,
+                _ => return false,
+            };
+            true
+        }
         _ => false,
     }
 }
@@ -6919,12 +7161,13 @@ pub fn cascade_element(
             candidate.declarations,
             &fonts,
             Importance::Normal,
+            parent,
         );
     }
     // Inline style (same font context: inline em resolves against the
     // element's own font-size too).
     if let Some(inline) = inline_css {
-        apply_declarations_importance(&mut style, inline, &fonts, Importance::Normal);
+        apply_declarations_importance(&mut style, inline, &fonts, Importance::Normal, parent);
     }
     for candidate in &candidates {
         apply_declarations_importance(
@@ -6932,10 +7175,11 @@ pub fn cascade_element(
             candidate.declarations,
             &fonts,
             Importance::Important,
+            parent,
         );
     }
     if let Some(inline) = inline_css {
-        apply_declarations_importance(&mut style, inline, &fonts, Importance::Important);
+        apply_declarations_importance(&mut style, inline, &fonts, Importance::Important, parent);
     }
 
     style

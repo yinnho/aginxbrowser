@@ -600,6 +600,7 @@ mod run_token_memo_tests {
                 tokens: std::cell::RefCell::new(None),
                 small_caps: false,
                 han: None,
+                clip_src: None,
             },
         )
         .unwrap()

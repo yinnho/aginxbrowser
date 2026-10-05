@@ -1327,22 +1327,34 @@ fn lerp_premultiplied(a: [u8; 4], b: [u8; 4], k: f32) -> [u8; 4] {
 /// coordinate space, final alpha = glyph coverage × stop alpha. The
 /// projection math mirrors [`Canvas::fill_gradient`] (same CSS gradient
 /// line convention), minus the shape test: coverage IS the shape.
-fn recolor_gradient_text(r: &mut TextRaster, x: f32, y: f32, g: &TextGradient) {
+/// `box-decoration-break: clone` (#218) swaps the one `area` for the
+/// pixel's own wrapped-line fragment box, so every line restarts the
+/// gradient — the line index comes from the row's y against the item's
+/// line boxes, exactly where the raster laid them.
+fn recolor_gradient_text(r: &mut TextRaster, x: f32, y: f32, line_height: f32, g: &TextGradient) {
     if r.width == 0 || r.height == 0 || g.stops.len() < 2 {
         return;
     }
     let rad = g.css_deg.to_radians() as f64;
     let (dux, duy) = (rad.sin(), -rad.cos());
-    let len = (g.area.width as f64 * dux.abs() + g.area.height as f64 * duy.abs()).max(1.0);
-    let (ccx, ccy) = (
-        g.area.x as f64 + g.area.width as f64 / 2.0,
-        g.area.y as f64 + g.area.height as f64 / 2.0,
-    );
-    let col_a = dux / len;
     // Pixel row 0's y in the item space (the compositor blits at
     // (x, y + top)) — row_base per row, fused multiply-add per pixel.
     let tile_top = y as f64 + r.top as f64;
     for gy in 0..r.height {
+        let (bx, by, bw, bh) = if g.clone_lines.is_empty() {
+            (g.area.x, g.area.y, g.area.width, g.area.height)
+        } else {
+            let idx = (((r.top + gy as f32) / line_height).floor().max(0.0) as usize)
+                .min(g.clone_lines.len() - 1);
+            let (lox, lw) = g.clone_lines[idx];
+            (x + lox, y + idx as f32 * line_height, lw, line_height)
+        };
+        let len = (bw as f64 * dux.abs() + bh as f64 * duy.abs()).max(1.0);
+        let (ccx, ccy) = (
+            bx as f64 + bw as f64 / 2.0,
+            by as f64 + bh as f64 / 2.0,
+        );
+        let col_a = dux / len;
         let row_base = (tile_top + gy as f64 - ccy) * duy / len + 0.5;
         for gx in 0..r.width {
             let i = (gy * r.width + gx) * 4;
@@ -1375,7 +1387,10 @@ pub(crate) fn est_width(text: &str, font_size: f32) -> f32 {
 /// is font-metric derived (CSS Text Decoration 4's `auto` position/thickness
 /// family): underline rides half the descent under the baseline,
 /// line-through sits at ~x-height, overline caps the ascent; thickness
-/// scales with font size at 1px per 16px.
+/// scales with font size at 1px per 16px. #218 (takumi #1802): when the
+/// DECORATING element itself clips a gradient through its text, Chrome
+/// strokes with the gradient (`text-decoration-color` loses) — `gradient`
+/// carries that fill and each column samples it in page space.
 #[allow(clippy::too_many_arguments)]
 fn paint_text_decorations(
     out: &mut Canvas,
@@ -1389,6 +1404,7 @@ fn paint_text_decorations(
     y: f32,
     wrap_at: f32,
     decorations: TextDecorations,
+    gradient: Option<&TextGradient>,
     mono: bool,
     word_spacing: f32,
     truncate_at: Option<f32>,
@@ -1436,8 +1452,44 @@ fn paint_text_decorations(
     });
     let b0 = baseline_offset(m.ascent, m.descent, line_height);
     let thickness = (font_size / 16.0).round().max(1.0);
-    let mut stroke = |lx: f32, ly: f32, w: f32| {
+    let mut stroke = |lx: f32, ly: f32, w: f32, li: usize| {
         if w <= 0.0 {
+            return;
+        }
+        if let Some(g) = gradient.filter(|g| g.stops.len() >= 2) {
+            // Same sampling math as `recolor_gradient_text`: the gradient
+            // area is the whole run's (or the clone line's) box, and the
+            // stroke's page-space x drives the color while the fill itself
+            // still lands at the band-shifted canvas x.
+            let (bx, by, bw, bh) = if g.clone_lines.is_empty() {
+                (g.area.x, g.area.y, g.area.width, g.area.height)
+            } else {
+                let (lox, lw) = g.clone_lines[li.min(g.clone_lines.len() - 1)];
+                (x + lox, y + li as f32 * line_height, lw, line_height)
+            };
+            let rad = g.css_deg.to_radians() as f64;
+            let (dux, duy) = (rad.sin(), -rad.cos());
+            let len = (bw as f64 * dux.abs() + bh as f64 * duy.abs()).max(1.0);
+            let (ccx, ccy) = (bx as f64 + bw as f64 / 2.0, by as f64 + bh as f64 / 2.0);
+            let row = (ly as f64 + thickness as f64 / 2.0 - ccy) * duy / len + 0.5;
+            let tw = w.round().max(1.0) as usize;
+            let th = thickness as usize;
+            let mut tile = vec![0u8; tw * th * 4];
+            for c in 0..tw {
+                let t = (((lx + c as f32) as f64 - ccx) * dux / len + row).clamp(0.0, 1.0);
+                let col = gradient_stop_color(&g.stops, t as f32);
+                for r in 0..th {
+                    tile[(r * tw + c) * 4..(r * tw + c) * 4 + 4].copy_from_slice(&col);
+                }
+            }
+            if out.xf().is_some() {
+                out.blit_rgba_affine(&tile, tw, th, lx as f64, ly as f64);
+            } else {
+                let (x0, y0) = ((lx - dx).round() as i64, (ly - dy).round() as i64);
+                for c in 0..tw {
+                    out.fill_rect(x0 + c as i64, y0, 1, th as i64, tile[c * 4..c * 4 + 4].try_into().unwrap());
+                }
+            }
             return;
         }
         if out.xf().is_some() {
@@ -1467,13 +1519,13 @@ fn paint_text_decorations(
         let baseline = y + (i as f32 * line_height).round() + b0;
         let lx = x + last_line_offset(&lines, i, last_line_align);
         if decorations.underline {
-            stroke(lx, baseline + (m.descent * 0.5).max(1.0), line.width);
+            stroke(lx, baseline + (m.descent * 0.5).max(1.0), line.width, i);
         }
         if decorations.overline {
-            stroke(lx, baseline - m.ascent, line.width);
+            stroke(lx, baseline - m.ascent, line.width, i);
         }
         if decorations.line_through {
-            stroke(lx, baseline - font_size * 0.28, line.width);
+            stroke(lx, baseline - font_size * 0.28, line.width, i);
         }
     }
 }
@@ -2463,7 +2515,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                             // line beside a feathered glyph reads as a bug,
                             // not a shadow.
                             if sh.blur <= 0.0 {
-                                paint_text_decorations(out, fonts, text, *font_size, *bold, [sh.color.0, sh.color.1, sh.color.2, sh.color.3], *line_height, *x + sh.dx, *y + sh.dy, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), 0.0, 0.0, *last_line_align);
+                                paint_text_decorations(out, fonts, text, *font_size, *bold, [sh.color.0, sh.color.1, sh.color.2, sh.color.3], *line_height, *x + sh.dx, *y + sh.dy, *wrap_at, *decorations, None, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), 0.0, 0.0, *last_line_align);
                             }
                         }
                     }
@@ -2473,13 +2525,13 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     let mut owned;
                     let r = if let Some(g) = gradient {
                         owned = (*r).clone();
-                        recolor_gradient_text(&mut owned, *x, *y, g);
+                        recolor_gradient_text(&mut owned, *x, *y, *line_height, g);
                         &owned
                     } else {
                         &r
                     };
                     out.blit_rgba_affine(&r.data, r.width, r.height, *x as f64, (*y + r.top) as f64);
-                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), 0.0, 0.0, *last_line_align);
+                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, decorations.pierce.then(|| gradient.as_ref()).flatten(), *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), 0.0, 0.0, *last_line_align);
                 } else {
                     let pad = shadow_pad.unwrap_or(0.0);
                     if !text_reaches_band(*y, text, *font_size, *wrap_at, *line_height, dy, out.height as i64, pad) {
@@ -2489,7 +2541,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                         for sh in shadows.iter().rev() {
                             stamp_text_shadow(out, fonts, text, *font_size, *bold, *wrap_at, *line_height, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), sh, false, (*x + sh.dx - dx) as f64, (*y + sh.dy - dy) as f64, *last_line_align);
                             if sh.blur <= 0.0 {
-                                paint_text_decorations(out, fonts, text, *font_size, *bold, [sh.color.0, sh.color.1, sh.color.2, sh.color.3], *line_height, *x + sh.dx, *y + sh.dy, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), dx, dy, *last_line_align);
+                                paint_text_decorations(out, fonts, text, *font_size, *bold, [sh.color.0, sh.color.1, sh.color.2, sh.color.3], *line_height, *x + sh.dx, *y + sh.dy, *wrap_at, *decorations, None, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), dx, dy, *last_line_align);
                             }
                         }
                     }
@@ -2497,14 +2549,14 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     let mut owned;
                     let r = if let Some(g) = gradient {
                         owned = (*r).clone();
-                        recolor_gradient_text(&mut owned, *x, *y, g);
+                        recolor_gradient_text(&mut owned, *x, *y, *line_height, g);
                         &owned
                     } else {
                         &r
                     };
                     // Tile row 0 sits `top` px above the leaf's line-box top.
                     out.blit_text(r, (x - dx).round() as i64, (y - dy + r.top).round() as i64);
-                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), dx, dy, *last_line_align);
+                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, decorations.pierce.then(|| gradient.as_ref()).flatten(), *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), dx, dy, *last_line_align);
                 }
             }
         }

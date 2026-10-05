@@ -173,6 +173,8 @@ fn gradient_text_samples_gradient_at_glyph_positions() {
             area: crate::diting_layout::Rect { x: 10.0, y: 0.0, width: 100.0, height: 32.0 },
             stops: vec![(0.0, [255, 0, 0, 255]), (1.0, [0, 0, 255, 255])],
             css_deg: 90.0,
+            clone_per_line: false,
+            clone_lines: Vec::new(),
         }),
         decorations: TextDecorations::default(),
         mono: false,
@@ -1190,7 +1192,7 @@ fn decorations_pre_shaped_matches_reshaped() {
     let tokens = tokens_of(&text, 16.0, false, &fonts, false, 0.0, WhiteSpace::Normal, false, None);
     let stroke = |pre: Option<&[Token]>, truncate_at: Option<f32>| {
         let mut c = Canvas::new_filled(320, 200, [255, 255, 255, 255]);
-        paint_text_decorations(&mut c, &fonts, &text, 16.0, false, [0, 0, 0, 255], 24.0, 2.0, 4.0, 300.0, deco, false, 0.0, truncate_at, WhiteSpace::Normal, false, None, pre, 0.0, 0.0, None);
+        paint_text_decorations(&mut c, &fonts, &text, 16.0, false, [0, 0, 0, 255], 24.0, 2.0, 4.0, 300.0, deco, None, false, 0.0, truncate_at, WhiteSpace::Normal, false, None, pre, 0.0, 0.0, None);
         c.data
     };
     assert_eq!(stroke(None, None), stroke(Some(&tokens), None), "wrapped: pre-shaped == re-shaped");

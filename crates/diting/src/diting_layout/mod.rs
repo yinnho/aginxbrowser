@@ -37,6 +37,7 @@ use crate::diting_css::{
 };
 use crate::diting_dom::tree::{DomTree, NodeId};
 
+mod clip_text;
 mod counters;
 mod forms;
 pub mod image;
@@ -94,10 +95,9 @@ enum TextLeaf {
         mono: bool,
         word_spacing: f32,
         /// The run's white-space mode (nowrap plus the pre family):
-        /// `no_soft_wrap()` drops the wrap width (one line, max-content —
-        /// the box overflows its container and scrollWidth grows for
-        /// free), paint wraps at +inf; `pre`/`pre-line` add hard breaks,
-        /// `pre*` preserve space runs.
+        /// `no_soft_wrap()` drops the wrap width (one line, max-content;
+        /// scrollWidth grows for free), paint wraps at +inf; `pre`/
+        /// `pre-line` add hard breaks, `pre*` preserve space runs.
         ws: WhiteSpace,
         /// `text-overflow: ellipsis` on the owning element (non-inherited,
         /// so captured from the block that owns the run). Only acted on
@@ -118,6 +118,8 @@ enum TextLeaf {
         /// unified ideographs route to the first same-slot face (see
         /// `text::han`). `None` = plain cascade.
         han: Option<text::HanSlot>,
+        /// #218: source DOM text node — flattened spans own no box; the clip chain walks from it.
+        clip_src: Option<NodeId>,
     },
     /// One word/glyph of a MIXED run (text around inline elements): the
     /// batch-2b word-leaf fallback, now carrying paint context (batch 4d).
@@ -160,12 +162,12 @@ fn effective_line_height(
 }
 
 /// Whether `cid` acts as an in-flow block-level ELEMENT child toward its
-/// parent — the trigger half of the block-in-inline split (CSS2.1
-/// §9.2.1.1). An inline child that itself carries a block child counts
-/// too: it blockifies (see [`blockifies_for_block_child`]) and therefore
-/// presents block-level outward, which is how the spec's split propagates
-/// through nested inlines. Replaced children never trigger — they stay
-/// atomic run members either way (Chrome does not split an inline around
+/// parent — the trigger half of the block-in-inline split (CSS2.1 §9.2.1.1).
+/// An inline child that itself carries a block child counts too: it
+/// blockifies (see [`blockifies_for_block_child`]) and presents block-level
+/// outward — how the spec's split propagates through nested inlines.
+/// Replaced children never trigger — they stay atomic run members either
+/// way (Chrome does not split an inline around
 /// an inline-level replaced box). Floats and out-of-flow boxes are
 /// excluded v1: they ride the float-zone/reparent machinery, not the split.
 fn block_level_child(
@@ -304,10 +306,9 @@ fn to_taffy_style(style: &ComputedStyle, pct_h_resolves: bool) -> Style {
         None => LengthPercentage::length(0.0),
     };
     // Margin has an auto variant; unset margins are CSS `0`, not auto.
-    // `Length::Auto` (margin:auto) maps to taffy's auto - taffy's block
-    // algorithm implements both the in-flow horizontal auto-margin
-    // expansion (CSS §10.3.3 centering) and the abspos auto-margin
-    // resolution (§abs-non-replaced-width).
+    // `Length::Auto` (margin:auto) maps to taffy's auto — its block
+    // algorithm implements the in-flow expansion (§10.3.3 centering) and
+    // the abspos resolution (§abs-non-replaced-width).
     let lpa_zero = |v: Option<crate::diting_css::Length>| match v {
         Some(crate::diting_css::Length::Px(px)) => LengthPercentageAuto::length(px),
         Some(crate::diting_css::Length::Percent(p)) => LengthPercentageAuto::percent(p / 100.0),
@@ -1028,6 +1029,10 @@ fn decoration_context(
         let boundary = if let Some(s) = styles.get(&nid) {
             if let Some(d) = s.text_decoration_line {
                 out = out.union(d);
+                // #218: clip:text on the DECLARER pierces the strokes.
+                if s.background_clip_text {
+                    out.pierce = true;
+                }
             }
             nid != id
                 && (s.display == Some(CssDisplay::InlineBlock)
@@ -1044,19 +1049,27 @@ fn decoration_context(
     out
 }
 
+/// An own-element decoration set (pseudo leaves): the decorator IS the
+/// element, so clip:text on it pierces the strokes (#218).
+fn own_decorations(p: &ComputedStyle) -> TextDecorations {
+    let mut d = p.text_decoration_line.unwrap_or_default();
+    if p.background_clip_text {
+        d.pierce = true;
+    }
+    d
+}
+
 /// `vertical-align: sub|super` as a baseline shift on inline text (CSS 2.1
 /// §10.8.1 keyword model, Chromium constants): sub drops 20% of the PARENT's
-/// font-size below the baseline, super lifts 40% above it — reproduces the
-/// Chrome probes (a 20px-parent `<sup>` and an explicit 20px `super` both
-/// grow the line by exactly 8px). Shifts compose up the ancestor chain
-/// (nested sup compounds). The walk stops at an atomic-inline (inline-block)
-/// or out-of-flow boundary WITHOUT applying the boundary's own declaration:
-/// vertical-align on an inline-block moves the BOX, not the text inside.
-/// Down-positive: sub → +0.2×parent_fs, super → −0.4×parent_fs; an authored
-/// length (up-positive, CSS: positive raises) flips sign; a percentage
-/// resolves against the element's own line-height before the same flip;
-/// baseline/top/middle/bottom are 0 (the line-baseline machinery handles
-/// those at the alignment site).
+/// font-size below the baseline, super lifts 40% above it — the Chrome probes
+/// (a 20px-parent `<sup>` and an explicit 20px `super` both grow the line by
+/// exactly 8px). Shifts compose up the ancestor chain (nested sup compounds).
+/// The walk stops at an atomic-inline (inline-block) or out-of-flow boundary
+/// WITHOUT applying the boundary's own declaration — vertical-align on an
+/// inline-block moves the BOX. Down-positive: sub → +0.2×parent_fs, super →
+/// −0.4×parent_fs; an authored length flips sign (CSS: positive raises); a
+/// percentage resolves against the element's own line-height; the baseline/
+/// top/middle/bottom keywords are 0 (the line-baseline machinery owns them).
 fn valign_shift(
     tree: &DomTree,
     id: NodeId,
@@ -1370,11 +1383,9 @@ pub(crate) fn tokenize_ws(text: &str, ws: crate::diting_css::WhiteSpace) -> Vec<
 /// unconditional block-side max a no-op (max(a+b applied once)) while giving
 /// flex/grid the correct sum.
 ///
-/// Out of scope (documented approximations): %-margin pairs (taffy resolves
-/// them against the CB width at layout time; the max is unknowable at build
-/// time — such pairs keep whatever the engine does), collapse-through of
-/// empty self-collapsing blocks, and first/last-child collapse with the
-/// parent.
+/// Out of scope (documented approximations): %-margin pairs (the collapsed
+/// max is unknowable at build time), collapse-through of empty
+/// self-collapsing blocks, and first/last-child collapse with the parent.
 /// Whether this taffy style is the flex-column alignment stand-in for a
 /// block's `text-align: center/right` (see `to_taffy_style`). Tables share
 /// Column but stretch; rows are Row — both stay outside this predicate.
@@ -1629,9 +1640,8 @@ fn ws_rank(ws: WhiteSpace) -> u8 {
 ///   run's size UP so nothing overflows the box, which taffy's own
 ///   round-to-nearest would not reproduce (probe: "hello" 37.36 → 38);
 /// - height = line count × used line-height (blitz pins `normal` at
-///   1.2×fs; declared values arrive with the leaf) plus the baseline-shift
-///   pad, so a shifted (sub/sup) run grows its line box by exactly the
-///   shift's extent.
+///   1.2×fs) plus the baseline-shift pad (a sub/sup run grows its line box
+///   by exactly the shift's extent).
 fn measure_text_leaf(
     tokens: &[text::Token],
     line_height: f32,
@@ -2662,7 +2672,8 @@ fn build_flow_column(
     }
     let mut flow_children: Vec<taffy::tree::NodeId> = Vec::new();
     let mut run: Vec<RunSeg> = Vec::new();
-    let flush_run = |run: &mut Vec<RunSeg>, flow_children: &mut Vec<taffy::tree::NodeId>, taffy_tree: &mut TaffyTree<TextLeaf>, run_wrappers: &mut Vec<taffy::tree::NodeId>| {
+    let mut run_clip: Option<NodeId> = None;
+    let flush_run = |run: &mut Vec<RunSeg>, flow_children: &mut Vec<taffy::tree::NodeId>, taffy_tree: &mut TaffyTree<TextLeaf>, run_wrappers: &mut Vec<taffy::tree::NodeId>, clip: Option<NodeId>| {
         if run.is_empty() {
             return;
         }
@@ -2689,7 +2700,7 @@ fn build_flow_column(
                 let run_ellipsis = false;
                 if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                     Style::default(),
-                    TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, ellipsis: run_ellipsis, tokens: std::cell::RefCell::new(None), small_caps: *sc, han: *han },
+                    TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, ellipsis: run_ellipsis, tokens: std::cell::RefCell::new(None), small_caps: *sc, han: *han, clip_src: clip },
                 ) {
                     flow_children.push(leaf);
                 }
@@ -2746,7 +2757,7 @@ fn build_flow_column(
                 RunSeg::Text(t, ..) => !t.trim().is_empty(),
                 RunSeg::Nodes(n) => !n.is_empty(),
             });
-            flush_run(&mut run, &mut flow_children, taffy_tree, run_wrappers);
+            flush_run(&mut run, &mut flow_children, taffy_tree, run_wrappers, run_clip.take());
             if !line_has_content && child_display != Some(CssDisplay::None) {
                 let (_, _, lh) = font_context(tree, child, styles, fonts);
                 if let Some(strut) = br_strut_leaf(taffy_tree, lh) {
@@ -2771,7 +2782,7 @@ fn build_flow_column(
                 if inline_atom && !out_of_flow {
                     run.push(RunSeg::Nodes(vec![leaf]));
                 } else {
-                    flush_run(&mut run, &mut flow_children, taffy_tree, run_wrappers);
+                    flush_run(&mut run, &mut flow_children, taffy_tree, run_wrappers, run_clip.take());
                     flow_children.push(leaf);
                 }
             }
@@ -2798,6 +2809,7 @@ fn build_flow_column(
             let nws = tree.with_node(child, |n| n.parent).flatten().and_then(|p| styles.get(&p)).and_then(|s| s.white_space).unwrap_or(WhiteSpace::Normal);
             let sc = small_caps_context(tree, child, styles);
             let han = han_context(tree, child, styles);
+            run_clip = Some(child);
             run.push(RunSeg::Text(text, fs, b, col, lh, deco, vs, mono, ws, nws, sc, han));
         } else if child_display == Some(CssDisplay::InlineBlock) && !out_of_flow {
             // Atomic inline-level box (obscura#750 family): keeps its own
@@ -2819,13 +2831,13 @@ fn build_flow_column(
                 }
             }
         } else {
-            flush_run(&mut run, &mut flow_children, taffy_tree, run_wrappers);
+            flush_run(&mut run, &mut flow_children, taffy_tree, run_wrappers, run_clip.take());
             if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta) {
                 flow_children.push(node);
             }
         }
     }
-    flush_run(&mut run, &mut flow_children, taffy_tree, run_wrappers);
+    flush_run(&mut run, &mut flow_children, taffy_tree, run_wrappers, run_clip.take());
     flow_children
 }
 
@@ -4131,12 +4143,13 @@ fn pseudo_inline_run_leaf(
                 bold,
                 color: p.color.map_or([0, 0, 0, 255], |c| [c.0, c.1, c.2, c.3]),
                 line_height: effective_line_height(fonts, p.line_height.as_ref(), fs, bold),
-                decorations: p.text_decoration_line.unwrap_or_default(),
+                decorations: own_decorations(p),
                 baseline_shift: 0.0,
                 mono: p.font_family.as_deref().is_some_and(crate::diting_css::wants_monospace),
                 word_spacing: p.word_spacing.unwrap_or(0.0),
                 ws,
                 ellipsis: false,
+                clip_src: None,
                 tokens: std::cell::RefCell::new(None),
                 small_caps: p.font_variant_caps.unwrap_or(false),
                 han: p.lang.as_deref().and_then(text::han_slot_for_lang),
@@ -4220,6 +4233,7 @@ fn pseudo_leaf(
                     ellipsis,
                     small_caps,
                     han,
+                    clip_src,
                     ..
                 }) = taffy_tree.get_node_context(adj)
                 {
@@ -4248,6 +4262,7 @@ fn pseudo_leaf(
                                     tokens: std::cell::RefCell::new(None),
                                     small_caps: *small_caps,
                                     han: *han,
+                                    clip_src: *clip_src,
                                 },
                             )
                             .ok();
@@ -4335,7 +4350,7 @@ fn pseudo_leaf(
                                 bold,
                                 color: p.color.map_or([0, 0, 0, 255], |c| [c.0, c.1, c.2, c.3]),
                                 line_height: effective_line_height(fonts, p.line_height.as_ref(), fs, bold),
-                                decorations: p.text_decoration_line.unwrap_or_default(),
+                                decorations: own_decorations(p),
                                 baseline_shift: 0.0,
                                 mono: p
                                     .font_family
@@ -4347,6 +4362,7 @@ fn pseudo_leaf(
                                 tokens: std::cell::RefCell::new(None),
                                 small_caps: p.font_variant_caps.unwrap_or(false),
                                 han: p.lang.as_deref().and_then(text::han_slot_for_lang),
+                                clip_src: None,
                             }
                         },
                     )
@@ -4443,7 +4459,8 @@ fn build_element_inner(
     }
     let mut direct: Vec<taffy::tree::NodeId> = Vec::new();
     let mut run: Vec<RunSeg> = Vec::new();
-    let flush_run = |run: &mut Vec<RunSeg>, direct: &mut Vec<taffy::tree::NodeId>, taffy_tree: &mut TaffyTree<TextLeaf>, run_wrappers: &mut Vec<taffy::tree::NodeId>| {
+    let mut run_clip: Option<NodeId> = None;
+    let flush_run = |run: &mut Vec<RunSeg>, direct: &mut Vec<taffy::tree::NodeId>, taffy_tree: &mut TaffyTree<TextLeaf>, run_wrappers: &mut Vec<taffy::tree::NodeId>, clip: Option<NodeId>| {
         if run.is_empty() {
             return;
         }
@@ -4477,7 +4494,7 @@ fn build_element_inner(
             });
             if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                 Style::default(),
-                TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, ellipsis: run_ellipsis, tokens: std::cell::RefCell::new(None), small_caps: *sc, han: *han },
+                TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, ellipsis: run_ellipsis, tokens: std::cell::RefCell::new(None), small_caps: *sc, han: *han, clip_src: clip },
             ) {
                 direct.push(leaf);
                 return;
@@ -4518,28 +4535,15 @@ fn build_element_inner(
 
     let (font_size, _bold, lh_elem) = font_context(tree, id, styles, fonts);
 
-    // --- float zone (batch 8b/8c): floats reified as synthetic flex rows ---
-    // taffy (as configured — float_layout is a non-default feature that must
-    // stay off) has no floats, so float shapes are REIFIED at tree-build
-    // time, following upstream obscura-render's
-    // build_children_with_float_zone:
-    //
-    // - A RUN of ≥2 consecutive same-side floats (the classic float-grid
-    //   idiom, whitespace between them allowed) becomes ONE wrapping flex
-    //   row — CSS places same-side floats side by side, wrapping to a new
-    //   band when the row fills (8c).
+    // --- float zone (batch 8b/8c/8h) -------------------------------------
+    // taffy has no floats, so float shapes are REIFIED at tree-build time
+    // (upstream obscura-render's build_children_with_float_zone):
+    // - A RUN of ≥2 consecutive same-side floats (whitespace between them
+    //   allowed) becomes ONE wrapping flex row (8c).
     // - A single float plus following siblings becomes [float | anonymous
-    //   flow column]: the column takes the remaining width; the float keeps
-    //   its authored margins/size. Right floats sit at the row's inline-end.
-    //   (8b)
-    // - A `clear` sibling ends a zone and stays in normal flow after the
-    //   row.
-    // - Zones interleave with normal siblings in DOCUMENT order (8h): a
-    //   float's zone row lands at the float's document position — content
-    //   before it keeps its band ABOVE the zone — and a second float after
-    //   the zone opens its own zone instead of demoting to a plain block.
-    //   Wikipedia's lead section floats an infobox, then two sidebar tables
-    //   across empty bridges, then runs the lead paragraphs.
+    //   flow column]: the column takes the remaining width (8b).
+    // - A `clear` sibling ends a zone and stays in normal flow after it.
+    // - Zones interleave with normal siblings in DOCUMENT order (8h).
     let is_float_child = |cid: &NodeId| -> bool {
         styles
             .get(cid)
@@ -4578,13 +4582,10 @@ fn build_element_inner(
 
         // --- 8e: the right-float navigation bar --------------------------
         // A container of inline-ish flow content plus >=2 RIGHT floats and
-        // no left float: right floats place from the inline-end inward, so
-        // their visual order is the REVERSE of source order, while ordinary
-        // content fills from the start of the same band. Serializing each
-        // float into its own row reverses the two groups and shrink-wraps
-        // the bar. Reified as [flow items | reversed right-float group],
-        // with an anonymous wrapping row at definite width (upstream
-        // strategy 4).
+        // no left float: right floats place from the inline-end inward —
+        // visual order REVERSED vs source — while ordinary content fills
+        // from the band's start. Reified as [flow items | reversed
+        // right-float group], an anonymous wrapping row at definite width.
         let first_float_side = child_ids
             .iter()
             .find(|cid| is_float_child(cid))
@@ -5111,7 +5112,7 @@ fn build_element_inner(
                 RunSeg::Text(t, ..) => !t.trim().is_empty(),
                 RunSeg::Nodes(n) => !n.is_empty(),
             });
-            flush_run(&mut run, &mut direct, taffy_tree, run_wrappers);
+            flush_run(&mut run, &mut direct, taffy_tree, run_wrappers, run_clip.take());
             if !line_has_content && child_display != Some(CssDisplay::None) {
                 let (_, _, lh) = font_context(tree, child, styles, fonts);
                 if let Some(strut) = br_strut_leaf(taffy_tree, lh) {
@@ -5136,7 +5137,7 @@ fn build_element_inner(
                 if inline_atom && !atomic_container && !out_of_flow {
                     run.push(RunSeg::Nodes(vec![leaf]));
                 } else {
-                    flush_run(&mut run, &mut direct, taffy_tree, run_wrappers);
+                    flush_run(&mut run, &mut direct, taffy_tree, run_wrappers, run_clip.take());
                     direct.push(leaf);
                 }
             }
@@ -5163,6 +5164,7 @@ fn build_element_inner(
             let nws = tree.with_node(child, |n| n.parent).flatten().and_then(|p| styles.get(&p)).and_then(|s| s.white_space).unwrap_or(WhiteSpace::Normal);
             let sc = small_caps_context(tree, child, styles);
             let han = han_context(tree, child, styles);
+            run_clip = Some(child);
             run.push(RunSeg::Text(text, fs, b, col, lh, deco, vs, mono, ws, nws, sc, han));
         } else if child_display == Some(CssDisplay::InlineBlock) && !atomic_container && !out_of_flow {
             // An inline-level block is ATOMIC (Chrome line-box model): it keeps
@@ -5195,14 +5197,14 @@ fn build_element_inner(
                 }
             }
         } else {
-            flush_run(&mut run, &mut direct, taffy_tree, run_wrappers);
+            flush_run(&mut run, &mut direct, taffy_tree, run_wrappers, run_clip.take());
             if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta) {
                 direct.push(node);
             }
         }
     }
     }
-    flush_run(&mut run, &mut direct, taffy_tree, run_wrappers);
+    flush_run(&mut run, &mut direct, taffy_tree, run_wrappers, run_clip.take());
     // Sibling margin normalization runs over the FINAL child list of every
     // container (see collapse_adjacent_sibling_margins: fixes the
     // border/padding separation rule taffy's native block collapse lacks,
@@ -5516,6 +5518,10 @@ pub struct TextGradient {
     /// linear-gradient angle in CSS degrees (0 = to top, clockwise), same
     /// convention `BgGradient` carries.
     pub css_deg: f32,
+    /// `box-decoration-break: clone` (#218): restart per line; the
+    /// per-line fragment boxes (x offset, advance).
+    pub clone_per_line: bool,
+    pub clone_lines: Vec<(f32, f32)>,
 }
 
 /// Lay a DOM tree out at a fixed viewport size and return each element's
@@ -7487,20 +7493,17 @@ pub fn layout_collect_with_images(
                 {
                     if styles.get(dom_id).is_some_and(|s| s.background_clip_text) {
                         // background-clip: text: the gradient never fills
-                        // the box (that was the opaque-block-covering-the-
-                        // text bug) — it becomes the glyph fill for this
-                        // subtree, threaded down like alpha. Stops stay raw;
-                        // each text folds its own inherited alpha at attach.
-                        // The captured map guards the space: a text leaf
-                        // only attaches while its accumulated xf still
-                        // equals this one, so an intervening transform
-                        // degrades those glyphs to solid color instead of
-                        // sampling a mismatched space.
+                        // the box (the opaque-block-covering-the-text bug) —
+                        // it becomes the subtree's glyph fill, threaded down
+                        // like alpha; the xf array guards the space (see the
+                        // attach filter below).
                         text_gradient = Some((
                             TextGradient {
                                 area: bg_rect,
                                 stops: g.stops.iter().map(|(p, c)| (*p, [c.0, c.1, c.2, c.3])).collect(),
                                 css_deg: g.css_deg,
+                                clone_per_line: styles.get(dom_id).is_some_and(|s| s.box_decoration_clone),
+                                clone_lines: Vec::new(),
                             },
                             child_xf.to_array(),
                         ));
@@ -8016,11 +8019,9 @@ pub fn layout_collect_with_images(
                 }
             }
         }
-        // background-clip: text attach: the inherited fill lands only while
-        // this leaf still paints in the space the gradient was captured in
-        // (an intervening transform opened a different one — degrade to the
-        // solid run color), with this leaf's inherited opacity folded into
-        // the stops.
+        // background-clip: text attach: only while this leaf still paints
+        // in the captured space (transform mismatch → solid), this leaf's
+        // inherited opacity folded into the stops.
         let text_gradient_fill = text_gradient
             .as_ref()
             .filter(|(_, at)| *at == xf.to_array())
@@ -8028,6 +8029,8 @@ pub fn layout_collect_with_images(
                 area: g.area,
                 stops: g.stops.iter().map(|(p, c)| (*p, with_alpha(*c, alpha))).collect(),
                 css_deg: g.css_deg,
+                clone_per_line: g.clone_per_line,
+                clone_lines: g.clone_lines.clone(),
             });
         // Inherited text-shadow layers with this element's opacity folded
         // into each color (the item colors carry alpha, shadows ride along).
@@ -8057,7 +8060,7 @@ pub fn layout_collect_with_images(
                     })
                     .collect()
             });
-        if let Some(TextLeaf::Run { text, font_size, bold, color, line_height, decorations, mono, word_spacing, ws, ellipsis, tokens, small_caps, han, .. }) = taffy_tree.get_node_context(node) {
+        if let Some(TextLeaf::Run { text, font_size, bold, color, line_height, decorations, mono, word_spacing, ws, ellipsis, tokens, small_caps, han, clip_src, .. }) = taffy_tree.get_node_context(node) {
             // text-align-last (#214, blitz#998): inherited, so the run's
             // OWNING block carries the computed value — walk taffy ancestors
             // to the first boxed element (pure runs hang directly off their
@@ -8085,6 +8088,9 @@ pub fn layout_collect_with_images(
             // Under a non-diagonal map (affine batch) the leaf emits RAW
             // local geometry and the canvas-side SetXf bracket maps the
             // rasterized tile per pixel.
+            // Inline clip:text fill (#218): a span owns no box — rebuilt from its line geometry.
+            let toks = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han);
+            let clip_fill = |x: f32, y: f32, wrap_at: f32, lh: f32, s: (f32, f32)| clip_text::run_fill(text_gradient_fill.clone(), *clip_src, tree, styles, x, y, wrap_at, lh, &toks, *ws, last_line_align, alpha, s);
             if xf.is_diagonal() {
                 let wrap_at = taffy_tree
                     .parent(node)
@@ -8092,9 +8098,8 @@ pub fn layout_collect_with_images(
                     .map(|l| l.content_box_width())
                     .unwrap_or(viewport_width)
                     * xf.a;
-                // no-soft-wrap modes measure/paint one line: wrap at +inf (a
-                // distinct RasterKey), ellipsis truncates at the real box
-                // width.
+                // no-soft-wrap: wrap at +inf (a distinct RasterKey), ellipsis
+                // truncates at the real box width.
                 let truncate_at = if *ellipsis && ws.no_soft_wrap() { Some(wrap_at) } else { None };
                 let wrap_at = if ws.no_soft_wrap() { f32::INFINITY } else { wrap_at };
                 items.push(PaintItem::Text {
@@ -8106,17 +8111,16 @@ pub fn layout_collect_with_images(
                     x: abs.0 * xf.a + xf.e,
                     y: abs.1 * xf.d + xf.f,
                     wrap_at,
-                    gradient: text_gradient_fill.clone(),
+                    gradient: clip_fill(abs.0 * xf.a + xf.e, abs.1 * xf.d + xf.f, wrap_at, *line_height * xf.d, (xf.a, xf.d)),
                     decorations: *decorations,
                     mono: *mono,
                     word_spacing: word_spacing * xf.d,
                     truncate_at,
-                    // Paint half of obscura#983: hand the leaf's measure-time
-                    // wrap tokens to the paint item so repaints stop re-shaping.
-                    // Only valid unscaled — a diagonal scale folds d into
-                    // font_size/word_spacing and the memo no longer matches.
+                    // obscura#983 paint half: hand the leaf's measure-time
+                    // wrap tokens to the item (unscaled only — a diagonal
+                    // scale folds d and the memo no longer matches).
                     tokens: if xf.d == 1.0 {
-                        Some(run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han))
+                        Some(toks.clone())
                     } else {
                         None
                     },
@@ -8143,12 +8147,12 @@ pub fn layout_collect_with_images(
                     x: abs.0,
                     y: abs.1,
                     wrap_at,
-                    gradient: text_gradient_fill.clone(),
+                    gradient: clip_fill(abs.0, abs.1, wrap_at, *line_height, (1.0, 1.0)),
                     decorations: *decorations,
                     mono: *mono,
                     word_spacing: *word_spacing,
                     truncate_at,
-                    tokens: Some(run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han)),
+                    tokens: Some(toks),
                     ws: *ws,
                     text_shadow: run_text_shadow.clone(),
                     small_caps: *small_caps,
@@ -8598,7 +8602,9 @@ pub fn layout_collect_with_images(
             // border-only spans entirely.
             let st = styles.get(dom);
             let bg = st.and_then(|s| s.background_color).filter(|c| c.3 != 0);
+            // clip:text spans: the band gradient moves into the glyphs (#218).
             let grad = st
+                .filter(|s| !s.background_clip_text)
                 .and_then(|s| s.background_image.as_deref())
                 .and_then(crate::diting_css::parse_linear_gradient);
             // (#26): box-shadow layers paint even on a span with no

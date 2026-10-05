@@ -1424,19 +1424,19 @@ fn text_decoration_grammar() {
     assert!(apply_one(&mut s, "text-decoration", "underline", &f));
     assert_eq!(
         s.text_decoration_line,
-        Some(TextDecorations { underline: true, overline: false, line_through: false })
+        Some(TextDecorations { underline: true, overline: false, line_through: false, pierce: false })
     );
     // Multi-line longhand unions.
     assert!(apply_one(&mut s, "text-decoration-line", "underline line-through", &f));
     assert_eq!(
         s.text_decoration_line,
-        Some(TextDecorations { underline: true, overline: false, line_through: true })
+        Some(TextDecorations { underline: true, overline: false, line_through: true, pierce: false })
     );
     // Shorthand style/color/thickness legs parse-and-drop.
     assert!(apply_one(&mut s, "text-decoration", "underline wavy red 2px", &f));
     assert_eq!(
         s.text_decoration_line,
-        Some(TextDecorations { underline: true, overline: false, line_through: false })
+        Some(TextDecorations { underline: true, overline: false, line_through: false, pierce: false })
     );
     // `none` is a real declaration (kills UA decorations); overline alone
     // is legal; garbage invalidates the whole declaration.
@@ -1445,7 +1445,7 @@ fn text_decoration_grammar() {
     assert!(apply_one(&mut s, "text-decoration-line", "overline", &f));
     assert_eq!(
         s.text_decoration_line,
-        Some(TextDecorations { underline: false, overline: true, line_through: false })
+        Some(TextDecorations { underline: false, overline: true, line_through: false, pierce: false })
     );
     assert!(!apply_one(&mut s, "text-decoration", "sideways", &f));
     assert!(!apply_one(&mut s, "text-decoration-line", "wavy", &f));

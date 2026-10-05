@@ -10111,6 +10111,10 @@ globalThis.getComputedStyle = (el, pseudoElt) => {
     'outline-width': '3px',
   };
 
+  // A css-wide keyword is never a valid computed value — `color: initial`
+  // must resolve downstream (snapshot → default), never echo verbatim (#218).
+  const _CSS_WIDE_KW = /^\s*(inherit|initial|unset|revert|revert-layer)\s*$/i;
+
   const lookup = (rawProp) => {
     if (typeof rawProp !== 'string') return '';
     // Snapshot first: it already resolved the cascade, inline included.
@@ -10126,26 +10130,21 @@ globalThis.getComputedStyle = (el, pseudoElt) => {
       return snapshot.rendered[kebab];
     }
     // Box offsets outrank the inline echo: Chrome's resolved value for a
-    // positioned element is the used value (its geometry), and an inline
-    // write the parser dropped — style.left='NaNpx' (#129) — must never
-    // read back through the computed face.
+    // positioned element is the used value; an inline write the parser
+    // dropped — style.left='NaNpx' (#129) — must never read back through.
     if (!pseudoName && (kebab === 'left' || kebab === 'top'
         || kebab === 'right' || kebab === 'bottom')) {
       const dim = dimensionFor(kebab);
       if (dim != null) return dim;
     }
     // Inline value next — CSSOM writes not yet folded into a snapshot
-    // (or no layout run at all). Pseudo-elements carry no inline style
-    // (their cascade lives in the host's pseudo tables), so this branch
-    // is element-only.
+    // (or no layout run at all); pseudo-elements carry no inline style.
     if (!pseudoName) {
       const inlineVal = target.getPropertyValue ? target.getPropertyValue(rawProp) : '';
-      if (inlineVal) return inlineVal;
+      if (inlineVal && !_CSS_WIDE_KW.test(inlineVal)) return inlineVal;
     }
     // A pseudo-element generates no box of its own: Chrome answers 'auto'
-    // for width/height instead of the host's geometry, and the remaining
-    // dimensionFor entries (left/top/offset-*) are host geometry too —
-    // both stay element-only.
+    // for width/height instead of the host's geometry — element-only.
     if (pseudoName) {
       if (kebab === 'width' || kebab === 'inline-size' || kebab === 'height' || kebab === 'block-size') return 'auto';
     } else {
