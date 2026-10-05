@@ -17,9 +17,10 @@ Checks:
                         product cross-check pipeline (comment-stripped, so
                         doc mentions of upstream bugs are fine).
   R3   faces are thin — no `unsafe` anywhere in a face (comment-stripped).
-  G    god-file ratchet — non-test .rs files stay <= GOD_FILE_CAP lines;
-                        files over the cap at ratchet time are grandfathered at
-                        their exact line count and may not grow. Splitting a
+  G    god-file ratchet — non-test .rs files and the engine's baked-in JS
+                        (crates/diting/js/, snapshot sources) stay <= GOD_FILE_CAP
+                        lines; files over the cap at ratchet time are grandfathered
+                        at their exact line count and may not grow. Splitting a
                         grandfathered file shrinks or retires its entry.
 """
 
@@ -73,6 +74,7 @@ GOD_FILE_CAP = 1500
 # growth past the recorded count fails CI. Removing a file without removing its
 # entry also fails (stale ratchet).
 GOD_FILE_GRANDFATHER = {
+    "crates/diting/js/bootstrap.js": 20147,
     "crates/diting/src/diting_layout/mod.rs": 9642,
     "crates/diting/src/diting_css/mod.rs": 8511,
     "crates/diting/src/diting_js/ops/mod.rs": 6475,
@@ -199,25 +201,28 @@ def check_god_files() -> list[str]:
     """Ratchet: cap for new files, no growth for grandfathered ones."""
     out = []
     seen = set()
-    for base in (PRODUCT, ENGINE):
-        for f in rs_files(base):
-            if f.name == "tests.rs":  # colocated contract suites are a feature, not debt
-                continue
-            lines = len(f.read_text().splitlines())
-            key = rel(f)
-            if key in GOD_FILE_GRANDFATHER:
-                seen.add(key)
-                cap = GOD_FILE_GRANDFATHER[key]
-                if lines > cap:
-                    out.append(
-                        f"{key}: grew {cap} -> {lines} lines — grandfathered god "
-                        "files only shrink; split the file (ARCHITECTURE.md §6 P2)"
-                    )
-            elif lines > GOD_FILE_CAP:
+    # The engine's baked-in realm JS (js/, executed into the V8 snapshot by
+    # build.rs) is engine source that happens to be JS — same ratchet.
+    files = [f for base in (PRODUCT, ENGINE) for f in rs_files(base)]
+    files += sorted((ENGINE / "js").glob("*.js"))
+    for f in files:
+        if f.name == "tests.rs":  # colocated contract suites are a feature, not debt
+            continue
+        lines = len(f.read_text().splitlines())
+        key = rel(f)
+        if key in GOD_FILE_GRANDFATHER:
+            seen.add(key)
+            cap = GOD_FILE_GRANDFATHER[key]
+            if lines > cap:
                 out.append(
-                    f"{key}: {lines} lines exceeds the {GOD_FILE_CAP}-line god-file "
-                    "cap — split it, then grandfather entries shrink (ARCHITECTURE.md §6 P2)"
+                    f"{key}: grew {cap} -> {lines} lines — grandfathered god "
+                    "files only shrink; split the file (ARCHITECTURE.md §6 P2)"
                 )
+        elif lines > GOD_FILE_CAP:
+            out.append(
+                f"{key}: {lines} lines exceeds the {GOD_FILE_CAP}-line god-file "
+                "cap — split it, then grandfather entries shrink (ARCHITECTURE.md §6 P2)"
+            )
     for key in sorted(set(GOD_FILE_GRANDFATHER) - seen):
         out.append(f"{key}: grandfather entry is stale (file gone) — remove it from the ratchet")
     return out
