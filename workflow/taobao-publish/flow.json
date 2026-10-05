@@ -134,11 +134,11 @@
     {
       "op": "eval",
       "args": {
-        "script": "(function(){var D={{args}},eng=window.GlobalStore.engine,fv=eng.getModels().formValues;var cp={};cp[D.brand_prop_name]=String(D.brand_id);fv.catProp=cp;var pre={catProp:JSON.stringify(fv.catProp),tpl:((fv.descRepublicOfSell||{}).descPageCommitParam||{}).templateContent?1:0,main:(fv.mainImagesGroup&&fv.mainImagesGroup.images||[]).length,sku:(fv.sku||[]).length};if(pre.tpl!==1)throw new Error('preflight: desc templateContent missing');if(pre.main<1)throw new Error('preflight: mainImagesGroup empty');if(pre.sku<1)throw new Error('preflight: sku empty');eng.getComponent('button-submit').emit('click');return JSON.stringify(pre)})()",
+        "script": "(function(){var D={{args}},eng=window.GlobalStore.engine,fv=eng.getModels().formValues;var cp={};cp[D.brand_prop_name]={value:Number(D.brand_id),text:D.brand_text};fv.catProp=cp;var pre={catProp:JSON.stringify(fv.catProp),tpl:((fv.descRepublicOfSell||{}).descPageCommitParam||{}).templateContent?1:0,main:(fv.mainImagesGroup&&fv.mainImagesGroup.images||[]).length,sku:(fv.sku||[]).length};if(pre.tpl!==1)throw new Error('preflight: desc templateContent missing');if(pre.main<1)throw new Error('preflight: mainImagesGroup empty');if(pre.sku<1)throw new Error('preflight: sku empty');eng.getComponent('button-submit').emit('click');return JSON.stringify(pre)})()",
         "timeout_ms": 120000
       },
       "save": "preflight",
-      "note": "THE submit: fv.catProp overwritten as the plain STRING map (server payload) → preflight asserts desc/main/sku → emit button-submit click. NO onChange in this block — the engine already holds its client-passing shape from the previous wait, and any onChange here would retrigger the async normalization and clobber the string before the POST serializes"
+      "note": "THE submit: fv.catProp overwritten as the native-selection OBJECT map {p-20000:{value:<number>,text:中文}} — the exact shape a hand-picked brand leaves in formValues and in jsonBody.catProp on a native submit (#203 retest verdict: the old forced-string built the item but the server read it back as {value:<negative garbage>,text:\"30025069481\"} — the id digits landed in the display-text slot, a fake green). Preflight asserts desc/main/sku → emit button-submit click. NO onChange in this block — the engine already holds its client-passing shape from the previous wait, and any onChange here would retrigger the async normalization and clobber the object before the POST serializes"
     },
     {
       "op": "wait",

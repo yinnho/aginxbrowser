@@ -45,6 +45,11 @@ impl Page {
             body_size,
             timestamp,
             error: None,
+            // Navigation/subresource rows don't track hops here (the
+            // document's trail lives on the page-level `redirect_chain`,
+            // #102); script rows get theirs from sync_js_network_events.
+            final_url: String::new(),
+            redirects: Vec::new(),
         });
         request_id
     }
@@ -205,6 +210,10 @@ impl Page {
                 body_size: ev.body_size,
                 timestamp: ev.timestamp,
                 error: ev.error,
+                // #203: the requested url rides in `url`; where it landed
+                // and the hops it took follow it onto the page-level rows.
+                final_url: ev.final_url,
+                redirects: ev.redirects,
             });
         }
     }

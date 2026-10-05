@@ -22,6 +22,17 @@ pub(crate) use policy::custom_cert_store_requested;
 
 pub use ssrf::{is_forbidden_base, is_forbidden_ip, SsrfGuardResolver};
 
+/// One hop a redirected request followed: the Location target and the 3xx
+/// status that sent it there. Network rows keep the REQUESTED url in
+/// `url` (#203: a taobao submit bounced to error.taobao.com used to read
+/// as "never issued" because the failure row carried only the final
+/// target), so the hop list is the only place the wander is visible.
+#[derive(Debug, Clone)]
+pub struct RedirectHop {
+    pub url: String,
+    pub status: u16,
+}
+
 /// A script-initiated fetch()/XHR currently flying (one entry per redirect
 /// hop, mirroring the `in_flight` counter). Exists so a caller whose eval
 /// timed out can ask "is it still executing?" instead of re-issuing the

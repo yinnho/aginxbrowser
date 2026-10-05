@@ -381,6 +381,13 @@ pub struct JsNetworkEvent {
     /// die here reads as "never issued a request" (the taobao shop-SPA
     /// report chased exactly that ghost).
     pub error: Option<String>,
+    /// Where the request actually landed when redirects carried it (#203);
+    /// equal to `url` when it went straight through. `url` stays the
+    /// REQUESTED address on both success and failure rows so a bounced
+    /// submit can still be found by its original URL.
+    pub final_url: String,
+    /// Hops followed in order, each with the 3xx status (#203).
+    pub redirects: Vec<crate::diting_net::RedirectHop>,
 }
 
 /// A response body retained for `Network.getResponseBody`. Bodies are
@@ -4044,6 +4051,22 @@ struct FetchNetworkEvent {
     body_size: usize,
     stored_text: Option<String>,
     resp_body_base64: String,
+    // #203 redirect observability — threaded to the recorded event.
+    final_url: String,
+    redirects: Vec<crate::diting_net::RedirectHop>,
+}
+
+/// A walk failure to replay into the network-event log. `url` is the
+/// REQUESTED address (#203: rows used to carry only the last hop, so a
+/// submit.htm bounced to error.taobao.com was unfindable by its original
+/// URL); `final_url` is where the walk ended up — the response that
+/// triggered the failure, or the redirect target that was refused.
+struct FetchFailure {
+    url: String,
+    method: String,
+    reason: String,
+    final_url: String,
+    redirects: Vec<crate::diting_net::RedirectHop>,
 }
 
 /// What [`fetch_url_walk`] produces: the exact JSON envelope the op returns,
@@ -4076,7 +4099,7 @@ struct FetchWalkDeps {
     referrer_policy: String,
     referrer_init: String,
     callbacks: Option<std::sync::Arc<crate::diting_net::CallbackRegistry>>,
-    failures: Vec<(String, String, String)>,
+    failures: Vec<FetchFailure>,
 }
 
 /// Drop-remove a pushed in-flight entry — the walk returns from a dozen
@@ -4129,7 +4152,13 @@ fn gather_fetch_parts(
 ) -> Result<(FetchRequestInit, bool), String> {
     if let Ok(parsed_url) = url::Url::parse(url) {
         if let Err(e) = validate_fetch_url(&parsed_url) {
-            record_failed_fetch(state, url, method, e.clone());
+            record_failed_fetch(state, &FetchFailure {
+                url: url.to_string(),
+                method: method.to_string(),
+                reason: e.clone(),
+                final_url: url.to_string(),
+                redirects: Vec::new(),
+            });
             return Err(serde_json::json!({
                 "status": 0,
                 "body": "",
@@ -4187,9 +4216,13 @@ fn gather_fetch_parts(
     if let Some(pattern) = blocked_pattern {
         record_failed_fetch(
             state,
-            url,
-            method,
-            format!("blocked by Network.setBlockedURLs pattern: {pattern}"),
+            &FetchFailure {
+                url: url.to_string(),
+                method: method.to_string(),
+                reason: format!("blocked by Network.setBlockedURLs pattern: {pattern}"),
+                final_url: url.to_string(),
+                redirects: Vec::new(),
+            },
         );
         return Err(serde_json::json!({
             "status": 0,
@@ -4246,6 +4279,8 @@ fn record_fetch_network_event(state: &OpState, ev: &FetchNetworkEvent) -> String
         body_size: ev.body_size,
         timestamp,
         error: None,
+        final_url: ev.final_url.clone(),
+        redirects: ev.redirects.clone(),
     });
     const MAX_JS_NETWORK_EVENTS: usize = 4096;
     if gs.js_network_events.len() > MAX_JS_NETWORK_EVENTS {
@@ -4257,9 +4292,9 @@ fn record_fetch_network_event(state: &OpState, ev: &FetchNetworkEvent) -> String
 
 /// Replays the failure events the walk collected into the network-event log
 /// (a sequential walk yields at most one).
-fn replay_fetch_failures(state: &OpState, failures: &[(String, String, String)]) {
-    for (url, method, reason) in failures {
-        record_failed_fetch(state, url, method, reason.clone());
+fn replay_fetch_failures(state: &OpState, failures: &[FetchFailure]) {
+    for f in failures {
+        record_failed_fetch(state, f);
     }
 }
 
@@ -4344,7 +4379,13 @@ async fn op_fetch_url(
                     }).to_string());
                 }
                 Ok(Ok(InterceptResolution::Fail { reason })) => {
-                    record_failed_fetch(&state.borrow(), &url, &method, reason.clone());
+                    record_failed_fetch(&state.borrow(), &FetchFailure {
+                        url: url.clone(),
+                        method: method.clone(),
+                        reason: reason.clone(),
+                        final_url: url.clone(),
+                        redirects: Vec::new(),
+                    });
                     return Ok(serde_json::json!({
                         "status": 0,
                         "body": "",
@@ -4380,7 +4421,13 @@ async fn op_fetch_url(
                 Ok(parsed) => {
                     if let Err(reason) = validate_fetch_url(&parsed) {
                         let error = format!("Intercept rewrite to forbidden URL blocked: {}", reason);
-                        record_failed_fetch(&state.borrow(), &new_url, &method, error.clone());
+                        record_failed_fetch(&state.borrow(), &FetchFailure {
+                        url: new_url.clone(),
+                        method: method.clone(),
+                        reason: error.clone(),
+                        final_url: new_url.clone(),
+                        redirects: Vec::new(),
+                    });
                         return Ok(serde_json::json!({
                             "status": 0,
                             "body": "",
@@ -4392,7 +4439,13 @@ async fn op_fetch_url(
                 }
                 Err(_) => {
                     let error = "Intercept rewrite to unparseable URL blocked".to_string();
-                    record_failed_fetch(&state.borrow(), &new_url, &method, error.clone());
+                    record_failed_fetch(&state.borrow(), &FetchFailure {
+                        url: new_url.clone(),
+                        method: method.clone(),
+                        reason: error.clone(),
+                        final_url: new_url.clone(),
+                        redirects: Vec::new(),
+                    });
                     return Ok(serde_json::json!({
                         "status": 0,
                         "body": "",
@@ -4809,7 +4862,13 @@ async fn fetch_url_walk(
                                     ),
                                     None => format!("CORS preflight failed: {e}"),
                                 };
-                                deps.failures.push((url.clone(), method.clone(), error.clone()));
+                                deps.failures.push(FetchFailure {
+                                        url: url.clone(),
+                                        method: method.clone(),
+                                        reason: error.clone(),
+                                        final_url: url.clone(),
+                                        redirects: Vec::new(),
+                                    });
                                 return Err(deno_error::JsErrorBox::generic(error));
                             }
                         }
@@ -4822,7 +4881,13 @@ async fn fetch_url_walk(
         // the reason, or the request vanishes from /network (the same ghost
         // the taobao punished-mtop report chased on the response-side gate).
         let mut reject_preflight = |message: String| -> deno_error::JsErrorBox {
-            deps.failures.push((url.clone(), method.clone(), message.clone()));
+            deps.failures.push(FetchFailure {
+                url: url.clone(),
+                method: method.clone(),
+                reason: message.clone(),
+                final_url: url.clone(),
+                redirects: Vec::new(),
+            });
             deno_error::JsErrorBox::generic(message)
         };
 
@@ -4896,6 +4961,9 @@ async fn fetch_url_walk(
     // "went somewhere else" actually went; the walk stops at the limit so
     // the vec needs no separate cap.
     let mut redirect_chain: Vec<String> = Vec::new();
+    // Same trail with each hop's 3xx status — the network-event face
+    // (#203); `redirect_chain` above stays the url-only JSON envelope.
+    let mut redirect_hops: Vec<crate::diting_net::RedirectHop> = Vec::new();
     // Fetch's redirect stripping (obscura#967 same hole): once the chain
     // crosses an origin, credentials scripted into custom headers stop
     // riding (browsers never forward Authorization to the redirect target),
@@ -5239,11 +5307,23 @@ async fn fetch_url_walk(
                 match fallback {
                     Some(Ok(buffered)) => break OpFetchOutcome::Buffered(buffered),
                     Some(Err(fallback_err)) => {
-                        deps.failures.push((current_url.clone(), current_method.as_str().to_string(), fallback_err.to_string()));
+                        deps.failures.push(FetchFailure {
+                            url: url.clone(),
+                            method: current_method.as_str().to_string(),
+                            reason: fallback_err.to_string(),
+                            final_url: current_url.clone(),
+                            redirects: redirect_hops.clone(),
+                        });
                         return Err(deno_error::JsErrorBox::generic(fallback_err.to_string()))
                     }
                     None => {
-                        deps.failures.push((current_url.clone(), current_method.as_str().to_string(), e.to_string()));
+                        deps.failures.push(FetchFailure {
+                            url: url.clone(),
+                            method: current_method.as_str().to_string(),
+                            reason: e.to_string(),
+                            final_url: current_url.clone(),
+                            redirects: redirect_hops.clone(),
+                        });
                         return Err(deno_error::JsErrorBox::generic(e.to_string()))
                     }
                 }
@@ -5292,7 +5372,13 @@ async fn fetch_url_walk(
         // Re-validate every redirect target against the SSRF policy.
         if let Err(reason) = validate_fetch_url(&next_url) {
             let error = format!("Redirect to forbidden URL blocked: {}", reason);
-            deps.failures.push((next_url.to_string(), current_method.as_str().to_string(), error.clone()));
+            deps.failures.push(FetchFailure {
+                url: url.clone(),
+                method: current_method.as_str().to_string(),
+                reason: error.clone(),
+                final_url: next_url.to_string(),
+                redirects: redirect_hops.clone(),
+            });
             return Ok(FetchWalkOutcome {
                 json: serde_json::json!({
                     "status": 0,
@@ -5309,10 +5395,20 @@ async fn fetch_url_walk(
         }
 
         redirect_chain.push(next_url.to_string());
+        redirect_hops.push(crate::diting_net::RedirectHop {
+            url: next_url.to_string(),
+            status: resp.status().as_u16(),
+        });
         redirects_followed += 1;
         if redirects_followed > FETCH_REDIRECT_LIMIT {
             let error = format!("Too many redirects (>{})", FETCH_REDIRECT_LIMIT);
-            deps.failures.push((next_url.to_string(), current_method.as_str().to_string(), error.clone()));
+            deps.failures.push(FetchFailure {
+                url: url.clone(),
+                method: current_method.as_str().to_string(),
+                reason: error.clone(),
+                final_url: next_url.to_string(),
+                redirects: redirect_hops.clone(),
+            });
             return Ok(FetchWalkOutcome {
                 json: serde_json::json!({
                     "status": 0,
@@ -5347,7 +5443,13 @@ async fn fetch_url_walk(
                     "CORS error: redirect to '{}' blocked: Origin '{}' not in Access-Control-Allow-Origin '{}'",
                     next_url, page_origin, allowed
                 );
-                deps.failures.push((current_url.clone(), current_method.as_str().to_string(), error.clone()));
+                deps.failures.push(FetchFailure {
+                    url: url.clone(),
+                    method: current_method.as_str().to_string(),
+                    reason: error.clone(),
+                    final_url: current_url.clone(),
+                    redirects: redirect_hops.clone(),
+                });
                 return Ok(FetchWalkOutcome {
                     json: serde_json::json!({
                         "status": 0,
@@ -5439,7 +5541,13 @@ async fn fetch_url_walk(
             } else {
                 format!("CORS error: Origin '{}' not in Access-Control-Allow-Origin '{}'{}", page_origin, allowed, redirect_note)
             };
-            deps.failures.push((current_url.clone(), current_method.as_str().to_string(), error.clone()));
+            deps.failures.push(FetchFailure {
+                    url: url.clone(),
+                    method: current_method.as_str().to_string(),
+                    reason: error.clone(),
+                    final_url: current_url.clone(),
+                    redirects: redirect_hops.clone(),
+                });
             return Ok(FetchWalkOutcome {
                 json: serde_json::json!({
                     "status": 0,
@@ -5531,6 +5639,8 @@ async fn fetch_url_walk(
         body_size: resp_bytes.len(),
         stored_text: stored_text.clone(),
         resp_body_base64: resp_body_base64.clone(),
+        final_url: current_url.clone(),
+        redirects: redirect_hops.clone(),
     };
 
     if let Some(cbs) = callbacks.as_ref() {
@@ -5595,12 +5705,7 @@ pub(crate) fn glob_match(pattern: &str, url: &str) -> bool {
 /// died here read as "never issued a request" — exactly the ghost the taobao
 /// shop-SPA report chased (punished mtop XHRs are CORS-refused after the
 /// body arrives, so the whole call site went dark).
-fn record_failed_fetch(
-    state: &OpState,
-    url: &str,
-    method: &str,
-    error: String,
-) {
+fn record_failed_fetch(state: &OpState, f: &FetchFailure) {
     let gs = state.borrow::<SharedState>().clone();
     let mut gs = gs.borrow_mut();
     gs.network_response_body_counter += 1;
@@ -5614,14 +5719,16 @@ fn record_failed_fetch(
         .as_secs_f64();
     gs.js_network_events.push(JsNetworkEvent {
         request_id,
-        url: url.to_string(),
-        method: method.to_string(),
+        url: f.url.clone(),
+        method: f.method.clone(),
         status: 0,
         response_headers: HashMap::new(),
         request_headers: HashMap::new(),
         body_size: 0,
         timestamp,
-        error: Some(error),
+        error: Some(f.reason.clone()),
+        final_url: f.final_url.clone(),
+        redirects: f.redirects.clone(),
     });
     const MAX_JS_NETWORK_EVENTS: usize = 4096;
     if gs.js_network_events.len() > MAX_JS_NETWORK_EVENTS {

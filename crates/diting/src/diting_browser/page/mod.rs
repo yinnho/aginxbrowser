@@ -183,6 +183,16 @@ pub struct NetworkEvent {
     /// servable response (SSRF block, CORS refusal, transport failure).
     /// Navigation/subresource rows leave it `None`.
     pub error: Option<String>,
+    /// Where a redirected request actually landed (#203). `url` keeps the
+    /// REQUESTED address on every row — a taobao submit that bounced to
+    /// error.taobao.com used to read as "never issued" because failure rows
+    /// carried only the final target. Empty (or equal to `url`) when the
+    /// request never redirected; navigation/subresource rows leave it empty
+    /// (their face is the page-level `redirect_chain`, #102).
+    pub final_url: String,
+    /// The redirect hops followed, in order, each with the 3xx status that
+    /// sent it there (#203). Empty when the request went straight through.
+    pub redirects: Vec<crate::diting_net::RedirectHop>,
 }
 
 /// A response body retained for `get_response_body` (upstream #360). Bodies

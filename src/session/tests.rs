@@ -4088,6 +4088,151 @@
         assert_eq!(row["hung"], false, "fresh entry must not read as hung: {row}");
     }
 
+    /// (#203) A fetch that wandered through redirects stays findable by the
+    /// address it was ISSUED to: the row's `url` is the requested one,
+    /// `final_url` says where it landed, `redirects` carries each hop with
+    /// the 3xx that sent it. The failure twin — a same-origin request the
+    /// server bounces to a foreign origin that never authorizes CORS — keeps
+    /// the same shape on its status-0 row instead of collapsing to only the
+    /// last target (the taobao submit.htm → error.taobao.com report, where
+    /// the submit read as "never issued").
+    #[tokio::test]
+    async fn network_rows_carry_the_redirect_trail() {
+        use std::io::{Read, Write};
+        let _net = crate::server::test_util::net_env_guard();
+
+        // One listener, four routes: the document, a submit that 302s
+        // same-origin to its landing, and a wall that 302s to a second
+        // listener playing the foreign origin.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let foreign = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let foreign_port = foreign.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut s in listener.incoming().flatten() {
+                let mut buf = [0u8; 8192];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let path = String::from_utf8_lossy(&buf[..n])
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("")
+                    .split('?')
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                let page = "<html><body></body></html>";
+                let resp = match path.as_str() {
+                    "/page" => format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        page.len(), page
+                    ),
+                    "/submit" => format!(
+                        "HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:{port}/land\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    ),
+                    "/land" => "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 9\r\nconnection: close\r\n\r\n{\"ok\":1}\n".to_string(),
+                    "/wall" => format!(
+                        "HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:{foreign_port}/blocked\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    ),
+                    _ => "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        .to_string(),
+                };
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        // The foreign origin answers 200 with no ACAO — the walk follows the
+        // hop, then the terminal CORS check refuses it.
+        std::thread::spawn(move || {
+            for mut s in foreign.incoming().flatten() {
+                let mut buf = [0u8; 8192];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                );
+            }
+        });
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/page")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        mgr.send(&sid, |reply| SessionCommand::Eval {
+            script: "(function(){ fetch('/submit').then(function(){},function(){}); fetch('/wall').then(function(){},function(){}); return 'fired'; })()".to_string(),
+            timeout_ms: None,
+            reply,
+        })
+        .await
+        .unwrap();
+
+        // The async ops dispatch a turn after the eval — poll until both
+        // rows land in the request log.
+        let mut submit_row = None;
+        let mut wall_row = None;
+        for _ in 0..40 {
+            let text = mgr
+                .send(&sid, |reply| SessionCommand::Network {
+                    media_only: false,
+                    include_bodies: false,
+                    include_headers: false,
+                    url_contains: None,
+                    body_max_chars: 0,
+                    reply,
+                })
+                .await
+                .unwrap();
+            let val: Value = serde_json::from_str(&text).unwrap();
+            for row in val["requests"].as_array().cloned().unwrap_or_default() {
+                let u = row["url"].as_str().unwrap_or("");
+                if u.ends_with("/submit") {
+                    submit_row = Some(row.clone());
+                }
+                if u.ends_with("/wall") {
+                    wall_row = Some(row.clone());
+                }
+            }
+            if submit_row.is_some() && wall_row.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let submit = submit_row.expect("followed-redirect row landed in the log");
+        let wall = wall_row.expect("blocked-redirect row landed in the log");
+
+        // Followed: the requested url survives, the landing and the hop ride
+        // along, and the row itself is the 200 of /land.
+        assert_eq!(submit["url"], format!("http://127.0.0.1:{port}/submit"));
+        assert_eq!(submit["final_url"], format!("http://127.0.0.1:{port}/land"));
+        assert_eq!(submit["redirects"][0]["url"], format!("http://127.0.0.1:{port}/land"));
+        assert_eq!(submit["redirects"][0]["status"], 302);
+        assert_eq!(submit["status"], 200);
+
+        // Refused: status 0 with the CORS reason, but the requested url is
+        // still the row's url and the hop list still names where it bounced.
+        assert_eq!(wall["url"], format!("http://127.0.0.1:{port}/wall"));
+        assert_eq!(
+            wall["final_url"],
+            format!("http://127.0.0.1:{foreign_port}/blocked")
+        );
+        assert_eq!(wall["status"], 0);
+        assert!(wall["error"].as_str().unwrap_or("").contains("CORS"));
+        assert_eq!(
+            wall["redirects"][0]["url"],
+            format!("http://127.0.0.1:{foreign_port}/blocked")
+        );
+        assert_eq!(wall["redirects"][0]["status"], 302);
+    }
+
     /// (#130) Both Network keys are always present — `in_flight: []` and
     /// `challenges: 0` on a quiet page. An absent field can't be told apart
     /// from a wrong endpoint or a stale version by the reading agent, which

@@ -4616,7 +4616,15 @@ class Element extends Node {
       try { fullUrl = new URL(url, _docBase()).href; } catch(e) {}
     }
     const el = this;
-    fetch(fullUrl, {mode: 'no-cors'}).then(async resp => {
+    // credentials:'include' — an iframe load is a NAVIGATION of the child
+    // frame, not a subresource fetch: the frame's own origin's cookies ride
+    // (same-site frames like taobao's detailDescPreview get the login jar).
+    // The fetch() default 'same-origin' sends nothing cross-origin, so the
+    // server answers as a guest and its Set-Cookie mint lands on the shared
+    // domain over the login state (#203: editor page's preview iframe was
+    // silently logging the session out; forcing include — what a real
+    // browser does by navigation — held the login for hours).
+    fetch(fullUrl, {mode: 'no-cors', credentials: 'include'}).then(async resp => {
       if (resp.ok || resp.type === 'opaque') {
         const html = await resp.text();
         el._iframeDoc = new _IframeDocument(html, fullUrl, el);

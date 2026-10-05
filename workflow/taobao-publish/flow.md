@@ -49,7 +49,7 @@ preload blockqn2（掐 qn 微前端注入）
 → eval 挂 submit.htm 应答钩子（fetch+XHR 双挂）
 → eval 品牌发射①：从可见 input 现走 fiber 找实例 + onChange
 → wait 引擎 catProp 异步落库（{p-20000:{value:-1,text}} 形状）
-→ eval 品牌发射②：fv.catProp 直写字符串 + preflight + emit click
+→ eval 品牌发射②：fv.catProp 直写原生对象 + preflight + emit click
 → wait 应答或跳 success.htm
 → eval 解析回执 {success, item_id, form_error[]}
 ```
@@ -65,11 +65,16 @@ preload blockqn2（掐 qn 微前端注入）
    fiber 现调 onChange。而引擎侧的 catProp 提交是**异步**的（~1s
    落成 `{value:-1,text}` 形状，客户端校验认这个），wait 步等它落
    库后才进下一步。
-2. **catProp 双形状**。服务器要 `{"p-20000":"30025069481"}` **纯
-   字符串**（数字也读空）；客户端校验要引擎里的 `{value:-1,text}`
-   形状。最后的发射 eval 只做 fv 直写 + emit，**不再碰 onChange**
-   ——任何 onChange 都会重新触发异步规范化，在 POST 序列化前把字
-   符串盖掉。
+2. **catProp 两端都是原生对象**（10-05 推翻 10-04 判决）。10-04 真机
+   用纯字符串建品成功，误判「服务器要字符串」；#203 商家回读已建
+   商品，服务端把字符串规范化成 `{value:负数,text:"30025069481"}`
+   ——id 数字进了显示文本槽，品牌中文名没了，假绿。商家原生链路
+   实测形状两端一致：手选品牌后 formValues、组件 getProps、原生提
+   交的 jsonBody.catProp 全是
+   `{value:30025069481,text:"无品牌/无注册商标"}`（value 是**数字**），
+   原生校验器 exec/isValid 也认。发射②直写这个对象；同样**不碰
+   onChange**——任何 onChange 都会重新触发异步规范化，在 POST 序列
+   化前把对象盖掉。
 3. **mainImagesGroup 双形状**。官方 onChange 收裸数组，序列化后服务器
    读成空（1:1主图为必填项）；要 `{images:[{url}]}` 对象——component
    `setProps` + `emit('change')` + fv 直写三件套。flow 两步都做。

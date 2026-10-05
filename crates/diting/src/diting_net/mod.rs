@@ -8,7 +8,8 @@ pub mod wreq_client;
 
 pub use client::{
     env_allows_private_network, HttpClient, InFlightScripted, NetError,
-    CallbackRegistry, RequestCallback, RequestInfo, Response, ResponseCallback, ResourceType,
+    CallbackRegistry, RedirectHop, RequestCallback, RequestInfo, Response, ResponseCallback,
+    ResourceType,
 };
 pub use cookies::CookieJar;
 pub use encoding::{

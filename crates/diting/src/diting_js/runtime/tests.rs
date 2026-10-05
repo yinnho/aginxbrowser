@@ -10076,6 +10076,78 @@
         assert!(jar.get_cookie_header(&b_url).split("; ").any(|c| c == "b=1"));
     }
 
+    /// #203: an iframe load is a child-frame NAVIGATION, so its fetch must
+    /// carry credentials — `same-origin` (the fetch default the loader used
+    /// to inherit) sends nothing cross-origin, the server answers as a
+    /// guest, and its Set-Cookie mint lands on the shared domain over the
+    /// login state. The taobao editor's detailDescPreview iframe was
+    /// silently logging the session out this way.
+    #[tokio::test(flavor = "current_thread")]
+    async fn iframe_load_sends_cookies_cross_origin() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        use std::io::{Read, Write};
+        fn read_request(stream: &mut std::net::TcpStream) -> String {
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        }
+
+        // Page origin A: seeds a cookie via a same-origin fetch.
+        let listener_a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_a = listener_a.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener_a.accept() else { return };
+            read_request(&mut stream);
+            stream.write_all(b"HTTP/1.1 200 OK\r\nset-cookie: s=login; Path=/\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok").unwrap();
+        });
+
+        // Cross-origin B: the iframe target — reports the Cookie header it saw.
+        let listener_b = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_b = listener_b.local_addr().unwrap().port();
+        let (cookie_tx, cookie_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener_b.accept() else { return };
+            let req = read_request(&mut stream);
+            let seen = req.lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("cookie:"))
+                .map(|l| l[7..].trim().to_string())
+                .unwrap_or_default();
+            cookie_tx.send(seen).unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 48\r\nconnection: close\r\n\r\n<html><body>preview</body></html>").unwrap();
+        });
+
+        let (mut rt, _jar) = setup_runtime_with_cookies("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port_a));
+        let result = rt.call_function_on_for_cdp(
+            r#"async (pa, pb) => {
+                await fetch("http://127.0.0.1:" + pa + "/seed");
+                return await new Promise(resolve => {
+                    const iframe = document.createElement('iframe');
+                    iframe.addEventListener('load', () => resolve('loaded'));
+                    document.body.appendChild(iframe);
+                    iframe.src = "http://127.0.0.1:" + pb + "/preview.htm";
+                });
+            }"#,
+            None,
+            &[
+                serde_json::json!({ "value": port_a }),
+                serde_json::json!({ "value": port_b }),
+            ],
+            true,
+            true,
+        ).await.unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        assert_eq!(result.value.unwrap(), serde_json::json!("loaded"));
+        let seen = cookie_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(
+            seen.split("; ").any(|c| c == "s=login"),
+            "iframe load must carry the jar's cookies cross-origin (navigation semantics), saw: '{seen}'"
+        );
+    }
+
     /// #163: a same-origin credentialed fetch whose endpoint 302s to a
     /// cross-origin host without CORS headers must fail (Chrome parity — the
     /// response is cross-origin-tainted and unauthorized), and the error must

@@ -209,6 +209,20 @@ pub fn compact_events(events: &[NetworkEvent], include_headers: bool) -> Vec<Val
             if let Some(error) = &e.error {
                 row["error"] = json!(error);
             }
+            // #203 redirect observability: `url` is the REQUESTED address
+            // on every row; a request that wandered says where it landed
+            // and which hops (with the 3xx that sent it) it took. Leaned
+            // on — straight-through rows keep their old shape untouched.
+            if !e.final_url.is_empty() && e.final_url != e.url {
+                row["final_url"] = json!(e.final_url);
+            }
+            if !e.redirects.is_empty() {
+                row["redirects"] = json!(e
+                    .redirects
+                    .iter()
+                    .map(|h| json!({ "url": h.url, "status": h.status }))
+                    .collect::<Vec<_>>());
+            }
             if let Some(kind) = challenge_kind(&e.url) {
                 row["challenge"] = json!(kind);
             }
@@ -248,8 +262,15 @@ pub fn xhr_bodies(
         if e.status == 0 || e.error.is_some() {
             continue;
         }
+        // #203: the filter matches the REQUESTED url, where the request
+        // landed, and every hop in between — the merchant's `submit.htm`
+        // lookup must find a row whose submit bounced to error.taobao.com.
         if !url_substrings.is_empty()
-            && !url_substrings.iter().any(|s| e.url.contains(s.as_str()))
+            && !url_substrings.iter().any(|s| {
+                e.url.contains(s.as_str())
+                    || e.final_url.contains(s.as_str())
+                    || e.redirects.iter().any(|h| h.url.contains(s.as_str()))
+            })
         {
             continue;
         }
@@ -462,7 +483,7 @@ pub fn har_log(page_title: &str, events: &[NetworkEvent], body_of: &dyn Fn(&str)
                     content.insert("encoding".into(), json!("base64"));
                 }
             }
-            json!({
+            let mut entry = json!({
                 "startedDateTime": iso8601(e.timestamp),
                 "time": -1.0,
                 "_resourceType": e.resource_type,
@@ -489,7 +510,22 @@ pub fn har_log(page_title: &str, events: &[NetworkEvent], body_of: &dyn Fn(&str)
                 },
                 "cache": {},
                 "timings": { "send": -1.0, "wait": -1.0, "receive": -1.0 },
-            })
+            });
+            // #203: a followed redirect's entry answers 200 with no Location
+            // header (the recorded response is the landing), so the wander is
+            // invisible in spec fields alone. Custom `_`-prefixed fields are
+            // the HAR-sanctioned extension point.
+            if !e.redirects.is_empty() {
+                entry["_redirects"] = json!(e
+                    .redirects
+                    .iter()
+                    .map(|h| json!({ "url": h.url, "status": h.status }))
+                    .collect::<Vec<_>>());
+                if !e.final_url.is_empty() && e.final_url != e.url {
+                    entry["_finalUrl"] = json!(e.final_url);
+                }
+            }
+            entry
         })
         .collect();
 
@@ -540,7 +576,81 @@ mod tests {
             body_size: 0,
             timestamp: ts,
             error: None,
+            final_url: String::new(),
+            redirects: Vec::new(),
         }
+    }
+
+    #[test]
+    fn compact_rows_keep_requested_url_and_carry_the_wander() {
+        // #203: a submit that bounced to error.taobao.com used to read as
+        // "never issued" because the failure row carried only the final
+        // target. Now `url` is the requested address everywhere, and the
+        // landing + hops follow it.
+        let mut bounced = event("https://seller.example.com/publish.htm", "Fetch", 0, 1.0);
+        bounced.error = Some("CORS error: cross-origin redirect refused".into());
+        bounced.final_url = "https://error.taobao.com/error.aspx".to_string();
+        bounced.redirects = vec![diting::diting_net::RedirectHop {
+            url: "https://error.taobao.com/error.aspx".to_string(),
+            status: 302,
+        }];
+        let rows = compact_events(
+            &[bounced.clone(), event("https://api.example/items", "Fetch", 200, 2.0)],
+            false,
+        );
+        assert_eq!(rows[0]["url"], "https://seller.example.com/publish.htm");
+        assert_eq!(rows[0]["final_url"], "https://error.taobao.com/error.aspx");
+        assert_eq!(rows[0]["redirects"][0]["status"], 302);
+        assert_eq!(
+            rows[0]["redirects"][0]["url"],
+            "https://error.taobao.com/error.aspx"
+        );
+        // Straight-through rows keep their old shape: no empty redirect
+        // fields leaking into every row.
+        assert!(rows[1].get("final_url").is_none());
+        assert!(rows[1].get("redirects").is_none());
+
+        // A landed-but-wandered XHR body is findable by the landing URL, and
+        // a direct one by the requested URL — whichever substring the agent
+        // thought to grep for (#203's `url_contains=submit.htm` case).
+        let mut api = event("https://api.example/items", "Fetch", 200, 3.0);
+        api.final_url = "https://cdn.example/items".to_string();
+        let api_rid = api.request_id.clone();
+        let body_of = move |rid: &str| {
+            (rid == api_rid).then(|| StoredResponseBody {
+                body: "{}".into(),
+                base64_encoded: false,
+            })
+        };
+        let landed = xhr_bodies(&[api.clone()], &["cdn.example".to_string()], 0, false, &body_of);
+        assert_eq!(landed.len(), 1, "landing URL matches: {landed:?}");
+        let asked =
+            xhr_bodies(&[api.clone()], &["api.example/items".to_string()], 0, false, &body_of);
+        assert_eq!(asked.len(), 1, "requested URL still matches: {asked:?}");
+        let missed = xhr_bodies(&[api], &["nowhere.example".to_string()], 0, false, &body_of);
+        assert!(missed.is_empty(), "unrelated needles still filter out");
+    }
+
+    #[test]
+    fn har_entries_expose_redirect_trail_as_custom_fields() {
+        let mut walked = event("https://shop.example/submit.htm", "Fetch", 200, 1.0);
+        walked.final_url = "https://error.taobao.com/error.aspx".to_string();
+        walked.redirects = vec![diting::diting_net::RedirectHop {
+            url: "https://error.taobao.com/error.aspx".to_string(),
+            status: 302,
+        }];
+        let log = har_log(
+            "t",
+            &[walked, event("https://e.example/x", "Fetch", 200, 2.0)],
+            &|_| None,
+        );
+        let entries = &log["log"]["entries"];
+        // The landing entry answers 200 with no Location — the trail rides
+        // the _-prefixed fields instead.
+        assert_eq!(entries[0]["response"]["redirectURL"], "");
+        assert_eq!(entries[0]["_finalUrl"], "https://error.taobao.com/error.aspx");
+        assert_eq!(entries[0]["_redirects"][0]["status"], 302);
+        assert!(entries[1].get("_redirects").is_none());
     }
 
     #[test]
