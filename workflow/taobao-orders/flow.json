@@ -1,0 +1,79 @@
+{
+ "vars": {
+  "list_url": "https://buyertrade.taobao.com/trade/itemlist/list_bought_items.htm"
+ },
+ "max_steps": 800,
+ "steps": [
+  {
+   "id": "goto",
+   "op": "navigate",
+   "args": {
+    "url": "{{list_url}}"
+   },
+   "note": "PC bought-items shell. The doc-level 12s watchdog shows a soft error if we are slow — harmless: we boot the app ourselves before it matters, and the app renders over the placeholder. REQUIRES a logged-in buyer session passed via session_id (fresh flow sessions ride the default jar; see flow.md)."
+  },
+  {
+   "id": "shell",
+   "op": "wait",
+   "args": {
+    "predicate": "!!document.getElementById('tbpc-trade-container')",
+    "timeout_ms": 12000
+   },
+   "save": "shell",
+   "note": "SSR shell marker. The React app itself never loads here — the shell carries no script tag for it; the tbnav loader is supposed to fetch-load it and that step does not fire in diting (engine gap, own issue)."
+  },
+  {
+   "id": "boot",
+   "op": "eval",
+   "args": {
+    "timeout_ms": 25000,
+    "script": "(async () => {\n  if (window.__booted) return {booted: 'already', bodies: window.__bodies.length};\n  window.__bodies = [];\n  const sniff = (u) => String(u).includes('queryboughtlistv2');\n  const of = window.fetch;\n  window.fetch = function(u, o) {\n    const r = of.apply(this, arguments);\n    try { if (sniff(u) || sniff(o && o.url)) r.clone().text().then(t => window.__bodies.push(t)).catch(()=>{}); } catch(e) {}\n    return r;\n  };\n  const OX = XMLHttpRequest.prototype.open, OS = XMLHttpRequest.prototype.send;\n  XMLHttpRequest.prototype.open = function(m, u) { this.__u = u; return OX.apply(this, arguments); };\n  XMLHttpRequest.prototype.send = function() {\n    this.addEventListener('load', function() { try { if (sniff(this.__u)) window.__bodies.push(this.responseText); } catch(e) {} });\n    return OS.apply(this, arguments);\n  };\n  let jsUrl = null, cssUrl = null;\n  (function walk(x) {\n    if (!x || typeof x !== 'object') return;\n    if (typeof x.urlList === 'string') {\n      for (const u of x.urlList.split(';')) {\n        if (!jsUrl && /js\\/main\\.js$/.test(u)) jsUrl = u;\n        if (!cssUrl && /css\\/main\\.css$/.test(u)) cssUrl = u;\n      }\n    }\n    if (Array.isArray(x)) { for (const c of x) walk(c); }\n    else if (typeof x === 'object') { for (const k of Object.keys(x)) walk(x[k]); }\n  })((window.pcMyTaobaoMenuList && JSON.parse(window.pcMyTaobaoMenuList.replace(/&quot;/g, '\"'))) || []);\n  if (!jsUrl) return {error: 'no main.js in pcMyTaobaoMenuList'};\n  if (cssUrl) { const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = cssUrl; document.head.appendChild(l); }\n  history.pushState(null, '', '/');\n  const code = await (await of(jsUrl)).text();\n  const s = document.createElement('script');\n  s.textContent = code;\n  document.head.appendChild(s);\n  window.__booted = true;\n  return {injected: code.length, jsUrl};\n})()"
+   },
+   "save": "boot",
+   "note": "Sniff fetch/XHR for queryboughtlistv2 bodies -> parse the app's main.js url out of window.pcMyTaobaoMenuList urlList (never hardcode the 0.x version) -> pushState('/') so the ice.js browser router matches route '/' (standalone basename 404s the full trade path) -> fetch + inject the bundle. The app then fires its own baxia-signed mtop — manual mtop.request from page context is silently swallowed, so letting the real app run is the only door."
+  },
+  {
+   "id": "first_page",
+   "op": "wait",
+   "args": {
+    "predicate": "!!(window.__bodies && window.__bodies.length)",
+    "timeout_ms": 25000
+   },
+   "save": "first_page",
+   "note": "App booted + first mtop body sniffed. A timeout here means login lost or punish — inspect the session verdict by hand."
+  },
+  {
+   "id": "paginate",
+   "op": "eval",
+   "args": {
+    "timeout_ms": 45000,
+    "script": "(async () => {\n  if (!window.__bodies || !window.__bodies.length) return {grew: false, why: 'session lost: no __bodies (redirected to login/punish?)', page: 0, bodies: 0, orders: 0};\n  const parse = (b) => {\n    try {\n      const t = b.trim();\n      const j = JSON.parse(t.startsWith('{') ? t : t.replace(/^\\/\\*\\//, '').replace(/^[\\w$.]+\\s*\\(/, '').replace(/\\)\\s*;?$/, ''));\n      const data = (j.data && j.data.data) || {};\n      const ids = new Set();\n      for (const k of Object.keys(data)) { if (k.indexOf('shopInfo_') === 0) ids.add(k.slice(9)); }\n      return {ids, pc: (j.data && j.data.global && j.data.global.pageControl) || null};\n    } catch (e) { return {ids: new Set(), pc: null}; }\n  };\n  window.__seenIds = window.__seenIds || new Set();\n  for (const b of window.__bodies) { for (const id of parse(b).ids) window.__seenIds.add(id); }\n  const fire = (target) => {\n    const ul = document.querySelector('.ant-pagination');\n    if (!ul) return 'no pager';\n    const fkey = Object.keys(ul).find(k => k.startsWith('__reactFiber$'));\n    if (!fkey) return 'no fiber';\n    let fiber = ul[fkey], hops = 0, onChange = null;\n    while (fiber && hops < 12) {\n      const pp = fiber.memoizedProps || {};\n      if (typeof pp.onChange === 'function') { onChange = pp.onChange; break; }\n      fiber = fiber.return; hops++;\n    }\n    if (!onChange) return 'no onChange';\n    onChange(target, 30);\n    return null;\n  };\n  const awaitBody = async (before) => {\n    for (let i = 0; i < 40; i++) {\n      if (window.__bodies.length > before) return window.__bodies[window.__bodies.length - 1];\n      await new Promise(r => setTimeout(r, 500));\n    }\n    return null;\n  };\n  // Target page from the DATA, not the DOM: pageControl.nextPageIndex of the\n  // last body is exactly the next page to ask for. antd's active item lags\n  // arbitrarily when driven this way (seen showing 1 while on page 4).\n  const last = parse(window.__bodies[window.__bodies.length - 1]);\n  let target = (last.pc && last.pc.nextPageIndex) ? last.pc.nextPageIndex : (window.__bodies.length + 1);\n  let why = null, fresh = null, round = 0;\n  while (round < 2) {\n    why = fire(target);\n    if (why) break;\n    fresh = await awaitBody(window.__bodies.length);\n    if (!fresh) { why = 'no new body'; break; }\n    const f = parse(fresh);\n    let newIds = 0;\n    for (const id of f.ids) { if (!window.__seenIds.has(id)) { newIds++; window.__seenIds.add(id); } }\n    const hasMore = f.pc ? f.pc.hasMore : true;\n    if (newIds > 0 || hasMore === false || round === 1) {\n      await new Promise(r => setTimeout(r, 1500)); // settle: back-to-back onChange refetches the same page\n      return {grew: newIds > 0 && hasMore !== false, newIds, hasMore, page: target, bodies: window.__bodies.length, orders: window.__seenIds.size};\n    }\n    target = target + 1; round = 1; // dup body while hasMore — re-fire at the next page once\n  }\n  return {grew: false, why: why || 'exhausted', page: target, bodies: window.__bodies.length, orders: window.__seenIds.size};\n})()"
+   },
+   "save": "paged",
+   "note": "Drive the Pagination fiber's onChange directly (synthetic .click() freezes at page 2). Target page comes from the DATA — pageControl.nextPageIndex of the last sniffed body — never the DOM (antd's active item lags arbitrarily this way, seen showing 1 on page 4) and never a counter. 'grew' is data-aware (new orderIds AND hasMore!==false) because the app refetches the same page on back-to-back calls (that runaway burned a whole step budget); a 1.5s settle plus one in-script retry at target+1 absorbs a stray dup. Bare-object return — a JSON.stringify'd save is a string and branch dotted-paths die on it."
+  },
+  {
+   "id": "loop",
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "paged.grew",
+     "is": "equals",
+     "value": true
+    },
+    "goto": "paginate"
+   },
+   "note": "Loop while pages keep coming; falls through on the first dry page (hasMore exhausted). max_steps=800 bounds a runaway (data-aware 'grew' already stops a dup-page loop; 800 ≈ 397 pages ceiling)."
+  },
+  {
+   "id": "collect",
+   "op": "eval",
+   "args": {
+    "timeout_ms": 30000,
+    "script": "(() => {\n  const orders = {};\n  let bad = 0;\n  for (const b of window.__bodies) {\n    let j = null;\n    try {\n      const t = b.trim();\n      j = JSON.parse(t.startsWith('{') ? t : t.replace(/^\\/\\*\\//, '').replace(/^[\\w$.]+\\s*\\(/, '').replace(/\\)\\s*;?$/, ''));\n    } catch (e) { bad++; continue; }\n    const data = (j.data && j.data.data) || {};\n    for (const k of Object.keys(data)) {\n      if (k.indexOf('shopInfo_') === 0) {\n        const oid = k.slice(9);\n        const f = (data[k].fields) || {};\n        const o = orders[oid] = orders[oid] || {orderId: oid};\n        o.createTime = f.createTime; o.shopName = f.shopName || f.sellerNick;\n      } else if (k.indexOf('orderItemInfo_') === 0) {\n        const oid = k.slice(14).split('_')[0];\n        const item = ((data[k].fields) || {}).item || {};\n        const o = orders[oid] = orders[oid] || {orderId: oid};\n        o.title = item.title; o.itemId = item.itemId; o.qty = item.quantity;\n        o.paid = item.priceInfo && item.priceInfo.actualTotalFee;\n        o.sku = item.skuText; o.url = item.itemUrl;\n      }\n    }\n  }\n  const list = Object.keys(orders).map(k => orders[k]).sort((a, b) => (b.createTime || '').localeCompare(a.createTime || ''));\n  return {pages: window.__bodies.length, badBodies: bad, orders: list};\n})()"
+   },
+   "save": "orders",
+   "note": "Parse every sniffed JSONP body, fold shopInfo_*/orderItemInfo_* islands into one order per orderId, newest first. Receipt carries the full history."
+  }
+ ]
+}

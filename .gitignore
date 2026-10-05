@@ -31,14 +31,18 @@ cache.db-wal
 # Local vendored source trees pulled for reference (e.g. deno_core during musl port)
 vendor/
 
-# Reports/notes stay local — docs under docs/ are never committed (user rule, 2026-09-22)
-docs/**/*.md
+# Reports/notes/receipts stay local — new files under docs/ are never committed
+# (user rule, 2026-09-22; tracked product docs keep updating, adding one needs -f)
+docs/**
 
 # localStorage persistence test artifact (runtime state, must never rsync to hosted instance)
 /localStorage/
 
+# User-pulled reference bundles at repo root — never commit
+/TurnstileLogin.bundle.js
+/api.js
+/index.web-*.js
+
 # working docs & credentials — never committed
 HANDOFF-*.md
 scripts/__pycache__/
-docs/aginx上传测试包_*.zip
-docs/登录凭据_*.json
