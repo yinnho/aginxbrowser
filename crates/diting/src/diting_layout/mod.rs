@@ -470,27 +470,14 @@ fn to_taffy_style(style: &ComputedStyle, pct_h_resolves: bool) -> Style {
     // resolves at layout time, same posture as the slots above.
     if let Some(fb) = style.flex_basis {
         s.flex_basis = match fb {
-            // The content-box carry-over the size slots apply, on the main
-            // axis: taffy sizes border-box, so an authored content-box
-            // flex-basis must measure to the border edge — padding/border px
-            // ride on top of the basis (Chrome: flex-basis 50px + padding
-            // 20px in a column is 90px tall; without the carry it stayed 50,
-            // #216). % parts can't ride (same "no Dimension shape" limit as
+            // The px carry-over (basis + main-axis padding/border to the
+            // border-box measure, #216) lives in fix_flex_basis_carry at the
+            // flex PARENT's tail — to_taffy_style only sees the item's own
+            // style, and flex-basis measures along the parent's main axis
+            // (#220). % parts can't ride (same "no Dimension shape" limit as
             // the size slots), and under authored border-box the basis
             // already measures border-edge.
-            crate::diting_css::Length::Px(px) => {
-                // Main-axis side pair follows flex_direction (set above):
-                // column pairs top/bottom, row pairs left/right.
-                let (a, b, ba, bb2) = if matches!(
-                    s.flex_direction,
-                    FlexDirection::Column | FlexDirection::ColumnReverse
-                ) {
-                    (side_px(style.padding.top), side_px(style.padding.bottom), bt, bb)
-                } else {
-                    (side_px(style.padding.left), side_px(style.padding.right), bl, br)
-                };
-                Dimension::length(if border_box { px } else { px + a + b + ba + bb2 })
-            }
+            crate::diting_css::Length::Px(px) => Dimension::length(px),
             crate::diting_css::Length::Percent(p) => Dimension::percent(p / 100.0),
             crate::diting_css::Length::Calc { percent, .. } => Dimension::percent(percent / 100.0),
             // Gap's grammar never stores auto/sizing keywords here; auto is
@@ -785,6 +772,62 @@ fn side_px(v: Option<crate::diting_css::Length>) -> f32 {
     match v {
         Some(crate::diting_css::Length::Px(px)) => px,
         _ => 0.0,
+    }
+}
+
+/// The #220 flex-basis content-box carry-over. flex-basis measures along
+/// the PARENT's main axis, but to_taffy_style only sees the item's own
+/// style — its carry keyed on the item's flex_direction, which is Row for
+/// a plain item (the default), so items in a column container carried
+/// their LEFT/RIGHT padding onto the basis while Chrome adds top/bottom.
+/// One-value shorthand padding masked it (uniform sides carry the same
+/// sum either way); longhand or multi-value padding exposed it (basis 50 +
+/// padding-top 40 measured 50, and 40+20 measured 60 — the latter being
+/// taffy clamping the border-box basis up to the padding sum, not a
+/// carry). Runs at the flex parent's tail, where the parent's axis and
+/// the final child list are both known; border-box items already measure
+/// border-edge and synthetic children (no node_map entry) are skipped.
+fn fix_flex_basis_carry(
+    taffy_tree: &mut TaffyTree<TextLeaf>,
+    parent: &ComputedStyle,
+    styles: &HashMap<NodeId, ComputedStyle>,
+    node_map: &HashMap<taffy::tree::NodeId, NodeId>,
+    children: &[taffy::tree::NodeId],
+) {
+    if parent.display != Some(CssDisplay::Flex) {
+        return;
+    }
+    let vertical = matches!(
+        parent.flex_direction,
+        Some(crate::diting_css::FlexDirection::Column | crate::diting_css::FlexDirection::ColumnReverse)
+    );
+    for &child in children {
+        let Some(&dom) = node_map.get(&child) else { continue };
+        let Some(cs) = styles.get(&dom) else { continue };
+        let Some(crate::diting_css::Length::Px(px)) = cs.flex_basis else { continue };
+        if matches!(cs.box_sizing, Some(crate::diting_css::BoxSizing::BorderBox)) {
+            continue;
+        }
+        let bline = cs.border_style.is_some();
+        let bw = |v: Option<crate::diting_css::Length>| if bline { side_px(v) } else { 0.0 };
+        let carry = if vertical {
+            side_px(cs.padding.top)
+                + side_px(cs.padding.bottom)
+                + bw(cs.border_width.top)
+                + bw(cs.border_width.bottom)
+        } else {
+            side_px(cs.padding.left)
+                + side_px(cs.padding.right)
+                + bw(cs.border_width.left)
+                + bw(cs.border_width.right)
+        };
+        if carry == 0.0 {
+            continue;
+        }
+        if let Ok(mut ts) = taffy_tree.style(child).cloned() {
+            ts.flex_basis = Dimension::length(px + carry);
+            let _ = taffy_tree.set_style(child, ts);
+        }
     }
 }
 
@@ -5165,6 +5208,9 @@ fn build_element_inner(
     // border/padding separation rule taffy's native block collapse lacks,
     // and supplies collapsing for flex stand-in parents).
     collapse_adjacent_sibling_margins(taffy_tree, styles, node_map, &direct);
+    // #220: the flex-basis px carry needs this container's main axis —
+    // only the parent knows it (see fix_flex_basis_carry).
+    fix_flex_basis_carry(taffy_tree, &style, styles, node_map, &direct);
 
     let taffy_style = to_taffy_style(&style, pct_height_resolves(tree, styles, id));
     if is_alignment_promote(&taffy_style) {

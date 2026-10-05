@@ -135,7 +135,7 @@ fn backdrop_filter_computed_face() {
 #[cfg(feature = "screenshot")]
 #[test]
 fn style_write_paint_only_diff_matrix() {
-    use super::{style_property_names, style_write_is_paint_only};
+    use super::{style_property_map, style_write_is_paint_only};
     // Values differ freely while the names stay — the seek case.
     assert!(style_write_is_paint_only(
         Some("transform: translate3d(-200px, 0px, 0px); opacity: 0"),
@@ -150,6 +150,20 @@ fn style_write_paint_only_diff_matrix() {
     assert!(style_write_is_paint_only(
         Some("opacity: 0.42; transform: scale(2)"),
         Some(""),
+    ));
+    // Same-name VALUE rewrite of a solve-feeding property (#220): the
+    // name-set diff was empty, which used to classify it paint-only and
+    // keep the stale solve — getBoundingClientRect served pre-write rects
+    // until some unrelated write happened to change the name set.
+    assert!(!style_write_is_paint_only(
+        Some("flex-basis: 50px; padding-top: 40px; padding-bottom: 20px"),
+        Some("flex-basis: 50px; padding-top: 30px; padding-bottom: 20px"),
+    ));
+    // Whitelisted value rewrite alongside a geometry value rewrite — the
+    // geometry half disqualifies the whole write.
+    assert!(!style_write_is_paint_only(
+        Some("opacity: 0; padding-top: 40px"),
+        Some("opacity: 0.5; padding-top: 30px"),
     ));
     // A geometry property appears — full invalidation.
     assert!(!style_write_is_paint_only(
@@ -167,15 +181,20 @@ fn style_write_paint_only_diff_matrix() {
         Some("width: 300px; opacity: 0.5"),
         Some("opacity: 0.5"),
     ));
+    // A semantically identical rewrite (normalization/reordering only) is
+    // paint-only — no effective declaration moved, so the solve stands.
+    assert!(style_write_is_paint_only(
+        Some("padding-top:40px;color:red"),
+        Some("color: red; padding-top: 40px;"),
+    ));
     // No before-state to diff — conservative full drop (first write on
     // a bare element).
     assert!(!style_write_is_paint_only(None, Some("opacity: 0")));
     assert!(!style_write_is_paint_only(Some("opacity: 0"), None));
-    // Name extraction: casing, whitespace and empty fragments.
-    assert_eq!(
-        style_property_names("TRANSFORM: scale(2) ; ; opacity:0"),
-        ["transform", "opacity"].into_iter().map(str::to_string).collect::<std::collections::HashSet<_>>()
-    );
+    // Effective map: casing, whitespace, empty fragments, last-wins.
+    let m = style_property_map("TRANSFORM: scale(2) ; ; opacity:0; transform: none");
+    assert_eq!(m.len(), 2);
+    assert_eq!(m["transform"], "none");
 }
 
 // Ephemeral deployments must not persist login tokens: storage_file is

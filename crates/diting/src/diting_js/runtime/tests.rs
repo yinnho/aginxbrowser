@@ -13034,6 +13034,80 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn flex_basis_padding_carry_survives_longhand_and_incremental() {
+        // #220: the #216 carry-over (basis + main-axis padding on the
+        // border-box measure) worked for the one-value shorthand but the
+        // issue matrix saw longhand / multi-value padding lose it, with
+        // non-deterministic heights across rounds — suspected the rect
+        // matching or incremental path, not to_taffy_style (FEEDPROBE proved
+        // the feed correct). Probe all padding spellings in one container,
+        // then rewrite each item's padding through CSSOM longhands and
+        // re-measure — the incremental relayout is where the matrix's
+        // two-rounds-different-heights lived.
+        let mut rt = setup_runtime(
+            r#"<html><body><div id="col" style="display:flex;flex-direction:column;width:400px">
+<div id="sh1" style="flex-basis:50px;padding:20px"></div>
+<div id="lh_top" style="flex-basis:50px;padding-top:40px"></div>
+<div id="lh_bot" style="flex-basis:50px;padding-bottom:20px"></div>
+<div id="sh4" style="flex-basis:50px;padding:0 0 20px 0"></div>
+<div id="lh2" style="flex-basis:50px;padding-top:40px;padding-bottom:20px"></div>
+<div id="sh42" style="flex-basis:50px;padding:40px 0 20px 0"></div>
+</div></body></html>"#,
+        );
+        let script = r#"async () => {
+            const h = id => Math.round(document.getElementById(id).getBoundingClientRect().height);
+            const first = ['sh1','lh_top','lh_bot','sh4','lh2','sh42'].map(h);
+            // Incremental pass: same items, padding rewritten through CSSOM
+            // longhands to the SAME values (a no-op rewrite still exercises
+            // the incremental match + relayout), then to a new value.
+            for (const id of ['sh1','lh_top','lh_bot','sh4','lh2','sh42']) {
+                const el = document.getElementById(id);
+                const cs = getComputedStyle(el);
+                el.style.paddingTop = cs.paddingTop;
+                el.style.paddingBottom = cs.paddingBottom;
+            }
+            const noop = ['sh1','lh_top','lh_bot','sh4','lh2','sh42'].map(h);
+            for (const id of ['sh1','lh_top','lh_bot','sh4','lh2','sh42']) {
+                document.getElementById(id).style.paddingTop = '30px';
+            }
+            const cssom = ['sh1','lh_top','lh_bot','sh4','lh2','sh42'].map(h);
+            for (const id of ['sh1','lh_top','lh_bot','sh4','lh2','sh42']) {
+                const el = document.getElementById(id);
+                const cs = getComputedStyle(el);
+                el.setAttribute('style', 'flex-basis:50px;padding-top:30px;padding-bottom:' + cs.paddingBottom);
+            }
+            const attr = ['sh1','lh_top','lh_bot','sh4','lh2','sh42'].map(h);
+            return [first, noop, cssom, attr];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let v = result.value.unwrap();
+        // Chrome oracle, content-box: basis 50 + main-axis (vertical) padding.
+        assert_eq!(
+            v[0], serde_json::json!([90, 90, 70, 70, 110, 110]),
+            "initial pass: every padding spelling carries onto the basis: {:?}",
+            v[0]
+        );
+        assert_eq!(
+            v[1], serde_json::json!([90, 90, 70, 70, 110, 110]),
+            "CSSOM no-op rewrite keeps the carry: {:?}",
+            v[1]
+        );
+        // The noop round leaves every item's padding-bottom materialized as
+        // a longhand (0px where it was absent), so bottoms are 20/0/20/20/20/20
+        // and the 30px tops give 50+30+bottom everywhere.
+        assert_eq!(
+            v[2], serde_json::json!([100, 80, 100, 100, 100, 100]),
+            "CSSOM value rewrite re-solves (was the stale-solve hole): {:?}",
+            v[2]
+        );
+        assert_eq!(
+            v[3], serde_json::json!([100, 80, 100, 100, 100, 100]),
+            "setAttribute rewrite agrees with the CSSOM round: {:?}",
+            v[3]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     #[cfg(feature = "screenshot")]
     async fn test_root_scroll_mirrors_to_native_band_paint_state() {
         // AginxOS P0: the CDP band painter reads the root scroll offset from
@@ -18368,7 +18442,7 @@ fn document_evaluate_xpath_subset() {
         assert!(v.is_object(), "cascade must finish inside 10s");
         let fired = v["fired"].as_i64().unwrap();
         assert!(
-            fired >= 50 && fired <= 1000,
+            (50..=1000).contains(&fired),
             "50ms timer must fire mid-cascade (task-per-fetch), fired={}ms",
             fired
         );

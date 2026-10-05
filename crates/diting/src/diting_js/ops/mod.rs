@@ -777,15 +777,14 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
     ) {
         let gs = state.borrow::<SharedState>().clone();
         // Paint-only style write (#395): a timeline seek lands as
-        // set_attribute("style", …) whose property-NAME diff sits entirely
-        // inside {transform, opacity} — exactly the compositor-only set a
-        // real browser never re-layouts for. The taffy solve ignores both,
-        // so it survives and the next layout run re-collects against the
-        // cached tree (measured 109ms/frame full-pipeline seeks on the
-        // probe page → the paint floor). This runs pre-write, so the OLD
-        // attribute is still on the node for the diff. Anything else —
-        // unknown properties added, no prior style to diff against — falls
-        // back to the full drop.
+        // set_attribute("style", …) whose changed declarations sit inside
+        // {transform, opacity} — the compositor-only set a real browser
+        // never re-layouts for; the taffy solve ignores them, so it
+        // survives and the next layout run re-collects against the cached
+        // tree (measured 109ms/frame seeks → the paint floor). The diff is
+        // per-property and value-aware (#220): a same-name rewrite of a
+        // solve-feeding property (padding, width, …) must not ride this
+        // path; runs pre-write, so the OLD attribute is still on the node.
         //
         // Value-identity short-circuit (#398): a style write whose full
         // serialized string is byte-identical to what's already on the node
@@ -2145,36 +2144,37 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
     }
 }
 
-/// Property names declared in an inline style string, lowercased. A
-/// fragment without a colon (malformed declaration, comment) counts as its
-/// raw text so garbage can never whitelist by accident — it simply never
-/// matches {transform, opacity}.
+/// Inline style string as an effective property map (lowercased names,
+/// trimmed values, last declaration wins; colon-less garbage stays raw).
 #[cfg(feature = "screenshot")]
-fn style_property_names(style: &str) -> std::collections::HashSet<String> {
-    style
-        .split(';')
-        .map(|decl| decl.split_once(':').map(|(name, _)| name).unwrap_or(decl).trim())
-        .filter(|name| !name.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect()
+fn style_property_map(style: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for decl in style.split(';') {
+        let (n, v) = decl.split_once(':').unwrap_or((decl, ""));
+        let n = n.trim().to_ascii_lowercase();
+        if !n.is_empty() {
+            map.insert(n, v.trim().to_string());
+        }
+    }
+    map
 }
 
-/// Is a style-attribute write paint-only — every property name it ADDS or
-/// REMOVES sits inside the paint-only set {transform, opacity, translate, rotate,
-/// scale}? Values may differ freely: the
-/// taffy solve reads neither property, and the collect walk re-reads both
-/// from fresh computed styles, so only the name diff matters for geometry.
-/// A missing side (no prior attribute to diff against) answers false — an
-/// unmeasurable before-state gets the full invalidation, never a guessed
-/// cache reuse.
+/// Is a style-attribute write paint-only — every property whose effective
+/// declaration differs (added, removed, or VALUE-changed) sits inside the
+/// paint-only set {transform, opacity, translate, rotate, scale}? Those
+/// feed no layout input, so the solve survives and only the collect half
+/// re-runs. Anything else (padding, width, …) feeds the solve: a same-name
+/// value rewrite used to pass a name-set diff vacuously and served the
+/// stale solve (#220's two-rounds-different-heights); a missing side gets
+/// the full drop.
 #[cfg(feature = "screenshot")]
 fn style_write_is_paint_only(old: Option<&str>, new: Option<&str>) -> bool {
+    const PAINT_ONLY: [&str; 5] = ["transform", "opacity", "translate", "rotate", "scale"];
     let (Some(old), Some(new)) = (old, new) else { return false };
-    let old = style_property_names(old);
-    let new = style_property_names(new);
-    old.symmetric_difference(&new).all(|name| {
-        name == "transform" || name == "opacity" || name == "translate" || name == "rotate" || name == "scale"
-    })
+    let old = style_property_map(old);
+    let new = style_property_map(new);
+    old.keys().chain(new.keys())
+        .all(|n| old.get(n) == new.get(n) || PAINT_ONLY.contains(&n.as_str()))
 }
 
 /// Can an attribute write never change computed style or layout on its own?
