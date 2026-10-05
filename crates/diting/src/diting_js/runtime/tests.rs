@@ -18215,10 +18215,8 @@ fn document_evaluate_xpath_subset() {
         // DOM. Pin the padding shape in a host-TZ-independent way: build the
         // instant from Date.UTC shifted by the engine's own (persona) offset,
         // so a host in UTC and a host in Asia/Shanghai must render the same
-        // civil date. The absolute-hour pinning used to live here too, but
-        // under #221 the local-args CONSTRUCTOR resolves in the host zone
-        // while toString formats in the persona zone — that inconsistency is
-        // #221's to fix and pin; this test only owns the padding contract.
+        // civil date. Local-field coherence lives next door in
+        // test_date_local_fields_follow_persona_tz (#221).
         let mut rt = setup_runtime("<html><body></body></html>");
         let script = r#"() => {
             const off = -new Date(Date.UTC(2026, 9, 4)).getTimezoneOffset();
@@ -18236,6 +18234,58 @@ fn document_evaluate_xpath_subset() {
         let v = result.value.unwrap();
         assert_eq!(v[1], serde_json::json!(true), "toDateString pads the day: {:?}", v[0]);
         assert_eq!(v[2], serde_json::json!(true), "toString pads the day: {:?}", v[0]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_date_local_fields_follow_persona_tz() {
+        // #221: constructor local-args, the get/set field families, and the
+        // formatter family must all resolve in the persona zone. Before the
+        // fix, a TZ=UTC host printed toString() "13:06:07 GMT+0800" while
+        // getHours() returned 5 on the same instant. Both pins below are
+        // host-independent: 'America/New_York' forces the wrap on Shanghai
+        // and UTC hosts alike, 'Asia/Shanghai' exercises the common persona
+        // (fast path on a Shanghai host, wrapped on CI's UTC).
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"() => {
+            const out = [];
+            globalThis.__diting_tz = 'Asia/Shanghai';
+            // getters + formatters agree on a fixed instant (the #221 repro)
+            const d = new Date(Date.UTC(2026, 9, 4, 5, 6, 7)); // wall 13:06:07 +08
+            out.push(d.getHours() === 13, d.getMinutes() === 6, d.getSeconds() === 7);
+            out.push(d.getFullYear() === 2026, d.getMonth() === 9, d.getDate() === 4);
+            out.push(d.getDay() === 0); // 2026-10-04 is a Sunday
+            out.push(d.toString().includes('13:06:07'));
+            // setter: wall 20:30 +08 = 12:30Z
+            d.setHours(20, 30, 0, 0);
+            out.push(d.getTime() === Date.UTC(2026, 9, 4, 12, 30, 0));
+            // setter keeps unspecified fields at their persona values
+            const p = new Date(Date.UTC(2026, 9, 4, 5, 6, 7));
+            p.setMonth(11);
+            out.push(p.getTime() === Date.UTC(2026, 11, 4, 5, 6, 7));
+            // local-args constructor reads fields in the persona zone
+            const c = new Date(2026, 9, 4, 5, 6, 7);
+            out.push(c.getTime() === Date.UTC(2026, 9, 4, 5, 6, 7) - 8 * 3600000);
+            // two-digit years still land in 19xx
+            out.push(new Date(98, 9, 4).getTime() === Date.UTC(1998, 9, 4) - 8 * 3600000);
+            delete globalThis.__diting_tz;
+            // DST zone: offset must come from the instant, not a fixed value
+            globalThis.__diting_tz = 'America/New_York';
+            const jul = new Date(Date.UTC(2026, 6, 4, 12, 0, 0)); // EDT -4
+            const jan = new Date(Date.UTC(2026, 0, 4, 12, 0, 0)); // EST -5
+            out.push(jul.getHours() === 8, jan.getHours() === 7);
+            out.push(jul.getTimezoneOffset() === 240, jan.getTimezoneOffset() === 300);
+            out.push(new Date(2026, 6, 4, 9, 0, 0).getTime() === Date.UTC(2026, 6, 4, 13, 0, 0));
+            delete globalThis.__diting_tz;
+            return out;
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        for (i, item) in v.as_array().unwrap().iter().enumerate() {
+            assert_eq!(item, &serde_json::json!(true), "#221 clause {i} failed: {v:?}");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -16306,13 +16306,21 @@ __ditingNativeOf.set(_OrigDateTimeFormat.prototype.resolvedOptions, _origResolve
 // Date's own clock still follows the host zone unless these methods read
 // the same pin Intl uses. A proxy over the native keeps
 // Function.prototype.toString on the original.
+// #221: the DTF is cached per zone — the local-field getters below call
+// this on every access and would otherwise allocate a fresh formatter per
+// getHours() on hot paths.
+let _ditingOffDTF = null, _ditingOffDTFTZ = '';
 function __ditingOffsetMinutes(date) {
-  const dtf = new _OrigDateTimeFormat('en-US', {
-    timeZone: __ditingTZ(), hourCycle: 'h23',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-  });
-  const parts = dtf.formatToParts(date);
+  const tz = __ditingTZ();
+  if (_ditingOffDTFTZ !== tz) {
+    _ditingOffDTF = new _OrigDateTimeFormat('en-US', {
+      timeZone: tz, hourCycle: 'h23',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    _ditingOffDTFTZ = tz;
+  }
+  const parts = _ditingOffDTF.formatToParts(date);
   const pick = (t) => Number(parts.find((p) => p.type === t).value);
   let hour = pick('hour');
   if (hour === 24) hour = 0;
@@ -16377,6 +16385,127 @@ __ditingWrapDate('toLocaleTimeString', (target, date, args) => {
   const options = Object.assign({}, args[1]);
   if (!options.timeZone) options.timeZone = __ditingTZ();
   return Reflect.apply(target, date, [args[0], options]);
+});
+// #221: the local-field surface must resolve in the persona zone, not the
+// host's. Above, the formatter family (toString/…) already formats in
+// __ditingTZ() — but the constructor's local-args form and the native
+// getter/setter families still resolved in the HOST zone, so on a TZ=UTC
+// deployment toString() said "13:06:07 GMT+0800" while getHours() on the
+// same instant returned 5. Any page diffing the two faces saw the mismatch.
+// Local wall = instant − offset(instant), offset DST-aware via the cached
+// DTF above; reading getUTC* off the shifted instant yields exact persona
+// fields, and inverting (wall via Date.UTC, plus one offset lookup at the
+// target wall — the pre-transition convention V8 itself uses for walls
+// inside a DST gap) rebuilds instants from persona fields.
+const _OrigDate = Date;
+const _ditingHostNativeOffset = __ditingNativeOf.get(Date.prototype.getTimezoneOffset);
+const _ditingWall = new _OrigDate(NaN);
+function __ditingWallMs(date) {
+  const t = date.getTime();
+  if (Number.isNaN(t)) { _ditingWall.setTime(NaN); return _ditingWall; }
+  _ditingWall.setTime(t - __ditingOffsetMinutes(date) * 60000);
+  return _ditingWall;
+}
+// Fast path: when the host zone's offset matches the persona zone at 8
+// probes across a year, the native local-field methods are already
+// persona-correct and nothing needs shifting (the dev box in Shanghai runs
+// zero overhead; only a TZ-mismatched host pays the wrap cost). Revalidated
+// whenever the pin changes, same cache discipline as the offset DTF.
+let _ditingHostOK = false, _ditingHostOKTZ = '\0';
+function __ditingHostMatchesTZ() {
+  const tz = __ditingTZ();
+  if (_ditingHostOKTZ !== tz) {
+    _ditingHostOK = true;
+    const base = Date.UTC(2026, 0, 15);
+    for (let i = 0; i < 8; i++) {
+      const probe = new _OrigDate(base + i * 45 * 86400000);
+      if (__ditingOffsetMinutes(probe) !== _ditingHostNativeOffset.call(probe)) {
+        _ditingHostOK = false;
+        break;
+      }
+    }
+    _ditingHostOKTZ = tz;
+  }
+  return _ditingHostOK;
+}
+for (const [local, utc] of [
+  ['getFullYear', 'getUTCFullYear'], ['getMonth', 'getUTCMonth'],
+  ['getDate', 'getUTCDate'], ['getDay', 'getUTCDay'],
+  ['getHours', 'getUTCHours'], ['getMinutes', 'getUTCMinutes'],
+  ['getSeconds', 'getUTCSeconds'], ['getMilliseconds', 'getUTCMilliseconds'],
+]) {
+  __ditingWrapDate(local, (target, date) => __ditingHostMatchesTZ()
+    ? Reflect.apply(target, date, [])
+    : __ditingWallMs(date)[utc]());
+}
+__ditingWrapDate('getYear', (target, date) => __ditingHostMatchesTZ()
+  ? Reflect.apply(target, date, [])
+  : __ditingWallMs(date).getUTCFullYear() - 1900);
+// Setters: rebuild the full persona field vector (current values for the
+// fields this setter doesn't mention — Date.UTC's own defaults never leak
+// in because only present args overlay), then map back to an instant.
+function __ditingZonedSet(date, args, writes) {
+  const wall = __ditingWallMs(date);
+  const f = [
+    wall.getUTCFullYear(), wall.getUTCMonth(), wall.getUTCDate(),
+    wall.getUTCHours(), wall.getUTCMinutes(), wall.getUTCSeconds(),
+    wall.getUTCMilliseconds(),
+  ];
+  for (let i = 0; i < writes.length && i < args.length; i++) f[writes[i]] = args[i];
+  const w = Date.UTC(f[0], f[1], f[2], f[3], f[4], f[5], f[6]);
+  let t = NaN;
+  if (!Number.isNaN(w)) {
+    _ditingWall.setTime(w);
+    t = w + __ditingOffsetMinutes(_ditingWall) * 60000;
+  }
+  date.setTime(t);
+  return t;
+}
+const _ditingSetSpec = {
+  setFullYear: [0, 1, 2], setMonth: [1, 2], setDate: [2],
+  setHours: [3, 4, 5, 6], setMinutes: [4, 5, 6], setSeconds: [5, 6],
+  setMilliseconds: [6],
+};
+for (const name of Object.keys(_ditingSetSpec)) {
+  const writes = _ditingSetSpec[name];
+  __ditingWrapDate(name, (target, date, args) => __ditingHostMatchesTZ()
+    ? Reflect.apply(target, date, args)
+    : __ditingZonedSet(date, args, writes));
+}
+__ditingWrapDate('setYear', (target, date, args) => {
+  if (__ditingHostMatchesTZ()) return Reflect.apply(target, date, args);
+  let y = Number(args[0]);
+  if (y >= 0 && y <= 99) y += 1900;
+  return __ditingZonedSet(date, [y], [0]);
+});
+// Constructor, local-args form: interpret the fields in the persona zone.
+// Single-string/numeric/date/zero-arg forms pass through untouched, and
+// Date.UTC's argument defaults mirror the constructor's own exactly.
+Date = new Proxy(_OrigDate, __ditingHandler('Date', {
+  construct(target, args, newTarget) {
+    if (args.length >= 2 && !__ditingHostMatchesTZ()) {
+      let y = Number(args[0]);
+      if (y >= 0 && y <= 99) y += 1900;
+      // Pass exactly the args the caller gave: an explicit undefined IS
+      // "present" per spec and would NaN the whole time value.
+      const parts = [y].concat(Array.prototype.slice.call(args, 1));
+      const w = Date.UTC.apply(null, parts);
+      let t = w;
+      if (!Number.isNaN(w)) {
+        _ditingWall.setTime(w);
+        t = w + __ditingOffsetMinutes(_ditingWall) * 60000;
+      }
+      return Reflect.construct(target, [t], newTarget);
+    }
+    return Reflect.construct(target, args, newTarget);
+  },
+  apply(target, thisArg, args) {
+    return __ditingFormatZoned(new _OrigDate(), 'all');
+  },
+}));
+__ditingNativeOf.set(Date, _OrigDate);
+Object.defineProperty(_OrigDate.prototype, 'constructor', {
+  value: Date, writable: true, enumerable: false, configurable: true,
 });
 // The remaining (locales, options) Intl constructors get the same
 // default-locale binding via the same proxy treatment.
