@@ -3,6 +3,7 @@ pub mod client;
 pub mod cookies;
 pub mod encoding;
 pub mod blocklist;
+pub mod site;
 #[cfg(feature = "stealth")]
 pub mod wreq_client;
 
@@ -12,6 +13,7 @@ pub use client::{
     ResourceType,
 };
 pub use cookies::CookieJar;
+pub use site::{is_same_site, registrable_domain, sec_fetch_site};
 pub use encoding::{
     decode_devtools_body, decode_non_html, decode_response_with_name, decode_with_label,
     label_name, url_encode_query,

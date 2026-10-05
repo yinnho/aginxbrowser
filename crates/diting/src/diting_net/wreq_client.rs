@@ -513,7 +513,23 @@ impl StealthHttpClient {
                 }
             }
 
-            let cookie_header = self.cookie_jar.get_cookie_header(&current_url);
+            // SameSite context per hop against the initiator document
+            // (referrer); a referrer-less stealth hop is a navigation.
+            let (cookie_ctx, cookie_header) = {
+                let initiator = referrer.and_then(|s| url::Url::parse(s).ok());
+                let cross_site = initiator
+                    .map(|i| !crate::diting_net::site::is_same_site(&i, &current_url))
+                    .unwrap_or(false);
+                let ctx = match initiator {
+                    Some(_) => crate::diting_net::cookies::SendContext::subresource(cross_site),
+                    None => crate::diting_net::cookies::SendContext::navigation(
+                        cross_site,
+                        method == wreq::Method::GET || method == wreq::Method::HEAD,
+                    ),
+                };
+                let header = self.cookie_jar.get_cookie_header_for(&current_url, &ctx);
+                (ctx, header)
+            };
             if include_cookies && !cookie_header.is_empty() {
                 req = req.header("Cookie", &cookie_header);
             }
@@ -604,7 +620,8 @@ impl StealthHttpClient {
 
             for val in resp.headers().get_all("set-cookie") {
                 if let Ok(s) = val.to_str() {
-                    self.cookie_jar.set_cookie(s, &current_url);
+                    self.cookie_jar
+                        .set_cookie_in_context(s, &current_url, &cookie_ctx, "http");
                 }
             }
 

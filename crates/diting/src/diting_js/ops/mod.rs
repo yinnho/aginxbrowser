@@ -4717,6 +4717,12 @@ async fn fetch_url_walk(
     let mode = deps.mode.clone();
     let page_origin = deps.page_origin.clone();
     let document_url = deps.document_url.clone();
+    // The fetch's initiator for site classification: the document, else the
+    // origin string, else an opaque sentinel (bare tool fetch — no page).
+    let fetch_initiator: url::Url = url::Url::parse(&document_url)
+        .ok()
+        .or_else(|| url::Url::parse(&page_origin).ok())
+        .unwrap_or_else(|| url::Url::parse("about:blank").unwrap());
     let referrer_policy = deps.referrer_policy.clone();
     let referrer_init = deps.referrer_init.clone();
     let custom_headers = std::mem::take(&mut deps.custom_headers);
@@ -5028,7 +5034,12 @@ async fn fetch_url_walk(
         if credentials_allowed {
             if let Some(ref jar) = cookie_jar {
                 if let Ok(parsed_url) = url::Url::parse(&current_url) {
-                    let cookie_header = jar.get_cookie_header(&parsed_url);
+                    // SameSite send gate: fetch()/XHR are subresources, so
+                    // Lax/Strict cookies never ride a cross-site hop.
+                    let send_ctx = crate::diting_net::cookies::SendContext::subresource(
+                        !crate::diting_net::site::is_same_site(&fetch_initiator, &parsed_url),
+                    );
+                    let cookie_header = jar.get_cookie_header_for(&parsed_url, &send_ctx);
                     if !cookie_header.is_empty() {
                         req = req.header("Cookie", &cookie_header);
                     }
@@ -5074,8 +5085,18 @@ async fn fetch_url_walk(
             }
         }
         // Fetch Metadata: derived per-hop because a redirect can change
-        // same/cross-site. fetch()/XHR are always dest "empty".
-        let sec_fetch_site = if current_is_cross_origin { "cross-site" } else { "same-origin" };
+        // same/cross-site. fetch()/XHR are always dest "empty". The value
+        // follows the Fetch spec's four-value vocabulary against the
+        // initiator's SITE (registrable domain), not full-origin equality —
+        // a sibling-subdomain request (item.upload.taobao.com →
+        // everyhelp.taobao.com) is `same-site`, a label Chrome can produce
+        // while carrying that site's Lax login cookies; `cross-site` there
+        // is an impossible-in-Chrome combination taobao risk control reads
+        // as cookie theft (#203).
+        let sec_fetch_site = crate::diting_net::site::sec_fetch_site(
+            Some(&fetch_initiator),
+            &url::Url::parse(&current_url).unwrap_or_else(|_| fetch_initiator.clone()),
+        );
         let sec_fetch_mode = if mode.is_empty() { "cors" } else { mode.as_str() };
         for (name, value) in [
             ("sec-fetch-site", sec_fetch_site.to_string()),
@@ -5337,9 +5358,12 @@ async fn fetch_url_walk(
         if credentials_allowed {
             if let Some(ref jar) = cookie_jar {
                 if let Ok(parsed_url) = url::Url::parse(&current_url) {
+                    let send_ctx = crate::diting_net::cookies::SendContext::subresource(
+                        !crate::diting_net::site::is_same_site(&fetch_initiator, &parsed_url),
+                    );
                     for val in resp.headers().get_all(reqwest::header::SET_COOKIE) {
                         if let Ok(s) = val.to_str() {
-                            jar.set_cookie(s, &parsed_url);
+                            jar.set_cookie_in_context(s, &parsed_url, &send_ctx, "http");
                         }
                     }
                 }

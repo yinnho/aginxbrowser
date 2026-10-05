@@ -39,6 +39,48 @@ pub struct CookieTraceEntry {
     pub deleted: bool,
 }
 
+/// Request context for SameSite send/receive decisions. The network layer
+/// knows the initiator; the jar doesn't. Two facts drive every Chrome rule:
+/// is the request cross-site, and is it a top-level navigation with a safe
+/// (GET/HEAD) method — cross-site Lax cookies ride exactly and only those.
+pub struct SendContext {
+    pub cross_site: bool,
+    pub top_level_navigation: bool,
+    pub method_safe: bool,
+}
+
+impl SendContext {
+    /// fetch()/XHR/asset request: Lax and Strict never ride cross-site
+    /// subrequests, whatever the method.
+    pub fn subresource(cross_site: bool) -> Self {
+        SendContext {
+            cross_site,
+            top_level_navigation: false,
+            method_safe: false,
+        }
+    }
+
+    /// Top-level navigation.
+    pub fn navigation(cross_site: bool, method_safe: bool) -> Self {
+        SendContext {
+            cross_site,
+            top_level_navigation: true,
+            method_safe,
+        }
+    }
+
+    fn allows(&self, same_site: &str) -> bool {
+        if !self.cross_site {
+            return true;
+        }
+        match same_site {
+            "None" => true,
+            "Lax" => self.top_level_navigation && self.method_safe,
+            _ => false, // Strict never crosses sites
+        }
+    }
+}
+
 pub struct CookieJar {
     cookies: RwLock<HashMap<String, DomainCookies>>,
     trace: RwLock<VecDeque<CookieTraceEntry>>,
@@ -102,17 +144,36 @@ impl CookieJar {
     }
 
     pub fn set_cookie(&self, set_cookie_str: &str, url: &Url) {
-        self.set_cookie_inner(set_cookie_str, url, "http")
+        self.set_cookie_inner(set_cookie_str, url, "http", None)
+    }
+
+    /// Context-aware twin of [`CookieJar::set_cookie`] for the HTTP response
+    /// path: SameSite receive rules apply (a cross-site subresource response
+    /// cannot set cookies that don't opt in with `SameSite=None`).
+    pub fn set_cookie_in_context(
+        &self,
+        set_cookie_str: &str,
+        url: &Url,
+        ctx: &SendContext,
+        source: &'static str,
+    ) {
+        self.set_cookie_inner(set_cookie_str, url, source, Some(ctx))
     }
 
     /// The seeded-state twin of [`CookieJar::set_cookie`]: same parsing and
     /// storage rules, but the mutation ring records the write as "import" —
     /// session-create injection and account seeding carried no response.
     pub fn set_cookie_seeded(&self, set_cookie_str: &str, url: &Url) {
-        self.set_cookie_inner(set_cookie_str, url, "import")
+        self.set_cookie_inner(set_cookie_str, url, "import", None)
     }
 
-    fn set_cookie_inner(&self, set_cookie_str: &str, url: &Url, source: &'static str) {
+    fn set_cookie_inner(
+        &self,
+        set_cookie_str: &str,
+        url: &Url,
+        source: &'static str,
+        ctx: Option<&SendContext>,
+    ) {
         let parts: Vec<&str> = set_cookie_str.splitn(2, ';').collect();
         let name_value = parts[0].trim();
         let (name, value) = match name_value.split_once('=') {
@@ -174,6 +235,19 @@ impl CookieJar {
                         _ => {}
                     }
                 }
+            }
+        }
+
+        // SameSite gates (Chrome). `SameSite=None` without Secure is refused
+        // in every context, and a cross-site subresource response cannot set
+        // any cookie that doesn't opt in with `SameSite=None`. Refusal is
+        // total: the header must not even act as an expiry-deletion.
+        if same_site == "None" && !secure {
+            return;
+        }
+        if let Some(ctx) = ctx {
+            if ctx.cross_site && !ctx.top_level_navigation && same_site != "None" {
+                return;
             }
         }
 
@@ -251,6 +325,51 @@ impl CookieJar {
             cookies.entry(domain.clone()).or_default().insert((name.clone(), path.clone()), entry.clone());
         }
         self.record_trace(source, url.as_str(), &entry, false);
+    }
+
+    /// Context-aware twin of [`CookieJar::get_cookie_header`]: enforces
+    /// SameSite send rules (Chrome, Lax-by-default — cookies stored without
+    /// an explicit attribute are already normalized to `Lax` at parse time).
+    pub fn get_cookie_header_for(&self, url: &Url, ctx: &SendContext) -> String {
+        let host = url.host_str().unwrap_or("");
+        let path = url.path();
+        let is_secure = is_trustworthy_origin(url);
+        let cookies = self.cookies.read().unwrap();
+
+        let mut matching: Vec<String> = Vec::new();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        for (domain, domain_cookies) in cookies.iter() {
+            if !domain_matches(host, domain) {
+                continue;
+            }
+            for entry in domain_cookies.values() {
+                if entry.host_only && !host.eq_ignore_ascii_case(domain) {
+                    continue;
+                }
+                if let Some(exp) = entry.expires {
+                    if exp <= now {
+                        continue;
+                    }
+                }
+                if entry.secure && !is_secure {
+                    continue;
+                }
+                if !path_matches(path, &entry.path) {
+                    continue;
+                }
+                if !ctx.allows(&entry.same_site) {
+                    continue;
+                }
+                matching.push(format!("{}={}", entry.name, entry.value));
+            }
+        }
+
+        matching.join("; ")
     }
 
     pub fn get_cookie_header(&self, url: &Url) -> String {

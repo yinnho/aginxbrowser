@@ -842,3 +842,87 @@ fn cookie_trace_tags_import_seeding_and_stays_empty_on_new_jar() {
     let face = serde_json::to_string(&trace).unwrap();
     assert!(!face.contains("SEEDSECRET"), "{face}");
 }
+
+/// SameSite send rules (Chrome, Lax-by-default). fetch()/XHR are
+/// subresources: Lax and Strict never ride a cross-site hop, None does.
+#[test]
+fn same_site_send_gate_matches_chrome() {
+    let jar = CookieJar::new();
+    let u = |s: &str| Url::parse(s).unwrap();
+    jar.set_cookie("lax1=v; SameSite=Lax", &u("https://everyhelp.taobao.com/"));
+    jar.set_cookie("strict1=v; SameSite=Strict", &u("https://everyhelp.taobao.com/"));
+    jar.set_cookie("none1=v; SameSite=None; Secure", &u("https://everyhelp.taobao.com/"));
+    jar.set_cookie("unset1=v", &u("https://everyhelp.taobao.com/"));
+
+    let same = u("https://everyhelp.taobao.com/x");
+    let sub_same = SendContext::subresource(false);
+    let got = jar.get_cookie_header_for(&same, &sub_same);
+    for name in ["lax1", "strict1", "none1", "unset1"] {
+        assert!(got.contains(&format!("{name}=")), "same-site subresource carries {name}: {got}");
+    }
+
+    // Same target URL, but the initiating document is another site (say
+    // mmstat.com) — cross-site lives in the context, not the target host.
+    let sub_cross = SendContext::subresource(true);
+    let got = jar.get_cookie_header_for(&same, &sub_cross);
+    assert!(!got.contains("lax1") && !got.contains("strict1") && !got.contains("unset1"));
+    assert!(got.contains("none1="), "None rides cross-site subresources: {got}");
+}
+
+/// A cross-site top-level GET navigation is the one cross-site shape Lax
+/// cookies ride (Chrome's SSO login shape); POST drops them again.
+#[test]
+fn lax_rides_cross_site_get_navigation_only() {
+    let jar = CookieJar::new();
+    let u = |s: &str| Url::parse(s).unwrap();
+    jar.set_cookie("lax1=v; SameSite=Lax", &u("https://taobao.com/"));
+    jar.set_cookie("strict1=v; SameSite=Strict", &u("https://taobao.com/"));
+
+    let cross = u("https://taobao.com/");
+    let get_nav = SendContext::navigation(true, true);
+    assert!(jar
+        .get_cookie_header_for(&cross, &get_nav)
+        .contains("lax1="));
+    assert!(!jar
+        .get_cookie_header_for(&cross, &get_nav)
+        .contains("strict1="));
+
+    let post_nav = SendContext::navigation(true, false);
+    assert!(!jar
+        .get_cookie_header_for(&cross, &post_nav)
+        .contains("lax1="));
+}
+
+/// SameSite receive rules: a cross-site subresource response cannot set a
+/// cookie that isn't `SameSite=None` — not even as an expiry-deletion.
+/// `SameSite=None` without Secure is refused in every context.
+#[test]
+fn same_site_receive_gate_blocks_cross_site_subresource_sets() {
+    let jar = CookieJar::new();
+    let u = |s: &str| Url::parse(s).unwrap();
+    let same_site_origin = u("https://everyhelp.taobao.com/");
+    jar.set_cookie("unb=live", &same_site_origin);
+
+    let sub_cross = SendContext::subresource(true);
+    jar.set_cookie_in_context(
+        "unb=; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+        &same_site_origin,
+        &sub_cross,
+        "http",
+    );
+    jar.set_cookie_in_context("fresh=1", &same_site_origin, &sub_cross, "http");
+    assert!(
+        jar.get_cookie_header(&same_site_origin).contains("unb="),
+        "a gated set must not act as a deletion"
+    );
+    assert!(!jar.get_cookie_header(&same_site_origin).contains("fresh"));
+
+    jar.set_cookie_in_context("none1=v; SameSite=None", &same_site_origin, &sub_cross, "http");
+    assert!(
+        !jar.get_cookie_header(&same_site_origin).contains("none1"),
+        "None without Secure is refused in any context"
+    );
+
+    jar.set_cookie_in_context("optin=v; SameSite=None; Secure", &same_site_origin, &sub_cross, "http");
+    assert!(jar.get_cookie_header(&same_site_origin).contains("optin="));
+}

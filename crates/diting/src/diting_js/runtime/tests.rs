@@ -18894,3 +18894,95 @@ fn document_evaluate_xpath_subset() {
             "each payload observes the previous payload's microtask settled"
         );
     }
+
+    /// #203 root cause regression: `sec-fetch-site` must follow the
+    /// initiator's SITE (registrable domain), not full-origin equality. A
+    /// sibling-origin fetch (127.0.0.1:A → 127.0.0.1:B — the loopback
+    /// stand-in for item.upload.taobao.com → everyhelp.taobao.com) is
+    /// `same-site`; the old origin-equality code labeled it `cross-site`, a
+    /// combination real Chrome never produces while carrying that site's Lax
+    /// login cookies, and taobao risk control answered with a defensive
+    /// logout. localhost vs 127.0.0.1 is genuinely cross-site.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_sec_fetch_site_uses_site_not_origin() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let probe = |host: &str| {
+            let listener = std::net::TcpListener::bind((host, 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (tx, rx) = std::sync::mpsc::channel::<String>();
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let body = b"{}";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(body);
+                let _ = stream.flush();
+                tx.send(request).unwrap();
+            });
+            (port, rx)
+        };
+
+        let (doc_port, doc_rx) = probe("127.0.0.1");
+        let (sibling_port, sibling_rx) = probe("127.0.0.1");
+        let (foreign_port, foreign_rx) = probe("localhost");
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/doc", doc_port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    // Cross-origin without ACAO → the promise rejects after
+                    // the request itself has gone out; the probe on the wire
+                    // is the assertion surface, not the response.
+                    try { await fetch("http://127.0.0.1:SIBLING/api"); } catch (e) {}
+                    try { await fetch("http://localhost:FOREIGN/api"); } catch (e) {}
+                    return 1;
+                }"#
+                    .replace("SIBLING", &sibling_port.to_string())
+                    .replace("FOREIGN", &foreign_port.to_string())
+                    .as_str(),
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        assert_eq!(result.value.unwrap(), serde_json::json!(1));
+        let sibling_req = sibling_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let line = sibling_req
+            .to_ascii_lowercase()
+            .lines()
+            .find(|l| l.starts_with("sec-fetch-site:"))
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(
+            line.trim(),
+            "sec-fetch-site: same-site",
+            "sibling-origin request must self-describe same-site, request:\n{sibling_req}"
+        );
+        let foreign_req = foreign_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let line = foreign_req
+            .to_ascii_lowercase()
+            .lines()
+            .find(|l| l.starts_with("sec-fetch-site:"))
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(
+            line.trim(),
+            "sec-fetch-site: cross-site",
+            "different-site request must self-describe cross-site, request:\n{foreign_req}"
+        );
+        let _ = doc_rx;
+    }

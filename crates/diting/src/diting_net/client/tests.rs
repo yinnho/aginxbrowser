@@ -1095,3 +1095,69 @@ async fn scripted_stealth_hop_none_for_socks_proxy() {
         "SOCKS contexts must keep scripted hops on the plain transport"
     );
 }
+
+/// #203: Fetch-Metadata follows the resource class and the initiator's SITE
+/// (registrable domain). Parser-loaded subresources are
+/// `dest: style|script` / `mode: no-cors` — never the navigation's
+/// `document`/`navigate` pair — and `sec-fetch-site` distinguishes
+/// same-origin / same-site (sibling origin, same site: the loopback
+/// stand-in is a different port on the same host) / cross-site / none.
+#[tokio::test]
+async fn fetch_metadata_follows_resource_type_and_site() {
+    let (url, server) = loopback_header_echo().await;
+    let client = referrer_client();
+
+    let sibling_doc = format!("http://{}:1/doc.html", url.host_str().unwrap());
+    let resp = client
+        .fetch_with_callbacks(&url, None, ResourceType::Stylesheet, Some(&sibling_doc))
+        .await
+        .unwrap();
+    assert_eq!(resp.status, 200);
+    let echo = String::from_utf8_lossy(&resp.body).to_string();
+    assert_eq!(echoed(&echo, "sec-fetch-dest"), vec!["style"], "{echo}");
+    assert_eq!(echoed(&echo, "sec-fetch-mode"), vec!["no-cors"], "{echo}");
+    assert_eq!(
+        echoed(&echo, "sec-fetch-site"),
+        vec!["same-site"],
+        "sibling-origin stylesheet must self-describe same-site, echo:\n{echo}"
+    );
+    assert!(
+        echoed(&echo, "sec-fetch-user").is_empty(),
+        "sec-fetch-user is navigation-only, echo:\n{echo}"
+    );
+    assert!(
+        echoed(&echo, "upgrade-insecure-requests").is_empty(),
+        "upgrade-insecure-requests is navigation-only, echo:\n{echo}"
+    );
+    assert!(
+        echoed(&echo, "accept").iter().any(|v| v.starts_with("text/css")),
+        "stylesheet Accept is Chrome's text/css shape, echo:\n{echo}"
+    );
+
+    let resp = client
+        .fetch_with_callbacks(&url, None, ResourceType::Stylesheet, Some("http://localhost:9/doc.html"))
+        .await
+        .unwrap();
+    let echo = String::from_utf8_lossy(&resp.body).to_string();
+    assert_eq!(
+        echoed(&echo, "sec-fetch-site"),
+        vec!["cross-site"],
+        "localhost vs 127.0.0.1 are distinct sites, echo:\n{echo}"
+    );
+
+    let resp = client
+        .fetch_with_callbacks(&url, None, ResourceType::Document, None)
+        .await
+        .unwrap();
+    let echo = String::from_utf8_lossy(&resp.body).to_string();
+    assert_eq!(echoed(&echo, "sec-fetch-dest"), vec!["document"], "{echo}");
+    assert_eq!(echoed(&echo, "sec-fetch-mode"), vec!["navigate"], "{echo}");
+    assert_eq!(
+        echoed(&echo, "sec-fetch-site"),
+        vec!["none"],
+        "no referring document = address-bar shape, echo:\n{echo}"
+    );
+    assert_eq!(echoed(&echo, "sec-fetch-user"), vec!["?1"], "{echo}");
+    assert_eq!(echoed(&echo, "upgrade-insecure-requests"), vec!["1"], "{echo}");
+    server.abort();
+}

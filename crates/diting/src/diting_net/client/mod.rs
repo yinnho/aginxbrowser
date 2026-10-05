@@ -972,6 +972,31 @@ impl HttpClient {
         let mut redirects = Vec::new();
         let max_redirects = 20;
 
+        // Fetch-Metadata + SameSite context, fixed for the whole redirect
+        // chain: the initiator is the referring document (None = address-bar
+        // / tool navigation). dest/mode/Accept follow the resource class —
+        // Chrome sends `sec-fetch-dest: style|script` with
+        // `sec-fetch-mode: no-cors` on parser-loaded subresources, never the
+        // navigation's `document`/`navigate` pair (#203).
+        let initiator = referrer.and_then(|s| url::Url::parse(s).ok());
+        let is_navigation = matches!(resource_type, ResourceType::Document);
+        let (fetch_dest, fetch_mode, default_accept): (&'static str, &'static str, &'static str) =
+            match resource_type {
+                ResourceType::Document => (
+                    "document",
+                    "navigate",
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                ),
+                ResourceType::Script => ("script", "no-cors", "*/*"),
+                ResourceType::Stylesheet => ("style", "no-cors", "text/css,*/*;q=0.1"),
+                ResourceType::Image => (
+                    "image",
+                    "no-cors",
+                    "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                ),
+                ResourceType::Fetch => ("empty", "cors", "*/*"),
+            };
+
         for _redirect_count in 0..max_redirects {
             let ua = self.user_agent.read().await.clone();
             let (sec_ch_ua, platform) = derive_client_hints(&ua);
@@ -979,10 +1004,7 @@ impl HttpClient {
             headers.insert(USER_AGENT, HeaderValue::from_str(&ua).unwrap_or_else(|_| {
                 HeaderValue::from_static("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36")
             }));
-            headers.insert(
-                reqwest::header::ACCEPT,
-                HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"),
-            );
+            headers.insert(reqwest::header::ACCEPT, HeaderValue::from_static(default_accept));
             headers.insert(
                 reqwest::header::ACCEPT_LANGUAGE,
                 HeaderValue::from_str(&self.accept_language.read().await.clone())
@@ -1002,24 +1024,34 @@ impl HttpClient {
             );
             headers.insert(
                 HeaderName::from_static("sec-fetch-dest"),
-                HeaderValue::from_static("document"),
+                HeaderValue::from_static(fetch_dest),
             );
             headers.insert(
                 HeaderName::from_static("sec-fetch-mode"),
-                HeaderValue::from_static("navigate"),
+                HeaderValue::from_static(fetch_mode),
             );
+            // Per-hop against the ORIGINAL initiator (the whole chain keeps
+            // the request's initiator): same-origin / same-site (registrable
+            // domain, so sibling subdomains are same-site) / cross-site /
+            // none (no referring document).
             headers.insert(
                 HeaderName::from_static("sec-fetch-site"),
-                HeaderValue::from_static("none"),
+                HeaderValue::from_str(crate::diting_net::site::sec_fetch_site(
+                    initiator.as_ref(),
+                    &current_url,
+                ))
+                .unwrap(),
             );
-            headers.insert(
-                HeaderName::from_static("sec-fetch-user"),
-                HeaderValue::from_static("?1"),
-            );
-            headers.insert(
-                HeaderName::from_static("upgrade-insecure-requests"),
-                HeaderValue::from_static("1"),
-            );
+            if is_navigation {
+                headers.insert(
+                    HeaderName::from_static("sec-fetch-user"),
+                    HeaderValue::from_static("?1"),
+                );
+                headers.insert(
+                    HeaderName::from_static("upgrade-insecure-requests"),
+                    HeaderValue::from_static("1"),
+                );
+            }
             // Document-initiated requests carry the initiator's Referer —
             // whitelist-checked service APIs (map vendors, CDN anti-leech)
             // reject bare requests — trimmed per hop by the navigation
@@ -1047,7 +1079,23 @@ impl HttpClient {
                 }
             }
 
-            let cookie_header = self.cookie_jar.get_cookie_header(&current_url);
+            // SameSite context: cross-site against the initiator document
+            // (no initiator = address-bar navigation, never cross-site);
+            // navigations may ride Lax cookies cross-site with a safe
+            // method, subresources never do.
+            let cross_site = initiator
+                .as_ref()
+                .map(|i| !crate::diting_net::site::is_same_site(i, &current_url))
+                .unwrap_or(false);
+            let cookie_ctx = if is_navigation {
+                crate::diting_net::cookies::SendContext::navigation(
+                    cross_site,
+                    method == Method::GET || method == Method::HEAD,
+                )
+            } else {
+                crate::diting_net::cookies::SendContext::subresource(cross_site)
+            };
+            let cookie_header = self.cookie_jar.get_cookie_header_for(&current_url, &cookie_ctx);
             tracing::debug!(
                 "Cookie header for {}: {} cookies ({} bytes)",
                 current_url.host_str().unwrap_or("?"),
@@ -1163,7 +1211,8 @@ impl HttpClient {
 
             for val in resp.headers().get_all(reqwest::header::SET_COOKIE) {
                 if let Ok(s) = val.to_str() {
-                    self.cookie_jar.set_cookie(s, &current_url);
+                    self.cookie_jar
+                        .set_cookie_in_context(s, &current_url, &cookie_ctx, "http");
                 }
             }
 
