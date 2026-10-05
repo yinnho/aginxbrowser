@@ -688,6 +688,96 @@ const _intervals = new Set();
 let _timerNesting = 0;
 const _TIMER_FLOOR_MS = 4;
 
+// #38, 2026-10-05: timers no longer get one tokio sleep each. Same-deadline
+// sleeps complete in the OP DRIVER's order, not scheduling order — the wheel
+// holds a slot as a LIFO stack, the completion FuturesUnordered wakes onto
+// another LIFO, and deno_core delivers results 128 per event-loop tick, so
+// the two reversals only cancel for small quiet batches. Live on an fxg boot
+// storm (1500 same-delay timers): 0..127,309..182,310..437,... — dozens of
+// 128-item chunks, some ascending, some descending. HTML's timer task source
+// is ordered: same-deadline timers run in scheduling order. The fix is the
+// shape every real browser uses — one sorted timer heap, ordered by
+// (deadline, sequence), with outstanding sleeps as nothing more than wakeups.
+// An op sleep cannot be cancelled, so arming an earlier timer may leave a
+// stale sleep in flight; a stale wake (its deadline no longer the armed
+// minimum) is a no-op, and the arm policy (`e.d < armed`) keeps at most one
+// sleep covering the true earliest deadline.
+const _timerHeap = [];
+let _timerSeq = 0;
+let _timerArmed = Infinity;
+const _timerLess = (a, b) => a.d < b.d || (a.d === b.d && a.s < b.s);
+const _timerPush = (e) => {
+  const h = _timerHeap;
+  h.push(e);
+  let i = h.length - 1;
+  while (i > 0) {
+    const p = (i - 1) >> 1;
+    if (!_timerLess(h[i], h[p])) break;
+    const t = h[i]; h[i] = h[p]; h[p] = t;
+    i = p;
+  }
+};
+const _timerPop = () => {
+  const h = _timerHeap;
+  const top = h[0];
+  const last = h.pop();
+  if (h.length) {
+    h[0] = last;
+    let i = 0;
+    for (;;) {
+      const l = 2 * i + 1, r = l + 1;
+      let m = i;
+      if (l < h.length && _timerLess(h[l], h[m])) m = l;
+      if (r < h.length && _timerLess(h[r], h[m])) m = r;
+      if (m === i) break;
+      const t = h[i]; h[i] = h[m]; h[m] = t;
+      i = m;
+    }
+  }
+  return top;
+};
+const _timerWake = (d) => {
+  if (d !== _timerArmed) return; // stale: a sleep for a superseded deadline
+  _timerArmed = Infinity;
+  // Fixed snapshot: entries whose f() enqueues more timers during this loop
+  // must not extend the pop window mid-wake.
+  const now = Date.now();
+  let e;
+  while ((e = _timerHeap[0]) && e.d <= now) {
+    _timerPop();
+    e.f();
+  }
+  _timerArmNext();
+};
+// #39 discipline: termination unwinds pending ops WITHOUT settling them, so
+// the armed sleep can vanish and the earliest deadline would rot while
+// `armed` claims coverage. Same cure as the trampoline patrol — a slow
+// sleep that re-delivers anything already past deadline.
+let _timerPatrol = false;
+const _timerPatrolFn = () => {
+  _timerPatrol = false;
+  const e = _timerHeap[0];
+  if (e && e.d <= Date.now()) {
+    if (_timerArmed !== Infinity) _timerWake(_timerArmed);
+    else _timerArmNext();
+  }
+  if (_timerHeap.length && !_timerPatrol) {
+    _timerPatrol = true;
+    _OPS.op_sleep(1500).then(_timerPatrolFn, () => {});
+  }
+};
+const _timerArmNext = () => {
+  const e = _timerHeap[0];
+  if (!e || e.d >= _timerArmed) return;
+  _timerArmed = e.d;
+  if (!_timerPatrol && _timerHeap.length) {
+    _timerPatrol = true;
+    _OPS.op_sleep(1500).then(_timerPatrolFn, () => {});
+  }
+  const wait = Math.max(0, e.d - Date.now());
+  _OPS.op_sleep(wait).then(() => _timerWake(e.d), () => { _timerPatrolFn(); });
+};
+
 const _scheduleAfter = (delay, level, fn) => {
   const d0 = Math.max(0, Number(delay) || 0);
   // Per HTML's timer-initialisation steps, a timer whose nesting level is
@@ -701,9 +791,11 @@ const _scheduleAfter = (delay, level, fn) => {
   // task boundary a real browser provides. Delivering it as a microtask
   // breaks every scheduler built on the distinction (React 19's Scheduler
   // defers work through MessageChannel/setTimeout specifically to land on
-  // that boundary), so even delay-0 timers go through op_sleep: a resolved
-  // async op is the cheapest true event-loop turn the runtime offers.
-  _OPS.op_sleep(d).then(fn);
+  // that boundary), so even delay-0 timers round-trip through op_sleep:
+  // a resolved async op is the cheapest true event-loop turn the runtime
+  // offers.
+  _timerPush({ d: Date.now() + d, s: _timerSeq++, f: fn });
+  _timerArmNext();
 };
 
 // A timer/message delivery must land at a TASK BOUNDARY, never at a

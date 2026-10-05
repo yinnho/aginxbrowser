@@ -13640,6 +13640,55 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn test_same_deadline_timers_fire_in_fifo_order() {
+        // HTML's timer task source is ordered: timers with the same deadline
+        // run in scheduling order. We used to hand every timer its own
+        // tokio sleep, and same-tick completions settle in the op driver's
+        // completion order — not scheduling order (#38).
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"async () => {
+            const order = [];
+            for (let i = 0; i < 30; i++) setTimeout(() => order.push(i), 0);
+            // nonzero same delay: all land in the same timer-wheel slot
+            const wheel = [];
+            for (let i = 0; i < 30; i++) setTimeout(() => wheel.push(i), 40);
+            await new Promise(r => setTimeout(r, 80));
+            // mixed delays, interleaved scheduling: all 0ms in order, then
+            // all 5ms in order.
+            const mixed = [];
+            for (let i = 0; i < 20; i++) {
+                const d = i % 2 === 0 ? 0 : 5;
+                setTimeout(() => mixed.push(i), d);
+            }
+            // scheduled from inside timer callbacks (async arming, the way
+            // real pages chain timers)
+            const nested = [];
+            setTimeout(() => { nested.push('a'); setTimeout(() => nested.push('a1'), 0); }, 0);
+            setTimeout(() => { nested.push('b'); setTimeout(() => nested.push('b1'), 0); }, 0);
+            setTimeout(() => nested.push('c'), 0);
+            await new Promise(r => setTimeout(r, 120));
+            // The live observation (#30 session, fxg boot storm): 1500
+            // same-delay timers completed 0..127,1499,128..1498 — one
+            // mid-sequence inversion. Small batches don't trip it.
+            const mass = [];
+            for (let i = 0; i < 1500; i++) setTimeout(() => mass.push(i), 50);
+            await new Promise(r => setTimeout(r, 200));
+            return [order.join(','), wheel.join(','), mixed.join(','), nested.join(','), mass.join(',')];
+        }"#;
+        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let v = result.value.unwrap();
+        let expected_order: Vec<String> = (0..30).map(|i| i.to_string()).collect();
+        let mut expected_mixed: Vec<String> = (0..20).step_by(2).map(|i| i.to_string()).collect();
+        expected_mixed.extend((1..20).step_by(2).map(|i| i.to_string()));
+        assert_eq!(v[0], serde_json::json!(expected_order.join(",")), "delay-0 FIFO: {:?}", v[0]);
+        assert_eq!(v[1], serde_json::json!(expected_order.join(",")), "same-wheel-slot FIFO: {:?}", v[1]);
+        assert_eq!(v[2], serde_json::json!(expected_mixed.join(",")), "mixed-delay ordering: {:?}", v[2]);
+        assert_eq!(v[3], serde_json::json!("a,b,c,a1,b1"), "nested-timer ordering: {:?}", v[3]);
+        let expected_mass: Vec<String> = (0..1500).map(|i| i.to_string()).collect();
+        assert_eq!(v[4], serde_json::json!(expected_mass.join(",")), "1500 same-deadline FIFO: {:?}", v[4]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn test_throwing_timer_is_contained_and_later_timers_still_fire() {
         // Upstream #394: a page timer that throws (Booking.com's
         // "Cannot redefine property: src" inside a timer) took the whole
