@@ -1,0 +1,18 @@
+{
+  "vars": {
+    "username": "livid"
+  },
+  "steps": [
+    {
+      "id": "member",
+      "op": "http",
+      "args": {
+        "url": "https://www.v2ex.com/api/members/show.json?username={{username}}",
+        "method": "GET",
+        "headers": { "User-Agent": "aginxbrowser-flow/1.0" }
+      },
+      "save": "member",
+      "note": "用户公开档：id/username/bio/location/github/twitter/website/avatar/created"
+    }
+  ]
+}

@@ -27,13 +27,19 @@ anything else is rejected before it touches the filesystem.
 
 | name | site | state | notes |
 |---|---|---|---|
+| `bilibili-search` | bilibili.com | runs green | cookie 预热 → 页内 fetch 搜索 API：真浏览器上下文无 412 无 wbi（yt-dlp 被封的那条路我们不走）；video+bangumi 块 — see flow.md |
 | `bsky-post` | bsky.social | runs green | app password (`creds_json` vars) → createRecord → verify; page-context xrpc, no cookies — see flow.md |
 | `doudian-login` | fxg.jinritemai.com (via open.snssdk.com) | runs green to QR handoff | direct SSO authorize URL: QR in ~1.8s vs 12-20s via the fxg front; human scans `qr_shot`, session lands logged-in — see flow.md |
+| `github-read` | api.github.com | runs green | 免 gh/token 公开读：repo 元数据 + issue 列表（search API 避开 PR 混排）；404/403 落 fail 步带原始 body — see flow.md |
 | `taobao-login` | login.taobao.com | runs green to QR handoff | direct login.jhtml (3.7s vs 13.5s via homepage); QR canvas needs no click; cookie lands on .taobao.com — see flow.md |
 | `taobao-live` | live.taobao.com | runs green logged-out | verdict-gated front probe: delivers "no wall + telemetry"; room list awaits engine hydration — see flow.md |
 | `taobao-shop-collect` | shop<N>.taobao.com | runs green (reboot handles boot roulette; wall receipt verified ×3) | buyer-side listing collect: 60 cards via React fiber walk + secfont price tokens/cps (offline decode companion in flow.md); data-level gates, no verdict (session-cumulative rows false-wall a rebooted-clean page) — see flow.md |
+| `v2ex-hot` / `v2ex-node` / `v2ex-topic` / `v2ex-member` | www.v2ex.com/api | runs green (needs `AGINXBROWSER_PROXY` egress + plain UA) | 公开 API 四件套纯 http 步；朴素 UA 过 CF（默认 Chrome UA 配引擎 TLS 指纹=错配会被 managed challenge）——机制与墙见 v2ex-hot/flow.md |
+| `web-read` | any URL | runs green (CF-challenge sites excluded) | 引擎本体=reader 的 Jina 平替：goto + 容器优先级抽取 + 截断；404 页诚实抽取 — see flow.md |
 | `wechat-oa-post` | api.weixin.qq.com | runs green (certified OA) / draft-only (uncertified) | 5 pure http steps (token→cover→draft→publish→verify); account = `creds {app_id, app_secret}` via vars, never in flow.json — see flow.md |
 | `xcom-profile` | x.com | runs green logged-out | needs foreign egress (`use_proxy: true` baked in) |
+| `xueqiu-quote` / `xueqiu-trending` | xueqiu.com | runs green | 页内 fetch（flow http 步无 cookie 带不了雪球会话）：行情/热股榜+热帖；三坑=自定义 header 触发 preflight 400、eval 5s 预算不够、热帖必须 www 直连 — see flow.md |
+| `youtube-subtitles` | youtube.com | runs green (use_proxy baked in) | 元数据+字幕轨全表；**正文=pot 墙原料交付**（timedtext 200 空 body，四路实测全墙）— see flow.md |
 | `juejin-post` | juejin.cn | runs green | read a post page; list pages stall (see flow.md) |
 | `juejin-publish` | juejin.cn | needs a logged-in session | draft then publish; no proxy; sample title is refused |
 | `zhihu-answer` | zhihu.com | 403 wall logged-out | compose with a logged-in session — see flow.md |
@@ -61,3 +67,20 @@ The honest rule the samples demonstrate: a flow either replays green or
 fails with a receipt (failing step, reason, URL, screenshot, saved-so-far,
 session left alive). Failed samples stay installed on purpose — their
 flow.md documents the wall and the composition recipe around it.
+
+## Capability flows — routing (agent-facing)
+
+读/搜类零登录流，agent 按意图直达：
+
+| 意图 | flow |
+|---|---|
+| 读任意网页正文 | `web-read`（`vars.url`） |
+| 搜B站视频 | `bilibili-search`（`vars.keyword`） |
+| 股票行情 / 热股热帖 | `xueqiu-quote`（`vars.symbol`）/ `xueqiu-trending` |
+| V2EX 热帖/节点/帖详情/用户 | `v2ex-hot` / `v2ex-node` / `v2ex-topic` / `v2ex-member` |
+| GitHub 仓库/issue 公开读 | `github-read`（`vars.repo`） |
+| YouTube 视频信息+字幕轨 | `youtube-subtitles`（`vars.url`） |
+
+境外站（v2ex / youtube）要引擎挂着 `AGINXBROWSER_PROXY`；国内站直连。
+通用搜索走引擎搜索层（`/search`），不是 flow。
+

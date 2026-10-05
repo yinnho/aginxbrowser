@@ -1,0 +1,32 @@
+{
+  "vars": {
+    "keyword": "浏览器引擎",
+    "page": 1
+  },
+  "create": {
+    "url": "https://www.bilibili.com",
+    "width": 1440,
+    "height": 900
+  },
+  "steps": [
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "document.readyState === 'complete'",
+        "timeout_ms": 20000
+      },
+      "save": "ready",
+      "note": "这跳导航=cookie 预热（buvid3/buvid4 等风控 cookie 进引擎 jar）。B站是 412 老战场：裸 curl 指纹必被风控，会话页内 fetch=真浏览器上下文直接 code 0（实测无需 wbi 签名）"
+    },
+    {
+      "id": "search",
+      "op": "eval",
+      "args": {
+        "timeout_ms": 20000,
+        "script": "(async () => { const kw = encodeURIComponent('{{keyword}}'); const r = await fetch('https://api.bilibili.com/x/web-interface/search/all/v2?keyword=' + kw + '&page={{page}}', { credentials: 'include' }); const j = await r.json(); if (j.code !== 0) throw new Error('bilibili search wall — http=' + r.status + ' code=' + j.code + ' msg=' + (j.message || '')); const blocks = (j.data || {}).result || []; const take = (t) => ((blocks.find(b => b.result_type === t) || {}).data) || []; const strip = (s) => (s || '').replace(/<[^>]+>/g, ''); const video = take('video').map(v => ({ title: strip(v.title), author: v.author, mid: v.mid, play: v.play, danmaku: v.video_review, duration: v.duration, pubdate: v.pubdate, bvid: v.bvid, arcurl: v.arcurl, desc: strip(v.description).slice(0, 120) })); const media_bangumi = take('media_bangumi').map(v => ({ title: strip(v.title), season_id: v.season_id })); if (!video.length) throw new Error('bilibili search empty — kw={{keyword}} blocks=' + blocks.map(b => b.result_type).join(',')); return { http: r.status, keyword: '{{keyword}}', page: {{page}}, video: video, bangumi: media_bangumi }; })()"
+      },
+      "save": "search",
+      "note": "同雪球姿势：不带自定义 header（带了就 preflight 400），eval 传 timeout_ms。result 块里 video 是主菜，media_bangumi 附送；标题是 <em> 高亮 HTML 要剥。数据门两条：code!==0（墙/风控）与 video 空（关键词无结果）都就地 throw 带事实"
+    }
+  ]
+}

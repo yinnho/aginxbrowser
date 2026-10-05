@@ -1,0 +1,32 @@
+{
+  "vars": {
+    "size": 10,
+    "posts": 20
+  },
+  "create": {
+    "url": "https://www.xueqiu.com",
+    "width": 1440,
+    "height": 900
+  },
+  "steps": [
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "document.readyState === 'complete'",
+        "timeout_ms": 20000
+      },
+      "save": "ready",
+      "note": "同 xueqiu-quote：这跳导航就是 cookie 预热"
+    },
+    {
+      "id": "trending",
+      "op": "eval",
+      "args": {
+        "timeout_ms": 30000,
+        "script": "(async () => { const g = async (u) => { const r = await fetch(u, { credentials: 'include' }); return { r, j: await r.json() } }; const hs = await g('https://stock.xueqiu.com/v5/stock/hot_stock/list.json?size={{size}}&type=10'); const hot_stocks = (((hs.j.data || {}).items) || []).map((x, i) => ({ rank: i + 1, symbol: x.code || x.symbol, name: x.name, current: x.current, percent: x.percent })); const hp = await g('https://www.xueqiu.com/v4/statuses/public_timeline_by_category.json?since_id=-1&max_id=-1&count={{posts}}&category=-1'); const strip = (s) => (s || '').replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim(); const hot_posts = ((hp.j.list) || []).map(it => { try { const d = JSON.parse(it.data); return { id: d.id, title: d.title || '', author: (d.user || {}).screen_name || '', text: strip(d.text || d.description).slice(0, 200), likes: d.like_count || 0, url: d.target ? ('https://xueqiu.com' + d.target) : '' }; } catch (e) { return null; } }).filter(Boolean); if (!hot_stocks.length && !hot_posts.length) throw new Error('xueqiu trending empty — stocks http=' + hs.r.status + ' posts http=' + hp.r.status); return { hot_stocks: hot_stocks, hot_posts: hot_posts }; })()"
+      },
+      "save": "trending",
+      "note": "两个端点一次 eval 串行拿：热股榜 stock.xueqiu.com（跨子域 CORS 面 OK）+ 热帖 v4 公共时间线（必须 www.xueqiu.com——裸 xueqiu.com 会 301 到 www，重定向响应的 ACAO 是空串，浏览器上下文直接被拦；他们的 Python 版没有 CORS 概念才走得通）。热帖每条 data 字段是 JSON 字符串要二次 parse，text 是带标签 HTML 要剥"
+    }
+  ]
+}

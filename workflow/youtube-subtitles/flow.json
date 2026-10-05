@@ -1,0 +1,50 @@
+{
+  "vars": {
+    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "lang": "en"
+  },
+  "create": {
+    "url": "{{url}}",
+    "width": 1440,
+    "height": 900,
+    "use_proxy": true
+  },
+  "steps": [
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "!!window.ytInitialPlayerResponse || performance.now() > 12000",
+        "timeout_ms": 15000
+      },
+      "save": "boot",
+      "note": "youtube.com 在 BLOCKED_DOMAINS，create 里的 use_proxy:true 让整个会话走 AGINXBROWSER_PROXY（session 级 opt-in 全量走——这个流要的就是全量走）。软探测：ytInitialPlayerResponse 挂上或 12s 到点必真（wait 超时=fail 整流，#50 老坑）"
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": { "var": "boot.detail", "is": "contains", "value": "true" },
+        "goto": "read"
+      },
+      "note": "detail 是字符串只能 contains（#50 坑）；boot 干净=true 跳 read，脏（12s 无 playerResponse：代理死/consent 墙/视频不存在）直落 takeover"
+    },
+    {
+      "id": "takeover",
+      "op": "eval",
+      "args": {
+        "script": "throw new Error('youtube player response absent — url={{url}} boot=' + JSON.stringify({{boot}}).slice(0, 200) + ' — check AGINXBROWSER_PROXY egress / consent wall')"
+      },
+      "save": "takeover",
+      "note": "回执带 boot 事实。代理没挂/出口坏了是最常见原因"
+    },
+    {
+      "id": "read",
+      "op": "eval",
+      "args": {
+        "timeout_ms": 15000,
+        "script": "(() => { const pr = window.ytInitialPlayerResponse; const vd = pr.videoDetails || {}; const caps = (((pr.captions || {}).playerCaptionsTracklistRenderer || {}).captionTracks) || []; const pick = caps.find(c => c.languageCode === '{{lang}}' && !c.kind) || caps.find(c => c.languageCode === '{{lang}}') || null; return { vid: vd.videoId, title: vd.title, author: vd.author, lengthSeconds: vd.lengthSeconds, viewCount: vd.viewCount, keywords: vd.keywords || [], captionTracks: caps.map(c => ({ lang: c.languageCode, name: (c.name && (c.name.simpleText || (c.name.runs && c.name.runs[0] && c.name.runs[0].text))) || '', kind: c.kind || null, isTranslatable: !!c.isTranslatable, baseUrl: c.baseUrl })), picked: pick ? { lang: pick.languageCode, baseUrl: pick.baseUrl } : null, note: pick ? 'body fetch = pot wall, baseUrl delivered raw (see flow.md)' : 'no track for lang={{lang}}' }; })()"
+      },
+      "save": "read",
+      "note": "交付原料：视频全元数据 + 字幕轨全表（语言/名称/auto 标记/可翻译/baseUrl）+ 按 lang 挑轨。字幕正文四路实测全墙（timedtext 200 空 body、innertube ANDROID 400、get_transcript 400、DOM 无转录面板）=pot/出口信誉墙——baseUrl 原样交付，正文解码是另案（同 secfont：流送 token，解码离线）"
+    }
+  ]
+}

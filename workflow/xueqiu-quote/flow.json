@@ -1,0 +1,31 @@
+{
+  "vars": {
+    "symbol": "SH601138"
+  },
+  "create": {
+    "url": "https://www.xueqiu.com",
+    "width": 1440,
+    "height": 900
+  },
+  "steps": [
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "document.readyState === 'complete'",
+        "timeout_ms": 20000
+      },
+      "save": "ready",
+      "note": "雪球首页落地（这次导航就是 cookie 预热——引擎收到 acw_tc 等会话 cookie 存进 jar，后续页内 fetch 才有票）。SPA 首页重，等 complete 就够，不需要等任何业务 selector"
+    },
+    {
+      "id": "quote",
+      "op": "eval",
+      "args": {
+        "timeout_ms": 25000,
+        "script": "(async () => { const r = await fetch('https://stock.xueqiu.com/v5/stock/quote.json?symbol=' + encodeURIComponent('{{symbol}}') + '&extend=detail', { credentials: 'include' }); const j = await r.json(); const q = (j.data || {}).quote || {}; if (!q.symbol) throw new Error('xueqiu quote miss — http=' + r.status + ' code=' + j.code + ' raw=' + JSON.stringify(j).slice(0, 200)); return { http: r.status, symbol: q.symbol, name: q.name, current: q.current, percent: q.percent, chg: q.chg, high: q.high, low: q.low, open: q.open, last_close: q.last_close, volume: q.volume, amount: q.amount, market_capital: q.market_capital, pe_ttm: q.pe_ttm, pb: q.pb, timestamp: q.timestamp }; })()"
+      },
+      "save": "quote",
+      "note": "页内 fetch 而不是 http 步：雪球的行情接口要会话 cookie，flow http 步是每步新建的无 cookie 裸客户端带不了。三踩：(1) 不能带任何自定义 header——加 Referer 就变非 simple request，CORS preflight 直接 400；(2) stock.xueqiu.com 与页面跨子域但对方给了 CORS 面，裸 GET + credentials:include 是 simple request 不预检，一次过；(3) eval 默认 5s 预算不够（首跳含 DNS/TLS 4.8s+），必须传 timeout_ms"
+    }
+  ]
+}

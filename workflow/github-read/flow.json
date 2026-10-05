@@ -1,0 +1,54 @@
+{
+  "vars": {
+    "repo": "yinnho/aginxbrowser",
+    "per_page": 10
+  },
+  "steps": [
+    {
+      "id": "meta",
+      "op": "http",
+      "args": {
+        "url": "https://api.github.com/repos/{{repo}}",
+        "method": "GET",
+        "headers": {
+          "User-Agent": "aginxbrowser-flow/1.0",
+          "Accept": "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28"
+        }
+      },
+      "save": "meta",
+      "note": "仓库公开元数据（star/fork/语言/描述/默认分支/最近推送）。免 gh 认证——Agent-Reach 的 github 渠道要装 gh CLI + 配 token，公开读这条路 curl 语义就够"
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": { "var": "meta.status", "is": "equals", "value": 200 },
+        "goto": "issues"
+      },
+      "note": "正向条件跳过 throw（#50 补集铁律）：repo 名打错 → 404 落到 fail 步带原始 message"
+    },
+    {
+      "id": "fail",
+      "op": "eval",
+      "args": {
+        "script": "throw new Error('github-read: repo {{repo}} failed — http=' + {{meta}}.status + ' body=' + JSON.stringify({{meta}}.json).slice(0, 200))"
+      },
+      "note": "404=repo 名错/私有仓，403=限流（未认证 60 req/h/IP）。纯 http 流也自带空白会话，eval 步可用"
+    },
+    {
+      "id": "issues",
+      "op": "http",
+      "args": {
+        "url": "https://api.github.com/search/issues?q=repo:{{repo}}+type:issue&sort=updated&order=desc&per_page={{per_page}}",
+        "method": "GET",
+        "headers": {
+          "User-Agent": "aginxbrowser-flow/1.0",
+          "Accept": "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28"
+        }
+      },
+      "save": "issues",
+      "note": "search/issues 而非 repos/:r/issues：后者把 PR 混在 issue 里（github API 已知行为），search 加 type:issue 干净；还白送 total_count。回执带 items[]（title/state/updated_at/html_url/comments）"
+    }
+  ]
+}
