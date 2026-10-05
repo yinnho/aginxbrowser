@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-changed=js/bootstrap.js");
+    println!("cargo:rerun-if-changed=js/message_port.js");
     println!("cargo:rerun-if-changed=build.rs");
     // Re-embed the commit when HEAD moves (branch switches change .git/HEAD;
     // same-branch commits move .git/refs/heads/<branch> — cargo watches both
@@ -35,6 +36,10 @@ fn main() {
     let snapshot_path = out_dir.join("DITING_SNAPSHOT.bin");
 
     let bootstrap_js = include_str!("js/bootstrap.js");
+    // Second script, same realm, runs after bootstrap.js: message_port.js
+    // only consumes bindings the first script defined, so plain sequential
+    // execute_script calls are equivalent to one concatenated script.
+    let message_port_js = include_str!("js/message_port.js");
 
     let output = deno_core::snapshot::create_snapshot(
         deno_core::snapshot::CreateSnapshotOptions {
@@ -47,6 +52,9 @@ fn main() {
                 runtime
                     .execute_script("<diting:bootstrap>", bootstrap_js.to_string())
                     .expect("bootstrap.js should not fail during snapshot creation");
+                runtime
+                    .execute_script("<diting:message_port>", message_port_js.to_string())
+                    .expect("message_port.js should not fail during snapshot creation");
             })),
         },
         None,

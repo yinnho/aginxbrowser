@@ -11,7 +11,13 @@ use url::Url;
 use crate::diting_net::cookies::CookieJar;
 
 pub(crate) mod policy;
+mod metadata;
+mod observer;
 mod ssrf;
+
+use metadata::{metadata_for, FetchMetadata};
+pub use metadata::ResourceType;
+pub use observer::{CallbackRegistry, RequestCallback, RequestInfo, ResponseCallback};
 
 pub use policy::{
     allow_file_access, env_allows_private_network, parse_scoped_cidrs, set_allow_file_access,
@@ -117,143 +123,7 @@ impl Response {
     }
 }
 
-/// CDP `Network.ResourceType`-shaped label for a request. Drives
-/// `RequestInfo.resource_type` and the page's NetworkEvent kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResourceType {
-    Document,
-    Script,
-    Stylesheet,
-    Image,
-    Fetch,
-}
 
-impl ResourceType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Document => "Document",
-            Self::Script => "Script",
-            Self::Stylesheet => "Stylesheet",
-            Self::Image => "Image",
-            Self::Fetch => "Fetch",
-        }
-    }
-}
-
-/// A request about to be sent (or just answered), as seen by an
-/// on_request / on_response observer. Headers are the fully-built set the
-/// transport sent, lowercased like `Response.headers`.
-#[derive(Debug, Clone)]
-pub struct RequestInfo {
-    pub url: Url,
-    pub method: String,
-    pub headers: HashMap<String, String>,
-    pub resource_type: ResourceType,
-}
-
-pub type RequestCallback = Arc<dyn Fn(&RequestInfo) + Send + Sync>;
-pub type ResponseCallback = Arc<dyn Fn(&RequestInfo, &Response) + Send + Sync>;
-
-/// Page-scoped store for the passive on_request/on_response callbacks (upstream
-/// issue #408). Each `Page` owns one, so a callback never fires for another
-/// page's requests and dies with its page. The HTTP client itself stays
-/// callback-free; page-driven fetches pass the page's registry in. Ids keep
-/// the `u64` shape upstream established on `Page::on_request`/`on_response`.
-pub struct CallbackRegistry {
-    on_request: RwLock<Vec<(u64, RequestCallback)>>,
-    on_response: RwLock<Vec<(u64, ResponseCallback)>>,
-    id_counter: std::sync::atomic::AtomicU64,
-}
-
-impl CallbackRegistry {
-    pub fn new() -> Self {
-        CallbackRegistry {
-            on_request: RwLock::new(Vec::new()),
-            on_response: RwLock::new(Vec::new()),
-            id_counter: std::sync::atomic::AtomicU64::new(1),
-        }
-    }
-
-    fn next_id(&self) -> u64 {
-        self.id_counter
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Register a request callback; the returned id detaches it via
-    /// `remove_request`. Sync like the pre-registry push path: registration
-    /// happens from `Page` setup where no reader holds the lock, so
-    /// `try_write` cannot fail there.
-    pub fn add_request(&self, cb: RequestCallback) -> u64 {
-        let id = self.next_id();
-        if let Ok(mut v) = self.on_request.try_write() {
-            v.push((id, cb));
-        }
-        id
-    }
-
-    /// Register a response callback; see `add_request`.
-    pub fn add_response(&self, cb: ResponseCallback) -> u64 {
-        let id = self.next_id();
-        if let Ok(mut v) = self.on_response.try_write() {
-            v.push((id, cb));
-        }
-        id
-    }
-
-    /// Detach a request callback. Returns true when the id was found and
-    /// removed, so a double detach is a visible no-op.
-    pub fn remove_request(&self, id: u64) -> bool {
-        match self.on_request.try_write() {
-            Ok(mut v) => {
-                let before = v.len();
-                v.retain(|(cid, _)| *cid != id);
-                v.len() != before
-            }
-            Err(_) => false,
-        }
-    }
-
-    /// Detach a response callback; see `remove_request`.
-    pub fn remove_response(&self, id: u64) -> bool {
-        match self.on_response.try_write() {
-            Ok(mut v) => {
-                let before = v.len();
-                v.retain(|(cid, _)| *cid != id);
-                v.len() != before
-            }
-            Err(_) => false,
-        }
-    }
-
-    /// True when at least one request callback is registered. Lets fire sites
-    /// skip building a `RequestInfo` when nobody listens.
-    pub async fn has_request_callbacks(&self) -> bool {
-        !self.on_request.read().await.is_empty()
-    }
-
-    /// True when at least one response callback is registered.
-    pub async fn has_response_callbacks(&self) -> bool {
-        !self.on_response.read().await.is_empty()
-    }
-
-    pub async fn fire_request(&self, info: &RequestInfo) {
-        for (_, cb) in self.on_request.read().await.iter() {
-            cb(info);
-        }
-    }
-
-    pub async fn fire_response(&self, info: &RequestInfo, resp: &Response) {
-        for (_, cb) in self.on_response.read().await.iter() {
-            cb(info, resp);
-        }
-    }
-}
-
-impl Default for CallbackRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 
 pub(crate) async fn fetch_file_url(url: &Url) -> Result<Response, NetError> {
@@ -974,28 +844,11 @@ impl HttpClient {
 
         // Fetch-Metadata + SameSite context, fixed for the whole redirect
         // chain: the initiator is the referring document (None = address-bar
-        // / tool navigation). dest/mode/Accept follow the resource class —
-        // Chrome sends `sec-fetch-dest: style|script` with
-        // `sec-fetch-mode: no-cors` on parser-loaded subresources, never the
-        // navigation's `document`/`navigate` pair (#203).
+        // / tool navigation); the header triple comes from the resource
+        // class (metadata.rs, #203).
         let initiator = referrer.and_then(|s| url::Url::parse(s).ok());
-        let is_navigation = matches!(resource_type, ResourceType::Document);
-        let (fetch_dest, fetch_mode, default_accept): (&'static str, &'static str, &'static str) =
-            match resource_type {
-                ResourceType::Document => (
-                    "document",
-                    "navigate",
-                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                ),
-                ResourceType::Script => ("script", "no-cors", "*/*"),
-                ResourceType::Stylesheet => ("style", "no-cors", "text/css,*/*;q=0.1"),
-                ResourceType::Image => (
-                    "image",
-                    "no-cors",
-                    "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-                ),
-                ResourceType::Fetch => ("empty", "cors", "*/*"),
-            };
+        let is_navigation = metadata::is_navigation(resource_type);
+        let FetchMetadata { dest: fetch_dest, mode: fetch_mode, default_accept } = metadata_for(resource_type);
 
         for _redirect_count in 0..max_redirects {
             let ua = self.user_agent.read().await.clone();

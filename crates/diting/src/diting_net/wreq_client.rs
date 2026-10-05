@@ -518,7 +518,8 @@ impl StealthHttpClient {
             let (cookie_ctx, cookie_header) = {
                 let initiator = referrer.and_then(|s| url::Url::parse(s).ok());
                 let cross_site = initiator
-                    .map(|i| !crate::diting_net::site::is_same_site(&i, &current_url))
+                    .as_ref()
+                    .map(|i| !crate::diting_net::site::is_same_site(i, &current_url))
                     .unwrap_or(false);
                 let ctx = match initiator {
                     Some(_) => crate::diting_net::cookies::SendContext::subresource(cross_site),
