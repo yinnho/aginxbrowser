@@ -1,10 +1,11 @@
 //! The ops module's tests, split from the module root (ARCHITECTURE.md
 //! P2 god-file ratchet).
-use super::{
-    cors_response_allows, cors_unsafe_request_header_names, parse_cors_header_list,
-    preflight_allows_header, preflight_allows_method, validate_fetch_url, FetchCredentials,
+use super::cors::{
+    cors_response_allows, cors_unsafe_request_header_names, is_cors_safelisted_content_type,
+    is_cors_safelisted_request_header, parse_cors_header_list, preflight_allows_header,
+    preflight_allows_method,
 };
-use super::cors::{is_cors_safelisted_content_type, is_cors_safelisted_request_header};
+use super::{validate_fetch_url, FetchCredentials};
 use super::crypto_secret::{pbkdf2_derive, PBKDF2_MAX_ITERATIONS, PBKDF2_MAX_OUTPUT_BYTES};
 use super::image_header_dimensions;
 

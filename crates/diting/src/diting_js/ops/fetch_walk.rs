@@ -8,10 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::diting_net::cookies::CookieJar;
-use crate::diting_net::cookies::SendContext;
-use crate::diting_net::site;
 use crate::diting_net::HttpClient;
-use deno_error::JsErrorBox;
 
 use super::cors::{
     cors_response_allows, cors_unsafe_request_header_names, is_cors_safelisted_method,

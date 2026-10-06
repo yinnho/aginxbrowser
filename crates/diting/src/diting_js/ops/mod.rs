@@ -3007,7 +3007,7 @@ mod ecdsa;
 mod node_order;
 
 pub(crate) use fetch_walk::{
-    fetch_url_walk, FetchFailure, FetchNetworkEvent, FetchWalkDeps, FetchWalkOutcome,
+    fetch_url_walk, FetchFailure, FetchNetworkEvent, FetchWalkDeps,
 };
 use node_order::{compare_node_order, node_child_index};
 #[cfg(feature = "screenshot")]
@@ -3027,10 +3027,7 @@ pub(crate) use ecdsa::{
 mod crypto_secret;
 mod cors;
 pub use fetch_gate::validate_fetch_url;
-pub(crate) use cors::{
-    cors_response_allows, cors_unsafe_request_header_names, is_cors_safelisted_method,
-    parse_cors_header_list, preflight_allows_header, preflight_allows_method, request_origin,
-};
+pub(crate) use cors::request_origin;
 pub(crate) use crypto_secret::{
     crypto_err, op_random_bytes, op_subtle_aes_cbc, op_subtle_aes_ctr, op_subtle_aes_gcm,
     op_subtle_digest, op_subtle_hkdf, op_subtle_hmac, op_subtle_pbkdf2,
