@@ -3706,20 +3706,10 @@ class Element extends Node {
       if (rest === "") return true;
       return this.matches(rest);
     }
-    // `:scope` in matches() means this element (el.matches(':scope') is true).
-    // The parent-scoped querySelectorAll emulation below would scope it to the
-    // parent instead, so route :scope selectors through the native
-    // single-element match where :scope is bound to the element itself.
-    if (typeof s === "string" && s.indexOf(":scope") !== -1) {
-      return _dom("matches_selector", this._nid, s) === "1";
-    }
-    const parent = this.parentNode;
-    if (!parent || !parent.querySelectorAll) return false;
-    const matches = parent.querySelectorAll(s);
-    for (let i = 0; i < matches.length; i++) {
-      if (matches[i]._nid === this._nid) return true;
-    }
-    return false;
+    // Native single-element match. The Rust side binds `:scope` to the element
+    // being tested (Element.matches semantics) and handles detached subjects,
+    // so no :scope special case and no parent-scoped rescan are needed here.
+    return _dom("matches_selector", this._nid, s) === "1";
   }
   closest(s) {
     let el = this;
