@@ -10406,23 +10406,13 @@ globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNode
   // `set innerHTML`), which we need for record.target/added/removed.
   const target = _wrap(target_nid);
   if (!target) return;
-  const record = {
-    type: type, // 'childList', 'attributes', 'characterData'
-    target: target,
-    addedNodes: (addedNodes || []).map(nid => _wrap(nid)).filter(Boolean),
-    removedNodes: (removedNodes || []).map(nid => _wrap(nid)).filter(Boolean),
-    attributeName: attributeName || null,
-    oldValue: oldValue ?? null,
-    previousSibling: null,
-    nextSibling: null,
-  };
-  // Walk target → ancestors so a subtree-mode observer rooted at any
-  // ancestor matches. The previous implementation just checked that
-  // `target.contains` and `target.closest` were defined (always true on
-  // any Element), so subtree=true silently behaved like subtree=false and
-  // every nested mutation missed its subscriber.
+  // Match observers FIRST and build the (allocating) record only if someone
+  // wants this mutation — under attribute storms the overwhelming majority of
+  // calls match nobody, and the record build (wrap + array map/filter) was
+  // pure waste. Semantics unchanged: one notify per matching observer, same
+  // record identity shared across them.
+  const matched = [];
   for (const obs of globalThis.__mutationObservers) {
-    let matched = false;
     for (const t of obs._targets) {
       const root = t.target;
       if (!root) continue;
@@ -10435,19 +10425,30 @@ globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNode
         (type === 'characterData' && t.options.characterData) ||
         (type === 'childList' && t.options.childList);
       if (!wantsType) continue;
-      if (root._nid === target_nid) { matched = true; break; }
+      if (root._nid === target_nid) { matched.push(obs); break; }
       if (t.options.subtree) {
         // Walk parents until we hit the observed root or run off the tree.
         let cur = target.parentNode;
         while (cur) {
-          if (cur._nid === root._nid) { matched = true; break; }
+          if (cur._nid === root._nid) { matched.push(obs); break; }
           cur = cur.parentNode;
         }
-        if (matched) break;
+        if (matched[matched.length - 1] === obs) break;
       }
     }
-    if (matched) obs._notify([record]);
   }
+  if (!matched.length) return;
+  const record = {
+    type: type, // 'childList', 'attributes', 'characterData'
+    target: target,
+    addedNodes: (addedNodes || []).map(nid => _wrap(nid)).filter(Boolean),
+    removedNodes: (removedNodes || []).map(nid => _wrap(nid)).filter(Boolean),
+    attributeName: attributeName || null,
+    oldValue: oldValue ?? null,
+    previousSibling: null,
+    nextSibling: null,
+  };
+  for (const obs of matched) obs._notify([record]);
 };
 
 // A native shadow root: a real arena node with its own child list (kept out
