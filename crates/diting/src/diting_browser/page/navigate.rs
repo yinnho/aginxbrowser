@@ -23,8 +23,12 @@ impl Page {
         // loop for seconds past the settle budget (#100/#111 family), and the
         // old +250ms razor terminated it mid-commit, poisoning React's
         // executionContext. A true spin still trips at +5s; the #66
-        // duty-cycle freeze remains the sustained-burn backstop.
-        let settle_wd = js.arm_watchdog(std::time::Duration::from_millis(
+        // duty-cycle freeze remains the sustained-burn backstop. Pump-family
+        // arm (#224): a realm already beheaded N times gets its settle
+        // budget scaled ×2^min(N,7) — doudian's boot fired this wall 15
+        // times against minute-scale legal schema/form JS and severed the
+        // prefill chain on every fire.
+        let settle_wd = js.arm_watchdog_pump(std::time::Duration::from_millis(
             dynamic_settle_ms + JsRuntime::WATCHDOG_HEADROOM_MS,
         ));
         let started = tokio::time::Instant::now();
@@ -832,9 +836,11 @@ impl Page {
             // synchronous commit can pin the thread past the 5s network-idle
             // deadline, so the watchdog arms WATCHDOG_HEADROOM_MS past it
             // instead of the old +500ms razor that killed real commits
-            // mid-flight (#100/#111 family).
+            // mid-flight (#100/#111 family). Pump-family arm (#224): budget
+            // escalates with the realm's fire history, same as the settle
+            // wall above.
             let netidle_wd = self.js.as_mut().map(|js| {
-                js.arm_watchdog(std::time::Duration::from_millis(
+                js.arm_watchdog_pump(std::time::Duration::from_millis(
                     5_000 + JsRuntime::WATCHDOG_HEADROOM_MS,
                 ))
             });

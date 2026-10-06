@@ -4429,11 +4429,15 @@ async fn op_fetch_url(
     replay_fetch_failures(&state.borrow(), &deps.failures);
     if let Some(ev) = outcome.network.as_ref() {
         let request_id = record_fetch_network_event(&state.borrow(), ev);
+        // #224: status rides the line — the doudian post-mortem had 0-byte
+        // completions whose status was unknowable from the log, and
+        // "empty 200" vs "synthesized 0" are different bugs.
         tracing::debug!(
-            "op_fetch_url completed: {} {} ({} bytes, network event {})",
+            "op_fetch_url completed: {} {} ({} bytes, status {}, network event {})",
             ev.method,
             ev.url,
             ev.body_size,
+            ev.status,
             request_id,
         );
     }

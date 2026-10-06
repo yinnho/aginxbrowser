@@ -297,6 +297,48 @@ impl super::JsRuntime {
         )
     }
 
+    /// #224: the pump-family arm (`settle_pending_work`, netidle,
+    /// `run_event_loop_bounded`, `run_event_loop_until_idle`). Same wall as
+    /// [`Self::arm_watchdog`], but the budget grows with this realm's fire
+    /// history: every termination the watchdog already dealt out doubles
+    /// the next pump budget, up to ×128. Doudian's publish boot is the
+    /// counterexample that motivated it: minute-scale synchronous
+    /// schema/form JS (legal commerce work, just 4-10× slower than Chrome
+    /// here) ran into settle 3s+5s / until_idle 200ms+5s walls FIFTEEN
+    /// times in one boot — each fire severed whatever promise chain was
+    /// mid-commit, and the prefill chain never completed (主图 never
+    /// mounted; op deliveries were lost outright). A realm that has
+    /// already been beheaded N times is either slow-and-legitimate (the
+    /// patience saves it) or a spin (the #66 duty freeze catches it —
+    /// a spin burns duty regardless of watchdog budget). NOT applied to
+    /// the eval/module/script watchdogs: those are API contracts with
+    /// caller-visible timeouts, nor to the #66 throttled burst (that
+    /// symmetric fence exists to CONTAIN a burner).
+    pub fn arm_watchdog_pump(&mut self, budget: std::time::Duration) -> WatchdogToken {
+        let mult = self.pump_patience();
+        // Cap the escalated wall at base + 60s. The patience exists for
+        // legitimate slow commits (42s of sustained sync measured on this
+        // page family) — not to stretch a termination-immune wedge. The
+        // first #224 repro pinned the session actor for minutes inside one
+        // optimized microtask (a memmove-shaped loop that ignored a pending
+        // TerminateExecution; V8 optimized code without interrupt checks
+        // doesn't observe termination at all), and at ×128 the settle wall
+        // alone was 256s of that. +60s keeps every escalated wall in the
+        // "survivable, commands drain within a minute" band.
+        let cap = budget + std::time::Duration::from_secs(60);
+        let scaled = budget.saturating_mul(mult).min(cap);
+        if scaled > budget {
+            tracing::debug!("#224 pump watchdog patience ×{mult} (capped at {}ms)",
+                scaled.as_millis());
+        }
+        self.arm_watchdog(scaled)
+    }
+
+    /// The current #224 escalation factor: 1 << min(fires, 7), capped ×128.
+    fn pump_patience(&self) -> u32 {
+        1u32 << self.watchdog_fired_total.get().min(7)
+    }
+
     /// Stop a watchdog armed by [`Self::arm_watchdog`]. If it had already fired
     /// (terminated the isolate), clear V8's termination flag so the isolate is
     /// usable again, and return `true`.
@@ -311,7 +353,11 @@ impl super::JsRuntime {
             self.runtime.v8_isolate().cancel_terminate_execution();
             self.watchdog_fired_total
                 .set(self.watchdog_fired_total.get() + 1);
-            tracing::warn!("V8 watchdog fired: terminated a synchronous overrun");
+            tracing::warn!(
+                "V8 watchdog fired: terminated a synchronous overrun ({} fires this realm; pump budgets now ×{})",
+                self.watchdog_fired_total.get(),
+                self.pump_patience()
+            );
         }
         fired
     }

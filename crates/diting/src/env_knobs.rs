@@ -98,6 +98,23 @@ pub fn js_stack_mb() -> usize {
         .unwrap_or(32)
 }
 
+/// #224: per-isolate V8 old-space ceiling (MB), applied process-wide via
+/// `--max-old-space-size` before the first isolate. deno_core 0.411
+/// exposes no `max_heap_size` RuntimeOption, so V8's default (~1400MB)
+/// used to stand — and doudian's publish boot crossed it mid-commit (a
+/// 1MB tcc config ×5 rounds + 10MB vendor_init + formily schema is a
+/// legal commerce-SPA heap), at which point the heap guard beheaded the
+/// form init chain. Commerce boots get the headroom; a page that still
+/// climbs the ceiling gets the #224 pressure-GC escalation instead of an
+/// instant kill. 0 = keep V8's default.
+pub fn js_heap_mb() -> usize {
+    std::env::var("AGINXBROWSER_JS_HEAP_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&mb| mb <= 16_384)
+        .unwrap_or(3_072)
+}
+
 /// #66 busy-storm freeze window (seconds; 0 disables). The watchdog family
 /// only sees single-entry overruns: a burner whose every callback stays
 /// under each budget (settle +500ms, script phase +1s, eval timeout) never

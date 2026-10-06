@@ -229,6 +229,22 @@ impl JsRuntime {
                 // which would leave the default ~984 KB ceiling in place.
                 v8::V8::set_flags_from_string(&format!("--stack-size={kb}"));
             });
+            // #224: same one-shot shape for the old-space ceiling. deno_core
+            // 0.411 has no max_heap_size option, so V8's default (~1400MB)
+            // stood — doudian's publish boot crossed it mid-commit and the
+            // heap guard severed the form init chain (getCategoryDetail took
+            // 7 minutes to complete; getSchema retries lost their op
+            // deliveries entirely). Commerce-scale heaps are legal; raise the
+            // ceiling and let the pressure-GC escalation (#224 A1) handle a
+            // page that still won't fit. `AGINXBROWSER_JS_HEAP_MB=0` keeps
+            // V8's default.
+            static V8_HEAP_FLAG: std::sync::Once = std::sync::Once::new();
+            V8_HEAP_FLAG.call_once(|| {
+                let mb = crate::env_knobs::js_heap_mb();
+                if mb > 0 {
+                    v8::V8::set_flags_from_string(&format!("--max-old-space-size={mb}"));
+                }
+            });
             deno_core::JsRuntime::new(RuntimeOptions {
                 extensions: vec![build_extension()],
                 module_loader: Some(module_loader.clone()),
@@ -1375,6 +1391,7 @@ impl JsRuntime {
         self.run_event_loop_bounded_with_headroom(
             budget_ms,
             std::time::Duration::from_millis(Self::WATCHDOG_HEADROOM_MS),
+            true,
         )
         .await
     }
@@ -1395,6 +1412,7 @@ impl JsRuntime {
         self.run_event_loop_bounded_with_headroom(
             budget_ms,
             std::time::Duration::from_millis(budget_ms),
+            false,
         )
         .await
     }
@@ -1403,12 +1421,20 @@ impl JsRuntime {
         &mut self,
         budget_ms: u64,
         headroom: std::time::Duration,
+        escalate: bool,
     ) -> Result<(), String> {
         if budget_ms == 0 {
             return self.run_event_loop().await;
         }
         let budget = std::time::Duration::from_millis(budget_ms);
-        let token = self.arm_watchdog(budget + headroom);
+        // #224: the plain pump arms through arm_watchdog_pump (patience
+        // grows with this realm's fire history); the #66 throttled burst
+        // keeps the flat wall — its whole job is containment.
+        let token = if escalate {
+            self.arm_watchdog_pump(budget + headroom)
+        } else {
+            self.arm_watchdog(budget + headroom)
+        };
         let result = tokio::time::timeout(budget, self.run_event_loop()).await;
         self.disarm_watchdog(token);
         match result {
@@ -1433,9 +1459,11 @@ impl JsRuntime {
         // Same headroom rationale as run_event_loop_bounded: the idle pump
         // calls this with 200ms slices, and +500ms terminated legitimate
         // multi-second React commits mid-flight (#100). See
-        // WATCHDOG_HEADROOM_MS.
-        let token =
-            self.arm_watchdog(budget + std::time::Duration::from_millis(Self::WATCHDOG_HEADROOM_MS));
+        // WATCHDOG_HEADROOM_MS. Pump-family arm (#224): patience escalates
+        // with this realm's fire history.
+        let token = self.arm_watchdog_pump(
+            budget + std::time::Duration::from_millis(Self::WATCHDOG_HEADROOM_MS),
+        );
         let result = tokio::time::timeout(budget, self.run_event_loop()).await;
         let fired = self.disarm_watchdog(token);
         matches!(result, Ok(Ok(()))) && !fired

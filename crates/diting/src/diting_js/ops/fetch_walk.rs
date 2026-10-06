@@ -992,6 +992,38 @@ pub(crate) async fn fetch_url_walk(
         }
     };
 
+    // #224: a real wire response is never status 0 — that is the client
+    // layer's marker for "no servable response" (tracker block, transport
+    // refused, synthesized empty). Chrome rejects those fetches with
+    // TypeError; passing the row through as a live response hands the page
+    // an opaque status-0 Response or a 0-byte success it cannot tell apart
+    // from the real thing, so the page's catch/toast/retry paths never run
+    // (the doudian broken-pipe retries completed as exactly this shape).
+    if status == 0 {
+        let error =
+            "request blocked or the transport produced no response (status 0)".to_string();
+        deps.failures.push(FetchFailure {
+            url: url.clone(),
+            method: current_method.as_str().to_string(),
+            reason: error.clone(),
+            final_url: current_url.clone(),
+            redirects: redirect_hops.clone(),
+        });
+        return Ok(FetchWalkOutcome {
+            json: serde_json::json!({
+                "status": 0,
+                "body": "",
+                "url": url,
+                "headers": {},
+                "blocked": true,
+                "error": error,
+                "redirect_chain": redirect_chain,
+            })
+            .to_string(),
+            network: None,
+        });
+    }
+
     let final_is_cross_origin = request_origin(&current_url)
         .map(|o| o != page_origin)
         .unwrap_or(false);
