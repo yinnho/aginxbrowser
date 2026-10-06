@@ -925,7 +925,7 @@ const _mtWindow = (body) => {
 // while looking alive (observed: defers climbing, qlen rotting). The
 // engine calls this from its termination recovery points, where nothing
 // JS is executing and any positive depth is necessarily leaked.
-globalThis.__diting_mt_recover_termination = () => { _mtDepth = 0; };
+globalThis.__diting_mt_recover_termination = () => { _mtDepth = 0; __probeInflightFetches(); };
 // Debug probe for the trampoline's live state (#30 follow-up: macrotask
 // deliveries dying while op+microtask paths stay alive — 2026-10-04 fxg).
 // Read-only snapshot; keep names short, it rides on globalThis.
@@ -8408,6 +8408,40 @@ function __recordFetchTiming(t0, url, initiator, parsed, opts) {
 // 'fetch' (consumed synchronously at shim entry, cleared after).
 var _initiatorHint = null;
 
+// #226: settlement recovery for fetches eaten by a mid-tick watchdog
+// terminate. deno_core pops completed op results inside
+// dispatch_event_loop_tick; if the terminate lands before the await
+// continuation runs, the fetch hangs forever with the server already
+// responded (phase dispatchers swallow the termination, so there is no
+// error anywhere). The Rust side mirrors every network fetch completion
+// into a bounded table keyed here; the probe below takes matching
+// entries and settles the outer promise manually. Runs from the
+// macrotask-recover hook (every unwind) and a slow heartbeat; probing an
+// empty registry is one length check.
+var __fetchKeySeq = 0;
+var __inflightFetches = new Map();
+var __fetchProbeTimer = 0;
+function __probeInflightFetches() {
+  if (!__inflightFetches.size) return;
+  var keys = Array.from(__inflightFetches.keys());
+  for (var i = 0; i < keys.length; i++) {
+    var raw;
+    try { raw = _OPS.op_fetch_take(keys[i]); } catch (e) { continue; }
+    if (raw === "") continue;
+    var ent = __inflightFetches.get(keys[i]);
+    __inflightFetches.delete(keys[i]);
+    if (raw.charCodeAt(0) === 0) ent.rejectOuter(new TypeError(raw.slice(1) || "fetch settlement lost"));
+    else ent.resolveOuter(raw);
+  }
+}
+// Lazy heartbeat (created with the first in-flight fetch, never during
+// snapshot creation — a boot-time interval would keep the snapshot build's
+// event-loop drain from ever going idle): covers fire-less losses, where a
+// settlement was eaten with no watchdog unwind to trigger the recover hook.
+function __armFetchProbeHeartbeat() {
+  if (!__fetchProbeTimer) __fetchProbeTimer = setInterval(function () { __probeInflightFetches(); }, 5000);
+}
+
 globalThis.fetch = async (input, init = {}) => {
   // AbortSignal (fetch §4.1): a pre-aborted signal rejects before anything
   // else happens — no request, no scheme handling. Checked first so data:
@@ -8583,14 +8617,27 @@ globalThis.fetch = async (input, init = {}) => {
     ? String(init.referrer)
     : (input instanceof Request ? input.referrer : "about:client");
   const pageOrigin = (function() { try { const u = new URL(_domParse("document_url") || "about:blank"); return u.origin; } catch(e) { return ""; } })();
-  const opCall = _OPS.op_fetch_url(url, method, hdrs, body, pageOrigin, fetchMode, fetchCredentials, fetchReferrerPolicy + '\u0000' + fetchReferrer);
+  // #226: key + outer promise so a settlement eaten by a mid-tick terminate
+  // can still be recovered from the Rust-side mirror (see
+  // __probeInflightFetches). Normal delivery resolves the outer promise via
+  // the .then below; the probe is the second, idempotent path.
+  const _fk = "fk" + (++__fetchKeySeq);
+  const opCall = _OPS.op_fetch_url(url, method, hdrs, body, pageOrigin, fetchMode, fetchCredentials, fetchReferrerPolicy + '\u0000' + fetchReferrer + '\u0000' + _fk);
+  let _resOuter, _rejOuter;
+  const _outer = new Promise(function (res, rej) { _resOuter = res; _rejOuter = rej; });
+  __inflightFetches.set(_fk, { resolveOuter: _resOuter, rejectOuter: _rejOuter });
+  __armFetchProbeHeartbeat();
+  opCall.then(
+    function (raw) { __inflightFetches.delete(_fk); _resOuter(raw); },
+    function (e) { __inflightFetches.delete(_fk); _rejOuter(e); }
+  );
   // Mid-flight abort: race the op against the signal. There is no JS-to-Rust
   // cancellation channel, so the underlying walk keeps going and its eventual
   // settlement is swallowed — but the fetch() promise rejects at abort time
   // with the signal's reason, which is the observable contract pages race on.
   let raw;
   try {
-    raw = await (signal ? _raceAbortSignal(signal, opCall) : opCall);
+    raw = await (signal ? _raceAbortSignal(signal, _outer) : _outer);
   } catch (e) {
     __recordFetchTiming(_rtT0, url, _rtInit, null);
     throw e;

@@ -265,6 +265,11 @@ impl JsRuntime {
         };
 
         runtime.op_state().borrow_mut().put(state_clone);
+        // #226: async fetch completion mirror — see FetchSettlements in ops.
+        runtime
+            .op_state()
+            .borrow_mut()
+            .put(crate::diting_js::ops::FetchSettlements::default());
 
         runtime
             .execute_script(

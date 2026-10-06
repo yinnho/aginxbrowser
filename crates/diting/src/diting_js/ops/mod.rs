@@ -4208,6 +4208,59 @@ fn replay_fetch_failures(state: &OpState, failures: &[FetchFailure]) {
     }
 }
 
+/// #226: mirror of async fetch completions, keyed by the JS shim's per-call
+/// key. A watchdog TerminateExecution landing mid event-loop tick eats op
+/// settlements silently — deno_core pops the completed batch in
+/// `dispatch_event_loop_tick`, the tick (or the microtask carrying the await
+/// continuation) dies, and the phase dispatchers swallow the termination as
+/// `Ok(false)`, so neither side ever learns. The JS side probes this table
+/// from the macrotask-recover hook (which runs on every unwind) and a slow
+/// heartbeat, and settles its outer promise manually via `op_fetch_take`.
+/// Byte-bounded: a lost settlement that is never probed out is exactly the
+/// entry that lingers longest, and bodies can be megabyte configs.
+#[derive(Default)]
+pub(crate) struct FetchSettlements {
+    deque: std::collections::VecDeque<(String, String)>,
+    total_bytes: usize,
+}
+
+const FETCH_SETTLEMENT_MAX_BYTES: usize = 8 * 1024 * 1024;
+const FETCH_SETTLEMENT_MAX_ENTRIES: usize = 64;
+
+impl FetchSettlements {
+    fn push(&mut self, key: String, payload: String) {
+        self.total_bytes += payload.len();
+        self.deque.push_back((key, payload));
+        while self.deque.len() > FETCH_SETTLEMENT_MAX_ENTRIES
+            || self.total_bytes > FETCH_SETTLEMENT_MAX_BYTES
+        {
+            match self.deque.pop_front() {
+                Some((_, p)) => self.total_bytes = self.total_bytes.saturating_sub(p.len()),
+                None => break,
+            }
+        }
+    }
+
+    fn take(&mut self, key: &str) -> Option<String> {
+        let pos = self.deque.iter().rposition(|(k, _)| k == key)?;
+        let (_, payload) = self.deque.remove(pos)?;
+        self.total_bytes = self.total_bytes.saturating_sub(payload.len());
+        Some(payload)
+    }
+}
+
+/// Probe-and-take one mirrored completion. `""` = not completed (or already
+/// evicted); a payload starting with NUL is a rejection notice, anything else
+/// is the op's JSON result verbatim.
+#[op2]
+#[string]
+fn op_fetch_take(state: &mut OpState, #[string] key: String) -> String {
+    state
+        .borrow_mut::<FetchSettlements>()
+        .take(&key)
+        .unwrap_or_default()
+}
+
 #[op2(async(deferred), fast)]
 #[string]
 async fn op_fetch_url(
@@ -4222,11 +4275,12 @@ async fn op_fetch_url(
     // "policy\0init" — bundled to stay under deno_core's async op arg limit.
     #[string] referrer: String,
 ) -> Result<String, deno_error::JsErrorBox> {
-    // deno_core async op codegen caps explicit args; the Referer pair rides one slot.
-    let (referrer_policy, referrer_init) = match referrer.split_once('\u{0}') {
-        Some((p, r)) => (p.to_string(), r.to_string()),
-        None => (String::new(), "about:client".to_string()),
-    };
+    // deno_core async op codegen caps explicit args; the Referer pair rides one slot
+    // (and, third segment, the #226 settlement key — see FetchSettlements).
+    let mut referrer_segs = referrer.split('\u{0}');
+    let referrer_policy = referrer_segs.next().unwrap_or("").to_string();
+    let referrer_init = referrer_segs.next().unwrap_or("about:client").to_string();
+    let settle_key = referrer_segs.next().unwrap_or("").to_string();
     // "" = the caller carried no explicit policy (fetch init unset, loaders,
     // XHR): fall back to the document's own policy (Referrer-Policy header or
     // <meta name=referrer>), else fetch_referer applies the spec default.
@@ -4423,6 +4477,12 @@ async fn op_fetch_url(
         Ok(outcome) => outcome,
         Err(e) => {
             replay_fetch_failures(&state.borrow(), &deps.failures);
+            if !settle_key.is_empty() {
+                state
+                    .borrow_mut()
+                    .borrow_mut::<FetchSettlements>()
+                    .push(settle_key, format!("\u{0}{e}"));
+            }
             return Err(e);
         }
     };
@@ -4440,6 +4500,12 @@ async fn op_fetch_url(
             ev.status,
             request_id,
         );
+    }
+    if !settle_key.is_empty() {
+        state
+            .borrow_mut()
+            .borrow_mut::<FetchSettlements>()
+            .push(settle_key, outcome.json.clone());
     }
     Ok(outcome.json)
 }
@@ -5428,6 +5494,7 @@ pub fn build_extension() -> Extension {
             op_blob_register(),
             op_blob_revoke(),
             op_fetch_url(),
+            op_fetch_take(),
             op_fetch_url_sync(),
             op_image_info(),
             op_canvas_png(),
