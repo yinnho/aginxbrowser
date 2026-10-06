@@ -2283,6 +2283,14 @@ function _namedNames(el) {
   return out;
 }
 function _namedInstall(name) {
+  // Idempotence short-circuit: if our getter still owns the slot, the
+  // defineProperty (plus fresh get/set closures) is pure waste — id/name
+  // rewrite storms re-track the same names constantly.
+  const cur = _namedGetters.get(name);
+  if (cur) {
+    const d = Object.getOwnPropertyDescriptor(globalThis, name);
+    if (d && d.get === cur) return;
+  }
   if (name in globalThis) {
     // Real globals win over named access. Our own installed getter (the
     // element was untracked and re-tracked) renews fine; anything else — a
@@ -2310,8 +2318,14 @@ function _namedTrack(el) {
     // Array-index names never become named properties (spec).
     if (!n || /^\d+$/.test(n)) continue;
     let s = _namedEls.get(n);
-    if (!s) { s = new Set(); _namedEls.set(n, s); }
-    s.add(el._nid);
+    if (s) {
+      // Already tracking this element under this name — the rewrite storm
+      // re-tracks constantly; only a fresh (element, name) pair installs.
+      if (s.has(el._nid)) continue;
+      s.add(el._nid);
+    } else {
+      s = new Set(); _namedEls.set(n, s); s.add(el._nid);
+    }
     _namedInstall(n);
   }
 }
@@ -5093,8 +5107,14 @@ class Element extends Node {
     // and the [object DOMStringMap] tag hold; data-* reflection stays dynamic
     // (upstream ec05ed0).
     el._dataset = new Proxy(new DOMStringMap(_domStringMapKey), {
+      // getAttribute returning null IS the miss signal — pairing
+      // hasAttribute with getAttribute doubled the op count on every read,
+      // and dataset reads ride the attribute storm.
       get(target, k, receiver) {
-        if (typeof k === "string" && el.hasAttribute(attrFor(k))) return el.getAttribute(attrFor(k));
+        if (typeof k === "string") {
+          const v = el.getAttribute(attrFor(k));
+          if (v !== null) return v;
+        }
         return Reflect.get(target, k, receiver);
       },
       set(target, k, v, receiver) {
@@ -5103,7 +5123,7 @@ class Element extends Node {
         return true;
       },
       has(target, k) {
-        return (typeof k === "string" && el.hasAttribute(attrFor(k))) || Reflect.has(target, k);
+        return (typeof k === "string" && el.getAttribute(attrFor(k)) !== null) || Reflect.has(target, k);
       },
       deleteProperty(target, k) {
         if (typeof k !== "string") return Reflect.deleteProperty(target, k);
@@ -5112,8 +5132,9 @@ class Element extends Node {
       },
       ownKeys() { return dataKeys(); },
       getOwnPropertyDescriptor(target, k) {
-        if (typeof k === "string" && el.hasAttribute(attrFor(k))) {
-          return { value: el.getAttribute(attrFor(k)), writable: true, enumerable: true, configurable: true };
+        if (typeof k === "string") {
+          const v = el.getAttribute(attrFor(k));
+          if (v !== null) return { value: v, writable: true, enumerable: true, configurable: true };
         }
         return Reflect.getOwnPropertyDescriptor(target, k);
       },
