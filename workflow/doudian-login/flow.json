@@ -1,21 +1,48 @@
 {
   "vars": {
-    "authorize_url": "https://open.snssdk.com/oauth/authorize/?client_key=ttae0f96cae89a91&state=toutiao&response_type=code&scope=mobile%2Cuser_info&redirect_uri=https%3A%2F%2Ffxg.jinritemai.com%2Flogin%2Fcommon",
+    "login_url": "https://fxg.jinritemai.com/login/common",
     "login_timeout_ms": 180000
   },
-  "create": { "url": "{{authorize_url}}", "width": 1440, "height": 900 },
+  "create": { "url": "{{login_url}}", "width": 1440, "height": 900 },
   "steps": [
     {
       "op": "wait",
-      "args": { "selector": ".qrcode-box img[src^='data:image']", "timeout_ms": 20000 },
+      "args": {
+        "predicate": "(function(){return document.querySelectorAll('.login-switcher--cell').length>0&&document.querySelectorAll('.account-center-switch-button').length>=2&&document.querySelectorAll('input').length>0})()",
+        "timeout_ms": 30000
+      },
+      "save": "switcher_ready",
+      "note": "the fxg login page defaults to the phone/SMS form. The QR view is behind the switcher icon at the input box's top-right corner — the in-page path, NOT the open.snssdk.com SSO detour the pre-2026-10-06 flow used. Wait for the FULL form face (switcher cell AND account-center tab pills AND an input), not just the cell: the cell renders before the account-center SDK finishes booting, and a click that early lands on a not-yet-wired element — the flip then never mounts the QR (probed 2026-10-06: settle-gated click flipped in 313ms)"
+    },
+    {
+      "op": "click_xy",
+      "args": { "x": 1322, "y": 136 },
+      "save": "switched",
+      "note": "viewport-pinned coords (create pins 1440x900): center of the 76x76 .login-switcher--cell. Real mouse chain via click_xy — DOM .click() on this element was never verified"
+    },
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "(function(){var el=document.querySelector('.account-center-image-content');if(!el)return false;var bg=getComputedStyle(el).backgroundImage;var m=bg.match(/data:image\\/(gif|png);base64,([A-Za-z0-9+\\/=]{200,})/);return !!m})()",
+        "timeout_ms": 20000
+      },
       "save": "qr_ready",
-      "note": "the SSO authorize URL renders 今日头条授权登录 with a client-generated QR — data:png img inside .qrcode-box, ~1.8s wall on a clean session vs 12-20s through the fxg marketing front. client_key must be exactly ttae0f96cae89a91: a typo'd key returns error 10003 配置无效 on the page and reads like a server outage. Do not route through fxg /login/common's own 扫码登录 toggle — its QR (account-center SDK, data:gif background) never mounts without extra SSO state"
+      "note": "the QR paints as a data: URI background-image on .account-center-image-content (200x200 css). get_qrcode on doudian-sso.jinritemai.com fires on the switch; the page then polls /passport/sso/check_qrconnect by itself — nothing to drive after handoff"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(function(){var el=document.querySelector('.account-center-image-content');var bg=el?getComputedStyle(el).backgroundImage:'';var m=bg.match(/data:image\\/(gif|png);base64,([A-Za-z0-9+\\/=]+)/);return m?('data:image/'+m[1]+';base64,'+m[2]):'NOMATCH'})()",
+        "timeout_ms": 10000
+      },
+      "save": "qr_data",
+      "note": "the pristine handoff artifact: the QR exactly as the page holds it, zero screenshot/crop involvement (element screenshot crops misalign on scaled pages in this engine). Decode locally: strip the data: prefix, base64-decode to .gif, open it. If the QR has aged out (60-100s life), re-run the flow — the re-mint costs ~15s"
     },
     {
       "op": "screenshot",
-      "args": { "selector": ".qrcode-box" },
+      "args": { "selector": ".account-center-image-content" },
       "save": "qr_shot",
-      "note": "cropped to the QR box (282×240) — what the human scans with 抖店 App 扫一扫. The SSO page polls scan state itself; on scan+confirm it redirects to redirect_uri (fxg /login/common) with the code attached"
+      "note": "human-viewable crop, same save name as the old SSO flow kept. If the crop misaligns, saved.qr_data above is the truth — verify scannability before handing either to a human"
     },
     {
       "op": "wait",
@@ -24,13 +51,13 @@
         "timeout_ms": "{{login_timeout_ms}}"
       },
       "save": "login_done",
-      "note": "scan + confirm on the phone → SSO redirects to redirect_uri → fxg exchanges the code and lands off /login. 180s default; if the exchange bounces back to /login the predicate times out and the receipt screenshot shows where it stuck"
+      "note": "scan with the 抖店 App + confirm on the phone -> check_qrconnect returns authorized -> the page SSOs in and lands on /ffa/mshop/homepage/index. Timeout clamps to 120000ms server-side regardless of this var. While this wait is outstanding the server's other endpoints stall (flow_run holds the SESSIONS lock for the whole run — known engine bug); for a QR-handoff-then-poll pattern run with login_timeout_ms:1000, take the receipt's fresh qr_data, and poll /session/:id/wait yourself"
     },
     {
       "op": "eval",
-      "args": { "script": "JSON.stringify({url: location.href, title: document.title})" },
+      "args": { "script": "JSON.stringify({url: location.href, title: document.title})", "timeout_ms": 10000 },
       "save": "landing",
-      "note": "logged-in landing evidence; the session stays alive after the flow — session_id on the receipt is the export handle (cookies land on .jinritemai.com)"
+      "note": "proven 2026-10-06: landed /ffa/mshop/homepage/index 9.7s after scan confirm. Export the login state from the receipt's session_id (GET /session/:id/cookies + /storage) — cookies land on .jinritemai.com; the load-bearing names are sessionid, sessionid_ss, sid_guard, sid_tt, passport_csrf_token, toutiao_sso_user_doudian, sso_uid_tt_doudian, ucas_sso_c0_doudian, ffa_goods_ewid, ecom_gray_shop_id, odin_tt, msToken, ttwid. doudian-publish composes on this via session_id reuse"
     }
   ]
 }
