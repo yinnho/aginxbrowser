@@ -3,6 +3,7 @@ use std::path::PathBuf;
 fn main() {
     println!("cargo:rerun-if-changed=js/bootstrap.js");
     println!("cargo:rerun-if-changed=js/message_port.js");
+    println!("cargo:rerun-if-changed=js/fetch_probe.js");
     println!("cargo:rerun-if-changed=build.rs");
     // Re-embed the commit when HEAD moves (branch switches change .git/HEAD;
     // same-branch commits move .git/refs/heads/<branch> — cargo watches both
@@ -40,6 +41,9 @@ fn main() {
     // only consumes bindings the first script defined, so plain sequential
     // execute_script calls are equivalent to one concatenated script.
     let message_port_js = include_str!("js/message_port.js");
+    // Third script, same rule: the #226 fetch-settlement registry only
+    // touches bindings bootstrap.js defined, and only at call time.
+    let fetch_probe_js = include_str!("js/fetch_probe.js");
 
     let output = deno_core::snapshot::create_snapshot(
         deno_core::snapshot::CreateSnapshotOptions {
@@ -55,6 +59,9 @@ fn main() {
                 runtime
                     .execute_script("<diting:message_port>", message_port_js.to_string())
                     .expect("message_port.js should not fail during snapshot creation");
+                runtime
+                    .execute_script("<diting:fetch_probe>", fetch_probe_js.to_string())
+                    .expect("fetch_probe.js should not fail during snapshot creation");
             })),
         },
         None,
