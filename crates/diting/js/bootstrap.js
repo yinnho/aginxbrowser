@@ -3181,6 +3181,8 @@ function _htmlAttrName(el, n) {
   }
   return n;
 }
+// Shared memo behind the dataset getter's attrFor (see there for why).
+const _attrForMemo = new Map();
 
 // innerText machinery (see the getter on Element). Tags whose UA default is
 // display:none (never rendered) and block-level (line-breaking) respectively.
@@ -5098,7 +5100,17 @@ class Element extends Node {
   get dataset() {
     const el = this;
     if (el._dataset) return el._dataset;
-    const attrFor = (k) => "data-" + String(k).replace(/([A-Z])/g, "-$1").toLowerCase();
+    // Pure function over a small key universe (form frameworks reuse the
+    // same camelCase keys across a write storm) — the regex chain was 80%+
+    // of dataset's per-call cost, so memo it module-level.
+    const attrFor = (k) => {
+      let a = _attrForMemo.get(k);
+      if (a === undefined) {
+        a = "data-" + String(k).replace(/([A-Z])/g, "-$1").toLowerCase();
+        if (_attrForMemo.size < 4096) _attrForMemo.set(k, a);
+      }
+      return a;
+    };
     const camel = (n) => n.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
     const dataKeys = () => (_domParse("attribute_names", el._nid) || [])
       .filter((n) => n.startsWith("data-"))
@@ -10433,6 +10445,9 @@ globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNode
   // pure waste. Semantics unchanged: one notify per matching observer, same
   // record identity shared across them.
   const matched = [];
+  // Ancestor nids, collected at most once and shared by every subtree
+  // root — one parentNode walk instead of one per observed root.
+  let chain = -1;
   for (const obs of globalThis.__mutationObservers) {
     for (const t of obs._targets) {
       const root = t.target;
@@ -10448,11 +10463,12 @@ globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNode
       if (!wantsType) continue;
       if (root._nid === target_nid) { matched.push(obs); break; }
       if (t.options.subtree) {
-        // Walk parents until we hit the observed root or run off the tree.
-        let cur = target.parentNode;
-        while (cur) {
-          if (cur._nid === root._nid) { matched.push(obs); break; }
-          cur = cur.parentNode;
+        if (chain === -1) {
+          chain = [];
+          for (let cur = target.parentNode; cur; cur = cur.parentNode) chain.push(cur._nid);
+        }
+        for (let i = 0; i < chain.length; i++) {
+          if (chain[i] === root._nid) { matched.push(obs); break; }
         }
         if (matched[matched.length - 1] === obs) break;
       }
@@ -10462,8 +10478,8 @@ globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNode
   const record = {
     type: type, // 'childList', 'attributes', 'characterData'
     target: target,
-    addedNodes: (addedNodes || []).map(nid => _wrap(nid)).filter(Boolean),
-    removedNodes: (removedNodes || []).map(nid => _wrap(nid)).filter(Boolean),
+    addedNodes: addedNodes ? addedNodes.map(nid => _wrap(nid)).filter(Boolean) : [],
+    removedNodes: removedNodes ? removedNodes.map(nid => _wrap(nid)).filter(Boolean) : [],
     attributeName: attributeName || null,
     oldValue: oldValue ?? null,
     previousSibling: null,
