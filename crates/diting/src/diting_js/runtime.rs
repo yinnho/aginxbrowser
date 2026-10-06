@@ -245,6 +245,17 @@ impl JsRuntime {
                     v8::V8::set_flags_from_string(&format!("--max-old-space-size={mb}"));
                 }
             });
+            // Forensics escape hatch (#225): verbatim extra flags, applied
+            // before the first isolate like the two above. `--prof` is the
+            // one that motivated the knob — its sampler thread sees wedges
+            // that ignore interrupt checks.
+            static V8_EXTRA_FLAG: std::sync::Once = std::sync::Once::new();
+            V8_EXTRA_FLAG.call_once(|| {
+                let extra = crate::env_knobs::v8_extra_flags();
+                if !extra.trim().is_empty() {
+                    v8::V8::set_flags_from_string(extra.trim());
+                }
+            });
             deno_core::JsRuntime::new(RuntimeOptions {
                 extensions: vec![build_extension()],
                 module_loader: Some(module_loader.clone()),

@@ -139,8 +139,23 @@ const _DOM_MUTATION_COMMANDS = new Set([
   "set_hover",
   "set_active",
 ]);
+  // #225: tree-edge memo. The only op_dom commands that change
+  // parent/child/sibling links are these — textContent and the children
+  // swap are built from remove_child/append_child loops, and the layout
+  // engine never mutates DomStore edges. Attribute churn does NOT clear
+  // it: the doudian storm's currency is set_attribute (dataset writes),
+  // and flushing the memo per write would re-pay the op crossing the memo
+  // exists to skip. The op costs a string-marshal round-trip per access
+  // (arg stringify, Rust parse, result String alloc, JS + conversion) —
+  // get parentNode alone ate 79.9% of a wedged boot's CPU.
+  const _TREE_EDGE_MUTATION_COMMANDS = new Set([
+    "append_child", "insert_before", "remove_child",
+    "set_inner_html", "document_write", "document_write_reset",
+  ]);
+  const _edgeMemo = new Map();
 const _domRaw = (cmd, a1, a2) => {
   if (_DOM_MUTATION_COMMANDS.has(cmd)) _ditingMutationEpoch++;
+  if (_TREE_EDGE_MUTATION_COMMANDS.has(cmd)) _edgeMemo.clear();
   return _OPS.op_dom(cmd, String(a1 ?? ""), String(a2 ?? ""));
 };
 // CDP evaluate runs in this realm but outside this closure; box-model
@@ -2614,7 +2629,17 @@ class Node {
     const t = this.nodeType;
     if (t === 3 || t === 8) _dom("set_text_content", this._nid, String(v ?? ""));
   }
-  get parentNode() { return _wrap(+_dom("parent_node", this._nid)); }
+  get parentNode() {
+    // #225: memoized edge — see _TREE_EDGE_MUTATION_COMMANDS. Form walks
+    // (getFormItemNodeByElement up-chains) hit this millions of times per
+    // boot; the memo turns each hit past the first into a Map lookup.
+    let p = _edgeMemo.get(this._nid);
+    if (p === undefined) {
+      p = +_dom("parent_node", this._nid);
+      _edgeMemo.set(this._nid, p);
+    }
+    return p >= 0 ? _wrap(p) : null;
+  }
   get parentElement() { const p = this.parentNode; return p && p.nodeType === 1 ? p : null; }
   get childNodes() {
     const ids = _domParse("child_nodes", this._nid) || [];

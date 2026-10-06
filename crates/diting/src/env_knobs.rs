@@ -115,6 +115,17 @@ pub fn js_heap_mb() -> usize {
         .unwrap_or(3_072)
 }
 
+/// Extra V8 flags applied process-wide before the first isolate, verbatim
+/// (`--prof --logfile=/tmp/x.log`). The built-ins above cover the tuned
+/// knobs; this is the escape hatch for engine forensics — #225's wedge
+/// runs in optimized code that ignores interrupt checks, so interrupt-
+/// based samplers can't see it, while `--prof` samples from its own
+/// thread and logs code events from the JIT regardless. V8 itself logs
+/// rejected flags to stderr; unknown flags never abort the other ones.
+pub fn v8_extra_flags() -> String {
+    std::env::var("AGINXBROWSER_V8_FLAGS").unwrap_or_default()
+}
+
 /// #66 busy-storm freeze window (seconds; 0 disables). The watchdog family
 /// only sees single-entry overruns: a burner whose every callback stays
 /// under each budget (settle +500ms, script phase +1s, eval timeout) never
