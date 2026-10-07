@@ -97,6 +97,14 @@ impl JsRuntime {
             .swap(0, std::sync::atomic::Ordering::SeqCst);
         if tripped {
             self.runtime.v8_isolate().cancel_terminate_execution();
+            // #227: the guard's terminate_execution carries no stale flag,
+            // so the #39/#50 heals are blind to it — a dispatch window
+            // beheaded at the heap wall leaks _mtDepth and every later
+            // macrotask chain defer-spins on it forever. Forward the unwind
+            // for the next loop entry (this runs at loop entry already, so
+            // the heal in the same pass consumes it).
+            self.termination_unwound
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             if restore_limit > 0 {
                 self.runtime.remove_near_heap_limit_callback(restore_limit);
             }

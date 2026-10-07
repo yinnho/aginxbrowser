@@ -1316,6 +1316,13 @@ impl JsRuntime {
                     // running. cancel_terminate_execution is the same
                     // healing disarm_watchdog applies at its phase boundary.
                     self.runtime.v8_isolate().cancel_terminate_execution();
+                    // #227: this guard arms a raw thread with no stale
+                    // flag, so the #39/#50 heals are blind to its fires —
+                    // a dispatch window beheaded here leaks _mtDepth and
+                    // every later chain defer-spins on it forever. Forward
+                    // the unwind for the next loop entry.
+                    self.termination_unwound
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
                     tracing::warn!("Script killed after {}s timeout", timeout.as_secs());
                     self.runtime.execute_script("<reset>", "undefined".to_string()).ok();
                     Ok(())

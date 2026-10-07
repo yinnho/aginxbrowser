@@ -925,7 +925,23 @@ const _mtWindow = (body) => {
 // while looking alive (observed: defers climbing, qlen rotting). The
 // engine calls this from its termination recovery points, where nothing
 // JS is executing and any positive depth is necessarily leaked.
-globalThis.__diting_mt_recover_termination = () => { _mtDepth = 0; __probeInflightFetches(); };
+// #227: also re-arm when a backlog waits — recovery points are the one
+// place that can retire a corpse chain, and a quiet page (its own timers
+// died with the chain) never pushes to do it from _runAsMacrotask.
+globalThis.__diting_mt_recover_termination = () => {
+  _mtDepth = 0; __probeInflightFetches();
+  if (_mtQueue.length) _mtArm();
+};
+// #227 stall predicate for the engine pump — the only witness independent
+// of JS continuations. A terminate severs the drain's op_sleep
+// continuation AND its sibling 1500ms patrol together (the completion
+// batch evaporates, cf. #226), and a quiet page pushes nothing, so the
+// 250ms retire never fires: armed corpse, backlog rotting (observed live:
+// qlen 160819 with stale:0). Healthy chains beat every few ms (draining)
+// or every ~4ms (deferring inside a dispatch window); 600ms of silence
+// with work queued can only be a corpse.
+globalThis.__diting_mt_stalled = () =>
+  _mtArmed && _mtQueue.length > 0 && Date.now() - _mtLastBeat > 600;
 // Debug probe for the trampoline's live state (#30 follow-up: macrotask
 // deliveries dying while op+microtask paths stay alive — 2026-10-04 fxg).
 // Read-only snapshot; keep names short, it rides on globalThis.

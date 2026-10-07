@@ -3066,6 +3066,143 @@
         );
     }
 
+    /// Issue #227 regression, behead shape: a watchdog fire during a
+    /// macrotask payload (synchronous overrun inside `_mtQueue.shift()()`)
+    /// unwinds the JS stack without the `finally { _mtDepth-- }` (#39).
+    /// The #50 poll-boundary heal or the 1500ms sibling patrol must
+    /// recover — the probe timer armed before the fire must still deliver.
+    #[tokio::test(flavor = "current_thread")]
+    async fn timer_fires_after_watchdog_beheads_macrotask_payload() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // The #227 stall predicate ships in the snapshot; a typo there
+        // silently neuters the stall heal (the Rust side maps any non-bool
+        // to false). Pin presence and the healthy-realm answer.
+        assert_eq!(
+            rt.evaluate("typeof globalThis.__diting_mt_stalled").unwrap(),
+            serde_json::Value::String("function".into())
+        );
+        assert_eq!(
+            rt.evaluate("globalThis.__diting_mt_stalled()").unwrap(),
+            serde_json::Value::Bool(false)
+        );
+        rt.evaluate(
+            "globalThis.__fired = false;
+             // Payload overrun: 3s of legal-but-slow sync work, beheaded by
+             // the throttled pump's 100ms wall with _mtDepth == 1 leaked.
+             setTimeout(() => { const t = Date.now(); while (Date.now() - t < 3000) {} }, 0);
+             // The #227 probe: must still deliver after the fire.
+             setTimeout(() => { globalThis.__fired = true; }, 50);
+             // Retire push: fires >250ms after the dead chain's last beat,
+             // retiring the dead chain so a fresh one owns the queue.
+             setTimeout(() => {}, 700);",
+        )
+        .unwrap();
+
+        // Behead the payload mid-spin (50ms budget + 50ms symmetric headroom).
+        let _ = rt.run_event_loop_bounded_throttled(50).await;
+        assert!(
+            rt.watchdog_fired_total() >= 1,
+            "precondition: the watchdog must have fired inside the payload"
+        );
+
+        // Pump past the probe (50ms) and the retire push (700ms).
+        let mut fired = false;
+        for _ in 0..30 {
+            let _ = rt.run_event_loop_bounded(200).await;
+            if rt
+                .evaluate("globalThis.__fired")
+                .unwrap()
+                .as_bool()
+                .unwrap_or(false)
+            {
+                fired = true;
+                break;
+            }
+        }
+        assert!(
+            fired,
+            "probe timer never fired after the watchdog beheaded a payload"
+        );
+        assert_eq!(
+            rt.evaluate("globalThis.__MT_STATE().depth")
+                .unwrap()
+                .as_f64()
+                .unwrap(),
+            0.0,
+            "trampoline depth must not stay leaked"
+        );
+    }
+
+    /// Issue #227 regression, quiet-corpse shape: the script-timeout
+    /// watchdog arms a RAW thread with no stale flag, so a dispatch window
+    /// beheaded here (`_mtWindow` bracket open at the fire) leaks
+    /// `_mtDepth > 0` with every heal flag blind — the #39 entry heal, the
+    /// #50 poll boundary, nothing fires. Every chain the probe's push arms
+    /// then hits the `if (_mtDepth > 0) defer` branch and defer-spins
+    /// while stamping `_mtLastBeat`: alive to every retire check, timers
+    /// rot in `_mtQueue` forever (the fxg wedge's defer-climbing state).
+    /// The fire must forward the unwind so the next loop entry resets the
+    /// leaked bracket.
+    #[tokio::test(flavor = "current_thread")]
+    async fn timer_fires_after_script_timeout_beheads_dispatch_window() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.evaluate(
+            "globalThis.__fired = false;
+             setTimeout(() => { globalThis.__fired = true; }, 50);",
+        )
+        .unwrap();
+
+        // Behead a dispatch window: the listener spins 3s synchronously
+        // inside `_mtWindow`, killed at 200ms by the script-timeout
+        // watchdog. The window's `finally { _mtDepth-- }` never runs.
+        rt.execute_script_with_timeout(
+            "globalThis.addEventListener('probe-evt', () => { \
+                 const t = Date.now(); while (Date.now() - t < 3000) {} \
+             }); \
+             globalThis.dispatchEvent(new Event('probe-evt'));",
+            std::time::Duration::from_millis(200),
+        )
+        .unwrap();
+        assert!(
+            rt.evaluate("globalThis.__MT_STATE().depth")
+                .unwrap()
+                .as_f64()
+                .unwrap()
+                >= 1.0,
+            "precondition: the dispatch window bracket must have leaked \
+             (nested _mtWindow brackets leak together — both finallys die)"
+        );
+
+        // Pump: the probe's push arms a chain that must NOT defer-spin on
+        // the leaked depth — the entry heal must have reset it first.
+        let mut fired = false;
+        for _ in 0..30 {
+            let _ = rt.run_event_loop_bounded(200).await;
+            if rt
+                .evaluate("globalThis.__fired")
+                .unwrap()
+                .as_bool()
+                .unwrap_or(false)
+            {
+                fired = true;
+                break;
+            }
+        }
+        assert!(
+            fired,
+            "probe timer never fired: a leaked _mtDepth kept every chain \
+             defer-spinning (the #227 quiet-corpse wedge)"
+        );
+        assert_eq!(
+            rt.evaluate("globalThis.__MT_STATE().depth")
+                .unwrap()
+                .as_f64()
+                .unwrap(),
+            0.0,
+            "trampoline depth must not stay leaked"
+        );
+    }
+
     /// The document's own Referrer Policy (batch-84 leftover): a policy from
     /// the navigation response's Referrer-Policy header beats every <meta
     /// name=referrer>; among metas the FIRST whose content yields a valid

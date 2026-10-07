@@ -92,10 +92,13 @@ impl super::JsRuntime {
 
     #[allow(dead_code)] // generic promise settle; evaluate paths settle through their own bounded loops
     pub async fn resolve_promises(&mut self) {
-        // Default settle: just pump until idle or 5s.
+        // Default settle: just pump until idle or 5s. #50: routed through
+        // Self::run_event_loop so each poll first clears a terminate flag
+        // the watchdog left on a parked isolate (deno_core's own
+        // run_event_loop does no such healing).
         let _ = tokio::time::timeout(
             tokio::time::Duration::from_secs(5),
-            self.runtime.run_event_loop(deno_core::PollEventLoopOptions::default()),
+            self.run_event_loop(),
         ).await;
     }
 

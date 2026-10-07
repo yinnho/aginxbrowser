@@ -350,6 +350,14 @@ impl super::JsRuntime {
             // between the last poll and this disarm.
             self.stale_termination
                 .store(false, std::sync::atomic::Ordering::SeqCst);
+            // #227 belt for the race that swap loses: a fire landing
+            // inside the final poll of a pump that then exits on its
+            // elapsed timeout is never re-polled, so no poll boundary
+            // observes the stale flag. Forward the unwind instead — the
+            // next loop entry (≤ one pump slice away) resets any trampoline
+            // bracket the fire leaked.
+            self.termination_unwound
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             self.runtime.v8_isolate().cancel_terminate_execution();
             self.watchdog_fired_total
                 .set(self.watchdog_fired_total.get() + 1);
@@ -417,6 +425,29 @@ impl super::JsRuntime {
                     .to_string(),
             );
             tracing::warn!("#39: reset macrotask depth after V8 termination");
+        }
+        // #227: the flags above only carry FIRES. A severed chain can
+        // outlive them: the terminate's op-delivery batch evaporated with
+        // the drain's op_sleep continuation AND its sibling 1500ms patrol
+        // (same arm — cf. #226), and a quiet page (self-chained timers
+        // died with the chain) pushes nothing, so the 250ms retire never
+        // fires either — the fxg wedge: armed corpse, 160k backlog, probe
+        // timers rotting while fetches settle fine. The pump is the only
+        // independent witness left: ask the trampoline whether it stalled
+        // and run the recover path. Its depth reset is safe here — nothing
+        // JS is executing, so any positive depth is a leaked bracket.
+        let stalled = self
+            .evaluate("globalThis.__diting_mt_stalled ? __diting_mt_stalled() : false")
+            .map(|v| v == serde_json::Value::Bool(true))
+            .unwrap_or(false);
+        if stalled {
+            let _ = self.runtime.execute_script(
+                "<mt-force-recover>",
+                "if (globalThis.__diting_mt_recover_termination) \
+                 globalThis.__diting_mt_recover_termination()"
+                    .to_string(),
+            );
+            tracing::warn!("#227: re-armed stalled macrotask chain");
         }
     }
 
