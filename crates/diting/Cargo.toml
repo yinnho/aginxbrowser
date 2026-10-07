@@ -55,7 +55,10 @@ screenshot = [
 
 [dependencies]
 # Taffy git pin, mirroring blitz's workspace declaration (their tree tracks
-# taffy main; c17b313 is the rev blitz 916fa89 pins).
+# taffy main; 4142c9d is blitz main's current pin — the 22f941e→4142c9d delta
+# we absorbed 2026-10-07 carries the grid % re-run family, abspos self-align,
+# and the normal-keyword Style rework where align_items/justify_content/
+# align_content went non-Option with NORMAL as the unset value).
 # When blitz-reference is also enabled, features must EXACTLY mirror blitz's
 # workspace declaration (default-features = false, no float_layout): cargo
 # unifies features across the graph, so any extra feature would silently
@@ -65,7 +68,7 @@ screenshot = [
 # taffy_tree is additionally listed because the unified graph already enables
 # it (Cargo.lock shows taffy pulling slotmap) — an explicit no-op.
 # Used by diting_layout box layout and the fork-delta tests (docs/engine/render.md).
-taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "22f941e19e05d1b29621703b4f3a9d96d7839886", optional = true, default-features = false, features = [
+taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "4142c9d8cac05d8b39eac9632856ed04f7623d52", optional = true, default-features = false, features = [
     "std",
     "taffy_tree",
     "flexbox",

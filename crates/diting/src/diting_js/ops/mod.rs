@@ -3695,6 +3695,21 @@ fn computed_style_value(
             }
             .into(),
         ),
+        // Cross-axis line/track distribution (blitz#1059): same unset→
+        // "normal" face the neighbors answer.
+        "align-content" => Some(
+            match s.align_content {
+                Some(AlignContentMode::FlexStart) => "flex-start",
+                Some(AlignContentMode::Center) => "center",
+                Some(AlignContentMode::FlexEnd) => "flex-end",
+                Some(AlignContentMode::SpaceBetween) => "space-between",
+                Some(AlignContentMode::SpaceAround) => "space-around",
+                Some(AlignContentMode::SpaceEvenly) => "space-evenly",
+                Some(AlignContentMode::Stretch) => "stretch",
+                None => "normal",
+            }
+            .into(),
+        ),
         // Animation batch A: opacity is non-inherited with initial 1; Chrome
         // spells the computed number bare ("1", "0.5781"). Undeclared still
         // answers here — "1" IS the initial value, so no caller chain can

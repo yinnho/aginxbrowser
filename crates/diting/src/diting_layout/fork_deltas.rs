@@ -187,27 +187,27 @@
         // Each entry's Size is the STOCK 0.13.0 result (locked); the comment
         // above it is the fork's expectation where it differs.
         type AlignCase =
-            (Option<AlignSelf>, Option<AlignSelf>, Option<AlignItems>, Option<AlignItems>, Size<f32>);
+            (Option<AlignSelf>, Option<AlignSelf>, AlignItems, AlignItems, Size<f32>);
         let cases: [AlignCase; 8] = [
             // fork: 300x150 (agrees) — both normal: inline stretch, block start
-            (None, None, None, None, Size { width: 300.0, height: 150.0 }),
+            (None, None, AlignItems::NORMAL, AlignItems::NORMAL, Size { width: 300.0, height: 150.0 }),
             // fork: 400x200 — explicit block stretch drives ratio-derived width;
             // stock ignores the block stretch (no normal provenance)
-            (None, Some(AlignSelf::STRETCH), None, None, Size { width: 300.0, height: 150.0 }),
+            (None, Some(AlignSelf::STRETCH), AlignItems::NORMAL, AlignItems::NORMAL, Size { width: 300.0, height: 150.0 }),
             // fork: 300x150 (agrees)
-            (Some(AlignSelf::STRETCH), None, None, None, Size { width: 300.0, height: 150.0 }),
+            (Some(AlignSelf::STRETCH), None, AlignItems::NORMAL, AlignItems::NORMAL, Size { width: 300.0, height: 150.0 }),
             // fork: 300x200 — both axes definite, ratio must not overwrite;
             // stock re-derives height 150 from the ratio anyway
-            (Some(AlignSelf::STRETCH), Some(AlignSelf::STRETCH), None, None, Size { width: 300.0, height: 150.0 }),
+            (Some(AlignSelf::STRETCH), Some(AlignSelf::STRETCH), AlignItems::NORMAL, AlignItems::NORMAL, Size { width: 300.0, height: 150.0 }),
             // fork: 300x150 (agrees)
-            (None, Some(AlignSelf::START), None, None, Size { width: 300.0, height: 150.0 }),
+            (None, Some(AlignSelf::START), AlignItems::NORMAL, AlignItems::NORMAL, Size { width: 300.0, height: 150.0 }),
             // fork: 400x200 — inline start frees block normal to stretch;
             // stock collapses to the natural 100x50 instead
-            (Some(AlignSelf::START), None, None, None, Size { width: 100.0, height: 50.0 }),
+            (Some(AlignSelf::START), None, AlignItems::NORMAL, AlignItems::NORMAL, Size { width: 100.0, height: 50.0 }),
             // fork: 400x200 — container-level block stretch; stock ignores it
-            (None, None, Some(AlignItems::STRETCH), None, Size { width: 300.0, height: 150.0 }),
+            (None, None, AlignItems::STRETCH, AlignItems::NORMAL, Size { width: 300.0, height: 150.0 }),
             // fork: 300x150 (agrees)
-            (None, None, None, Some(AlignItems::STRETCH), Size { width: 300.0, height: 150.0 }),
+            (None, None, AlignItems::NORMAL, AlignItems::STRETCH, Size { width: 300.0, height: 150.0 }),
         ];
         for (justify_self, align_self, align_items, justify_items, expected) in cases {
             let (_, actual) = layout_replaced_grid_item(

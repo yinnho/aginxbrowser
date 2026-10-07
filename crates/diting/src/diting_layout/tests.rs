@@ -378,6 +378,40 @@ mod reparent_anchoring_tests {
         assert_at(&rects, 40.0, 20.0, 23.0, 45.0);
     }
 
+    #[test]
+    fn flex_wrap_align_content_distributes_wrapped_lines() {
+        // blitz#1059 absorption: align-content moves the wrapped-line block
+        // in the cross axis. 300px-tall wrap container, two 50px lines →
+        // 100px of lines, 200px free; center puts 100px above the block.
+        let sheet = "body { margin: 0 } #c { display: flex; flex-wrap: wrap; width: 100px; height: 300px; align-content: center } \
+                     #a { width: 100px; height: 50px } #b { width: 60px; height: 50px }";
+        let rects = layout(sheet, r#"<div id="c"><div id="a"></div><div id="b"></div></div>"#);
+        assert_at(&rects, 100.0, 50.0, 0.0, 100.0);
+        assert_at(&rects, 60.0, 50.0, 0.0, 150.0);
+        // Unset (normal→stretch): the LINE boxes stretch to share the free
+        // space (150px each), children sit at their line starts — the
+        // pre-fix world was identical here because taffy's default was
+        // already stretch.
+        let sheet = "body { margin: 0 } #c { display: flex; flex-wrap: wrap; width: 100px; height: 300px } \
+                     #a { width: 100px; height: 50px } #b { width: 60px; height: 50px }";
+        let rects = layout(sheet, r#"<div id="c"><div id="a"></div><div id="b"></div></div>"#);
+        assert_at(&rects, 100.0, 50.0, 0.0, 0.0);
+        assert_at(&rects, 60.0, 50.0, 0.0, 150.0);
+        // flex-start packs the lines flush: pre-fix pages that asked for it
+        // got the stretch default instead.
+        let sheet = "body { margin: 0 } #c { display: flex; flex-wrap: wrap; width: 100px; height: 300px; align-content: flex-start } \
+                     #a { width: 100px; height: 50px } #b { width: 60px; height: 50px }";
+        let rects = layout(sheet, r#"<div id="c"><div id="a"></div><div id="b"></div></div>"#);
+        assert_at(&rects, 100.0, 50.0, 0.0, 0.0);
+        assert_at(&rects, 60.0, 50.0, 0.0, 50.0);
+        // flex-end pins the other edge: 200px free all above the block.
+        let sheet = "body { margin: 0 } #c { display: flex; flex-wrap: wrap; width: 100px; height: 300px; align-content: flex-end } \
+                     #a { width: 100px; height: 50px } #b { width: 60px; height: 50px }";
+        let rects = layout(sheet, r#"<div id="c"><div id="a"></div><div id="b"></div></div>"#);
+        assert_at(&rects, 100.0, 50.0, 0.0, 200.0);
+        assert_at(&rects, 60.0, 50.0, 0.0, 250.0);
+    }
+
     // (the probe that diagnosed #188-2 lived here print-only; its matrix is
     // now pinned in abspos_self_align_tests below)
 }

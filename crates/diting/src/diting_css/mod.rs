@@ -971,6 +971,7 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "position", "inset", "top", "right", "bottom", "left",
         "aspect-ratio", "visibility", "cursor", "user-select", "pointer-events",
         "flex-wrap", "flex-grow", "flex-shrink", "align-items", "justify-content",
+        "align-content",
         "min-width", "max-width", "min-height", "max-height",
         "letter-spacing", "text-decoration", "box-sizing",
     ];
@@ -1263,6 +1264,12 @@ pub struct ComputedStyle {
     /// addresses inline content (upstream keeps them distinct too).
     pub justify_content: Option<JustifyMode>,
     pub align_items: Option<AlignMode>,
+    /// `align-content` — cross-axis distribution of wrapped lines (flex) or
+    /// tracks (grid). Mapped only for flex/grid containers, where Chrome
+    /// applies it; block containers ignore it. `None` = unset (`normal`,
+    /// which computes stretch-like on flex/grid) — only an author
+    /// declaration yields a keyword.
+    pub align_content: Option<AlignContentMode>,
     /// Item-side self-alignment (#188-2, blitz#977): `align-self` and
     /// `justify-self` on the item. `None` = auto/normal/unset — defer to the
     /// container's items-level default. Consumed by the out-of-flow
@@ -2233,6 +2240,19 @@ pub enum JustifyMode {
     SpaceBetween,
     SpaceAround,
     SpaceEvenly,
+}
+
+/// `align-content` keywords. Carries `Stretch` (content lines grow to fill
+/// the cross axis), which justify-content's set lacks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignContentMode {
+    FlexStart,
+    Center,
+    FlexEnd,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+    Stretch,
 }
 
 impl JustifyMode {
@@ -4295,6 +4315,7 @@ css_wide_longhands! {
     "flex-wrap" => flex_wrap, false;
     "justify-content" => justify_content, false;
     "align-items" => align_items, false;
+    "align-content" => align_content, false;
     "align-self" => align_self, false;
     "justify-self" => justify_self, false;
     "justify-items" => justify_items, false;
@@ -5505,6 +5526,25 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 "flex-start" | "start" => Some(AlignMode::FlexStart),
                 "center" => Some(AlignMode::Center),
                 "flex-end" | "end" => Some(AlignMode::FlexEnd),
+                _ => return false,
+            };
+            true
+        }
+        // Cross-axis line/track distribution (blitz#1059). `normal`/`auto`
+        // = the initial value, kept unset like the computed-value face
+        // answers "normal"; `safe `/`unsafe ` prefixes drop like
+        // align-self's.
+        "align-content" => {
+            let v = v.trim().strip_prefix("safe ").or_else(|| v.trim().strip_prefix("unsafe ")).unwrap_or(v.trim());
+            style.align_content = match v {
+                "flex-start" | "start" => Some(AlignContentMode::FlexStart),
+                "center" => Some(AlignContentMode::Center),
+                "flex-end" | "end" => Some(AlignContentMode::FlexEnd),
+                "space-between" => Some(AlignContentMode::SpaceBetween),
+                "space-around" => Some(AlignContentMode::SpaceAround),
+                "space-evenly" => Some(AlignContentMode::SpaceEvenly),
+                "stretch" => Some(AlignContentMode::Stretch),
+                "normal" | "auto" => None,
                 _ => return false,
             };
             true
