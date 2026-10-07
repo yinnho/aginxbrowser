@@ -88,6 +88,61 @@ jobs:
             aginxbrowser-*.tar.gz
             aginxbrowser-*.sha256
 
+  # Intel Macs. No native Intel runners remain, and the v0.2.10 postmortem
+  # is why this asset was dropped: cross-building from the arm64 host bakes
+  # an arm64 V8 snapshot into the x86_64 binary (instant SIGSEGV — build
+  # scripts compile for the HOST, not the target). The fix here: run the
+  # entire toolchain under Rosetta as an x86_64 HOST (rustup default-host),
+  # so build.rs itself is an x86_64 process and the snapshot it embeds
+  # matches the target. Slower (Rosetta), but the smoke step boots the real
+  # artifact — a wrong-arch snapshot dies there, not in a user's terminal.
+  build-intel-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Ensure Rosetta
+        run: arch -x86_64 /usr/bin/true || softwareupdate --install-rosetta --agree-to-license
+      - name: Switch rustup to an x86_64 host toolchain
+        run: |
+          rustup set default-host x86_64-apple-darwin
+          rustup toolchain install stable
+          rustup default stable
+          cargo --version --verbose | grep -q 'host: x86_64-apple-darwin'
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: x86_64-apple-darwin-rosetta
+      - name: Build
+        shell: bash
+        run: cargo build --release --features stealth,screenshot --target x86_64-apple-darwin
+      - name: Package
+        shell: bash
+        run: |
+          dir=aginxbrowser-v${GITHUB_REF_NAME#v}-x86_64-apple-darwin
+          mkdir "$dir"
+          cp "target/x86_64-apple-darwin/release/aginxbrowser" "$dir/"
+          cp README.md docs/install.md "$dir/"
+          cp -R workflow "$dir/"
+          tar czf "$dir.tar.gz" "$dir"
+          shasum -a 256 "$dir.tar.gz" > "$dir.tar.gz.sha256"
+      # Rosetta boot takes longer than native; 15s covers it. A wrong-arch
+      # V8 snapshot never prints "listening on" — it crashes at startup.
+      - name: Smoke run
+        shell: bash
+        run: |
+          target/x86_64-apple-darwin/release/aginxbrowser >/tmp/intel_smoke.log 2>&1 &
+          pid=$!
+          sleep 15
+          kill $pid 2>/dev/null || true
+          grep -q "listening on" /tmp/intel_smoke.log || { echo "--- smoke output ---"; cat /tmp/intel_smoke.log; exit 1; }
+          head -1 /tmp/intel_smoke.log
+      - name: Upload release assets (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          files: |
+            aginxbrowser-*.tar.gz
+            aginxbrowser-*.sha256
+
   # AginxOS pulls this asset on device first-boot: bare static binary +
   # sha256 (agpkg convention), so NO features — stealth (BoringSSL) and
   # screenshot stay opt-in. The screenshot-enabled variant for the same
@@ -99,8 +154,9 @@ jobs:
   # SIGSEGV, zero output, found on a Pixel 5). These jobs now run on native
   # arm64 runners so the snapshot matches the target, and smoke-run the
   # actual artifact before it ships. x86_64-apple-darwin was dropped for
-  # the same reason: macos-latest is arm64, so that asset carried a broken
-  # arm64 snapshot in every release; Intel Macs build from source (brew).
+  # the same reason at the time; it is back as build-intel-mac above,
+  # which makes the whole toolchain an x86_64 host under Rosetta so the
+  # snapshot bakes correctly.
   build-musl:
     runs-on: ubuntu-24.04-arm
     steps:

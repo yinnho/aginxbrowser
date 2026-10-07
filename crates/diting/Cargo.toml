@@ -72,6 +72,7 @@ taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "4142c9d8cac05d8b39
     "std",
     "taffy_tree",
     "flexbox",
+    "flexbox_balance",
     "grid",
     "block_layout",
     "content_size",
