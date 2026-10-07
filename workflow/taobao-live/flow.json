@@ -9,6 +9,15 @@
   },
   "steps": [
     {
+      "op": "preload",
+      "args": {
+        "scripts": [
+          "(function(){var BAD=/^https?:\\/\\/everyhelp\\.(cdn\\.)?taobao\\.com\\//;var of=window.fetch;if(typeof of==='function'){window.fetch=function(input,init){var u=typeof input==='string'?input:(input&&input.url)||'';try{u=String(u)}catch(e){}if(BAD.test(u)){try{console.error('[BLOCK] '+u)}catch(e){};return Promise.reject(new TypeError('Failed to fetch'))}return of.apply(this,arguments)}}var op=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){if(BAD.test(String(u))){try{console.error('[BLOCK] '+u)}catch(e){};this.__ehb=1;return}return op.apply(this,arguments)};var os=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.send=function(){if(this.__ehb){return}return os.apply(this,arguments)}})()"
+        ]
+      },
+      "note": "[everyhelp wall 2026-10-06/07] the widget's getWidgetVersion answers 200 while its Set-Cookie deletes unb/sn/uss server-side — session revocation with no error surface. Any taobao page may load it, so this session gets the same fetch/XHR block the publish flow carries; instance-level AGINXBROWSER_INIT_SCRIPT covers the rest when mounted."
+    },
+    {
       "op": "wait",
       "args": {
         "predicate": "document.readyState === 'complete' || !!document.title",
@@ -32,7 +41,16 @@
     {
       "op": "branch",
       "args": {
-        "when": { "var": "v.verdict", "is": "not_in", "value": ["challenge", "captcha", "login", "empty"] },
+        "when": {
+          "var": "v.verdict",
+          "is": "not_in",
+          "value": [
+            "challenge",
+            "captcha",
+            "login",
+            "empty"
+          ]
+        },
         "goto": "read"
       },
       "note": "issue #72: clean verdict → skip the takeover throw"

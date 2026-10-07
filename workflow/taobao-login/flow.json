@@ -1,6 +1,6 @@
 {
   "vars": {
-    "login_url": "https://login.taobao.com/member/login.jhtml",
+    "login_url": "https://login.taobao.com/member/login.jhtml?redirectURL=https%3A%2F%2Fwww.taobao.com%2F",
     "login_timeout_ms": 180000
   },
   "create": {
@@ -10,14 +10,28 @@
   },
   "steps": [
     {
+      "op": "preload",
+      "args": {
+        "scripts": [
+          "(function(){var BAD=/^https?:\\/\\/everyhelp\\.(cdn\\.)?taobao\\.com\\//;var of=window.fetch;if(typeof of==='function'){window.fetch=function(input,init){var u=typeof input==='string'?input:(input&&input.url)||'';try{u=String(u)}catch(e){}if(BAD.test(u)){try{console.error('[BLOCK] '+u)}catch(e){};return Promise.reject(new TypeError('Failed to fetch'))}return of.apply(this,arguments)}}var op=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){if(BAD.test(String(u))){try{console.error('[BLOCK] '+u)}catch(e){};this.__ehb=1;return}return op.apply(this,arguments)};var os=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.send=function(){if(this.__ehb){return}return os.apply(this,arguments)}})()"
+        ]
+      },
+      "note": "[everyhelp wall 2026-10-06/07] the widget's getWidgetVersion answers 200 while its Set-Cookie deletes unb/sn/uss server-side — session revocation with no error surface. Any taobao page may load it, so this session gets the same fetch/XHR block the publish flow carries; instance-level AGINXBROWSER_INIT_SCRIPT covers the rest when mounted."
+    },
+    {
       "op": "wait",
-      "args": { "selector": ".qrcode-img canvas", "timeout_ms": 15000 },
+      "args": {
+        "selector": ".qrcode-img canvas",
+        "timeout_ms": 15000
+      },
       "save": "qr_ready",
       "note": "login.jhtml 302s to havanaone/login.htm; the QR canvas is the page's only canvas, rendered ~0.8s after doc start (qrCode/generate.do fires at ~0.17s) — no tab click needed, it sits beside the password/SMS form. Direct URL skips the 9.8s www.taobao.com front"
     },
     {
       "op": "screenshot",
-      "args": { "selector": ".qrcode-img" },
+      "args": {
+        "selector": ".qrcode-img"
+      },
       "save": "qr_shot",
       "note": "cropped to the QR element — what the human scans (淘宝 App 扫一扫). qrCode/query.do polls scan state from ~0.8s automatically"
     },
@@ -32,9 +46,11 @@
     },
     {
       "op": "eval",
-      "args": { "script": "JSON.stringify({url: location.href, title: document.title})" },
+      "args": {
+        "script": "JSON.stringify({url: location.href, title: document.title, nick: !!document.querySelector('.site-nav-login-info-nick')})"
+      },
       "save": "landing",
-      "note": "logged-in landing evidence; session stays alive after the flow — session_id on the receipt is the export handle (GET /session/:id/cookies, /storage)"
+      "note": "logged-in landing evidence; redirectURL pins the landing to www.taobao.com so the nick anchor is meaningful there (nick:true = logged in, false = landed elsewhere or logged out — re-check on www before retrying; do NOT probe i.taobao.com my_taobao: no nick anchor on that page + bounces to havana = false negative, 2026-10-07 watch lesson). Session stays alive after the flow — session_id on the receipt is the export handle (GET /session/:id/cookies, /storage)"
     }
   ]
 }

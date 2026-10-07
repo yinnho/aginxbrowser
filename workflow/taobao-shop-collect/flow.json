@@ -10,6 +10,15 @@
   },
   "steps": [
     {
+      "op": "preload",
+      "args": {
+        "scripts": [
+          "(function(){var BAD=/^https?:\\/\\/everyhelp\\.(cdn\\.)?taobao\\.com\\//;var of=window.fetch;if(typeof of==='function'){window.fetch=function(input,init){var u=typeof input==='string'?input:(input&&input.url)||'';try{u=String(u)}catch(e){}if(BAD.test(u)){try{console.error('[BLOCK] '+u)}catch(e){};return Promise.reject(new TypeError('Failed to fetch'))}return of.apply(this,arguments)}}var op=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){if(BAD.test(String(u))){try{console.error('[BLOCK] '+u)}catch(e){};this.__ehb=1;return}return op.apply(this,arguments)};var os=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.send=function(){if(this.__ehb){return}return os.apply(this,arguments)}})()"
+        ]
+      },
+      "note": "[everyhelp wall 2026-10-06/07] the widget's getWidgetVersion answers 200 while its Set-Cookie deletes unb/sn/uss server-side — session revocation with no error surface. Any taobao page may load it, so this session gets the same fetch/XHR block the publish flow carries; instance-level AGINXBROWSER_INIT_SCRIPT covers the rest when mounted."
+    },
+    {
       "op": "wait",
       "args": {
         "predicate": "(function(){ var n = document.querySelectorAll('div[class^=\"cardContainer--\"]').length; var pe = document.querySelector('.text-price'); if (pe && pe.shadowRoot && n >= {{min_cards}}) return { secfont: true, cards: n }; if (performance.now() > 15000) return { secfont: false, cards: n }; return false; })()",
@@ -21,7 +30,11 @@
     {
       "op": "branch",
       "args": {
-        "when": { "var": "boot.detail", "is": "contains", "value": "\"secfont\":true" },
+        "when": {
+          "var": "boot.detail",
+          "is": "contains",
+          "value": "\"secfont\":true"
+        },
         "goto": "attach"
       },
       "note": "干净列表页 → 跳去挂载等待。注意 wait 的 detail 是字符串（谓词返回值被 JSON.stringify 过），dotted path 查不进去，只能 contains 紧凑子串。刻意不放 verdict 门：verdict 数的是会话累计挑战行，reboot 后当前页明明干净也报 challenge（s_10 实测假阳性）；这个页族的墙只表现为数据缺席（30 卡），数据本身就是门"
@@ -29,7 +42,9 @@
     {
       "id": "reboot",
       "op": "navigate",
-      "args": { "url": "{{shop_url}}" },
+      "args": {
+        "url": "{{shop_url}}"
+      },
       "note": "boot 轮盘：同 URL 首跳可能落在店铺首页/半 hydration 态，重导航同 URL 常起完整列表（s_6/s_7/s_10 三代会话实测）；但注意轮盘每跳独立——s_17 首跳 60 卡、二跳反而 30 卡，两轮都试过才算数"
     },
     {
@@ -45,7 +60,11 @@
     {
       "op": "branch",
       "args": {
-        "when": { "var": "boot2.detail", "is": "contains", "value": "\"secfont\":true" },
+        "when": {
+          "var": "boot2.detail",
+          "is": "contains",
+          "value": "\"secfont\":true"
+        },
         "goto": "attach"
       },
       "note": "补集铁律（s_18 亲踩反例：条件写成「脏→goto takeover」，干净 boot2 直落 throw，60 卡好页被扔进接管）：必须正向「干净→goto attach」跳过 throw，脏（secfont:false）才直落 takeover"
