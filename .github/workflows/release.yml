@@ -102,13 +102,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Ensure Rosetta
         run: arch -x86_64 /usr/bin/true || softwareupdate --install-rosetta --agree-to-license
-      - name: Switch rustup to an x86_64 host toolchain
+      - name: Switch to an x86_64 host toolchain
         run: |
-          rustup set default-host x86_64-apple-darwin
-          # rustup refuses non-host toolchains without this; Rosetta runs it
-          rustup toolchain install stable --force-non-host
-          rustup default stable
-          cargo --version --verbose | grep -q 'host: x86_64-apple-darwin'
+          rustup toolchain install stable-x86_64-apple-darwin --force-non-host --profile minimal
+          TC="$HOME/.rustup/toolchains/stable-x86_64-apple-darwin/bin"
+          echo "$TC" >> "$GITHUB_PATH"
+          # Pre-warm the Rosetta translation — rustup's own version probe
+          # timed out on the first x86_64 exec; the real build must not.
+          "$TC/rustc" --version
+          "$TC/cargo" --version --verbose | grep -q 'host: x86_64-apple-darwin'
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: x86_64-apple-darwin-rosetta
