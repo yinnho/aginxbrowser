@@ -150,6 +150,67 @@ fn is_byte_waf_challenge_html(html: &str) -> bool {
     html.contains("_wafchallengeid") && html.contains("readygo")
 }
 
+/// Shared media-list finisher for both fetch tiers (#232): trim, drop empty
+/// and `data:` URIs (/download can't fetch those), dedupe preserving
+/// document order, cap so a pathological page can't flood the response.
+/// Lives in core (not the acquisition face) so both tiers can call it.
+pub(crate) fn finalize_media(urls: Vec<String>) -> Vec<String> {
+    const MEDIA_CAP: usize = 500;
+    let mut seen = std::collections::HashSet::new();
+    urls.into_iter()
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty() && !u.starts_with("data:"))
+        .filter(|u| seen.insert(u.clone()))
+        .take(MEDIA_CAP)
+        .collect()
+}
+
+/// Tier 1 media collection (#232): static scan of the downloaded HTML for
+/// the same attribute set the browser-tier probe reads — img src + lazyload
+/// attrs + srcset first candidate, og:image, video/audio sources + poster.
+/// No JS ran, so lazyload never landed; the data-* attributes are the lead.
+fn collect_media(html: &str) -> Vec<String> {
+    use scraper::{ElementRef, Html, Selector};
+    let doc = Html::parse_document(html);
+    let mut urls: Vec<String> = Vec::new();
+    let take = |el: &ElementRef, attrs: &[&str], out: &mut Vec<String>| {
+        for a in attrs {
+            if let Some(v) = el.value().attr(a) {
+                out.push(v.to_string());
+            }
+        }
+    };
+    // srcset entries are "url 1x, url 2x" — keep only the first candidate.
+    let take_first_candidate = |el: &ElementRef, attrs: &[&str], out: &mut Vec<String>| {
+        for a in attrs {
+            if let Some(v) = el.value().attr(a) {
+                let first = v.split(',').next().unwrap_or("").trim();
+                let url = first.split_whitespace().next().unwrap_or("");
+                out.push(url.to_string());
+            }
+        }
+    };
+    if let Ok(sel) = Selector::parse("img") {
+        for el in doc.select(&sel) {
+            take(&el, &["src", "data-src", "data-original", "data-lazy-src"], &mut urls);
+            take_first_candidate(&el, &["srcset", "data-srcset"], &mut urls);
+        }
+    }
+    if let Ok(sel) = Selector::parse("meta[property='og:image'], meta[name='og:image']") {
+        for el in doc.select(&sel) {
+            if let Some(c) = el.value().attr("content") {
+                urls.push(c.to_string());
+            }
+        }
+    }
+    if let Ok(sel) = Selector::parse("video, audio, video source, audio source") {
+        for el in doc.select(&sel) {
+            take(&el, &["src", "data-src", "poster"], &mut urls);
+        }
+    }
+    finalize_media(urls)
+}
+
 /// Tier 1: fetch via plain HTTP and return if the content is sufficient.
 ///
 /// Returns `None` when the page needs JS rendering (Tier 2). On hard network
@@ -295,6 +356,7 @@ pub async fn http_fetch(
         changed_since_prev: None,
         sanitize_report,
         xhr: Vec::new(),
+        media: collect_media(&html),
     }))
 }
 
@@ -421,6 +483,38 @@ pub async fn smart_fetch(req: crate::FetchRequest) -> Result<FetchResponse, anyh
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collect_media_static_scan() {
+        let html = r#"<html><head>
+            <meta property="og:image" content="https://cdn.example.com/og.jpg">
+            <meta property="og:image" content="https://cdn.example.com/og.jpg">
+            </head><body>
+            <img src="https://cdn.example.com/a.jpg">
+            <img src="placeholder.gif" data-src="https://cdn.example.com/b.jpg">
+            <img data-srcset="https://cdn.example.com/c.jpg 2x, https://cdn.example.com/c2.jpg 3x">
+            <img src="data:image/gif;base64,AAAA">
+            <video poster="https://cdn.example.com/poster.jpg">
+              <source src="https://cdn.example.com/v.mp4">
+            </video>
+            </body></html>"#;
+        let m = collect_media(html);
+        for want in [
+            "https://cdn.example.com/a.jpg",
+            "https://cdn.example.com/b.jpg", // lazyload attr is the lead on Tier 1
+            "https://cdn.example.com/c.jpg", // srcset: first candidate only
+            "https://cdn.example.com/og.jpg",
+            "https://cdn.example.com/poster.jpg",
+            "https://cdn.example.com/v.mp4",
+        ] {
+            assert!(m.contains(&want.to_string()), "missing {want} in {m:?}");
+        }
+        assert!(!m.contains(&"https://cdn.example.com/c2.jpg".to_string()));
+        assert!(!m.iter().any(|u| u.starts_with("data:")));
+        // og:image appeared twice in the head — must come out once.
+        let set: std::collections::HashSet<&String> = m.iter().collect();
+        assert_eq!(set.len(), m.len());
+    }
 
     // ---- is_content_sufficient ----
 

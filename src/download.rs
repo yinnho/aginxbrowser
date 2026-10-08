@@ -50,6 +50,12 @@ pub struct DownloadRequest {
     /// Set-Cookie-style entries ("name=value") scoped to the target host.
     #[serde(default)]
     pub cookies: Vec<String>,
+    /// Relative subdirectory under the download root to place the file in
+    /// (created as needed), so batch consumers can land assets straight into
+    /// per-topic dirs instead of renaming across filesystems (#232).
+    /// Path-cleaned: absolute paths, `..` segments and NUL are rejected.
+    #[serde(default)]
+    pub dir: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -170,7 +176,15 @@ pub async fn do_download(req: DownloadRequest) -> Result<DownloadResponse> {
                     .unwrap_or_else(|| DEFAULT_FILENAME.to_string())
             }),
     };
-    let dir = download_dir()?;
+    let dir = match req.dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(sub) => {
+            let dir = download_dir()?.join(resolve_download_subdir(sub)?);
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("create download subdir {}", dir.display()))?;
+            dir
+        }
+        None => download_dir()?,
+    };
     let final_path = dir.join(&filename);
     let part_path = dir.join(format!("{}.part", filename));
 
@@ -338,6 +352,22 @@ fn download_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Caller-requested subdir under the download root (#232): must be relative
+/// and free of `..` segments (checked on both separators, mirroring
+/// sanitize_filename's split), so a download can never escape the root.
+fn resolve_download_subdir(sub: &str) -> Result<PathBuf> {
+    if sub.contains('\0') {
+        return Err(anyhow!("dir contains NUL byte"));
+    }
+    if sub.starts_with('/') || sub.starts_with('\\') {
+        return Err(anyhow!("dir must be relative, got '{sub}'"));
+    }
+    if sub.split(['/', '\\']).any(|seg| seg == "..") {
+        return Err(anyhow!("dir must not contain '..': '{sub}'"));
+    }
+    Ok(PathBuf::from(sub))
+}
+
 /// Final path component of the URL (query/fragment stripped by Url), decoded.
 fn filename_from_url(url: &Url) -> Option<String> {
     let last = url.path().rsplit('/').next()?;
@@ -465,6 +495,24 @@ mod tests {
         assert_eq!(filename_from_url(&u).unwrap(), "目录.zip");
         let u = Url::parse("https://x.test/").unwrap();
         assert!(filename_from_url(&u).is_none());
+    }
+
+    #[test]
+    fn download_subdir_accepts_nested_relative() {
+        assert_eq!(
+            resolve_download_subdir("research/2026-10/media").unwrap(),
+            PathBuf::from("research/2026-10/media")
+        );
+    }
+
+    #[test]
+    fn download_subdir_rejects_escape_attempts() {
+        assert!(resolve_download_subdir("../x").is_err());
+        assert!(resolve_download_subdir("a/../../x").is_err());
+        assert!(resolve_download_subdir("..\\x").is_err()); // windows separator too
+        assert!(resolve_download_subdir("/abs").is_err());
+        assert!(resolve_download_subdir("\\\\srv\\share").is_err());
+        assert!(resolve_download_subdir("a\0b").is_err());
     }
 
     #[test]
@@ -615,6 +663,7 @@ mod tests {
                 resume: false,
                 use_proxy: false,
                 cookies: vec![],
+            dir: None,
             })
             .await
             .unwrap();
@@ -644,6 +693,7 @@ mod tests {
                 resume: true,
                 use_proxy: false,
                 cookies: vec![],
+            dir: None,
             })
             .await
             .unwrap();
@@ -677,6 +727,7 @@ mod tests {
                 resume: false,
                 use_proxy: false,
                 cookies: vec![],
+            dir: None,
             })
             .await
             .unwrap();
@@ -695,9 +746,49 @@ mod tests {
             resume: false,
             use_proxy: false,
             cookies: vec![],
+            dir: None,
         })
         .await
         .unwrap_err();
         assert!(err.to_string().contains("unsupported scheme"));
+    }
+
+    /// #232: `dir` lands the file in a created-on-demand subdirectory under
+    /// the download root — no caller-side rename, no cross-fs move.
+    #[tokio::test]
+    async fn download_lands_in_requested_subdir() {
+        with_private_net(async {
+            let (url, _srv) = spawn_fixture(b"asset bytes".to_vec(), vec![]).await;
+            let tmp = tempfile_dir("subdir");
+            let _dd = download_dir_guard(&tmp);
+
+            let resp = do_download(DownloadRequest {
+                url: url.to_string(),
+                filename: None,
+                resume: false,
+                use_proxy: false,
+                cookies: vec![],
+                dir: Some("research/2026-10/media".into()),
+            })
+            .await
+            .unwrap();
+
+            let expected = PathBuf::from(&tmp).join("research/2026-10/media/fixture.bin");
+            assert_eq!(Path::new(&resp.path), expected);
+            assert!(expected.exists());
+            // Traversal shape rejected outright, root never escapes.
+            let err = do_download(DownloadRequest {
+                url: url.to_string(),
+                filename: None,
+                resume: false,
+                use_proxy: false,
+                cookies: vec![],
+                dir: Some("../escape".into()),
+            })
+            .await
+            .unwrap_err();
+            assert!(err.to_string().contains("must not contain"));
+        })
+        .await;
     }
 }

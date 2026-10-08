@@ -649,3 +649,25 @@ mod search_fallback_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod media_manifest {
+    use serde_json::Value;
+
+    /// #232: the MEDIA_PROBE result is a JSON string of URLs; parse, drop
+    /// data: URIs, dedupe — and never fail the fetch over a probe hiccup.
+    #[test]
+    fn media_from_eval_parses_probe_json_and_tolerates_junk() {
+        let v = Value::String(
+            r#"["https://a/1.jpg","data:image/gif;base64,AAAA","https://a/1.jpg"]"#.into(),
+        );
+        assert_eq!(
+            crate::server::media_from_eval(v),
+            vec!["https://a/1.jpg".to_string()]
+        );
+        assert!(crate::server::media_from_eval(Value::Null).is_empty());
+        assert!(crate::server::media_from_eval(Value::String("not json".into())).is_empty());
+        // Probe returned a non-string (page died mid-eval): empty, not panic.
+        assert!(crate::server::media_from_eval(Value::Bool(true)).is_empty());
+    }
+}

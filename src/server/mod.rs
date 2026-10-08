@@ -626,6 +626,13 @@ pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string());
 
+            // Media manifest (#232): one probe over the rendered DOM —
+            // img currentSrc is the post-lazyload live value, the data-*
+            // attributes cover images that never fired, srcset keeps only
+            // its first candidate, video/audio carry sources + poster.
+            // Research loops get body + asset leads in a single /fetch.
+            let media = media_from_eval(page.evaluate(MEDIA_PROBE));
+
             // Source the content from the RENDERED DOM, not the initial HTML
             // snapshot. On heavy SPA pages (WeChat: 6.6MB shell) the article
             // body is filled in by JS and sits deep in document.documentElement
@@ -718,9 +725,41 @@ pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
                 changed_since_prev: None,
                 sanitize_report,
                 xhr,
+                media,
             })
         })
     })
+}
+
+/// Media-manifest probe (#232). Runs after the page settles, so img
+/// `currentSrc` is the post-lazyload live value. Mirrors the attribute set
+/// of render.rs::collect_media (the Tier-1 static twin) — keep the two in
+/// sync when adding a source.
+const MEDIA_PROBE: &str = r#"(function(){
+var out=[],seen={};
+function add(u){if(!u)return;u=String(u).trim();if(!u||u.indexOf('data:')===0)return;if(seen[u])return;seen[u]=1;out.push(u)}
+function plain(el,names){for(var i=0;i<names.length;i++){var v=el.getAttribute(names[i]);if(v)add(v)}}
+function first(el,names){for(var i=0;i<names.length;i++){var v=el.getAttribute(names[i]);if(v){add(v.split(',')[0].trim().split(/\s+/)[0])}}}
+var imgs=document.querySelectorAll('img');
+for(var i=0;i<imgs.length;i++){var im=imgs[i];add(im.currentSrc);plain(im,['src','data-src','data-original','data-lazy-src']);first(im,['srcset','data-srcset'])}
+var ms=document.querySelectorAll('meta[property="og:image"],meta[name="og:image"]');
+for(var i=0;i<ms.length;i++){add(ms[i].getAttribute('content'))}
+var vs=document.querySelectorAll('video,audio,video source,audio source');
+for(var i=0;i<vs.length;i++){var v=vs[i];add(v.src);plain(v,['data-src','poster'])}
+return JSON.stringify(out)})()"#;
+
+/// Parse the MEDIA_PROBE result (a JSON string of URLs) into the response's
+/// `media` list. Any probe hiccup yields an empty list — media is a lead
+/// surface, never worth failing the fetch over.
+fn media_from_eval(v: serde_json::Value) -> Vec<String> {
+    let raw = match v.as_str() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    match serde_json::from_str::<Vec<String>>(raw) {
+        Ok(urls) => crate::render::finalize_media(urls),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Click an element by CSS selector using JS `element.click()`.

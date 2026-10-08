@@ -197,6 +197,15 @@ pub struct FetchResponse {
     /// own API face, usually cleaner than the rendered DOM.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub xhr: Vec<serde_json::Value>,
+    /// Media resource URLs found on the page: `img` current/src plus the
+    /// common lazyload attributes (data-src/data-original/srcset first
+    /// candidate), `video`/`audio` sources and posters, og:image. Deduped,
+    /// `data:` URIs dropped, capped — so one /fetch returns the article AND
+    /// its asset leads without a second `format:html` hop (#232, research
+    /// loops keep valuable media found during取材). Populated on both tiers;
+    /// absent when the page genuinely has none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub media: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -539,7 +548,25 @@ mod tests {
             changed_since_prev: None,
             sanitize_report: None,
             xhr: Vec::new(),
+            media: Vec::new(),
         }
+    }
+
+    #[test]
+    fn finalize_media_dedups_drops_data_and_caps() {
+        let urls = vec![
+            " https://a/1.jpg ".to_string(),
+            "https://a/1.jpg".to_string(),            // dup after trim
+            "data:image/gif;base64,AAAA".to_string(), // /download can't fetch these
+            "".to_string(),
+            "https://a/2.jpg".to_string(),
+        ];
+        assert_eq!(
+            crate::render::finalize_media(urls),
+            vec!["https://a/1.jpg".to_string(), "https://a/2.jpg".to_string()]
+        );
+        let many: Vec<String> = (0..600).map(|i| format!("https://a/{i}.jpg")).collect();
+        assert_eq!(crate::render::finalize_media(many).len(), 500);
     }
 
     #[test]
