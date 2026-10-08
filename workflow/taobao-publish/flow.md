@@ -134,15 +134,27 @@ preload blockqn2（掐 qn 微前端注入 + everyhelp widget）
 
 ## 真机 receipt
 
+**对象形状真发**（2026-10-08，s_88 克隆 s_76，`/flow/run` 全 16 步含提交，
+64s）：itemId **1090268221238**，success.htm primaryId 直落。编辑页回读
+（服务器持久态）：**skuParam 18/18 行对象**、0 裸串 0 空，
+row0=`[{value:564110794,text:"清洁工具包"}]`（服务器把 value 规范化成了
+**数字**——dataSource 绑的是字符串，回读变数字，印证「别立法 number/
+string」）；catProp=`{p-20000:{value:30025069481,text:"无品牌/无注册商标"}}`
+——value=id 数字、text=中文名，**与商家手选的原生形状完全一致**，不是
+旧假绿的 `{value:负数,text:"<id数字>"}`。#203 诉求①（品牌+skuParam 对象
+形状）服务端实证闭环。小瑕疵：preflight 快照里 brandVia 停在
+`armed-waiting-async`——发射轮询是异步的，快照时刻对象还没解析完（或
+引擎侧 catProp 已带干净对象，无需再发射）；标记是时点值，**回执+回读
+才是终态真相**，见到这个标记别急着判 legacy。
+
 **对象形状干跑**（2026-10-08，会话 s_87（克隆 s_76 tb-pub 登录态），
 16 步跑到提交前一步停）：`skuParam=object-from-dataSource`，
 row0=`[{value:"564110794",text:"清洁工具包"}]`，**18/18 行对象形
 状**；`brandVia=verified-default-alias`，`brandUsed={value:3246379,
 text:"无品牌"}`（本类目官方默认，物化后 tick 3 发射，-1 待定对象被
 isOpt 拒收一次）；catProp 落 `{p-20000:3246379}`；主图 5/竖图 5/详情
-模板 1 全在。**未提交**——形状验证流，不建商品。同场证据：商品
-1091036652226（旧 naked 绑法建的）编辑页回读 18 行 skuParam 全空
-=服务器静默丢弃裸串的实锤。
+模板 1 全在。同场证据：商品 1091036652226（旧 naked 绑法建的）编辑页
+回读 18 行 skuParam 全空=服务器静默丢弃裸串的实锤。
 
 **flow 本体**（2026-10-04，会话 s_9，15 步全绿）：
 `status:ok`，submit.htm 200 返回 `globalMessage.type=success` +
