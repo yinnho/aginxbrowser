@@ -723,6 +723,13 @@ pub(crate) async fn fetch_url_walk(
                 if let Some(ref counter) = in_flight {
                     counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 }
+                // #231: the stealth walk resolved its redirects inside the
+                // client — adopt the trail (target+status hops and the
+                // url-only chain) so the network face reports the wander
+                // on the stealth build too, not just the final URL.
+                redirect_hops.extend(buffered.redirect_hops.iter().cloned());
+                redirect_chain
+                    .extend(buffered.redirect_hops.iter().map(|h| h.url.clone()));
                 break OpFetchOutcome::Buffered(buffered);
             }
             Some(Err(_)) => {
@@ -781,7 +788,14 @@ pub(crate) async fn fetch_url_walk(
                     _ => None,
                 };
                 match fallback {
-                    Some(Ok(buffered)) => break OpFetchOutcome::Buffered(buffered),
+                    Some(Ok(buffered)) => {
+                        // #231: same adoption for the legacy-TLS fallback —
+                        // its redirects were walked client-side as well.
+                        redirect_hops.extend(buffered.redirect_hops.iter().cloned());
+                        redirect_chain
+                            .extend(buffered.redirect_hops.iter().map(|h| h.url.clone()));
+                        break OpFetchOutcome::Buffered(buffered);
+                    }
                     Some(Err(fallback_err)) => {
                         deps.failures.push(FetchFailure {
                             url: url.clone(),
@@ -1170,6 +1184,7 @@ pub(crate) async fn fetch_url_walk(
                 headers: resp_headers.clone(),
                 body: resp_bytes.to_vec(),
                 redirected_from: Vec::new(),
+                redirect_hops: Vec::new(),
                 request_headers: final_hop_headers.clone(),
             };
             cbs.fire_response(&info, &net_resp).await;

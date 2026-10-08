@@ -527,7 +527,7 @@ impl Page {
             let body_bytes = decode_data_uri(url_str).unwrap_or_default();
             let mut headers = std::collections::HashMap::new();
             headers.insert("content-type".to_string(), content_type);
-            Ok(crate::diting_net::Response { url: url.clone(), status: 200, headers, body: body_bytes, redirected_from: Vec::new(), request_headers: std::collections::HashMap::new() })
+            Ok(crate::diting_net::Response { url: url.clone(), status: 200, headers, body: body_bytes, redirected_from: Vec::new(), redirect_hops: Vec::new(), request_headers: std::collections::HashMap::new() })
         } else if method == "POST" {
             // The submitting document initiates the POST: it is both the
             // Referer (policy-trimmed per hop) and the Origin source.

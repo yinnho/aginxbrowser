@@ -439,6 +439,7 @@ impl StealthHttpClient {
                         headers: HashMap::new(),
                         body: Vec::new(),
                         redirected_from: Vec::new(),
+                        redirect_hops: Vec::new(),
                         request_headers: HashMap::new(),
                     });
                 }
@@ -446,6 +447,9 @@ impl StealthHttpClient {
         }
 
         let mut redirects = Vec::new();
+        // #231: hop targets with status, mirroring the plain walk so the
+        // scripted-fetch face gets the same trail whichever transport served.
+        let mut redirect_hops: Vec<crate::diting_net::RedirectHop> = Vec::new();
         let mut method = method;
         let mut body = body;
         let mut content_type = content_type;
@@ -646,6 +650,10 @@ impl StealthHttpClient {
                         return crate::diting_net::client::fetch_file_url(&next_url).await;
                     }
                     redirects.push(current_url.clone());
+                    redirect_hops.push(crate::diting_net::RedirectHop {
+                        url: next_url.to_string(),
+                        status: status.as_u16(),
+                    });
                     tracing::info!("stealth redirect {} -> {}", current_url, next_url);
                     current_url = next_url;
                     // Mirror the plain client (and Chrome): 301/302/303
@@ -673,6 +681,7 @@ impl StealthHttpClient {
                 headers: response_headers,
                 body,
                 redirected_from: redirects,
+                redirect_hops,
                 request_headers: wire_headers,
             });
         }
