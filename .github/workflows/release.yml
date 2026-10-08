@@ -127,14 +127,17 @@ jobs:
           cp -R workflow "$dir/"
           tar czf "$dir.tar.gz" "$dir"
           shasum -a 256 "$dir.tar.gz" > "$dir.tar.gz.sha256"
-      # Rosetta boot takes longer than native; 15s covers it. A wrong-arch
-      # V8 snapshot never prints "listening on" — it crashes at startup.
+      # Rosetta boot takes longer than native — and the first exec of a fresh
+      # binary pays cold AOT translation of the whole image on top (v0.5.38
+      # smoked 15s with zero output while still translating; v0.5.37 had
+      # squeaked by). A wrong-arch V8 snapshot never survives to a timeout —
+      # it crashes at startup — so a generous window only costs wall-clock.
       - name: Smoke run
         shell: bash
         run: |
           target/x86_64-apple-darwin/release/aginxbrowser >/tmp/intel_smoke.log 2>&1 &
           pid=$!
-          sleep 15
+          sleep 45
           kill $pid 2>/dev/null || true
           grep -q "listening on" /tmp/intel_smoke.log || { echo "--- smoke output ---"; cat /tmp/intel_smoke.log; exit 1; }
           head -1 /tmp/intel_smoke.log
