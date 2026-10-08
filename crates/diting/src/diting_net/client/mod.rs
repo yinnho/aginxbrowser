@@ -83,6 +83,14 @@ pub struct Response {
     pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
     pub redirected_from: Vec<Url>,
+    /// The redirect trail WITH per-hop status: TARGET url + the 3xx that
+    /// sent it — the same shape the network-event face reports (#203).
+    /// Filled by both engine walks (plain reqwest and the wreq stealth
+    /// stack), so the scripted-fetch walk can surface a stealth-served
+    /// chain's hops (#231 — wreq resolves redirects internally and the
+    /// trail used to vanish on the stealth build). Synthesized responses
+    /// (tracker blocks, file://, intercepts) carry an empty vec.
+    pub redirect_hops: Vec<RedirectHop>,
     /// The outbound header set of the final hop, lowercased like
     /// `headers` (#97). Snapshot of what the engine itself put on the
     /// request — the fully-built set on the plain transport, the
@@ -165,6 +173,7 @@ pub(crate) async fn fetch_file_url(url: &Url) -> Result<Response, NetError> {
         headers,
         body,
         redirected_from: Vec::new(),
+        redirect_hops: Vec::new(),
         request_headers: HashMap::new(),
     })
 }
@@ -832,6 +841,7 @@ impl HttpClient {
                         headers: HashMap::new(),
                         body: Vec::new(),
                         redirected_from: Vec::new(),
+                        redirect_hops: Vec::new(),
                         request_headers: HashMap::new(),
                     });
                 }
@@ -840,6 +850,10 @@ impl HttpClient {
 
         let mut current_url = url.clone();
         let mut redirects = Vec::new();
+        // #231 twin of `redirects`: hop targets WITH status — the network
+        // face shape, so a scripted walk served by this client can adopt
+        // the whole trail without re-deriving it.
+        let mut redirect_hops: Vec<RedirectHop> = Vec::new();
         let max_redirects = 20;
 
         // Fetch-Metadata + SameSite context, fixed for the whole redirect
@@ -1081,6 +1095,10 @@ impl HttpClient {
                     })?;
                     validate_url(&next_url, self.allow_private_network)?;
                     redirects.push(current_url.clone());
+                    redirect_hops.push(RedirectHop {
+                        url: next_url.to_string(),
+                        status: status.as_u16(),
+                    });
                     current_url = next_url;
                     if status == reqwest::StatusCode::MOVED_PERMANENTLY
                         || status == reqwest::StatusCode::FOUND
@@ -1104,6 +1122,7 @@ impl HttpClient {
                 headers: response_headers,
                 body: body_bytes,
                 redirected_from: redirects,
+                redirect_hops,
                 request_headers: wire_headers,
             };
 

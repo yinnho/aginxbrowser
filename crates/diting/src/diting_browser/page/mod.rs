@@ -616,6 +616,7 @@ impl Page {
                             headers,
                             body,
                             redirected_from: Vec::new(),
+                            redirect_hops: Vec::new(),
                             request_headers: std::collections::HashMap::new(),
                         });
                     }
