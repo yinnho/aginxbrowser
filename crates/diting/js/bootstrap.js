@@ -8675,6 +8675,14 @@ globalThis.fetch = async (input, init = {}) => {
     redirected: !!parsed.redirected,
   });
 };
+// #235: XHR.send rides THIS closure, never the page-overridable
+// globalThis.fetch. Pages that wrap fetch (doudian's SDK wraps XHR and fetch
+// both) were re-processing already-signed XHRs through their own wrapper —
+// captured as getSchema returning 200 with a 0-byte body. `_initiatorHint`
+// above works unchanged: this is the same shim closure the XHR always
+// intended to call. var (not const) matches the snapshot-era style around
+// it and keeps a console/debugger `var` re-declaration benign.
+var __ditingFetchShim = globalThis.fetch;
 
 if (typeof Headers === "undefined") {
   globalThis.Headers = class Headers {
@@ -8728,475 +8736,6 @@ _markNative(XMLHttpRequestEventTarget.prototype.addEventListener);
 _markNative(XMLHttpRequestEventTarget.prototype.removeEventListener);
 _markNative(XMLHttpRequestEventTarget.prototype.dispatchEvent);
 
-globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarget {
-  static UNSENT = 0;
-  static OPENED = 1;
-  static HEADERS_RECEIVED = 2;
-  static LOADING = 3;
-  static DONE = 4;
-  UNSENT = 0; OPENED = 1; HEADERS_RECEIVED = 2; LOADING = 3; DONE = 4;
-
-  constructor() {
-    super();
-    this.readyState = 0;
-    this.status = 0;
-    this.statusText = "";
-    this.responseText = "";
-    this.responseXML = null;
-    this.responseURL = "";
-    this.responseType = "";
-    this.response = null;
-    this.timeout = 0;
-    this.withCredentials = false;
-    this.upload = { addEventListener(){}, removeEventListener(){} };
-    this._method = "GET";
-    this._url = "";
-    this._headers = {};
-    this._responseHeaders = {};
-    this._timeoutTimer = null;
-    this._timedOut = false;
-    this._aborted = false;
-    __lmap(this);
-    this.onreadystatechange = null;
-    this.onload = null;
-    this.onerror = null;
-    this.onabort = null;
-    this.onprogress = null;
-    this.ontimeout = null;
-    this.onloadstart = null;
-    this.onloadend = null;
-    __hideOwn(this);
-  }
-
-  open(method, url, async_) {
-    // Fetch-spec "normalize a method": a token that byte-uppercases to a
-    // standard method is sent uppercased; custom tokens ride as authored.
-    // Pages hand us lowercase ('get'/'put' from the Ali SDK) and the network
-    // layer compares methods case-sensitively, so passthrough broke CORS
-    // safelist matching and Allow-Methods checks (taobao report ⑤).
-    const up = String(method).toUpperCase();
-    this._method = /^(CONNECT|DELETE|GET|HEAD|OPTIONS|POST|PUT|TRACE)$/.test(up) ? up : String(method);
-    // WebIDL USVString coercion: open(undefined) stores "undefined" in Chrome,
-    // never a non-string — send() used to crash on .startsWith (#106).
-    this._url = String(url);
-    // obscura#908: open()'s third argument decides whether send() blocks for
-    // the response or resolves it through the event loop.
-    this._async = async_ === undefined ? true : !!async_;
-    this._headers = {};
-    this._responseHeaders = {};
-    this._aborted = false;
-    this.status = 0;
-    this.statusText = "";
-    this.responseText = "";
-    this.response = null;
-    this._setReadyState(1);
-  }
-
-  setRequestHeader(name, value) {
-    this._headers[name] = value;
-  }
-
-  getResponseHeader(name) {
-    const lower = name.toLowerCase();
-    for (const [k, v] of Object.entries(this._responseHeaders)) {
-      if (k.toLowerCase() === lower) return v;
-    }
-    return null;
-  }
-
-  getAllResponseHeaders() {
-    return Object.entries(this._responseHeaders)
-      .map(([k, v]) => k + ': ' + v)
-      .join('\r\n');
-  }
-
-  overrideMimeType(mime) { __def(this, '_overrideMime', mime); }
-
-  send(body) {
-    if (this.readyState !== 1) return;
-    if (this._aborted) return;
-
-    const xhr = this;
-
-    let url = this._url;
-    // (#106) guard the crash site: an open()'d XHR whose _url got cleared or
-    // never set must fail like Chrome (InvalidStateError), not die on
-    // url.startsWith below.
-    if (typeof url !== 'string' || url === '') {
-      throw new DOMException("Failed to execute 'send' on 'XMLHttpRequest': The object may not be sent yet.", "InvalidStateError");
-    }
-    if (url && !url.includes('://')) {
-      try {
-        const base = _docBase();
-        url = new URL(url, base).href;
-      } catch(e) {}
-    }
-
-    // (#42) data:/blob: resolve locally, not through the network ops — the
-    // sync path would otherwise fall into the JSON.parse catch and zero
-    // status. Chrome reports 200 + content-type for both; responseURL keeps
-    // the original URL. Sync fills state inline with no events (same
-    // semantics as the network sync path); async defers to a task so the
-    // usual readystatechange/load/loadend sequence stays ordered.
-    if (url.startsWith('data:') || url.startsWith('blob:')) {
-      // #126: local resolution still owns a resource-timing entry (Chrome
-      // records XHR'd data:/blob: URLs as xmlhttprequest). Async runs the
-      // record inside the deferred task, so the duration includes the real
-      // timer hop — an honest measurement, not the decode alone.
-      const _rtT0 = globalThis.performance ? performance.now() : 0;
-      const applyLocal = function () {
-        let bytes = null;
-        let ctype = '';
-        try {
-          if (url.startsWith('blob:')) {
-            const b = globalThis.__blobObjs && globalThis.__blobObjs[url];
-            if (b && b._bytes instanceof Uint8Array) { bytes = b._bytes; ctype = b.type || ''; }
-          } else {
-            const d = _dataUrlBytes(url);
-            bytes = d.bytes;
-            ctype = d.mime;
-          }
-        } catch (e) { bytes = null; }
-        if (!bytes) {
-          __recordFetchTiming(_rtT0, url, 'xmlhttprequest', null);
-          xhr.status = 0;
-          xhr.statusText = '';
-          xhr._responseHeaders = {};
-          xhr.responseText = '';
-          xhr.response = '';
-          if (xhr._async) {
-            xhr._setReadyState(4);
-            xhr._fireEvent('error');
-            xhr._fireEvent('loadend');
-          } else {
-            xhr.readyState = 4;
-          }
-          return;
-        }
-        xhr.responseURL = url;
-        xhr.status = 200;
-        xhr.statusText = '';
-        xhr._responseHeaders = ctype ? { 'content-type': ctype } : {};
-        __recordFetchTiming(_rtT0, url, 'xmlhttprequest', { status: 200 }, {
-          encodedBodySize: bytes.length, decodedBodySize: bytes.length, transferSize: 0,
-        });
-        const text = _decodeBodyWithCharset(bytes, {
-          get: (name) => {
-            const lower = String(name).toLowerCase();
-            for (const [k, v] of Object.entries(xhr._responseHeaders)) {
-              if (k.toLowerCase() === lower) return v;
-            }
-            return null;
-          },
-        });
-        xhr.responseText = text;
-        switch (xhr.responseType) {
-          case 'json':
-            try { xhr.response = JSON.parse(text); } catch(e) { xhr.response = null; }
-            break;
-          case 'text':
-          case '':
-            xhr.response = text;
-            break;
-          case 'arraybuffer':
-            xhr.response = bytes.slice().buffer;
-            break;
-          case 'blob':
-            xhr.response = new Blob([bytes]);
-            break;
-          case 'document':
-            xhr.response = text; // simplified
-            break;
-          default:
-            xhr.response = text;
-        }
-        if (xhr._async) {
-          xhr._setReadyState(4);
-          xhr._fireEvent('load');
-          xhr._fireEvent('loadend');
-        } else {
-          xhr.readyState = 4;
-        }
-      };
-      if (this._async) { setTimeout(applyLocal, 0); } else { applyLocal(); }
-      return;
-    }
-
-    if (this._async === false) {
-      // Sync XHR (obscura#908): the request must complete inside send() —
-      // async ops only resolve when the embedding pumps the event loop after
-      // the eval returns, which can never happen while JS holds the thread
-      // here. The sync op runs the identical server-side request walk on a
-      // worker thread and blocks. Spec: no events fire in the sync path
-      // (not even loadstart); the caller reads status/response inline.
-      // CDP Fetch interception has no sync story for the same reason.
-      // #116: a non-zero timeout on sync XHR throws, like Chrome — there is
-      // no event loop turn to fire it on.
-      if (this.timeout > 0) {
-        throw new DOMException("Failed to execute 'send' on 'XMLHttpRequest': Synchronous requests should not set a timeout.", "InvalidAccessError");
-      }
-      try {
-        const hdrs = {};
-        let bodyStr = '';
-        if (body !== undefined && body !== null) {
-          if (typeof body === 'string') {
-            bodyStr = body;
-          } else if (body instanceof ArrayBuffer) {
-            bodyStr = _bytesToBase64(new Uint8Array(body));
-            hdrs['__diting_body_b64'] = '1';
-          } else if (ArrayBuffer.isView(body)) {
-            bodyStr = _bytesToBase64(new Uint8Array(body.buffer, body.byteOffset, body.byteLength));
-            hdrs['__diting_body_b64'] = '1';
-          } else if (body instanceof Blob) {
-            // v1: Blob bodies ride the async path only.
-            console.warn('Synchronous XHR does not support Blob bodies');
-            xhr.status = 0;
-            xhr.responseText = '';
-            xhr.response = '';
-            xhr.readyState = 4;
-            return;
-          } else {
-            bodyStr = String(body);
-          }
-        }
-        for (const [k, v] of Object.entries(this._headers)) hdrs[k] = String(v);
-        let pageOrigin = '';
-        try { pageOrigin = new URL(_docBase()).origin; } catch(e) {}
-        const _rtT0 = globalThis.performance ? performance.now() : 0;
-        const raw = _OPS.op_fetch_url_sync(url, this._method, JSON.stringify(hdrs), bodyStr, pageOrigin, 'cors', this.withCredentials ? 'include' : 'same-origin');
-        const parsed = JSON.parse(raw);
-        __recordFetchTiming(_rtT0, url, 'xmlhttprequest', parsed);
-        xhr.responseURL = parsed.final_url || parsed.url || url;
-        if (parsed.blocked || parsed.corsBlocked) {
-          xhr.status = 0;
-          xhr.statusText = '';
-          xhr._responseHeaders = {};
-          xhr.responseText = '';
-          xhr.response = '';
-          xhr.readyState = 4;
-          return;
-        }
-        xhr.status = parsed.status;
-        xhr.statusText = '';
-        xhr._responseHeaders = parsed.headers || {};
-        const bytes = _base64ToUint8Array(parsed.bodyBase64 || '');
-        const text = _decodeBodyWithCharset(bytes, {
-          get: (name) => {
-            const lower = String(name).toLowerCase();
-            for (const [k, v] of Object.entries(xhr._responseHeaders)) {
-              if (k.toLowerCase() === lower) return v;
-            }
-            return null;
-          },
-        });
-        xhr.responseText = text;
-        switch (xhr.responseType) {
-          case 'json':
-            try { xhr.response = JSON.parse(text); } catch(e) { xhr.response = null; }
-            break;
-          case 'text':
-          case '':
-            xhr.response = text;
-            break;
-          case 'arraybuffer':
-            xhr.response = bytes.slice().buffer;
-            break;
-          case 'blob':
-            xhr.response = new Blob([bytes]);
-            break;
-          case 'document':
-            xhr.response = text; // simplified
-            break;
-          default:
-            xhr.response = text;
-        }
-        xhr.readyState = 4;
-      } catch (e) {
-        xhr.status = 0;
-        xhr.statusText = '';
-        xhr.responseText = '';
-        xhr.response = '';
-        xhr.readyState = 4;
-      }
-      return;
-    }
-
-    this._fireEvent('loadstart');
-
-    // #116: xhr.timeout must race the whole send→done span (headers AND body).
-    // Chrome: deadline hit → `timeout` event, DONE, status 0, then loadend;
-    // a late settlement of the underlying fetch is ignored. A hung transport
-    // used to fire nothing at all, which read on the surface as a silent
-    // EVAL_TIMEOUT with zero events (tmall publish report).
-    if (this.timeout > 0) {
-      const xhr = this;
-      this._timeoutTimer = setTimeout(function () {
-        if (xhr._aborted || xhr.readyState === 4) return;
-        xhr._timedOut = true;
-        xhr._aborted = true; // then/catch heads ignore the late settlement
-        xhr.status = 0;
-        xhr.statusText = '';
-        xhr._responseHeaders = {};
-        xhr.responseText = '';
-        xhr.response = '';
-        xhr.readyState = 4;
-        xhr._fireEvent('readystatechange');
-        xhr._fireEvent('timeout');
-        xhr._fireEvent('loadend');
-      }, this.timeout);
-    }
-
-    // #126: one record, the XHR's initiator — the hint is consumed at the
-    // fetch shim's synchronous entry, before the first await.
-    _initiatorHint = 'xmlhttprequest';
-    const delegated = fetch(url, {
-      method: this._method,
-      headers: this._headers,
-      body: body || undefined,
-      mode: 'cors',
-      credentials: this.withCredentials ? 'include' : 'same-origin',
-    });
-    _initiatorHint = null;
-    delegated.then(async (resp) => {
-      if (xhr._aborted) return;
-
-      xhr.status = resp.status;
-      xhr.statusText = resp.statusText || '';
-      xhr.responseURL = resp.url || url;
-
-      if (resp.headers) {
-        resp.headers.forEach((v, k) => { xhr._responseHeaders[k] = v; });
-      }
-
-      xhr._setReadyState(2); // HEADERS_RECEIVED
-
-      // arraybuffer/blob must round-trip the raw bytes: resp.text() is a
-      // lossy UTF-8 decode and re-encoding it mangles binary payloads
-      // (obscura #754/#716 class). Take the byte-exact buffer once and
-      // derive the charset-decoded text from the same bytes.
-      const bodyBuf = await resp.arrayBuffer();
-      const text = _decodeBodyWithCharset(new Uint8Array(bodyBuf), resp.headers);
-      if (xhr._aborted) return;
-
-      xhr.responseText = text;
-      xhr._setReadyState(3); // LOADING
-
-      switch (xhr.responseType) {
-        case 'json':
-          try { xhr.response = JSON.parse(text); } catch(e) { xhr.response = null; }
-          break;
-        case 'text':
-        case '':
-          xhr.response = text;
-          break;
-        case 'arraybuffer':
-          xhr.response = bodyBuf;
-          break;
-        case 'blob':
-          xhr.response = new Blob([bodyBuf]);
-          break;
-        case 'document':
-          xhr.response = text; // simplified
-          break;
-        default:
-          xhr.response = text;
-      }
-
-      xhr._setReadyState(4); // DONE
-      if (xhr._timeoutTimer) { clearTimeout(xhr._timeoutTimer); xhr._timeoutTimer = null; }
-      xhr._fireEvent('load');
-      xhr._fireEvent('loadend');
-    }).catch((err) => {
-      if (xhr._timeoutTimer) { clearTimeout(xhr._timeoutTimer); xhr._timeoutTimer = null; }
-      if (xhr._aborted) return;
-      xhr.status = 0;
-      xhr.readyState = 4;
-      xhr._fireEvent('readystatechange');
-      if (err && err.__aborted) {
-        xhr._aborted = true;
-        xhr._fireEvent('abort');
-        xhr._fireEvent('loadend');
-        if (xhr.onabort) xhr.onabort(err);
-      } else {
-        xhr._fireEvent('error');
-        xhr._fireEvent('loadend');
-        if (xhr.onerror) xhr.onerror(err);
-      }
-    });
-  }
-
-  abort() {
-    this._aborted = true;
-    if (this._timeoutTimer) { clearTimeout(this._timeoutTimer); this._timeoutTimer = null; }
-    if (this.readyState > 0 && this.readyState < 4) {
-      this._setReadyState(4);
-      this._fireEvent('abort');
-      this._fireEvent('loadend');
-    }
-    this.readyState = 0;
-  }
-
-  addEventListener(type, handler) {
-    __listenerGate(handler);
-    const L = __lmap(this);
-    if (!L[type]) L[type] = [];
-    L[type].push(handler);
-  }
-
-  removeEventListener(type, handler) {
-    const L = __evtStore.get(this);
-    if (L && L[type]) {
-      L[type] = L[type].filter(h => h !== handler);
-    }
-  }
-
-  // Per WHATWG DOM spec — required by zone.js which patches XHR via
-  // Object.getOwnPropertyDescriptor on XMLHttpRequestEventTarget.prototype.
-  dispatchEvent(event) {
-    if (!event || !event.type) return false;
-    const ev = (typeof event === 'object') ? event : { type: event };
-    ev.target = ev.target || this;
-    ev.currentTarget = ev.currentTarget || this;
-    const type = ev.type;
-    const L = __evtStore.get(this);
-    const handlers = (L && L[type]) || [];
-    _mtWindow(() => { for (const h of handlers) { try { _invokeListener(h, this, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } } });
-    const prop = 'on' + type;
-    if (typeof this[prop] === 'function') {
-      try { this[prop](ev); } catch (e) {}
-    }
-    return true;
-  }
-
-  _setReadyState(state) {
-    this.readyState = state;
-    this._fireEvent('readystatechange');
-    if (this.onreadystatechange) {
-      try { this.onreadystatechange(); } catch(e) {}
-    }
-  }
-
-  _fireEvent(type) {
-    const event = { type, target: this, currentTarget: this, bubbles: false };
-    const L = __evtStore.get(this);
-    const handlers = (L && L[type]) || [];
-    _mtWindow(() => { for (const h of handlers) { try { _invokeListener(h, this, event); } catch(e) { globalThis.__diting_reportUncaughtError(e); } } });
-    const prop = 'on' + type;
-    if (type !== 'readystatechange' && typeof this[prop] === 'function') {
-      try { this[prop](event); } catch(e) {}
-    }
-  }
-};
-_markNative(XMLHttpRequest);
-_markNative(XMLHttpRequest.prototype.open);
-_markNative(XMLHttpRequest.prototype.send);
-_markNative(XMLHttpRequest.prototype.abort);
-_markNative(XMLHttpRequest.prototype.setRequestHeader);
-_markNative(XMLHttpRequest.prototype.addEventListener);
-_markNative(XMLHttpRequest.prototype.removeEventListener);
-_markNative(XMLHttpRequest.prototype.dispatchEvent);
-_markNative(XMLHttpRequest.prototype.getResponseHeader);
-_markNative(XMLHttpRequest.prototype.getAllResponseHeaders);
 
 // WHATWG URL parsing/serialization is delegated to the Rust `url` crate via
 // op_url_parse / op_url_set. The op returns the full component set as JSON; the
@@ -10438,9 +9977,15 @@ globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNode
       // Filter by type per the observer options. Default behaviour matches
       // real MutationObserver: attribute mutations need options.attributes,
       // characterData mutations need options.characterData, childList
-      // needs options.childList.
+      // needs options.childList. #236: attributeFilter narrows the
+      // attribute case — a filter of ['data-allowed'] must not deliver
+      // 'data-other' records (spec: filter matches the attribute's
+      // local name; ours are unqualified names, so a direct includes).
       const wantsType =
-        (type === 'attributes' && t.options.attributes) ||
+        (type === 'attributes' &&
+          t.options.attributes &&
+          (!Array.isArray(t.options.attributeFilter) ||
+            t.options.attributeFilter.includes(attributeName))) ||
         (type === 'characterData' && t.options.characterData) ||
         (type === 'childList' && t.options.childList);
       if (!wantsType) continue;
@@ -17884,8 +17429,25 @@ if (typeof Image === 'undefined') {
     const img = document.createElement('img');
     img.onload = null; img.onerror = null;
     img.complete = false; img.naturalWidth = 0; img.naturalHeight = 0;
-    img.width = width !== undefined ? (width >>> 0) : 0;
-    img.height = height !== undefined ? (height >>> 0) : 0;
+    // #236: width/height are accessors, not data props. The HTML spec has
+    // the IDL getter fall back to the natural size when no value was ever
+    // set — `new Image()` with a decoded 1×1 src must read 1, not the
+    // constructor-era 0 (SDKs gate uploads on image.width and saw a
+    // phantom zero). A page or constructor assignment pins the value.
+    const _imgDims = {
+      w: width !== undefined ? (width >>> 0) : null,
+      h: height !== undefined ? (height >>> 0) : null,
+    };
+    Object.defineProperty(img, 'width', {
+      configurable: true, enumerable: true,
+      get() { return _imgDims.w !== null ? _imgDims.w : (img.naturalWidth || 0); },
+      set(v) { _imgDims.w = v >>> 0; },
+    });
+    Object.defineProperty(img, 'height', {
+      configurable: true, enumerable: true,
+      get() { return _imgDims.h !== null ? _imgDims.h : (img.naturalHeight || 0); },
+      set(v) { _imgDims.h = v >>> 0; },
+    });
     // There is no real image decoder, so emulate a successful decode: assigning
     // `.src` flips `complete` and fires `load` on a later tick. Lazy loaders
     // and preloaders that create `new Image()`, set `.src`, and wait for
@@ -19997,137 +19559,3 @@ globalThis.dispatchEvent = function(event) {
   }
   return _windowDispatch.call(this, event);
 };
-
-// tamperedFunctions: every builtin constructor reachable from the global
-// object gets its prototype methods AND accessors marked native, plus the
-// constructor itself (upstream 4c33f6d). The per-site _markNative calls above
-// miss accessors and several constructors; pixelscan's tamperedFunctions check
-// flags e.g. an Element.prototype.nodeType getter whose toString leaks JS
-// source. Runs once at snapshot build time; genuinely-native V8 builtins
-// already report native, so only JS-backed members change.
-(function _markBuiltinsNative() {
-  const seen = new Set();
-  function walk(ctor) {
-    if (typeof ctor !== 'function') return;
-    _markNative(ctor);
-    const proto = ctor.prototype;
-    if (!proto || seen.has(proto)) return;
-    seen.add(proto);
-    _markNativeProto(proto);
-  }
-  const names = Object.getOwnPropertyNames(globalThis);
-  for (let i = 0; i < names.length; i++) {
-    if (!/^[A-Z]/.test(names[i])) continue;
-    let val;
-    try { val = globalThis[names[i]]; } catch (e) { continue; }
-    walk(val);
-  }
-})();
-
-// WebIDL interface globals are non-enumerable in a real browser;
-// `globalThis.X = X` assignments default to enumerable:true, and one line
-// detects it: Object.getOwnPropertyDescriptor(window, 'Node').enumerable
-// (upstream c7e7c70). In Chrome every capitalized global (all interfaces and
-// JS builtins) is non-enumerable, so sweep by name shape. Runs at snapshot
-// build time, before any page code; configurable is preserved so `var Node`
-// pages still run.
-(function _interfaceGlobalsNonEnumerable() {
-  const names = Object.getOwnPropertyNames(globalThis);
-  for (let i = 0; i < names.length; i++) {
-    if (!/^[A-Z]/.test(names[i])) continue;
-    let d;
-    try { d = Object.getOwnPropertyDescriptor(globalThis, names[i]); } catch (e) { continue; }
-    if (!d || !d.configurable || d.enumerable === false) continue;
-    d.enumerable = false;
-    try { Object.defineProperty(globalThis, names[i], d); } catch (e) {}
-  }
-})();
-
-// (#27) Web IDL installs interface operations as {writable, enumerable,
-// configurable} — but every method above was defined with plain assignment
-// inside a class body (non-enumerable) or defineProperty without enumerable
-// (defaults false). zone.js's patchClass() — the standard Angular/Protractor
-// bootstrap — discovers methods via `for (const prop in instance)` and only
-// walks ENUMERABLE properties, so it saw nothing but engine internal fields
-// (_callback) and Angular died with "n.observe is not a function".
-// Explicit-list sweep over the DOM-ish prototypes: never walk chains upward,
-// that would reach Object.prototype and make hasOwnProperty etc. enumerable.
-(function _makeInterfaceMembersEnumerable() {
-  const protos = new Set();
-  const add = (C) => {
-    if (typeof C === "function" && C.prototype) protos.add(C.prototype);
-  };
-  for (const C of [
-    globalThis.EventTarget, globalThis.Node, globalThis.Element,
-    globalThis.HTMLElement, globalThis.HTMLFormElement, globalThis.Document,
-    globalThis.DocumentFragment, globalThis.ShadowRoot, globalThis.Text,
-    globalThis.Comment, globalThis.Attr, globalThis.CDATASection,
-    globalThis.MutationObserver, globalThis.IntersectionObserver,
-    globalThis.ResizeObserver, globalThis.PerformanceObserver,
-    globalThis.FileReader, globalThis.XMLHttpRequest,
-    globalThis.XMLHttpRequestEventTarget, globalThis.Image,
-    globalThis.NodeList, globalThis.HTMLCollection, globalThis.DOMTokenList,
-    globalThis.CSSStyleDeclaration, globalThis.Range, globalThis.Selection,
-    globalThis.Option, globalThis.FormData, globalThis.Headers, globalThis.URL,
-    globalThis.WebSocket, globalThis.EventSource, globalThis.BroadcastChannel,
-    globalThis.ReadableStream, globalThis.WritableStream,
-  ]) add(C);
-  for (const n of Object.getOwnPropertyNames(globalThis)) {
-    if (/^(HTML|SVG)[A-Za-z]*Element$/.test(n)) add(globalThis[n]);
-  }
-  for (const P of protos) {
-    for (const k of Object.getOwnPropertyNames(P)) {
-if (k === "constructor" || k.charCodeAt(0) === 95) continue; // #30: engine-internal _ members stay non-enumerable
-      const d = Object.getOwnPropertyDescriptor(P, k);
-      if (!d || d.enumerable || !d.configurable) continue;
-      try { Object.defineProperty(P, k, { enumerable: true }); } catch (e) {}
-    }
-  }
-})();
-
-// (#203) WebIDL brands. Chrome answers Object.prototype.toString with the
-// interface name for every platform object — '[object Event]',
-// '[object HTMLDivElement]', '[object XMLHttpRequest]' — because WebIDL
-// places Symbol.toStringTag on each interface prototype. The shims above
-// are plain classes, so they all read '[object Object]', and page code
-// that separates data from platform objects by that string misroutes:
-// doudian's deep-clone helper treats '[object Object]' as "plain data,
-// walk own keys", recursed into an Event (target→node→ownerDocument→…
-// back-edges) and died with RangeError: Maximum call stack size exceeded,
-// killing the goods-store boot. Tag every interface-shaped constructor;
-// native builtins already carrying a tag are skipped, as are the
-// %Object.prototype% family (Chrome leaves those untagged on purpose) and
-// the legacy element factories Image/Option/Audio (instances carry the
-// per-tag interface's brand instead).
-(function () {
-  const SKIP = new Set([
-    "Object", "Function", "Array", "String", "Number", "Boolean", "Symbol",
-    "BigInt", "Math", "JSON", "Image", "Option", "Audio",
-  ]);
-  for (const name of Object.getOwnPropertyNames(globalThis)) {
-    if (!/^[A-Z][A-Za-z0-9]*$/.test(name) || SKIP.has(name)) continue;
-    let C;
-    try { C = globalThis[name]; } catch (e) { continue; }
-    if (typeof C !== "function" || !C.prototype || typeof C.prototype !== "object") continue;
-    let has;
-    try { has = Object.getOwnPropertyDescriptor(C.prototype, Symbol.toStringTag) !== undefined; } catch (e) { continue; }
-    if (has) continue;
-    try {
-      Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, enumerable: false, writable: false, configurable: true });
-    } catch (e) { /* page froze the prototype first */ }
-  }
-  // Singleton platform objects built as literals rather than instances of
-  // an exposed interface: Chrome reports '[object Console]',
-  // '[object Location]', '[object History]', '[object Performance]',
-  // '[object Crypto]', '[object Storage]'.
-  const SINGLETONS = [
-    [globalThis.console, "Console"], [globalThis.location, "Location"],
-    [globalThis.history, "History"], [globalThis.performance, "Performance"],
-    [globalThis.crypto, "Crypto"],
-    [globalThis.localStorage, "Storage"], [globalThis.sessionStorage, "Storage"],
-  ];
-  for (const [obj, tag] of SINGLETONS) {
-    if (!obj || obj[Symbol.toStringTag] !== undefined) continue;
-    try { Object.defineProperty(obj, Symbol.toStringTag, { value: tag, enumerable: false, writable: false, configurable: true }); } catch (e) {}
-  }
-})();

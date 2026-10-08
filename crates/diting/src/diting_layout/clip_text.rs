@@ -19,6 +19,9 @@ use crate::diting_dom::tree::{DomTree, NodeId};
 use super::text::{greedy_wrap, last_line_offset, Token};
 use super::{Rect, TextGradient};
 
+/// Walked inline clip:text gradient: (stops, css degrees, box-decoration clone).
+type InlineGradientSpec = (Vec<(f32, [u8; 4])>, f32, bool);
+
 /// Innermost INLINE ancestor of `text_node` that declares its own clip:text
 /// gradient. The walk stops at the first non-inline ancestor: anything
 /// box-shaped (block, inline-block, flex item…) is the box-walk capture's
@@ -28,7 +31,7 @@ fn inline_spec(
     tree: &DomTree,
     styles: &HashMap<NodeId, ComputedStyle>,
     text_node: NodeId,
-) -> Option<(Vec<(f32, [u8; 4])>, f32, bool)> {
+) -> Option<InlineGradientSpec> {
     let mut cur = tree.with_node(text_node, |n| n.parent).flatten()?;
     loop {
         if let Some(s) = styles.get(&cur) {
@@ -67,6 +70,7 @@ fn inline_spec(
 /// maps line geometry into final space — (1.0, 1.0) unscaled. Line
 /// geometry replays the raster's `greedy_wrap`, so the fill tracks exactly
 /// where each line will paint.
+#[allow(clippy::too_many_arguments)] // flat paint geometry + token/whitespace plumbing; a params struct here would be ceremony (drag_xy precedent)
 pub(super) fn run_fill(
     box_fill: Option<TextGradient>,
     clip_src: Option<NodeId>,

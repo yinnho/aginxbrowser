@@ -2531,7 +2531,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                         &r
                     };
                     out.blit_rgba_affine(&r.data, r.width, r.height, *x as f64, (*y + r.top) as f64);
-                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, decorations.pierce.then(|| gradient.as_ref()).flatten(), *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), 0.0, 0.0, *last_line_align);
+                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, decorations.pierce.then_some(gradient.as_ref()).flatten(), *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), 0.0, 0.0, *last_line_align);
                 } else {
                     let pad = shadow_pad.unwrap_or(0.0);
                     if !text_reaches_band(*y, text, *font_size, *wrap_at, *line_height, dy, out.height as i64, pad) {
@@ -2556,7 +2556,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     };
                     // Tile row 0 sits `top` px above the leaf's line-box top.
                     out.blit_text(r, (x - dx).round() as i64, (y - dy + r.top).round() as i64);
-                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, decorations.pierce.then(|| gradient.as_ref()).flatten(), *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), dx, dy, *last_line_align);
+                    paint_text_decorations(out, fonts, text, *font_size, *bold, *color, *line_height, *x, *y, *wrap_at, *decorations, decorations.pierce.then_some(gradient.as_ref()).flatten(), *mono, *word_spacing, *truncate_at, *ws, *small_caps, *han, tokens.as_deref(), dx, dy, *last_line_align);
                 }
             }
         }

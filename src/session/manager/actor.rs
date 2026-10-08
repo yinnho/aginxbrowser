@@ -588,20 +588,27 @@ pub(super) fn session_thread(
                         SessionCommand::ClickXY { x, y, button, click_count, reply } => {
                             // A coordinate click can navigate exactly like an
                             // indexed one, so it spends the same page budget.
+                            // #236: an eval error in the dispatch chain IS the
+                            // result — "coordinates accepted" no longer masquerades
+                            // as "event chain actually dispatched".
                             let result = match crate::rate::check_page_budget(pages_loaded) {
                                 Err(reason) => Err(reason),
                                 Ok(()) => {
                                     let before = page.url();
-                                    click_xy(&mut page, x, y, &button, click_count).await;
-                                    let _ = page.process_pending_navigation().await;
-                                    if page.url() != before {
-                                        pages_loaded += 1;
+                                    match click_xy(&mut page, x, y, &button, click_count).await {
+                                        Err(stage) => Err(format!("click dispatch incomplete: {stage}")),
+                                        Ok(()) => {
+                                            let _ = page.process_pending_navigation().await;
+                                            if page.url() != before {
+                                                pages_loaded += 1;
+                                            }
+                                            Ok(serde_json::json!({
+                                                "url": page.url(),
+                                                "x": x,
+                                                "y": y,
+                                            }).to_string())
+                                        }
                                     }
-                                    Ok(serde_json::json!({
-                                        "url": page.url(),
-                                        "x": x,
-                                        "y": y,
-                                    }).to_string())
                                 }
                             };
                             recorder.push(RecordedAction::ClickXY { x, y, ok: result.is_ok() });
@@ -615,18 +622,22 @@ pub(super) fn session_thread(
                                 Err(reason) => Err(reason),
                                 Ok(()) => {
                                     let before = page.url();
-                                    drag_xy(&mut page, from_x, from_y, to_x, to_y, steps, delay_ms, humanize).await;
-                                    let _ = page.process_pending_navigation().await;
-                                    if page.url() != before {
-                                        pages_loaded += 1;
+                                    match drag_xy(&mut page, from_x, from_y, to_x, to_y, steps, delay_ms, humanize).await {
+                                        Err(stage) => Err(format!("drag dispatch incomplete: {stage}")),
+                                        Ok(()) => {
+                                            let _ = page.process_pending_navigation().await;
+                                            if page.url() != before {
+                                                pages_loaded += 1;
+                                            }
+                                            Ok(serde_json::json!({
+                                                "url": page.url(),
+                                                "from": {"x": from_x, "y": from_y},
+                                                "to": {"x": to_x, "y": to_y},
+                                                "steps": steps,
+                                                "humanized": humanize,
+                                            }).to_string())
+                                        }
                                     }
-                                    Ok(serde_json::json!({
-                                        "url": page.url(),
-                                        "from": {"x": from_x, "y": from_y},
-                                        "to": {"x": to_x, "y": to_y},
-                                        "steps": steps,
-                                        "humanized": humanize,
-                                    }).to_string())
                                 }
                             };
                             recorder.push(RecordedAction::Drag { from_x, from_y, to_x, to_y, steps });

@@ -74,7 +74,7 @@ GOD_FILE_CAP = 1500
 # growth past the recorded count fails CI. Removing a file without removing its
 # entry also fails (stale ratchet).
 GOD_FILE_GRANDFATHER = {
-    "crates/diting/js/bootstrap.js": 20147,
+    "crates/diting/js/bootstrap.js": 19561,  # #236: XMLHttpRequest split to js/xhr.js (new file, no cap); EventTarget base stays (AbortSignal extends it)
     "crates/diting/src/diting_layout/mod.rs": 9642,
     "crates/diting/src/diting_css/mod.rs": 8511,
     "crates/diting/src/diting_js/ops/mod.rs": 6475,

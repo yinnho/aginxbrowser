@@ -625,8 +625,16 @@ impl StealthHttpClient {
 
             for val in resp.headers().get_all("set-cookie") {
                 if let Ok(s) = val.to_str() {
-                    self.cookie_jar
-                        .set_cookie_in_context(s, &current_url, &cookie_ctx, "http");
+                    // #234: the credentials policy gates the response side
+                    // too — an `credentials:'omit'` /
+                    // withCredentials=false scripted fetch must not absorb
+                    // the response's Set-Cookie into the jar. The plain
+                    // reqwest path already dropped these; the stealth walk
+                    // applied them unconditionally, on every redirect hop.
+                    if include_cookies {
+                        self.cookie_jar
+                            .set_cookie_in_context(s, &current_url, &cookie_ctx, "http");
+                    }
                 }
             }
 
@@ -1037,6 +1045,7 @@ mod tests {
                     let path = req.split(' ').nth(1).unwrap_or("").to_string();
                     let resp = match path.as_str() {
                         "/r301" => "HTTP/1.1 301 Moved Permanently\r\nlocation: /land\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string(),
+                        "/setcookie" => "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\nset-cookie: sid_from_response=1; Path=/\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok".to_string(),
                         "/r307" => "HTTP/1.1 307 Temporary Redirect\r\nlocation: /land\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string(),
                         _ => "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok".to_string(),
                     };
@@ -1216,6 +1225,44 @@ mod tests {
             !omitted.contains("cookie:"),
             "credentials:'omit' must not leak the jar cookie: {omitted}"
         );
+    }
+
+    /// #234: the credentials policy must gate the response side too — an
+    /// `credentials:'omit'` scripted fetch must not absorb the response's
+    /// Set-Cookie into the jar. The plain walk gates this at its own
+    /// set-cookie application; the stealth walk used to apply every
+    /// set-cookie unconditionally (on every redirect hop).
+    #[allow(clippy::await_holding_lock)] // env-lock guard spans the fixture fetch, as above
+    #[tokio::test]
+    async fn credentials_policy_gates_response_set_cookie_absorption() {
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        let (port, _log) = method_recording_fixture().await;
+        let jar = Arc::new(CookieJar::new());
+        let mut client = StealthHttpClient::new(jar.clone());
+        client.allow_private_network = true;
+        let mk = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}/{path}")).unwrap();
+
+        client
+            .fetch_with_body(&mk("setcookie"), None, "POST", Some(b"a=1".as_slice()), None, None, false)
+            .await
+            .expect("omitted-credentials POST");
+        let visible = jar.get_js_visible_cookies(&mk("land"));
+        assert!(
+            !visible.contains("sid_from_response"),
+            "credentials:'omit' must not absorb the response Set-Cookie: {visible}"
+        );
+
+        client
+            .fetch_with_body(&mk("setcookie"), None, "POST", Some(b"a=1".as_slice()), None, None, true)
+            .await
+            .expect("included-credentials POST");
+        let visible = jar.get_js_visible_cookies(&mk("land"));
+        assert!(
+            visible.contains("sid_from_response=1"),
+            "credentials:'include' must absorb the response Set-Cookie: {visible}"
+        );
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
     }
 
     // set_extra_headers must reach the wire per-request, and an extras

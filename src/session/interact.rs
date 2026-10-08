@@ -799,28 +799,40 @@ pub(crate) fn mouse_up_js(
     )
 }
 
-pub(super) fn eval_interaction(page: &mut Page, js: &str) {
-    page.evaluate_with_timeout(js, crate::page::INTERACTION_EVAL_TIMEOUT);
+pub(super) fn eval_interaction(page: &mut Page, js: &str) -> Result<serde_json::Value, String> {
+    page.evaluate_with_timeout_result(js, crate::page::INTERACTION_EVAL_TIMEOUT)
 }
 
 /// Click at viewport coordinates through the real mouse chain — same JS the
-/// CDP bridge dispatches, so pages can't tell the two apart.
-pub(super) async fn click_xy(page: &mut Page, x: f64, y: f64, button: &str, click_count: u32) {
+/// CDP bridge dispatches, so pages can't tell the two apart. #236: every
+/// stage's eval error is propagated — a watchdog termination that ate the
+/// mouse-down used to be silently folded into Null, mouse-up still ran, and
+/// the caller got a "success" for a chain that never reached the page (the
+/// merchant's capture listeners saw only pointerup/mouseup).
+pub(super) async fn click_xy(
+    page: &mut Page,
+    x: f64,
+    y: f64,
+    button: &str,
+    click_count: u32,
+) -> Result<(), String> {
     let code = mouse_button_code(button);
     let mask = mouse_button_mask(button);
-    eval_interaction(page, INPUT_HELPERS);
-    eval_interaction(
-        page,
-        &mouse_down_js(x, y, code, mask, click_count as u64, 0),
-    );
-    eval_interaction(page, &mouse_up_js(x, y, code, click_count as u64, 0));
+    eval_interaction(page, INPUT_HELPERS).map_err(|e| format!("helpers: {e}"))?;
+    eval_interaction(page, &mouse_down_js(x, y, code, mask, click_count as u64, 0))
+        .map_err(|e| format!("mouse_down: {e}"))?;
+    eval_interaction(page, &mouse_up_js(x, y, code, click_count as u64, 0))
+        .map_err(|e| format!("mouse_up: {e}"))?;
+    Ok(())
 }
 
 /// Press → mousemoves → release. Linear path (`humanize: false`) is exact
 /// interpolation for tests/tools that need precise geometry; the humanized
 /// path (default) feeds the moves through [`humanized_drag_plan`] so the
 /// trajectory reads as a real hand (anti-bot heuristics score linear
-/// constant-velocity glides as synthetic).
+/// constant-velocity glides as synthetic). Stage errors propagate (#236) —
+/// a drag whose press was terminated stops mid-chain instead of reporting
+/// success.
 #[allow(clippy::too_many_arguments)] // flat geometry + pacing knobs; a params struct here would be ceremony
 pub(super) async fn drag_xy(
     page: &mut Page,
@@ -831,9 +843,10 @@ pub(super) async fn drag_xy(
     steps: u32,
     delay_ms: u64,
     humanize: bool,
-) {
-    eval_interaction(page, INPUT_HELPERS);
-    eval_interaction(page, &mouse_down_js(from_x, from_y, 0, 1, 1, 0));
+) -> Result<(), String> {
+    eval_interaction(page, INPUT_HELPERS).map_err(|e| format!("helpers: {e}"))?;
+    eval_interaction(page, &mouse_down_js(from_x, from_y, 0, 1, 1, 0))
+        .map_err(|e| format!("mouse_down: {e}"))?;
     if humanize {
         let plan = humanized_drag_plan(
             from_x,
@@ -848,7 +861,8 @@ pub(super) async fn drag_xy(
             if pt.delay_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(pt.delay_ms)).await;
             }
-            eval_interaction(page, &mouse_move_js(pt.x, pt.y, 1, 0));
+            eval_interaction(page, &mouse_move_js(pt.x, pt.y, 1, 0))
+                .map_err(|e| format!("mouse_move: {e}"))?;
         }
         if plan.settle_ms > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(plan.settle_ms)).await;
@@ -862,10 +876,13 @@ pub(super) async fn drag_xy(
             let k = i as f64 / n;
             let x = from_x + (to_x - from_x) * k;
             let y = from_y + (to_y - from_y) * k;
-            eval_interaction(page, &mouse_move_js(x, y, 1, 0));
+            eval_interaction(page, &mouse_move_js(x, y, 1, 0))
+                .map_err(|e| format!("mouse_move: {e}"))?;
         }
     }
-    eval_interaction(page, &mouse_up_js(to_x, to_y, 0, 1, 0));
+    eval_interaction(page, &mouse_up_js(to_x, to_y, 0, 1, 0))
+        .map_err(|e| format!("mouse_up: {e}"))?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

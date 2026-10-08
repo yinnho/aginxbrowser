@@ -79,17 +79,30 @@ impl Page {
         expression: &str,
         timeout: std::time::Duration,
     ) -> serde_json::Value {
+        self.evaluate_with_timeout_result(expression, timeout)
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    /// Result-shaped twin of [`Self::evaluate_with_timeout`] (#236): the
+    /// interaction dispatches must be able to tell "the expression returned
+    /// null" from "the watchdog terminated it" — a swallowed error made
+    /// click_xy report success for a dispatch that never reached the page
+    /// (the mouse-down eval died, mouse-up still ran). Errors carry the
+    /// runtime's message; callers decide what to surface.
+    pub fn evaluate_with_timeout_result(
+        &mut self,
+        expression: &str,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
         if let Some(js) = &mut self.js {
-            match js.evaluate_with_timeout(expression, timeout) {
-                Ok(val) => val,
-                Err(e) => {
-                    let preview: String = expression.chars().take(80).collect();
-                    tracing::debug!("JS eval error/timeout for '{}': {}", preview, e);
-                    serde_json::Value::Null
-                }
-            }
+            js.evaluate_with_timeout(expression, timeout).map_err(|e| {
+                let preview: String = expression.chars().take(80).collect();
+                let msg = format!("JS eval error/timeout for '{}': {}", preview, e);
+                tracing::debug!("{}", msg);
+                msg
+            })
         } else {
-            self.evaluate(expression)
+            Ok(self.evaluate(expression))
         }
     }
 

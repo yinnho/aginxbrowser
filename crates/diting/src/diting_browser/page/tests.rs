@@ -165,6 +165,32 @@
 
     // ---- pure functions -------------------------------------------------
 
+    /// #236: the result-shaped eval twin must carry watchdog terminations to
+    /// the caller — click_xy relies on it to report "dispatch incomplete"
+    /// instead of success. (A JS-level `throw` is deliberately NOT an error
+    /// here: wrap_expression folds script exceptions into a null completion
+    /// value, engine-wide CDP semantics — the terminate path is the one the
+    /// interaction chain needs.) The Null-returning wrapper keeps its old
+    /// face (fold to Null).
+    #[tokio::test(flavor = "current_thread")]
+    async fn evaluate_with_timeout_result_carries_termination() {
+        let mut p = test_page();
+        p.navigate("about:blank").await.unwrap();
+        let err = p
+            .evaluate_with_timeout_result(
+                "while (true) {}",
+                std::time::Duration::from_millis(200),
+            )
+            .expect_err("a watchdog termination must surface as Err");
+        assert!(
+            err.contains("timed out"),
+            "the termination must ride along: {err}"
+        );
+        // The legacy wrapper folds the same termination into Null — unchanged.
+        let folded = p.evaluate_with_timeout("1 + 1", std::time::Duration::from_secs(5));
+        assert_eq!(folded, serde_json::json!(2.0), "page must survive the termination");
+    }
+
     #[test]
     fn subresource_allowed_policy_matrix() {
         let http_page = Url::parse("http://example.com/page").ok();

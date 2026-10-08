@@ -2482,6 +2482,77 @@
         }
     }
 
+    /// #236: `attributeFilter` narrows attribute records — a filter of
+    /// ['data-allowed'] must not deliver a 'data-other' record. The observer
+    /// matching loop used to check only `options.attributes`, so the filter
+    /// was ignored entirely (the merchant's anonymous probe on #203).
+    #[tokio::test(flavor = "current_thread")]
+    async fn mutation_observer_attribute_filter_is_honored() {
+        let mut rt = setup_runtime(r#"<body><div id="d"></div></body>"#);
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const el = document.getElementById('d');
+                    const records = [];
+                    const mo = new MutationObserver(xs => records.push(...xs.map(x => x.attributeName)));
+                    mo.observe(el, {attributes: true, attributeFilter: ['data-allowed']});
+                    el.setAttribute('data-other', '1');
+                    el.setAttribute('data-allowed', '2');
+                    await new Promise(r => setTimeout(r, 50));
+                    mo.disconnect();
+                    return JSON.stringify(records);
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let records = result.value.unwrap();
+        assert_eq!(
+            records,
+            serde_json::json!(r#"["data-allowed"]"#),
+            "data-other must be filtered out, data-allowed delivered"
+        );
+    }
+
+    /// #235: native XHR must not ride the page-overridable fetch. A page
+    /// wrapping `window.fetch` (doudian's SDK wraps XHR and fetch both) used
+    /// to intercept our XHR.send through its wrapper — already-signed
+    /// requests re-processed, getSchema observed returning 200 with a 0-byte
+    /// body. The XHR now calls the engine's own shim closure; a pass-through
+    /// wrapper must see ZERO entries. data: URL keeps the probe offline.
+    #[tokio::test(flavor = "current_thread")]
+    async fn xhr_send_bypasses_page_fetch_wrapper() {
+        let mut rt = setup_runtime(r#"<body></body>"#);
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    let wrapped = 0;
+                    const orig = window.fetch;
+                    window.fetch = function() { wrapped++; return orig.apply(this, arguments); };
+                    const x = new XMLHttpRequest();
+                    x.open('GET', 'data:text/plain,hi');
+                    const settled = new Promise(r => { x.onload = r; x.onerror = r; });
+                    x.send();
+                    await settled;
+                    await new Promise(r => setTimeout(r, 30));
+                    window.fetch = orig;
+                    return {wrapped: String(wrapped), status: String(x.status)};
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        assert_eq!(v["wrapped"], serde_json::json!("0"), "XHR must bypass the page fetch wrapper");
+        assert_eq!(v["status"], serde_json::json!("200"), "data: URL still loads through the shim");
+    }
+
     /// #39 (obscura#999 residue): WebKitMutationObserver is an alias of the
     /// same constructor (zone.js patches both names; Chrome 151 face), and
     /// IntersectionObserver's prototype carries scrollMargin/delay/
@@ -4062,6 +4133,11 @@
                         how,
                         nw: String(img.naturalWidth),
                         nh: String(img.naturalHeight),
+                        // #236: width/height fall back to the natural size when
+                        // nothing pinned them — the old own-prop 0 gated SDKs
+                        // on a phantom zero.
+                        w: String(img.width),
+                        h: String(img.height),
                         complete: String(img.complete),
                     };
                 }"#,
@@ -4078,6 +4154,8 @@
         assert_eq!(v["how"], serde_json::json!("fired"));
         assert_eq!(v["nw"], serde_json::json!("62"));
         assert_eq!(v["nh"], serde_json::json!("33"));
+        assert_eq!(v["w"], serde_json::json!("62"), "width must fall back to natural");
+        assert_eq!(v["h"], serde_json::json!("33"), "height must fall back to natural");
         assert_eq!(v["complete"], serde_json::json!("true"));
     }
 

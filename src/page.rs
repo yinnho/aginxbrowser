@@ -136,6 +136,16 @@ impl Page {
         self.inner.evaluate_with_timeout(expression, timeout)
     }
 
+    /// Result-shaped twin (#236): click_xy must distinguish "dispatched"
+    /// from "terminated mid-chain" instead of folding the error into Null.
+    pub fn evaluate_with_timeout_result(
+        &mut self,
+        expression: &str,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        self.inner.evaluate_with_timeout_result(expression, timeout)
+    }
+
     /// Pin the viewport (device emulation); survives navigation. `dpr` pins
     /// `window.devicePixelRatio` when > 0, None keeps the persona's.
     pub fn set_viewport_override(&mut self, w: f32, h: f32, mobile: bool, dpr: Option<f64>) {
