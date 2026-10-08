@@ -57,7 +57,7 @@ jobs:
         # set-cookie gating is the second member). Targeted, not the whole
         # suite: BoringSSL is already built above and the filters keep the
         # wall-clock honest. Multiple positional filters are ORed by libtest.
-        run: cargo test --workspace --features stealth,screenshot redirect cookie
+        run: cargo test --workspace --features stealth,screenshot -- redirect cookie
 
   layers:
     # ARCHITECTURE.md §2 R1-R3 as greppable tripwires plus the god-file
