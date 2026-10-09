@@ -3990,6 +3990,17 @@ class Element extends Node {
     // click event at all — own disabled attribute or disabled by an ancestor
     // <fieldset disabled> (first <legend> exempt).
     if (_isFormControlDisabled(this)) return;
+    // File chooser interception (#239): a real browser opens the native
+    // picker here and the page waits for the user's selection. The engine
+    // has no picker UI — instead the input becomes the session's PENDING
+    // CHOOSER: selector-less set_files feeds it (el.files + input/change
+    // dispatch), so off-DOM inputs whose listeners attach only on widget
+    // click (doudian's new upload bundle) become drivable. Latest click()
+    // wins; the record is page-global state, so a navigation clears it.
+    if (this.tagName === 'INPUT' && (this.getAttribute('type') || '').toLowerCase() === 'file') {
+      const prev = globalThis.__ditingFileChooser;
+      globalThis.__ditingFileChooser = { el: this, at: Date.now(), gen: prev ? prev.gen + 1 : 1 };
+    }
     // "Click in progress" flag per spec, checked BEFORE any pre-activation
     // step: a nested .click() on an element whose click is still running must
     // be a full no-op, not a second state flip. This also stops a control's

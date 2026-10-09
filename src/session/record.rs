@@ -51,7 +51,8 @@ pub enum RecordedAction {
         ok: bool,
     },
     SetFiles {
-        selector: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        selector: Option<String>,
         /// File names only — content base64 never enters the action log:
         /// recordings and exported flows would balloon, and blob content has
         /// no business sitting in a replay script.

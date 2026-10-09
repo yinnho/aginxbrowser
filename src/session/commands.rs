@@ -42,7 +42,10 @@ pub enum SessionCommand {
     /// Selector-addressed because file inputs are routinely hidden — the
     /// interactive index from State may not include them at all.
     SetFiles {
-        selector: String,
+        /// None = feed the PENDING FILE CHOOSER (#239): the INPUT[type=file]
+        /// the page most recently click()-ed (widget buttons arm it on
+        /// click; the engine has no native picker).
+        selector: Option<String>,
         files: Vec<Value>,
         reply: oneshot::Sender<Result<Value, String>>,
     },

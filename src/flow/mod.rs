@@ -83,14 +83,22 @@ pub fn recorded_to_flow(jsonl: &str) -> Value {
             // so the export marks where an upload belongs and the author fills
             // in content (or a {{var}}) during curation — replay fails loudly
             // on a spec without content_base64 rather than uploading 0 bytes.
+            // A chooser-mode recording (selector-less feed of the pending
+            // file chooser) exports selector-less too — the replay re-feeds
+            // whatever chooser the prior steps armed.
             "set_files" => steps.push(step(
                 "set_files",
-                json!({
-                    "selector": v["selector"],
-                    "files": v["names"].as_array().map(|ns| {
-                        ns.iter().map(|n| json!({ "name": n })).collect::<Vec<_>>()
-                    }).unwrap_or_default(),
-                }),
+                {
+                    let mut args = json!({
+                        "files": v["names"].as_array().map(|ns| {
+                            ns.iter().map(|n| json!({ "name": n })).collect::<Vec<_>>()
+                        }).unwrap_or_default(),
+                    });
+                    if let Some(sel) = v.get("selector").filter(|s| !s.is_null()) {
+                        args["selector"] = sel.clone();
+                    }
+                    args
+                },
             )),
             "scroll" => steps.push(step(
                 "scroll",
@@ -618,7 +626,11 @@ async fn exec_step(
                 .map_err(|e| e.to_string())
         }
         "set_files" => {
-            let selector = str_arg(a, "selector", op)?;
+            // Selector optional (#239): absent = feed the PENDING FILE
+            // CHOOSER — the INPUT[type=file] the page most recently
+            // click()-ed, which is how off-DOM inputs (doudian's upload
+            // widget arms its input on click) become addressable.
+            let selector = a.get("selector").and_then(|v| v.as_str()).map(String::from);
             let files = a
                 .get("files")
                 .and_then(|v| v.as_array())
@@ -644,7 +656,7 @@ async fn exec_step(
                 }
             }
             mgr.send(sid, |reply| C::SetFiles {
-                selector: selector.clone(),
+                selector,
                 files: files.clone(),
                 reply,
             })

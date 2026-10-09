@@ -415,6 +415,44 @@ async fn run_flow_set_files_uploads() {
     assert!(mgr.close_and_wait(&sid).await);
 }
 
+/// The upload-widget shape (#239): the file input never lands in the DOM —
+/// a script (the widget's own click handler, here played by an eval step)
+/// creates it, attaches the change listener, and calls click(). The flow
+/// feeds it with a selector-LESS set_files step: the pending chooser the
+/// click armed receives the files and the widget's listener runs.
+#[tokio::test]
+async fn run_flow_set_files_feeds_pending_chooser_without_selector() {
+    let mut mgr = SessionManager::new();
+    let flow = json!({
+        "steps": [
+            { "op": "set_content", "args": { "html": "<html><body><button id='w'>upload</button></body></html>" } },
+            { "op": "eval", "args": {
+                "script": "(() => { const inp = document.createElement('input'); inp.setAttribute('type','file'); window.__widget = { inp, changes: 0 }; inp.addEventListener('change', () => { window.__widget.changes++; }); document.getElementById('w').addEventListener('click', () => { inp.click(); }); return 'ready'; })()"
+            } },
+            { "op": "eval", "args": {
+                "script": "(() => { document.getElementById('w').click(); return 'widget-clicked'; })()"
+            } },
+            { "op": "set_files", "args": {
+                "files": [ { "name": "m.png", "content_base64": "aGk=", "mime_type": "image/png" } ]
+            }, "save": "fed" },
+            { "op": "eval", "args": {
+                "script": "(() => JSON.stringify({ changes: window.__widget.changes, name: window.__widget.inp.files[0] ? window.__widget.inp.files[0].name : null, connected: window.__widget.inp.isConnected }))()"
+            }, "save": "after" },
+        ]
+    });
+    let receipt = run_flow(&mut mgr, &flow, &Map::new(), None).await;
+    assert_eq!(receipt["status"], "ok", "receipt: {receipt}");
+    assert_eq!(receipt["saved"]["fed"]["set"], true);
+    assert_eq!(receipt["saved"]["fed"]["mode"], "chooser");
+    let after: Value = serde_json::from_str(receipt["saved"]["after"].as_str().unwrap()).unwrap();
+    assert_eq!(after["changes"], 1, "widget listener ran: {after}");
+    assert_eq!(after["name"], "m.png");
+    assert_eq!(after["connected"], false, "input stayed off-DOM throughout");
+
+    let sid = receipt["session_id"].as_str().unwrap().to_string();
+    assert!(mgr.close_and_wait(&sid).await);
+}
+
 /// The names-only skeleton a recorded export emits must fail loudly at
 /// the set_files step — not silently upload 0-byte files.
 #[tokio::test]

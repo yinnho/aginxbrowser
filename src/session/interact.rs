@@ -1193,24 +1193,46 @@ pub(super) fn input_by_index(
     Ok(parsed)
 }
 
-/// Programmatic file selection (Playwright setInputFiles semantics): locate a
-/// file input by CSS selector, build File objects from base64 content
+/// Programmatic file selection (Playwright setInputFiles semantics): locate
+/// a file input by CSS selector, build File objects from base64 content
 /// specs, assign through `el.files`, then dispatch input+change so framework
 /// onChange handlers fire. Selector-addressed on purpose — file inputs are
 /// routinely hidden, so the interactive index the other commands use may not
 /// include them at all.
-pub(super) fn set_files_by_selector(page: &mut Page, selector: &str, files: &[Value]) -> Result<Value, String> {
-    if selector.trim().is_empty() {
-        return Err("selector must not be empty".to_string());
-    }
+///
+/// `selector: None` feeds the PENDING FILE CHOOSER instead (#239): the
+/// INPUT[type=file] the page most recently `click()`-ed. Upload widgets
+/// create their input off-DOM and attach the change listener only inside
+/// the widget's own click handler (doudian's new bundle), so no selector
+/// can reach the input — but the widget's `input.click()` call arms the
+/// chooser, and this mode feeds that exact element.
+pub(super) fn set_files_by_selector(page: &mut Page, selector: Option<&str>, files: &[Value]) -> Result<Value, String> {
     // JSON-encode both interpolations so selector quotes and spec strings
     // can't break out of the script literal.
+    let selector = match selector {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => "",
+    };
     let selector_json = serde_json::to_string(selector).map_err(|e| e.to_string())?;
     let specs = serde_json::to_string(files).map_err(|e| e.to_string())?;
     let js = format!(
         r#"(function() {{
-    var el = document.querySelector({selector_json});
-    if (!el) return JSON.stringify({{set: false, error: "selector matched no element"}});
+    var el;
+    var mode = 'selector';
+    var armedAgoMs = null;
+    if ({selector_json}) {{
+        el = document.querySelector({selector_json});
+        if (!el) return JSON.stringify({{set: false, error: "selector matched no element"}});
+    }} else {{
+        // Chooser mode: the bootstrap's INPUT[type=file].click() hook
+        // keeps the latest armed input here. Detached is expected — that's
+        // the off-DOM widget case this mode exists for.
+        var rec = globalThis.__ditingFileChooser;
+        if (!rec || !rec.el) return JSON.stringify({{set: false, error: "no pending file chooser — a page-side INPUT[type=file].click() arms it (upload widgets do this inside their own click handler)"}});
+        el = rec.el;
+        mode = 'chooser';
+        armedAgoMs = Date.now() - rec.at;
+    }}
     if (el.tagName !== 'INPUT' || (el.getAttribute('type') || '').toLowerCase() !== 'file')
         return JSON.stringify({{set: false, error: "not a file input"}});
     var specs = {specs};
@@ -1230,13 +1252,16 @@ pub(super) fn set_files_by_selector(page: &mut Page, selector: &str, files: &[Va
     el.files = out;
     el.dispatchEvent(new Event('input', {{bubbles: true}}));
     el.dispatchEvent(new Event('change', {{bubbles: true}}));
-    return JSON.stringify({{
+    var resp = {{
         set: true,
-        selector: {selector_json},
+        mode: mode,
         count: out.length,
         value: el.value,
         files: out.map(function(f) {{ return {{name: f.name, size: f.size, type: f.type}}; }})
-    }});
+    }};
+    if (mode === 'selector') resp.selector = {selector_json};
+    if (armedAgoMs != null) resp.armed_ms_ago = armedAgoMs;
+    return JSON.stringify(resp);
 }})()"#,
         selector_json = selector_json,
         specs = specs,

@@ -123,7 +123,7 @@
         ];
         let result = mgr
             .send(&sid, |reply| SessionCommand::SetFiles {
-                selector: "input[type=file]".to_string(),
+                selector: Some("input[type=file]".to_string()),
                 files: specs,
                 reply,
             })
@@ -162,7 +162,7 @@
         // Wrong selector and non-file target report set:false, never throw.
         let miss = mgr
             .send(&sid, |reply| SessionCommand::SetFiles {
-                selector: "input#nope".to_string(),
+                selector: Some("input#nope".to_string()),
                 files: vec![serde_json::json!({"name": "x", "content_base64": ""})],
                 reply,
             })
@@ -179,7 +179,7 @@
 
         let not_file = mgr
             .send(&sid, |reply| SessionCommand::SetFiles {
-                selector: "input[type=text]".to_string(),
+                selector: Some("input[type=text]".to_string()),
                 files: vec![serde_json::json!({"name": "x", "content_base64": ""})],
                 reply,
             })
@@ -196,6 +196,131 @@
         );
 
         assert!(mgr.close_and_wait(&sid).await, "session thread must ack close");
+    }
+
+    /// #239 — the pending file chooser face. An off-DOM INPUT[type=file]
+    /// whose change listener attaches right before click() (doudian's new
+    /// upload widget shape): no selector can reach the input, but the
+    /// page-side click() arms the chooser and selector-less SetFiles feeds
+    /// that exact element — files land, change fires, and a feed with
+    /// nothing armed names the gap instead of guessing.
+    #[tokio::test]
+    async fn set_files_feeds_the_pending_file_chooser() {
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(Some("about:blank"), false, vec![], None, None, None, false, false, None);
+
+        // Nothing armed yet: selector-less feed must refuse with the recipe.
+        let none = mgr
+            .send(&sid, |reply| SessionCommand::SetFiles {
+                selector: None,
+                files: vec![serde_json::json!({"name": "x.png", "content_base64": "aGk="})],
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(none.get("set").and_then(Value::as_bool), Some(false), "{none}");
+        assert!(
+            none.get("error").and_then(Value::as_str).unwrap_or("").contains("no pending file chooser"),
+            "should name the gap: {none}"
+        );
+
+        // The widget shape: create the input off-DOM, attach the change
+        // listener, THEN click() — exactly the order a real upload widget
+        // uses inside its own click handler.
+        let armed = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: r#"(function() {
+                    var inp = document.createElement('input');
+                    inp.setAttribute('type', 'file');
+                    window.__chooser = { inp: inp, changes: 0, lastNames: [] };
+                    inp.addEventListener('change', function() {
+                        window.__chooser.changes++;
+                        window.__chooser.lastNames = Array.prototype.map.call(inp.files, function(f) { return f.name; });
+                    });
+                    inp.click();
+                    return JSON.stringify({ armed: !!globalThis.__ditingFileChooser,
+                                            inDom: inp.isConnected,
+                                            gen: globalThis.__ditingFileChooser ? globalThis.__ditingFileChooser.gen : 0 });
+                })()"#
+                    .to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        let armed: Value = serde_json::from_str(armed.as_str().unwrap()).unwrap();
+        assert_eq!(armed["armed"], serde_json::json!(true), "click() must arm the chooser: {armed}");
+        assert_eq!(armed["inDom"], serde_json::json!(false), "the whole point: off-DOM input");
+
+        // Selector-less feed goes to the armed input.
+        let fed = mgr
+            .send(&sid, |reply| SessionCommand::SetFiles {
+                selector: None,
+                files: vec![
+                    serde_json::json!({"name": "m02.jpg", "content_base64": "aGk=", "mime_type": "image/jpeg"}),
+                ],
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(fed.get("set").and_then(Value::as_bool), Some(true), "{fed}");
+        assert_eq!(fed.get("mode").and_then(Value::as_str), Some("chooser"));
+        assert_eq!(fed.get("count").and_then(Value::as_i64), Some(1));
+        assert!(fed.get("armed_ms_ago").and_then(Value::as_i64).unwrap_or(-1) >= 0);
+
+        let check = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: r#"JSON.stringify({ changes: window.__chooser.changes, names: window.__chooser.lastNames, value: window.__chooser.inp.value })"#.to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        let check: Value = serde_json::from_str(check.as_str().unwrap()).unwrap();
+        assert_eq!(check["changes"], serde_json::json!(1), "widget listener fired: {check}");
+        assert_eq!(check["names"], serde_json::json!(["m02.jpg"]));
+        assert_eq!(check["value"], serde_json::json!("C:\\fakepath\\m02.jpg"));
+
+        // Latest click() wins: a second armed input receives the next feed.
+        let rearmed = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: r#"(function() {
+                    var second = document.createElement('input');
+                    second.setAttribute('type', 'file');
+                    window.__second = second;
+                    second.click();
+                    return String(globalThis.__ditingFileChooser.el === second);
+                })()"#
+                    .to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(rearmed.as_str().unwrap_or("false"), "true", "latest click() must win the chooser");
+
+        let fed2 = mgr
+            .send(&sid, |reply| SessionCommand::SetFiles {
+                selector: None,
+                files: vec![serde_json::json!({"name": "second.png", "content_base64": "eHg="})],
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(fed2.get("set").and_then(Value::as_bool), Some(true), "{fed2}");
+        let check2 = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: r#"JSON.stringify({ secondLen: window.__second.files.length, firstChanges: window.__chooser.changes })"#.to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        let check2: Value = serde_json::from_str(check2.as_str().unwrap()).unwrap();
+        assert_eq!(check2["secondLen"], serde_json::json!(1), "feed #2 landed on the latest armed input");
+        assert_eq!(check2["firstChanges"], serde_json::json!(1), "first input untouched by feed #2");
+
+        assert!(mgr.close_and_wait(&sid).await);
     }
 
     /// Session errors must be machine-readable: an agent has to tell "the

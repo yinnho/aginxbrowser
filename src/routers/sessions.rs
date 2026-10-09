@@ -97,7 +97,12 @@ pub struct SessionInputRequest {
 pub struct SessionSetFilesRequest {
     /// CSS selector for the file input — file inputs are often hidden, so the
     /// interactive index from GET /session/:id/state may not include them.
-    pub selector: String,
+    /// OMIT it to feed the PENDING FILE CHOOSER instead (#239): the
+    /// INPUT[type=file] the page most recently click()-ed (upload widgets
+    /// arm one inside their own click handler; their input is often
+    /// off-DOM, unreachable by any selector).
+    #[serde(default)]
+    pub selector: Option<String>,
     #[serde(default)]
     pub files: Vec<SessionFileSpec>,
 }

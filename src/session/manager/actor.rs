@@ -570,7 +570,7 @@ pub(super) fn session_thread(
                         }
 
                         SessionCommand::SetFiles { selector, files, reply } => {
-                            let result = set_files_by_selector(&mut page, &selector, &files);
+                            let result = set_files_by_selector(&mut page, selector.as_deref(), &files);
                             recorder.push(RecordedAction::SetFiles {
                                 selector,
                                 names: files
