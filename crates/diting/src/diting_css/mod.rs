@@ -974,6 +974,13 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "align-content",
         "min-width", "max-width", "min-height", "max-height",
         "letter-spacing", "text-decoration", "box-sizing",
+        // Logical box properties + transform-origin (#244): feature-detection
+        // staples of modern component CSS (@logical stubs probe these).
+        "margin-block", "margin-block-start", "margin-block-end",
+        "margin-inline", "margin-inline-start", "margin-inline-end",
+        "padding-block", "padding-block-start", "padding-block-end",
+        "padding-inline", "padding-inline-start", "padding-inline-end",
+        "transform-origin",
     ];
     let name_l = name.to_ascii_lowercase();
     // Custom-property declarations always probe true when the value parses
@@ -1361,6 +1368,13 @@ pub struct ComputedStyle {
     pub rotate_prop: Option<f32>,
     /// Individual `scale` property (#140): (x, y); `scale: 2` is (2, 2).
     pub scale_prop: Option<(f32, f32)>,
+    /// `transform-origin` (#244): (x, y), keywords normalized to percentages
+    /// at parse (left/top → 0%, center → 50%, right/bottom → 100%), a bare x
+    /// defaults y to center. Percentages resolve against the element's own
+    /// border box at collect time; the pivot default is the box center
+    /// (50% 50% — the pre-#244 hardcoded behavior). The z component stays
+    /// unparsed — same 2D posture as the transform list.
+    pub transform_origin: Option<(Length, Length)>,
     /// Parsed `animation` shorthand (CSS animations batch). The cascade
     /// only stores it; `sample_css_animation` resolves it against the
     /// stylesheet's `@keyframes` table at a time the caller supplies, then
@@ -2987,6 +3001,50 @@ fn parse_scale_prop(v: &str) -> Option<(f32, f32)> {
     Some((x, y))
 }
 
+/// Parse `transform-origin` (#244): `[ <length-percentage> | left | center |
+/// right ] || [ <length-percentage> | top | center | bottom ]`, keywords
+/// normalizing to percentages (left/top → 0%, center → 50%, right/bottom →
+/// 100%). A bare x component defaults y to center. More than two components
+/// (the 3D z form) invalidates the declaration.
+fn parse_transform_origin(v: &str, fonts: &FontCtx) -> Option<(Length, Length)> {
+    let len = |val: &str| -> Option<Length> {
+        let t = val.trim();
+        if let Some(l) = eval_math_call(t, fonts) {
+            return Some(l);
+        }
+        parse_css_length(t).map(|l| resolve_len(l, fonts))
+    };
+    let one = |tok: &str| -> Option<Length> {
+        match tok.trim().to_ascii_lowercase().as_str() {
+            "left" | "top" => Some(Length::Percent(0.0)),
+            "center" => Some(Length::Percent(50.0)),
+            "right" | "bottom" => Some(Length::Percent(100.0)),
+            _ => len(tok),
+        }
+    };
+    let toks: Vec<&str> = v.split_whitespace().collect();
+    if toks.is_empty() || toks.len() > 2 {
+        return None;
+    }
+    let is_y_kw = |t: &str| matches!(t, "top" | "bottom");
+    match toks.as_slice() {
+        [a] => {
+            // A lone y-keyword ("top") means x=center; anything else is x
+            // with y defaulting to center.
+            if is_y_kw(&a.to_ascii_lowercase()) {
+                Some((Length::Percent(50.0), one(a)?))
+            } else {
+                Some((one(a)?, Length::Percent(50.0)))
+            }
+        }
+        // Two components: a y-keyword fixes its own axis wherever it sits
+        // ("top 10px" is x=10px y=0%); otherwise positional x-then-y.
+        [a, b] if is_y_kw(&a.to_ascii_lowercase()) => Some((one(b)?, one(a)?)),
+        [a, b] => Some((one(a)?, one(b)?)),
+        _ => None,
+    }
+}
+
 /// Parse a `transform` declaration into one 2D affine [`Transform2D`]
 /// (transform batch; obscura #740 lineage, widened twice). The translate
 /// family (translate/translate3d — z parses and drops, 3D flattens to 2D
@@ -4283,6 +4341,16 @@ css_wide_longhands! {
     "translate" => translate_prop, false;
     "rotate" => rotate_prop, false;
     "scale" => scale_prop, false;
+    "transform-origin" => transform_origin, false;
+    // Logical box longhands (#244): same slots as their physical twins.
+    "margin-block-start" => margin.top, false;
+    "margin-block-end" => margin.bottom, false;
+    "margin-inline-start" => margin.left, false;
+    "margin-inline-end" => margin.right, false;
+    "padding-block-start" => padding.top, false;
+    "padding-block-end" => padding.bottom, false;
+    "padding-inline-start" => padding.left, false;
+    "padding-inline-end" => padding.right, false;
     "animation" => animation, false;
     "transition" => transition, false;
     "border-radius" => border_radius, false;
@@ -4369,6 +4437,12 @@ fn css_wide_expand(name: &str) -> Option<&'static [&'static str]> {
         "overflow" => &["overflow-x", "overflow-y"],
         "text-decoration" => &["text-decoration-line"],
         "list-style" => &["list-style-type"],
+        // Logical shorthands (#244) expand to their logical longhands (which
+        // css_wide_longhands maps onto the physical slots).
+        "margin-block" => &["margin-block-start", "margin-block-end"],
+        "margin-inline" => &["margin-inline-start", "margin-inline-end"],
+        "padding-block" => &["padding-block-start", "padding-block-end"],
+        "padding-inline" => &["padding-inline-start", "padding-inline-end"],
         _ => return None,
     })
 }
@@ -5294,6 +5368,78 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
         "scale" => {
             style.scale_prop = parse_scale_prop(v);
             style.scale_prop.is_some()
+        }
+        // transform-origin (#244): keywords normalize to percentages; the
+        // pivot itself resolves at collect time (layout mod), this only
+        // stores the pair.
+        "transform-origin" => {
+            style.transform_origin = parse_transform_origin(v, fonts);
+            style.transform_origin.is_some()
+        }
+        // CSS logical box longhands (#244): horizontal-tb maps block→
+        // top/bottom, inline→left/right. Our direction face doesn't mirror
+        // inline flow (rtl is a read/alignment face), so inline-start=left
+        // is the self-consistent mapping — the declared value lands in the
+        // physical slot and layout consumes it like the physical longhand.
+        "margin-block-start" | "margin-block-end" | "margin-inline-start" | "margin-inline-end"
+        | "padding-block-start" | "padding-block-end" | "padding-inline-start"
+        | "padding-inline-end" => {
+            if name.starts_with("padding") && v.eq_ignore_ascii_case("auto") {
+                // padding: auto is illegal — drop the declaration.
+                return false;
+            }
+            let len_v = if v.eq_ignore_ascii_case("auto") {
+                Some(Length::Auto)
+            } else {
+                len(v)
+            };
+            // Direct slot write — set_side keys on the full physical name's
+            // "-top"-style suffix, which a bare side word never matches.
+            let sides = if name.starts_with("margin") {
+                &mut style.margin
+            } else {
+                &mut style.padding
+            };
+            match name {
+                "margin-block-start" | "padding-block-start" => sides.top = len_v,
+                "margin-block-end" | "padding-block-end" => sides.bottom = len_v,
+                "margin-inline-start" | "padding-inline-start" => sides.left = len_v,
+                _ => sides.right = len_v,
+            }
+            true
+        }
+        // Logical 1-2 value shorthands (#244): one value fills start+end,
+        // two are (start, end) — NOT the physical TRBL rotation. Invalid
+        // tokens drop the whole declaration.
+        "margin-block" | "margin-inline" | "padding-block" | "padding-inline" => {
+            let parts: Vec<&str> = v.split_whitespace().collect();
+            if parts.is_empty() || parts.len() > 2 {
+                return false;
+            }
+            let (a, b) = (parts[0], if parts.len() == 2 { parts[1] } else { parts[0] });
+            if name.starts_with("padding")
+                && (a.eq_ignore_ascii_case("auto") || b.eq_ignore_ascii_case("auto"))
+            {
+                return false;
+            }
+            let mk = |t: &str| {
+                if t.eq_ignore_ascii_case("auto") { Some(Length::Auto) } else { len(t) }
+            };
+            let (start, end) = match (mk(a), mk(b)) {
+                (Some(s), Some(e)) => (s, e),
+                _ => return false,
+            };
+            let block = name.ends_with("block");
+            let margins = name.starts_with("margin");
+            let sides = if margins { &mut style.margin } else { &mut style.padding };
+            if block {
+                sides.top = Some(start);
+                sides.bottom = Some(end);
+            } else {
+                sides.left = Some(start);
+                sides.right = Some(end);
+            }
+            true
         }
         "opacity" => {
             // A number in [0, 1] (animation batch A). The initial value 1

@@ -6782,7 +6782,10 @@ pub fn layout_collect_with_images(
                 }
             }
             // The transform's linear part pivots on the element's own
-            // (already translate-folded) box center: pivoting the
+            // (already translate-folded) box: the center (50% 50%) by
+            // default, or the declared transform-origin (#244) — keywords
+            // normalized to percentages at parse, percentages resolving
+            // against the element's own border box here. Pivoting the
             // accumulated function list there equals CSS transform-origin
             // composition (the translate rode the same absolute axes the
             // offset fold used, so both list orders come out exact).
@@ -6792,7 +6795,17 @@ pub fn layout_collect_with_images(
             // into local coordinates bracketed by SetXf/ClearXf, and paint
             // inverse-maps per pixel.
             let prebake = if t_lin != (1.0f32, 0.0, 0.0, 1.0) {
-                let (rcx, rcy) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+                let origin = |l: crate::diting_css::Length, basis: f32| match l {
+                    crate::diting_css::Length::Px(v) => v,
+                    crate::diting_css::Length::Percent(p) => p / 100.0 * basis,
+                    crate::diting_css::Length::Calc { percent, .. } => percent / 100.0 * basis,
+                    _ => 0.0,
+                };
+                let (ox, oy) = match styles.get(dom_id).and_then(|s| s.transform_origin) {
+                    Some((lx, ly)) => (origin(lx, rect.width), origin(ly, rect.height)),
+                    None => (rect.width / 2.0, rect.height / 2.0),
+                };
+                let (rcx, rcy) = (rect.x + ox, rect.y + oy);
                 let own = Xf {
                     a: t_lin.0,
                     b: t_lin.1,

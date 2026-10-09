@@ -3142,6 +3142,15 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "margin-right",
     "margin-bottom",
     "margin-left",
+    "margin-block-start",
+    "margin-block-end",
+    "margin-inline-start",
+    "margin-inline-end",
+    "padding-block-start",
+    "padding-block-end",
+    "padding-inline-start",
+    "padding-inline-end",
+    "transform-origin",
     "border-radius",
     "flex-direction",
     "flex-wrap",
@@ -3575,6 +3584,35 @@ fn computed_style_value(
         "margin-right" => Some(side_css_used(&s.margin.right, cb_inline)),
         "margin-bottom" => Some(side_css_used(&s.margin.bottom, cb_inline)),
         "margin-left" => Some(side_css_used(&s.margin.left, cb_inline)),
+        // #244: logical box longhands serve from the same slots as their
+        // physical twins — horizontal-tb maps block→top/bottom, inline→
+        // left/right. Our direction face doesn't mirror inline flow, so
+        // inline-start=left is the self-consistent mapping (Chrome under
+        // rtl maps inline-start to right; that flips only when our inline
+        // layout mirrors).
+        "margin-block-start" => Some(side_css_used(&s.margin.top, cb_inline)),
+        "margin-block-end" => Some(side_css_used(&s.margin.bottom, cb_inline)),
+        "margin-inline-start" => Some(side_css_used(&s.margin.left, cb_inline)),
+        "margin-inline-end" => Some(side_css_used(&s.margin.right, cb_inline)),
+        "padding-block-start" => Some(side_css_used(&s.padding.top, cb_inline)),
+        "padding-block-end" => Some(side_css_used(&s.padding.bottom, cb_inline)),
+        "padding-inline-start" => Some(side_css_used(&s.padding.left, cb_inline)),
+        "padding-inline-end" => Some(side_css_used(&s.padding.right, cb_inline)),
+        // #244: transform-origin in Chrome's computed form — keywords stay
+        // normalized percentages and the z component pins 0px, so the
+        // initial value reads "50% 50% 0px" (the issue's Chrome ground
+        // truth); declared px survives verbatim.
+        "transform-origin" => Some({
+            let spell = |l: &Length| match l {
+                Length::Px(v) => format!("{}px", format_number(*v)),
+                Length::Percent(p) => format!("{}%", format_number(*p)),
+                _ => "50%".to_string(),
+            };
+            let (x, y) = s
+                .transform_origin
+                .unwrap_or((Length::Percent(50.0), Length::Percent(50.0)));
+            format!("{} {} 0px", spell(&x), spell(&y))
+        }),
         // Chrome's computed border-radius collapses equal corners (up to the
         // shortest form that round-trips); elliptical corners serialize with
         // the slash form. Percent stays percent — resolving against the box

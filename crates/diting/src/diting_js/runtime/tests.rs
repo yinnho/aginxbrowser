@@ -388,6 +388,95 @@
         );
     }
 
+    /// #244: the logical box longhands and transform-origin join the served
+    /// gCS table. Logical names answer from the physical slots (horizontal-tb:
+    /// block→top/bottom, inline→left/right) with the same used-px resolution
+    /// as #242; transform-origin serves Chrome's computed form with the z
+    /// pinned to 0px. The declarations must also LAYOUT — a logical margin
+    /// moves the box exactly like its physical twin.
+    #[test]
+    fn logical_box_properties_and_transform_origin_serve_and_layout() {
+        let mut rt = setup_runtime(
+            "<html><head><style>body { margin: 0 }\
+             #a { margin-block-start: 10px; padding-inline-start: 5% }\
+             #host { width: 400px }\
+             #b { margin-inline: 4px 8px }\
+             #c { transform-origin: left top; transform: rotate(90deg); width: 100px; height: 50px }\
+             #d { transform: rotate(90deg); width: 100px; height: 50px }\
+             </style></head><body>\
+             <div id='a'>x</div>\
+             <div id='host'><div id='pct'>y</div></div>\
+             <div id='b'>z</div>\
+             <div id='c'></div><div id='d'></div>\
+             </body></html>",
+        );
+        let out = rt
+            .evaluate(
+                r#"
+            // Pin the viewport: the stealth persona randomizes the default
+            // width across common laptop sizes, and the 5% padding below
+            // resolves against it.
+            __diting_setViewport(1920, 1000, false, undefined);
+            var g = function (id) { return getComputedStyle(document.getElementById(id)); };
+            [g('a').getPropertyValue('margin-block-start'),
+             g('a').getPropertyValue('padding-inline-start'),
+             g('b').getPropertyValue('margin-inline-start'),
+             g('b').getPropertyValue('margin-inline-end'),
+             g('pct').getPropertyValue('transform-origin'),
+             g('c').getPropertyValue('transform-origin'),
+             g('a').getPropertyValue('margin-inline-start')].join('|');
+        "#,
+            )
+            .unwrap();
+        // #a: logical margin/padding land in the physical slots; #a's
+        // padding-inline-start 5% resolves against its CB (body content —
+        // margin 0, so the full pinned 1920) like any #242 face → 96px.
+        // #b: the 1-2 value shorthand fills left=4 right=8.
+        // transform-origin: default "50% 50% 0px" (Chrome's string from the
+        // issue probe), declared "left top" normalizes to 0% 0%, unset
+        // logical margin answers 0px like Chrome.
+        assert_eq!(
+            out.as_str().unwrap(),
+            "10px|96px|4px|8px|50% 50% 0px|0% 0% 0px|0px",
+            "logical longhands serve from the physical slots with used-px resolution"
+        );
+        // The declarations LAYOUT too: #a's margin-block-start: 10px offsets
+        // it exactly like margin-top (gBCR y = 10), and the declared
+        // transform-origin actually pivots. Chrome math for rotate(90deg)
+        // (clockwise, y-down: (x,y)→(−y,x)) on a 100×50 box at flow slot
+        // (0, Y): left-top pivot gives bounds x∈[−50,0], y∈[Y,Y+100];
+        // center pivot gives x∈[25,75], y∈[Y−25,Y+75]. Both are 50×100.
+        // #d flows BELOW #c's unrotated 50px box (transform doesn't reflow),
+        // so with slots Yc and Yc+50: c.x−d.x = −50−25 = −75 and
+        // c.y−d.y = Yc−(Yc+25) = −25 — the deltas isolate the pivot without
+        // pinning Y itself (font-dependent line stack above).
+        let geo = rt
+            .evaluate(
+                r#"
+            var r = function (id) { return document.getElementById(id).getBoundingClientRect(); };
+            var a = r('a'), c = r('c'), d = r('d');
+            return [Math.round(a.y),
+                    Math.round(c.x), Math.round(c.y), Math.round(c.width), Math.round(c.height),
+                    Math.round(d.x), Math.round(d.y), Math.round(d.width), Math.round(d.height)].join('|');
+        "#,
+            )
+            .unwrap();
+        let nums: Vec<f64> = geo
+            .as_str()
+            .unwrap()
+            .split('|')
+            .map(|n| n.parse::<f64>().unwrap_or(0.0))
+            .collect();
+        assert_eq!(nums[0], 10.0, "margin-block-start: 10px must offset the box like margin-top");
+        // Both pivots: rotated bounds are 50 wide × 100 tall.
+        assert_eq!((nums[3], nums[4]), (50.0, 100.0), "left-top pivot bounds 50x100");
+        assert_eq!((nums[7], nums[8]), (50.0, 100.0), "center pivot bounds 50x100");
+        // The pivot deltas (d's slot sits 50 below c's unrotated box):
+        // c swings left past the slot edge, d hugs the slot center.
+        assert_eq!(nums[1] - nums[5], -75.0, "c.x = d.x - 75 (left-top vs center pivot)");
+        assert_eq!(nums[2] - nums[6], -25.0, "c.y = d.y - 25 (center pivot raises d by 25, slot +50)");
+    }
+
     /// Issue #29: `Emulation.setEmulatedMedia` (Playwright's
     /// page.emulateMedia) must flip all three faces together — the
     /// matchMedia script face, its change events, AND the @media cascade
