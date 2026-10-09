@@ -155,6 +155,7 @@ npx skills add yinnho/aginxbrowser
 ```text
 Set up aginxbrowser as your web access layer:
 1. Install it locally and verify it is healthy:
+   brew trust yinnho/aginxbrowser   # Homebrew 7+ tap-trust gate; older brew skips this
    brew install yinnho/aginxbrowser/aginxbrowser
    aginxbrowser doctor   # then start: aginxbrowser (listens on 0.0.0.0:8089)
    curl http://127.0.0.1:8089/health
@@ -168,7 +169,8 @@ Set up aginxbrowser as your web access layer:
 Self-hosting:
 
 ```bash
-# macOS / Linux via Homebrew
+# macOS / Linux via Homebrew (7+ needs the trust line first)
+brew trust yinnho/aginxbrowser
 brew install yinnho/aginxbrowser/aginxbrowser
 aginxbrowser doctor   # features + fonts + egress self-check
 

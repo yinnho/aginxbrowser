@@ -26,6 +26,9 @@ No Node, no Chromium, no Docker, and no API key needed.
 ### Option A: Homebrew (macOS / Linuxbrew)
 
 ```bash
+# Homebrew 7 gates third-party taps behind an explicit trust step
+# (older brew has no such command and needs none)
+brew trust yinnho/aginxbrowser
 brew install yinnho/aginxbrowser/aginxbrowser
 aginxbrowser          # starts the HTTP server on 0.0.0.0:8089
 ```
