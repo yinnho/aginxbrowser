@@ -412,6 +412,30 @@ mod reparent_anchoring_tests {
         assert_at(&rects, 60.0, 50.0, 0.0, 250.0);
     }
 
+    #[test]
+    fn indefinite_flex_basis_percent_falls_back_to_content() {
+        // #241 (taffy #1286, absorbed in the 2d936b77 bump — blitz #1148
+        // bumped for the same fix): a percentage flex-basis measured
+        // against an INDEFINITE container axis falls back to content-based
+        // sizing instead of collapsing to 0. Before the bump the column
+        // item below laid out at zero height.
+        let sheet = "body { margin: 0 } #c { display: flex; flex-direction: column; width: 200px } \
+                     #i { flex-basis: 40%; width: 50px }";
+        let rects = layout(sheet, r#"<div id="c"><div id="i">t</div></div>"#);
+        let item = rects.values().find(|r| r.width == 50.0).expect("50px item rect");
+        assert!(
+            item.height > 0.0,
+            "content fallback must not collapse to 0, got {}",
+            item.height
+        );
+        // Control: against a definite container axis the same 40% resolves
+        // exactly (100px container → 40px item).
+        let sheet = "body { margin: 0 } #c { display: flex; flex-direction: column; width: 200px; height: 100px } \
+                     #i { flex-basis: 40%; width: 50px }";
+        let rects = layout(sheet, r#"<div id="c"><div id="i">t</div></div>"#);
+        assert_at(&rects, 50.0, 40.0, 0.0, 0.0);
+    }
+
     // (the probe that diagnosed #188-2 lived here print-only; its matrix is
     // now pinned in abspos_self_align_tests below)
 }

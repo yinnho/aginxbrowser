@@ -1347,7 +1347,7 @@ dependencies = [
  "sha1 0.11.0",
  "sha2",
  "swash",
- "taffy 0.14.0 (git+https://github.com/DioxusLabs/taffy?rev=4142c9d8cac05d8b39eac9632856ed04f7623d52)",
+ "taffy 0.14.0 (git+https://github.com/DioxusLabs/taffy?rev=2d936b7701f64b0fe95e50f1bfdcfc65a9f88f6f)",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -4552,7 +4552,7 @@ dependencies = [
 [[package]]
 name = "taffy"
 version = "0.14.0"
-source = "git+https://github.com/DioxusLabs/taffy?rev=4142c9d8cac05d8b39eac9632856ed04f7623d52#4142c9d8cac05d8b39eac9632856ed04f7623d52"
+source = "git+https://github.com/DioxusLabs/taffy?rev=2d936b7701f64b0fe95e50f1bfdcfc65a9f88f6f#2d936b7701f64b0fe95e50f1bfdcfc65a9f88f6f"
 dependencies = [
  "serde",
  "slotmap",

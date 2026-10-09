@@ -167,11 +167,12 @@
             Style { item_is_replaced: true, ..Style::default() },
             Style::default(),
         );
-        // fork: Size { width: 100.0, height: 50.0 } — natural size for a
-        // compressible replaced element. Stock stretches the inline axis
-        // (300) and ratio-derives the block axis (150): the replaced-ness
-        // distinction does not exist without the `normal` keyword.
-        assert_eq!(replaced, Size { width: 300.0, height: 150.0 });
+        // 100x50 — natural size for a compressible replaced element. The
+        // `normal`→start provenance upstream absorbed (taffy main by
+        // 2d936b77, 2026-10-09) now produces the fork expectation; the old
+        // lock here was stock 0.13.0 stretching the inline axis (300) and
+        // ratio-deriving the block axis (150).
+        assert_eq!(replaced, Size { width: 100.0, height: 50.0 });
 
         let (_, ordinary) = layout_replaced_grid_item(Style::default(), Style::default());
         // fork: Size { width: 300.0, height: 150.0 } (agrees)
@@ -235,9 +236,10 @@
 
         let (_, block_stretch) =
             layout_replaced_grid_item(Style { align_self: Some(AlignSelf::STRETCH), ..base.clone() }, Style::default());
-        // fork: 400x200 — block stretch supplies height, ratio derives width;
-        // stock ignores explicit block stretch for a replaced item
-        assert_eq!(block_stretch, Size { width: 300.0, height: 150.0 });
+        // 400x200 — block stretch supplies height, ratio derives width.
+        // Upstream absorbed this (taffy main by 2d936b77); the old lock was
+        // stock ignoring explicit block stretch for a replaced item.
+        assert_eq!(block_stretch, Size { width: 400.0, height: 200.0 });
 
         let (_, both_stretch) = layout_replaced_grid_item(
             Style { justify_self: Some(AlignSelf::STRETCH), align_self: Some(AlignSelf::STRETCH), ..base.clone() },
