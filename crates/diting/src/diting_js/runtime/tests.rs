@@ -19019,6 +19019,128 @@ fn document_evaluate_xpath_subset() {
         );
     }
 
+    /// #237: a MessageChannel arm is a macrotask; a severed op chain means
+    /// its closure never runs. Splicing the queued closure out of `_mtQueue`
+    /// is the deterministic stand-in for that loss (observed live on fxg:
+    /// React 18's scheduler latches `isMessageLoopScheduled` on its first
+    /// post, so one lost delivery wedges every later async update — the
+    /// doudian upload stuck at 上传中1%). After the stall window the sweep
+    /// must re-arm and deliver exactly once, with clean bookkeeping.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_port_stalled_message_recovered_by_sweep() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"() => {
+            const ch = new MessageChannel();
+            const got = [];
+            globalThis.__got = got;
+            ch.port1.onmessage = (e) => got.push(e.data);
+            ch.port2.postMessage('survivor');
+            // Kill the armed delivery: the closure is the last item pushed
+            // (same synchronous block), so splice it off the tail.
+            const dropped = _mtQueue.splice(_mtQueue.length - 1, 1);
+            globalThis.__dropped = dropped.length;
+            // Age the stall window past the 5s threshold, then run one sweep.
+            ch.port1._pending[0].since -= 6000;
+            __ditingPortSweep();
+            return new Promise((resolve) => {
+                setTimeout(() => resolve({
+                    got: globalThis.__got.slice(),
+                    dropped: globalThis.__dropped,
+                    left: ch.port1._pending.length,
+                }), 50);
+            });
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        assert_eq!(v["dropped"].as_i64(), Some(1), "the arm was really removed");
+        let got = v["got"].as_array().unwrap();
+        assert_eq!(
+            got, &[serde_json::json!("survivor")],
+            "sweep re-arm must deliver the stalled message: {:?}", got
+        );
+        assert_eq!(
+            v["left"].as_i64(),
+            Some(0),
+            "pending list empties (and a lost arm leaves no counter residue)"
+        );
+    }
+
+    /// #237: termination recovery is the engine's "nothing is executing"
+    /// moment — still-pending port arms there are necessarily orphaned, so
+    /// the recovery hook re-arms them immediately instead of waiting out the
+    /// 5s sweep. No stall aging involved.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_port_recovery_on_termination_recover() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"() => {
+            const ch = new MessageChannel();
+            const got = [];
+            globalThis.__got = got;
+            ch.port1.onmessage = (e) => got.push(e.data);
+            ch.port2.postMessage('after-terminate');
+            _mtQueue.splice(_mtQueue.length - 1, 1);
+            __diting_mt_recover_termination();
+            return new Promise((resolve) => {
+                setTimeout(() => resolve({ got: globalThis.__got.slice() }), 50);
+            });
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        let got = v["got"].as_array().unwrap();
+        assert_eq!(
+            got, &[serde_json::json!("after-terminate")],
+            "recovery hook must re-arm orphaned messages: {:?}", got
+        );
+    }
+
+    /// #237: re-arming must be at-least-once, never at-least-twice. If the
+    /// sweep fires while the original arm is still queued (a #230-style
+    /// backlog, not a loss), both closures run — the per-entry generation
+    /// must turn the superseded one into a no-op so the page sees exactly
+    /// one message event.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_port_sweep_rarm_does_not_duplicate() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"() => {
+            const ch = new MessageChannel();
+            const got = [];
+            globalThis.__got = got;
+            ch.port1.onmessage = (e) => got.push(e.data);
+            ch.port2.postMessage('only-once');
+            // Original arm still queued — only age the window and sweep.
+            ch.port1._pendSince -= 6000;
+            __ditingPortSweep();
+            return new Promise((resolve) => {
+                setTimeout(() => resolve({
+                    got: globalThis.__got.slice(),
+                    qlen: _mtQueue.length,
+                }), 80);
+            });
+        }"#;
+        let result = rt
+            .call_function_on_for_cdp(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        let got = v["got"].as_array().unwrap();
+        assert_eq!(
+            got.len(),
+            1,
+            "superseded arm must no-op; exactly one delivery: {:?}", got
+        );
+        assert_eq!(
+            got[0], serde_json::json!("only-once"),
+            "payload intact through the re-arm"
+        );
+        assert_eq!(v["qlen"].as_i64(), Some(0), "queue drains fully");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn test_macrotask_staleness_escape_keeps_window_discipline() {
         // #37: when pushes outpace item runs past the staleness threshold,
