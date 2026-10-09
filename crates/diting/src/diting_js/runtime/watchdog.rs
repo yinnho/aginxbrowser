@@ -444,14 +444,28 @@ impl super::JsRuntime {
         // retry the arm. A due-past heap-top is the one wheel state a
         // healthy realm never shows; the recover path now force-heals it
         // (idempotent — a merely-behind page pays one redundant arm).
+        // #240 face-2: the fetch ring joined too. A fetch whose op settled
+        // but whose await/.then continuation never ran leaves a stall the
+        // wheel witness cannot see (timers stay alive); the detector names
+        // it, and the dump below rides the warn line so an unattended flow
+        // wedge leaves the ring tail + wheel counters in the log — the
+        // post-mortem previously required a human eval against a dead page.
         let stalled = self
             .evaluate(
                 "globalThis.__diting_mt_stalled ? \
-                 (__diting_mt_stalled() || __diting_wheel_stalled()) : false",
+                 (__diting_mt_stalled() || __diting_wheel_stalled() \
+                  || (globalThis.__diting_fetch_stalled && __diting_fetch_stalled())) : false",
             )
             .map(|v| v == serde_json::Value::Bool(true))
             .unwrap_or(false);
         if stalled {
+            if let Ok(dump) = self.evaluate(
+                "globalThis.__diting_mt_dump ? __diting_mt_dump() : null",
+            ) {
+                if let serde_json::Value::String(s) = dump {
+                    tracing::warn!("#240 stall post-mortem (mt/wheel/fetch ring): {}", s);
+                }
+            }
             let _ = self.runtime.execute_script(
                 "<mt-force-recover>",
                 "if (globalThis.__diting_mt_recover_termination) \

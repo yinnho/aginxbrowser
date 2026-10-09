@@ -1006,6 +1006,47 @@ globalThis.__diting_wheel_stalled = () => {
   const e = _timerHeap[0];
   return !!e && e.d <= Date.now() - 600;
 };
+// #240 face-2 detector: a fetch whose op settled (opok/operr — the outer
+// promise resolved or rejected) but whose chained .then continuation
+// (resume/fthrow) never ran. On a healthy realm the two are one microtask
+// checkpoint apart — the chain callback drains in the SAME turn that ran
+// opok — so a multi-second gap is impossible while the engine still pumps
+// (evals drive the loop). 8s tolerates even a slow busy window between the
+// two stages. The engine's loop-entry witness polls this; on a hit the
+// dump below rides the warn line, so an unattended flow wedge names the
+// stage it died at without a human eval.
+globalThis.__diting_fetch_stalled = () => {
+  const now = Date.now() % 100000;
+  // Date.now()%1e5 wraps every 100s; age math must survive the wrap.
+  const age = (t) => (t <= now ? now - t : now + 100000 - t);
+  const seen = new Set();
+  let stalled = false;
+  for (let i = _fetchRing.length - 1; i >= 0; i--) {
+    const [tag, fk, t] = _fetchRing[i];
+    if (seen.has(fk)) continue;
+    seen.add(fk);
+    if ((tag === 'opok' || tag === 'operr' || tag === 'takeok') && age(t) > 8000
+        && !_fetchStallReported.has(fk)) {
+      // Latch per key: a lost continuation rots in the ring forever, and
+      // the witness polls at every loop entry — without the latch the dump
+      // would fire once per pump for the rest of the session. A NEW
+      // stalled key still reports.
+      _fetchStallReported.add(fk);
+      stalled = true;
+    }
+    // armed/resp/resume/fthrow as the last stage of a key is a steady state
+    // (in flight / completed) — only a settle-without-continuation rots.
+  }
+  return stalled;
+};
+const _fetchStallReported = new Set();
+// Post-mortem bundle the witness dumps on any stall (#240): wheel counters,
+// the fetch ring tail, and the in-flight key count, one JSON line.
+globalThis.__diting_mt_dump = () => JSON.stringify({
+  mt: globalThis.__MT_STATE ? __MT_STATE() : null,
+  inflight: (typeof __inflightFetches !== 'undefined') ? __inflightFetches.size : null,
+  fetchTail: _fetchRing.slice(-16),
+});
 // Debug probe for the trampoline's live state (#30 follow-up: macrotask
 // deliveries dying while op+microtask paths stay alive — 2026-10-04 fxg).
 // Read-only snapshot; keep names short, it rides on globalThis.

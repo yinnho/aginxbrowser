@@ -3559,6 +3559,58 @@
         );
     }
 
+    /// #240 face-2 detector: a fetch whose op settled (opok) but whose
+    /// chained continuation (resume/fthrow) never ran is the one ring state
+    /// a healthy realm never shows — opok and resume are one microtask
+    /// checkpoint apart, so an 8s gap means the continuation was lost.
+    /// The detector must name it once per key (the latch keeps the
+    /// per-loop-entry witness from re-firing on a rotted ring slot), and
+    /// the dump helper must bundle the ring tail with the wheel counters.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_ring_stall_detector_names_lost_continuation() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        assert_eq!(
+            rt.evaluate("typeof globalThis.__diting_fetch_stalled").unwrap(),
+            serde_json::Value::String("function".into())
+        );
+        assert_eq!(
+            rt.evaluate("globalThis.__diting_fetch_stalled()").unwrap(),
+            serde_json::Value::Bool(false),
+            "healthy realm: no settle-without-continuation"
+        );
+
+        // Manufacture the corpse: an opok recorded 9s ago with no
+        // resume/fthrow after it — the exact face-2 post-mortem shape.
+        rt.evaluate(
+            "_fetchRing.push(['armed', 'fkZ', (Date.now() - 9000) % 100000]);
+             _fetchRing.push(['opok', 'fkZ', (Date.now() - 9000) % 100000]);",
+        )
+        .unwrap();
+        assert_eq!(
+            rt.evaluate("globalThis.__diting_fetch_stalled()").unwrap(),
+            serde_json::Value::Bool(true),
+            "opok without resume past the 8s window must trip"
+        );
+        // The latch: the same key must not re-trip — the witness polls at
+        // every loop entry and a rotted entry stays in the ring forever.
+        assert_eq!(
+            rt.evaluate("globalThis.__diting_fetch_stalled()").unwrap(),
+            serde_json::Value::Bool(false),
+            "a reported key must latch"
+        );
+
+        // The dump bundles the ring tail with the wheel counters — the
+        // warn line an unattended flow wedge now leaves in the log.
+        let dump = rt
+            .evaluate("globalThis.__diting_mt_dump()")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(dump.contains("fkZ"), "dump names the stalled key: {dump}");
+        assert!(dump.contains("wheel"), "dump carries the wheel counters: {dump}");
+    }
+
     /// The #240 heal from the JS side: the termination recover hook
     /// (`__diting_mt_recover_termination`, run by the engine at every
     /// unwind recovery point) must unlatch the patrol and force a fresh
