@@ -30,7 +30,7 @@ No Node, no Chromium, no Docker, and no API key needed.
 # (older brew has no such command and needs none)
 brew trust yinnho/aginxbrowser
 brew install yinnho/aginxbrowser/aginxbrowser
-aginxbrowser          # starts the HTTP server on 0.0.0.0:8089
+aginxbrowser          # starts the HTTP server on 127.0.0.1:8089
 ```
 
 ### Option B: One-line installer
@@ -60,7 +60,7 @@ esac
 curl -fsSL -o aginxbrowser.tar.gz \
   "https://github.com/yinnho/aginxbrowser/releases/download/${VER}/aginxbrowser-${VER}-${T}.tar.gz"
 tar xzf aginxbrowser.tar.gz && cd aginxbrowser-${VER}-${T}
-./aginxbrowser   # serves the HTTP API on 0.0.0.0:8089 by default (.exe on Windows)
+./aginxbrowser   # serves the HTTP API on 127.0.0.1:8089 by default (.exe on Windows)
 ```
 
 Verify the download with the matching `.sha256` file in the same release. Release binaries carry the full feature set (stealth TLS + screenshots); `doctor` reports the compiled-in feature set.
@@ -73,7 +73,7 @@ The archive also carries the WeChat OA article composer — `workflow/wechat-oa-
 git clone https://github.com/yinnho/aginxbrowser.git
 cd aginxbrowser
 cargo build --release --features stealth,screenshot   # ~4 minutes
-./target/release/aginxbrowser                          # listens on 0.0.0.0:8089 by default
+./target/release/aginxbrowser                          # listens on 127.0.0.1:8089 by default
 ```
 
 ---
@@ -139,7 +139,7 @@ curl -sS https://raw.githubusercontent.com/yinnho/aginxbrowser/main/SKILL.md \
 
 | Variable | Default | Description |
 |------|------|------|
-| `AGINXBROWSER_BIND` | `0.0.0.0:8089` | Listen address (bind `127.0.0.1:8089` to keep it loopback-only) |
+| `AGINXBROWSER_BIND` | `127.0.0.1:8089` | Listen address (bind `0.0.0.0:8089` for LAN/container access — pair it with `AGINXBROWSER_TOKEN`) |
 | `AGINXBROWSER_TOKEN` | none | When set, every route requires this as a bearer token |
 | `AGINXBROWSER_PROXY` | none | Proxy address (applied when `use_proxy:true`, and applied automatically for browser/session navigations to known-blocked domains — wikipedia.org, github.com, …). Standard `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` are ignored by the engine — `AGINXBROWSER_PROXY` is the only proxy knob |
 | `CAPTCHA_SOLVER_API_KEY` | none | 2captcha key; when set, CAPTCHAs are solved automatically |

@@ -30,7 +30,7 @@ curl -sS -X POST http://127.0.0.1:8089/session/create \
 
 ## HTTP API
 
-默认监听 `0.0.0.0:8089`，可通过 `AGINXBROWSER_BIND` 环境变量修改。
+默认监听 `127.0.0.1:8089`（只收本机——自用形态不需要更宽），可通过 `AGINXBROWSER_BIND` 环境变量修改。绑非回环（局域网/容器）属于操作者显式意图，务必同时设 `AGINXBROWSER_TOKEN`（#246）。
 
 ### GET /health
 
@@ -1034,7 +1034,7 @@ curl -sS -X POST http://127.0.0.1:8089/render_markdown \
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `AGINXBROWSER_BIND` | `0.0.0.0:8089` | HTTP 服务监听地址 |
+| `AGINXBROWSER_BIND` | `127.0.0.1:8089` | HTTP 服务监听地址 |
 | `AGINXBROWSER_STEALTH` | 启用 | `0` 关闭 stealth（诊断用） |
 | `AGINXBROWSER_UA` | macOS Chrome145 persona | 浏览器流量的伪装 UA（指纹池钉住的 persona——本实例实际呈现什么看 `/health` 的 `ua`；搜索引擎传输层另用自己的默认值）。UA 的浏览器家族/主版本与 TLS 指纹（默认 chrome145）不一致时，启动会打 `fingerprint mismatch` 警告——保持成对一致才能不漏指纹 |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language |

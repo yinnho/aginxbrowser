@@ -163,9 +163,10 @@ pub(super) fn scoped_allow_network(ip: IpAddr) -> bool {
 static FILE_ACCESS_FLAG: AtomicBool = AtomicBool::new(false);
 
 /// True when the engine may read `file://` URLs — navigation documents,
-/// subresources, /fetch. Off by default: the server binds 0.0.0.0 out of
-/// the box, so an unguarded local-file read would hand the operator's
-/// filesystem to any client that can reach the port. Flipped by
+/// subresources, /fetch. Off by default: even loopback-bound, an unguarded
+/// local-file read would hand the operator's filesystem to any local
+/// client that can reach the port (and the bind is only loopback by
+/// default since #246 — a LAN bind widens exactly this). Flipped by
 /// `--allow-file-access` or `AGINXBROWSER_ALLOW_FILE_ACCESS`. The gate
 /// itself lives in [`fetch_file_url`], the single choke point both
 /// transports (the reqwest funnel and the stealth client, redirect hops

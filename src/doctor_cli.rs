@@ -152,7 +152,7 @@ pub fn ffmpeg_probe_json() -> serde_json::Value {
 
 fn env_checks() -> Vec<Check> {
     let mut out = Vec::new();
-    let bind = std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".into());
+    let bind = std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "127.0.0.1:8089".into());
     out.push(check(
         Status::Info,
         "bind",

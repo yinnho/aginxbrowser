@@ -30,11 +30,11 @@ curl -sS -X POST http://127.0.0.1:8089/session/create \
 
 ## HTTP API
 
-Listens on `0.0.0.0:8089` by default; override via the `AGINXBROWSER_BIND` environment variable.
+Listens on `127.0.0.1:8089` by default (loopback-only — the dogfood shape needs nothing wider); override via the `AGINXBROWSER_BIND` environment variable. A non-loopback bind (LAN, container) is explicit operator intent — pair it with `AGINXBROWSER_TOKEN` (#246).
 
 ### GET /health
 
-Health check. Also the build-identity call: `version` + `commit` answer "which source is this binary" (compare against the release tag to verify doc/tag/binary/source are the same commit), `v8` is the JS kernel version actually executing scripts (the engine truth behind the UA string — "15.0.274.2" doesn't depend on which persona a session carried), and `ua`/`tls` say what the instance presents to sites — the UA browser traffic carries (`AGINXBROWSER_UA` override, else the pinned persona; imported sessions keep the copied request's own UA by design) and the default TLS fingerprint (`"off"` in non-stealth builds). `commit` is `"unknown"` for git-less builds.
+Health check. Also the build-identity call: `version` + `commit` answer "which source is this binary" (compare against the release tag to verify doc/tag/binary/source are the same commit), `v8` is the JS kernel version actually executing scripts (the engine truth behind the UA string — "15.0.274.2" doesn't depend on which persona a session carried), and `ua`/`tls` say what the instance presents to sites — the UA browser traffic carries (`AGINXBROWSER_UA` override, else the pinned persona; imported sessions keep the copied request's own UA by design) and the default TLS fingerprint (`"off"` in non-stealth builds). `commit` is `"unknown"` for git-less builds. When `AGINXBROWSER_TOKEN` is set, this detail requires the token — without it `/health` answers exactly `{"status":"ok"}` (liveness for supervisors/nginx, no build fingerprint to the public, #246).
 
 ```bash
 curl http://127.0.0.1:8089/health
@@ -1689,8 +1689,8 @@ curl -sS -X POST http://127.0.0.1:8089/render_markdown \
 
 | Variable | Default | Description |
 |------|------|------|
-| `AGINXBROWSER_TOKEN` | unset | Opt-in auth gate for the whole HTTP surface (#162). Unset = no gate (local dev keeps zero-config access). Set = every route except `/health` requires the token via `Authorization: Bearer <t>` or `?token=<t>`; the human takeover view carries it too (`/live?session=…&token=…`). Value must be 16+ chars of `[A-Za-z0-9_-]` (URL-safe so the header and query forms are the same string) — an invalid shape refuses to boot rather than serve a half-open surface |
-| `AGINXBROWSER_BIND` | `0.0.0.0:8089` | HTTP server listen address |
+| `AGINXBROWSER_TOKEN` | unset | Opt-in auth gate for the whole HTTP surface (#162). Unset = no gate (local dev keeps zero-config access). Set = every route requires the token via `Authorization: Bearer <t>` or `?token=<t>`; the human takeover view carries it too (`/live?session=…&token=…`). `/health` alone answers without a token, but only `{"status":"ok"}` — the build-identity detail (version/commit/UA/TLS/capabilities) needs the token (#246). Value must be 16+ chars of `[A-Za-z0-9_-]` (URL-safe so the header and query forms are the same string) — an invalid shape refuses to boot rather than serve a half-open surface |
+| `AGINXBROWSER_BIND` | `127.0.0.1:8089` | HTTP server listen address |
 | `AGINXBROWSER_STEALTH` | Enabled | `0` disables stealth (for diagnostics) |
 | `AGINXBROWSER_UA` | macOS Chrome145 persona | Spoofed User-Agent for browser traffic (a pinned persona from the fingerprint pool — see `/health`'s `ua` for what this instance presents; search-engine transports keep their own defaults). Startup logs a `fingerprint mismatch` warning when the UA's browser family/major version disagrees with the TLS fingerprint (default chrome145) — an intentionally coherent pair avoids a WAF tell |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language header |

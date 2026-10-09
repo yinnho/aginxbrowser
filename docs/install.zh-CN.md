@@ -27,7 +27,7 @@ AginxBrowser 是为 AI Agent 设计的浏览器引擎。一个 Rust 二进制，
 
 ```bash
 brew install yinnho/aginxbrowser/aginxbrowser
-aginxbrowser          # 启动 HTTP 服务，监听 0.0.0.0:8089
+aginxbrowser          # 启动 HTTP 服务，监听 127.0.0.1:8089
 ```
 
 ### 方式 B：一行安装器
@@ -57,7 +57,7 @@ esac
 curl -fsSL -o aginxbrowser.tar.gz \
   "https://github.com/yinnho/aginxbrowser/releases/download/${VER}/aginxbrowser-${VER}-${T}.tar.gz"
 tar xzf aginxbrowser.tar.gz && cd aginxbrowser-${VER}-${T}
-./aginxbrowser   # 默认监听 0.0.0.0:8089（Windows 下是 .exe）
+./aginxbrowser   # 默认监听 127.0.0.1:8089（Windows 下是 .exe）
 ```
 
 同一 release 下有对应 `.sha256` 文件可校验下载完整性。release 二进制带全量特性（stealth TLS + 截图）；`doctor` 会报编译进去的特性集。
@@ -70,7 +70,7 @@ tar xzf aginxbrowser.tar.gz && cd aginxbrowser-${VER}-${T}
 git clone https://github.com/yinnho/aginxbrowser.git
 cd aginxbrowser
 cargo build --release --features stealth,screenshot   # 约 4 分钟
-./target/release/aginxbrowser                          # 默认监听 0.0.0.0:8089
+./target/release/aginxbrowser                          # 默认监听 127.0.0.1:8089
 ```
 
 ---
@@ -136,7 +136,7 @@ curl -sS https://raw.githubusercontent.com/yinnho/aginxbrowser/main/SKILL.md \
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `AGINXBROWSER_BIND` | `0.0.0.0:8089` | 监听地址（绑 `127.0.0.1:8089` 即只允许本机访问） |
+| `AGINXBROWSER_BIND` | `127.0.0.1:8089` | 监听地址（绑 `0.0.0.0:8089` 即开放局域网/容器访问——务必同时设 `AGINXBROWSER_TOKEN`） |
 | `AGINXBROWSER_TOKEN` | 无 | 设了之后所有路由都要求这个 bearer token |
 | `AGINXBROWSER_PROXY` | 无 | 代理地址（`use_proxy:true` 时用；browser/session 页面导航遇到已知被墙域名（wikipedia.org、github.com 等）也会自动走它）。注意：`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 这些标准代理变量引擎一律不认，代理只看 `AGINXBROWSER_PROXY` 这一个开关 |
 | `CAPTCHA_SOLVER_API_KEY` | 无 | 2captcha Key，设了自动解验证码 |

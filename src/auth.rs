@@ -80,15 +80,24 @@ pub fn presented_token(req: &Request) -> Option<String> {
     bearer_token(req.headers()).or_else(|| query_token(req.uri()))
 }
 
-/// The middleware body. `/health` stays open — runbooks, supervisors and
-/// the hosted nginx check hit it with no token and must keep doing so.
+/// The middleware body. `/health` stays reachable with no token at all —
+/// runbooks, supervisors and the hosted nginx check hit it for liveness and
+/// must keep getting a 200. But with the gate on, the build identity behind
+/// it (version/commit/V8/UA/TLS fingerprint/capabilities) is operator
+/// detail, and the hosted nginx @proxy shape puts that JSON on the public
+/// internet — so without a valid token /health serves exactly
+/// `{"status":"ok"}` and nothing else (#246).
 /// Every other route demands the token; a miss is a 401 that names the
 /// remedy instead of a bare wall.
 pub async fn gate(expected: String, req: Request, next: Next) -> Response {
+    let token_ok = presented_token(&req).is_some_and(|t| token_eq(&t, &expected));
     if req.uri().path() == "/health" {
-        return next.run(req).await;
+        if token_ok {
+            return next.run(req).await;
+        }
+        return axum::Json(serde_json::json!({"status": "ok"})).into_response();
     }
-    if presented_token(&req).is_some_and(|t| token_eq(&t, &expected)) {
+    if token_ok {
         return next.run(req).await;
     }
     (
@@ -218,8 +227,23 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
 
-        // Liveness stays open with no token at all.
+        // Liveness stays open with no token at all — but the gate on means
+        // the detail body behind /health is operator-only (#246).
         let res = gated().oneshot(req("/health", None)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_text(res).await, r#"{"status":"ok"}"#);
+
+        let res = gated()
+            .oneshot(req("/health", Some("Bearer wrong-token-value")))
+            .await
+            .unwrap();
+        assert_eq!(body_text(res).await, r#"{"status":"ok"}"#);
+
+        // A valid token gets the real /health body (the route's own).
+        let res = gated()
+            .oneshot(req("/health", Some("Bearer t-ok-0123456789")))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(body_text(res).await, "ok");
     }

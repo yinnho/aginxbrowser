@@ -24,7 +24,7 @@ Agent 用浏览器到底要什么？想清楚这件事，会发现就五件事�
 
 ```
 ./aginxbrowser
-→ Listening on 0.0.0.0:8089
+→ Listening on 127.0.0.1:8089
 ```
 
 五感，全包：
@@ -160,7 +160,7 @@ curl https://browser.aginx.net/health
 ```bash
 cargo build --release --features stealth,screenshot
 ./target/release/aginxbrowser
-# → Listening on 0.0.0.0:8089
+# → Listening on 127.0.0.1:8089
 ```
 
 GitHub：https://github.com/yinnho/aginxbrowser

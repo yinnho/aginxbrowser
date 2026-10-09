@@ -231,8 +231,9 @@ FLAGS:
     --version, -V             print version and exit
     --help, -h                print this help and exit
 
-Bind address comes from AGINXBROWSER_BIND (default 0.0.0.0:8089). Run
-`aginxbrowser doctor` for the full environment-knob report.";
+Bind address comes from AGINXBROWSER_BIND (default 127.0.0.1:8089; bind
+0.0.0.0:8089 explicitly for LAN/container access and set AGINXBROWSER_TOKEN).
+Run `aginxbrowser doctor` for the full environment-knob report.";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -445,8 +446,13 @@ async fn main() -> anyhow::Result<()> {
         None => app,
     };
 
+    // #246: loopback by default — the binary's own dogfood shape (curl
+    // 127.0.0.1:8089) never needs the LAN, and a default 0.0.0.0 with the
+    // opt-in token gate meant every fresh install was an open driving
+    // surface for the whole network until someone remembered the env var.
+    // LAN/container deployments set AGINXBROWSER_BIND explicitly.
     let bind_addr =
-        std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "0.0.0.0:8089".to_string());
+        std::env::var("AGINXBROWSER_BIND").unwrap_or_else(|_| "127.0.0.1:8089".to_string());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
 
     // #88: sessions the previous process flushed at ITS shutdown revive
