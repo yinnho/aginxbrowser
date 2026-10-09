@@ -34,6 +34,15 @@
       "note": "category-pinned create page. If login expired this lands on the passport wall and the next wait times out — run doudian-login first. The page itself is NEVER driven by UI: it only provides tokens + cookies for the pure-API chain below"
     },
     {
+      "id": "args_check",
+      "op": "eval",
+      "save": "args_valid",
+      "note": "fail in seconds, not after the whole 3-minute chain (#240-adjacent lesson: server 10013 says 30汉字/60字符)",
+      "args": {
+        "script": "(function(){var D={{args}};function ceq(s){var n=0;for(var i=0;i<s.length;i++){var c=s.charCodeAt(i);n+=(c>=0x2E80)?1:0.5;}return n;}var errs=[];if(!D.title){errs.push('title: required');}else{var q=ceq(D.title);if(q>30){errs.push('title: 汉字当量 '+q.toFixed(1)+' 超限（30汉字/60字符，服务器 10013）');}}if(!D.main_images||!D.main_images.length){errs.push('main_images: required（doudian-upload 出 URL）');}else if(D.main_images.length>5){errs.push('main_images: 最多5张, got '+D.main_images.length);}if(!D.portrait_images||!D.portrait_images.length){errs.push('portrait_images: required（3:4 图, doudian-upload 出 URL）');}if(!D.freight_id){errs.push('freight_id: required');}if(!D.category_leaf_id){errs.push('category_leaf_id: required');}if(!D.skus||!D.skus.length){errs.push('skus: required');}if(errs.length){throw new Error('args 校验失败: '+errs.join('; '));}return JSON.stringify({validated:true,title_eq:ceq(D.title).toFixed(1),main_images:D.main_images.length,portrait_images:D.portrait_images.length,skus:D.skus.length});})()"
+      }
+    },
+    {
       "op": "wait",
       "args": {
         "predicate": "(function(){var rs=performance.getEntriesByType('resource');for(var i=rs.length-1;i>=0;i--){var e=rs[i];if(/\\/product\\/tproduct\\//.test(e.name)&&/__token=([a-f0-9]+)/.test(e.name)&&(e.responseEnd>0||e.duration>0))return true}return false})()",
@@ -123,22 +132,14 @@
       "note": "assemble the addWithSchema body from the SERVER's canonicalized model verbatim (shelled — formatSchemaData output shape is shelled: model.goods_category.value) + server-returned context (has shop_id/token/n_token filled in). Body layout per bundle module 51313: {schema, category_id, context(gray stripped), pass_through_extra:{}, check_status:1, session:{}, _signError:'1'} — the frontend itself ships _signError:'1' when genSignatureNew throws, so a missing request_extra signature is not a server gate. msToken = btoa(btoa(shop_id)) computed locally"
     },
     {
+      "id": "add_answer",
       "op": "eval",
+      "save": "add_answer",
+      "note": "API call 3 — THE submit, awaited inside the eval (#240): the old fire-and-forget + wait-pump shape left the fetch response undelivered — the session's macrotask queue died mid-wait. check_status:1 = draft (query string, per bundle module 51313); check_status:2 = live publish — that path hits the 10001010A risk wall which waits on a real msToken. ONE SHOT ONLY: 45s in-page abort, eval timeout = outcome UNKNOWN (the request may still land server-side), never blind-retry — testpack rule",
       "args": {
-        "script": "(function(){var t=window.__TL;t.mst=window.__MSTOKEN;window.__SHOT=null;var t0=Date.now();var ctrl=(typeof AbortController!=='undefined')?new AbortController():null;var to=ctrl?setTimeout(function(){try{ctrl.abort()}catch(e){}},45000):null;fetch('/product/tproduct/addWithSchema?check_status=1&'+(function(){var q='appid=1&__token='+t.tok+'&_bid=ffa_goods&_lid='+t.lid+'&msToken='+encodeURIComponent(t.mst);return q})(),{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:window.__FINAL_BODY,signal:ctrl?ctrl.signal:undefined}).then(function(r){return r.text()}).then(function(x){window.__SHOT=x},function(e){window.__SHOT='ERR:'+e.message});return 'add-fired'})()",
-        "timeout_ms": "{{submit_ms}}"
-      },
-      "save": "add_fired",
-      "note": "API call 3 — THE submit. check_status:1 = draft, carried on the QUERY string per bundle module 51313; the full body is the assembled {schema,...} payload. check_status:2 would be the live publish — that path hits the 10001010A risk wall which waits on a real msToken; draft path proven open. ONE SHOT ONLY: 45s abort, timeout = outcome UNKNOWN (the request may still land server-side), never blind-retry — testpack rule"
-    },
-    {
-      "op": "wait",
-      "args": {
-        "predicate": "!!window.__SHOT",
-        "timeout_ms": "{{submit_ms}}"
-      },
-      "save": "answered",
-      "note": "receipt or abort — both leave __SHOT set"
+        "timeout_ms": "{{submit_ms}}",
+        "script": "(async function(){var t=window.__TL;t.mst=window.__MSTOKEN;window.__SHOT=null;var ctrl=(typeof AbortController!=='undefined')?new AbortController():null;var to=ctrl?setTimeout(function(){try{ctrl.abort()}catch(e){}},45000):null;var q='appid=1&__token='+t.tok+'&_bid=ffa_goods&_lid='+t.lid+'&msToken='+encodeURIComponent(t.mst);var r=await fetch('/product/tproduct/addWithSchema?check_status=1&'+q,{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:window.__FINAL_BODY,signal:ctrl?ctrl.signal:undefined});var x=await r.text();if(to){clearTimeout(to);}window.__SHOT=x;return x.slice(0,2000);})()"
+      }
     },
     {
       "op": "eval",

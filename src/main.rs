@@ -362,7 +362,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/download", post(download_handler))
         .route("/v1/scrape", post(firecrawl_compat::scrape_handler))
         .route("/session/create", post(session_create_handler))
-        .route("/flow/run", post(flow_run_handler))
+        // Flow vars legitimately carry base64 images (doudian-upload's
+        // images array — same payload class as /session/:id/files), so the
+        // same raised ceiling applies; axum's 2 MiB default rejected a
+        // 5-image upload run with a bare 413.
+        .route(
+            "/flow/run",
+            post(flow_run_handler).layer(axum::extract::DefaultBodyLimit::max(max_body_bytes())),
+        )
         .route("/flow/install", post(flow_install_handler))
         .route("/flow/search", get(flow_search_handler))
         .route("/session/:id/clone", post(session_clone_handler))

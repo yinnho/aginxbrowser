@@ -41,7 +41,9 @@ product_id 3846431717594366336（18 spec / 18 SKU / 主5图 / 竖5图 / 8图详�
 ## 前置
 
 - doudian-login（登录态）
-- 图片先上传绑定（抖店素材域，回执见 docs/doudian-upload-receipts-20261004.json）
+- **带图 = 先 `doudian-upload`**：同一 session_id 上跑，产出的 CDN URL
+  数组填 `main_images` / `portrait_images`（10-09 起两 flow 闭环，
+  见 doudian-upload/flow.md）
 
 ## 引擎坑：fresh load 的 fxg 页任务泵必死（#39 已修，2026-10-05）
 
@@ -64,6 +66,32 @@ product_id 3846431717594366336（18 spec / 18 SKU / 主5图 / 竖5图 / 8图详�
 
 修复后 flow 重放 14 步全绿：**product_id 3846444003306373208**（timer 门 20s
 过、getSchema 两发 1.8s/13.5s、提交 5.4s 回 st=0）。timer gate 步骤保留当哨兵。
+
+## args 前置校验（step1 `args_valid`，2026-10-09 焊入）
+
+标题超限曾把整条 ~190s 的链烧完才在服务器 10013 爆（「商品标题最长不能
+超过 30 个汉字（60 个字符）」）。校验步在 navigate 后 2s 内就拦：
+
+- `title`：汉字当量 ≤30（CJK 计 1、其他计 0.5——`适用25款昊铂HL…` 28 字
+  = 当量 26.0，合法）；超限报「超限（30汉字/60字符，服务器 10013）」
+- `main_images` 1-5 张、`portrait_images` ≥1（3:4）、`skus` 非空、
+  `freight_id`/`category_leaf_id` 必填
+
+违反即 throw，receipt 带 `args 校验失败: …` 清单——失败成本从 190s 降到 2s。
+规则源头是实测服务器口径，不是文档口径；服务器再教新规则就往这步加。
+
+## 提交步 = eval 内 await（#240 工作区，2026-10-09 改形）
+
+fire-and-forget fetch + `wait` 泵等 `window.__SHOT` 的老形状，在一次
+带图跑里死透：fetch 本身发出去了，但 wait 期间会话的宏任务队列死亡，
+`.then` 回调永不投递（同会话 setTimeout(10ms) 跨 eval 永不 fire，
+fresh 会话 A/B 正常；引擎单 #240，蹦床病族 #227/#38/#237 的新形状）。
+当天 5+ 次 eval-await 探针全部 settle——所以提交步改为
+`(async function(){ … var r = await fetch(…); var x = await r.text();
+window.__SHOT = x; return x.slice(0,2000); })()`，`timeout_ms:{{submit_ms}}`，
+回包直接作为步骤返回值（`saved.add_answer`），outcome 步照旧读
+`window.__SHOT` 解析。页内 45s AbortController 兜底保留。#240 修掉前
+别把这条改回 fire-then-wait。
 
 ## 运行方法（2026-10-09 实跑口径）
 
@@ -90,6 +118,7 @@ POST /flow/run
 | 2026-10-05 | #39 修复版 | 3846431717594366336 | 首绿（手工协议同款）+ flow 重放 3846444003306373208 |
 | 2026-10-06 | 同 | 3846778561813938623 | s_18 接管跑法 |
 | 2026-10-09 | **#237 修复版** | 3847273730942305306 | s_3 当日扫码会话直跑，14 步全绿（timer 门 0ms、submit 0.9s） |
+| 2026-10-09 | #239 修复版 + 校验步/await 提交 | **3847304136886452316** | **首单纯 flow 带图全链**：doudian-upload 出 5 URL → publish 吃 URL；args_valid 26.0 当量放行，add_answer eval-await 直接回 `errno:0` |
 
 ## 2026-10-09 附记
 
