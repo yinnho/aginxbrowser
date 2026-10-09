@@ -477,6 +477,49 @@
         assert_eq!(nums[2] - nums[6], -25.0, "c.y = d.y - 25 (center pivot raises d by 25, slot +50)");
     }
 
+    /// Issue #245: content-box px width + percent padding. The style-map
+    /// carry-over only adds px padding (percent has no CB at style-map
+    /// time), so `width:400px; padding:4%` in a 500px host used to solve
+    /// as border-box 400 (content 360) — Chrome keeps the authored 400 as
+    /// the CONTENT width (border box 440, padding 20/side), and children
+    /// re-resolve their own percents against the honest 400.
+    #[test]
+    fn content_box_px_width_with_percent_padding_sizes_to_chrome() {
+        let mut rt = setup_runtime(
+            "<html><head><style>body { margin: 0 }\
+             #host { width: 500px }\
+             #nested { width: 400px; padding: 4% }\
+             #kid { padding-top: 25% }\
+             </style></head><body>\
+             <div id='host'><div id='nested'><div id='kid'>x</div></div></div>\
+             </body></html>",
+        );
+        let out = rt
+            .evaluate(
+                r#"
+            var n = document.getElementById('nested');
+            var kid = document.getElementById('kid');
+            var r = n.getBoundingClientRect();
+            [getComputedStyle(n).paddingTop,
+             getComputedStyle(n).paddingLeft,
+             getComputedStyle(kid).paddingTop,
+             Math.round(r.width), n.offsetWidth, n.clientWidth,
+             Math.round(kid.getBoundingClientRect().width)].join('|');
+        "#,
+            )
+            .unwrap();
+        // #nested: padding 4% of the host's 500 = 20/side, authored 400
+        // stays the CONTENT width → border box / offsetWidth / clientWidth
+        // all 440. #kid: a block fills the content box (400 wide), and its
+        // own 25% padding resolves against that 400 → 100px (the old broken
+        // basis answered 90 = 25% of 360).
+        assert_eq!(
+            out.as_str().unwrap(),
+            "20px|20px|100px|440|440|440|400",
+            "content-box px width + percent padding keeps the authored px as content width"
+        );
+    }
+
     /// Issue #29: `Emulation.setEmulatedMedia` (Playwright's
     /// page.emulateMedia) must flip all three faces together — the
     /// matchMedia script face, its change events, AND the @media cascade

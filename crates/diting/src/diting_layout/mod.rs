@@ -6067,7 +6067,10 @@ pub fn layout_solve_rooted(
     // Sorted shallow-first, a calc width inside a calc-width parent
     // cascades through the arithmetic `repaired` map without another layout
     // round-trip. height and the margin/padding/inset slots keep the
-    // percent-only placeholder (documented approximation).
+    // percent-only placeholder (documented approximation). `repaired` lives
+    // OUTSIDE this block: the #245 pass below continues the same arithmetic
+    // basis for percent-padding content-box fixes under a calc-width parent.
+    let mut repaired: HashMap<taffy::tree::NodeId, f32> = HashMap::new();
     {
         let has_calc_width = |s: &crate::diting_css::ComputedStyle| {
             matches!(s.width, Some(crate::diting_css::Length::Calc { .. }))
@@ -6098,7 +6101,6 @@ pub fn layout_solve_rooted(
                 d
             }
             fixups.sort_by_key(|(t, _)| taffy_depth(&taffy_tree, *t, icb_node));
-            let mut repaired: HashMap<taffy::tree::NodeId, f32> = HashMap::new();
             for (tnid, dom_id) in fixups {
                 let Some(st) = styles.get(&dom_id) else { continue };
                 // Containing block = the taffy parent's settled content box,
@@ -6148,6 +6150,153 @@ pub fn layout_solve_rooted(
                 if let Some(crate::diting_css::Length::Calc { percent, px }) = st.max_width {
                     let content = (cbw * percent / 100.0 + px).max(0.0);
                     ts.max_size.width = LengthPercentageAuto::length(content + infl);
+                }
+                let _ = taffy_tree.set_style(tnid, ts);
+            }
+            let re = taffy_tree.compute_layout_with_measure(
+                icb_node,
+                available,
+                |inputs, _id, ctx, style| match ctx {
+                    Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, han, .. }) => {
+                        let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
+                        let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han);
+                        measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws)
+                    }
+                    _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
+                },
+            );
+            if re.is_err() {
+                return SolvedGeometry::aborted();
+            }
+        }
+    }
+    // #245 repair pass: content-box px sizes + percent padding. The
+    // style-map carry-over (to_taffy_style) only adds px-VALUED padding —
+    // percent padding has no containing block to resolve against at
+    // style-map time, so `width:400px; padding:4%` solved as border-box
+    // 400 (content 360) where Chrome keeps the authored 400 as the
+    // content width (border box 440). The CB content width is settled
+    // now, so resolve the percent paddings against it once and carry
+    // the authored px sizes over by the true sums — the same
+    // single-pass-then-one-re-solve shape as the calc repair, reading
+    // the shared `repaired` arithmetic basis for a parent fixed by
+    // either pass (the converse order — a calc child under a parent
+    // fixed only here — keeps the stale-layout basis; rare×rare and
+    // self-consistent with the re-solve). Border-box sizes skip: the
+    // authored value already measures to the border edge.
+    {
+        let side_used = |l: Option<crate::diting_css::Length>, cbw: f32| -> f32 {
+            match l {
+                Some(crate::diting_css::Length::Px(v)) => v,
+                Some(crate::diting_css::Length::Percent(p)) => cbw * p / 100.0,
+                Some(crate::diting_css::Length::Calc { percent, px }) => cbw * percent / 100.0 + px,
+                _ => 0.0,
+            }
+        };
+        let pct = |l: Option<crate::diting_css::Length>| {
+            matches!(
+                l,
+                Some(crate::diting_css::Length::Percent(_)) | Some(crate::diting_css::Length::Calc { .. })
+            )
+        };
+        let px = |l: Option<crate::diting_css::Length>| {
+            matches!(l, Some(crate::diting_css::Length::Px(_)))
+        };
+        let needs = |s: &crate::diting_css::ComputedStyle| {
+            (pct(s.padding.top)
+                || pct(s.padding.right)
+                || pct(s.padding.bottom)
+                || pct(s.padding.left))
+                && !matches!(s.box_sizing, Some(crate::diting_css::BoxSizing::BorderBox))
+                && (px(s.width)
+                    || px(s.height)
+                    || px(s.min_width)
+                    || px(s.max_width)
+                    || px(s.min_height)
+                    || px(s.max_height))
+        };
+        let mut fixups: Vec<(taffy::tree::NodeId, NodeId)> = node_map
+            .iter()
+            .filter(|(_, d)| styles.get(*d).is_some_and(needs))
+            .map(|(t, d)| (*t, *d))
+            .collect();
+        if !fixups.is_empty() {
+            fn taffy_depth(
+                taffy_tree: &TaffyTree<TextLeaf>,
+                node: taffy::tree::NodeId,
+                icb: taffy::tree::NodeId,
+            ) -> usize {
+                let (mut d, mut cur) = (0usize, node);
+                while cur != icb {
+                    match taffy_tree.parent(cur) {
+                        Some(p) => {
+                            cur = p;
+                            d += 1;
+                        }
+                        None => break,
+                    }
+                }
+                d
+            }
+            fixups.sort_by_key(|(t, _)| taffy_depth(&taffy_tree, *t, icb_node));
+            for (tnid, dom_id) in fixups {
+                let Some(st) = styles.get(&dom_id) else { continue };
+                // Percent padding resolves against the CB's inline size —
+                // the parent's settled content box, or either repair pass's
+                // arithmetic basis while the taffy layout is still stale.
+                let Some(cbw) = taffy_tree.parent(tnid).and_then(|p| {
+                    if let Some(w) = repaired.get(&p) {
+                        return Some(*w);
+                    }
+                    let l = taffy_tree.layout(p).ok()?;
+                    Some(
+                        l.size.width
+                            - l.padding.left
+                            - l.padding.right
+                            - l.border.left
+                            - l.border.right,
+                    )
+                }) else {
+                    continue;
+                };
+                let (pt, pr, pb, pl) = (
+                    side_used(st.padding.top, cbw),
+                    side_used(st.padding.right, cbw),
+                    side_used(st.padding.bottom, cbw),
+                    side_used(st.padding.left, cbw),
+                );
+                let (bt, br, bb, bl) = if st.border_style.is_some() {
+                    (
+                        side_px(st.border_width.top),
+                        side_px(st.border_width.right),
+                        side_px(st.border_width.bottom),
+                        side_px(st.border_width.left),
+                    )
+                } else {
+                    (0.0, 0.0, 0.0, 0.0)
+                };
+                let Some(mut ts) = taffy_tree.style(tnid).ok().cloned() else { continue };
+                if let Some(crate::diting_css::Length::Px(w)) = st.width {
+                    ts.size.width = Dimension::length(w + pl + pr + bl + br);
+                    // Children resolve their percents against this
+                    // element's content box — the authored px IS the
+                    // content width under content-box.
+                    repaired.insert(tnid, w);
+                }
+                if let Some(crate::diting_css::Length::Px(h)) = st.height {
+                    ts.size.height = Dimension::length(h + pt + pb + bt + bb);
+                }
+                if let Some(crate::diting_css::Length::Px(w)) = st.min_width {
+                    ts.min_size.width = LengthPercentageAuto::length(w + pl + pr + bl + br);
+                }
+                if let Some(crate::diting_css::Length::Px(w)) = st.max_width {
+                    ts.max_size.width = LengthPercentageAuto::length(w + pl + pr + bl + br);
+                }
+                if let Some(crate::diting_css::Length::Px(h)) = st.min_height {
+                    ts.min_size.height = LengthPercentageAuto::length(h + pt + pb + bt + bb);
+                }
+                if let Some(crate::diting_css::Length::Px(h)) = st.max_height {
+                    ts.max_size.height = LengthPercentageAuto::length(h + pt + pb + bt + bb);
                 }
                 let _ = taffy_tree.set_style(tnid, ts);
             }
