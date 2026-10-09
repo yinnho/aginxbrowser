@@ -1,39 +1,57 @@
-# doudian-login — 抖店扫码登录流（SSO 直连版）
+# doudian-login — 抖店扫码登录流（页内切换版）
 
-抖店（fxg.jinritemai.com）扫码登录出码流。慢的根源是前链不是出码：
-fxg 首页落地 7.1s + 登录页安定 10s+，整链 12-20s 才见码，而码本身
-只有 60-100s 寿命。本流直连 SSO authorize URL，干净会话** 1.78s 出码**。
+抖店（fxg.jinritemai.com）扫码登录出码流。**2026-10-06 翻案后走页内切换器**，
+不再绕 open.snssdk.com SSO（那是过渡方案，见文末历史）。
 
-## 结构（4 步，线性）
+## 结构（7 步）
 
 ```
-create SSO authorize(open.snssdk.com, redirect_uri=fxg /login/common)
-  → wait .qrcode-box img[src^=data:image]（客户端生成的 data:png 码）
-  → screenshot .qrcode-box 282×240 crop（qr_shot）
-  → wait 落地判定：hostname=fxg && pathname 不以 /login 开头（{{login_timeout_ms}}）
+create login/common（钉 1440×900）
+  → wait 全表单面（.login-switcher--cell ×1 + .account-center-switch-button ≥2 + input）
+  → click_xy (1322,136)（76×76 切换器中心，真鼠标链）
+  → wait .account-center-image-content 的 background-image 变 data:png（200×200）
+  → eval qr_data（页面手里的码原样抠出，零截图裁剪）
+  → screenshot .account-center-image-content（人看的裁剪，对不齐时以 qr_data 为准）
+  → wait 落地：hostname=fxg && pathname 不以 /login 开头（{{login_timeout_ms}}）
   → eval landing {url,title}
 ```
 
-出码后把 `saved.qr_shot` 或 `/live?session=<id>` 递给人，抖店 App 扫一
-扫 + 手机确认。SSO 页自己轮询扫码态，确认后 302 到 redirect_uri 带
-code，fxg 换 code 完登、离开 /login，第 3 步 predicate 命中。回执的
-`session_id` 就是登录态导出柄（cookie 落 .jinritemai.com）。
+出码后把 `qr_data` 解码（剥 data: 前缀 → base64 → .gif/.png）落到本地文件，
+`open` 给人扫，抖店 App 扫一扫 + 手机确认。页面自己轮询 check_qrconnect，
+确认后 302 进 fxg，末步 predicate 命中。回执的 `session_id` 就是登录态导出柄
+（cookie 落 .jinritemai.com：sessionid / sessionid_ss / sid_guard / sid_tt /
+passport_csrf_token / toutiao_sso_user_doudian / sso_uid_tt_doudian /
+ucas_sso_c0_doudian / ffa_goods_ewid / ecom_gray_shop_id / odin_tt / msToken /
+ttwid）。doudian-publish 用 `session_id` 复用直接组合。
 
-## 真机 receipt（2026-10-02，/tmp/qr-test/run-doudian-login.json）
+## 递码的坑（2026-10-09 实战）
 
-`login_timeout_ms: 5000` 短超时验证黄金路径：`qr_ready` 命中 IMG、
-`qr_shot` 282×240 8.6KB（非空图）、第 2 步按预期 timeout 报 failed、
-回执带现场截图 + hint、会话 s_14 保活可接管——全按设计。真登录只差
-人扫码确认这一下。
+- **码只有 60-100s 寿命，出码到人扫要一气呵成**：抠码→落盘→open 全链要
+  <5s，先码后闲聊必过期。过期别救，重跑 flow（~15s 重铸一张）。
+- **要干净登录态就开新 account**（`/session/create {"account":"新名字"}`）：
+  共享 jar 的会话开登录页会被自己的旧 cookie 静默 302 进工作台，根本到不了
+  码。10-09 实测：`scan-1029` 新 jar 一次成。
+- 长等待别让 flow 自己 `wait` 到底——**flow_run 全程持 SESSIONS 锁**，
+  等待期间这台实例所有 HTTP 端点全堵（引擎已知 bug，另立单）。递码模式用
+  `vars.login_timeout_ms:1000` 拿回执里的 qr_data，自己轮询
+  `/session/:id/wait`。
 
-## 踩坑（都是本机实测）
+## 真机 receipt
 
-- **client_key 抄错一位 = 10003 配置无效**。key 必须是
-  `ttae0f96cae89a91`（ta 开头 15 位）；之前以为「SSO 服务端回归」，
-  其实是 URL 少打了个 `9`，报错页长得跟服务端挂了一样。
-- **fxg 登录页自带的「扫码登录」切换器是死路**：toggle 后 daren 容器
-  空壳，`get_qrcode` 根本不发（DOM click、真坐标 click、先踩
-  authorize 再进页，全试过）。页内 `.type` 其他登录方式三个 icon 点
-  了也全无反应（window.open 钩验证过没弹窗）。别绕回这条路。
-- SSO 页的码是**客户端生成**的 data:png img，不走网络图，probe 要按
-  `img[src^=data:image]` 找，别拦 get_qrcode 之类的 URL。
+- **2026-10-09**：`scan-1029` 干净 jar，页内切换出码 → 人扫+确认 → 落地
+  `/ffa/mshop/homepage/index`；前两枪过期纯因递码慢（教训如上）。
+- **2026-10-06**：全表单面等齐后 settle-gated 点击 **313ms** 翻转出码；
+  扫码确认后 **9.7s** 落地。
+- 2026-10-02：SSO 直连时代的首绿（`/tmp/qr-test/run-doudian-login.json`），
+  `login_timeout_ms:5000` 短超时验证黄金路径。
+
+## 踩坑史（都在本机实测过）
+
+- **早测页内切换器「全死」是点击太早**：cell 先于 account-center SDK 渲染，
+  那时点上的是没接线的元素，翻转永不挂载。等全表单面（cell+tab pills+input
+  三者齐）再点。DOM `.click()` 没验证过，走真坐标 click_xy。
+- SSO 时代：client_key 抄错一位 = 10003 配置无效（key 是 `ttae0f96cae89a91`，
+  ta 开头 15 位）；fxg 登录页自带切换器在 SSO 前链下试过三条路全死。这些
+  只在回 SSO 时有用。
+- 码是**客户端生成**的 data:png，不走网络图——probe 按
+  `img[src^=data:image]`/background-image 找，别拦 get_qrcode 之类的 URL。

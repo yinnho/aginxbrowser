@@ -64,3 +64,38 @@ product_id 3846431717594366336（18 spec / 18 SKU / 主5图 / 竖5图 / 8图详�
 
 修复后 flow 重放 14 步全绿：**product_id 3846444003306373208**（timer 门 20s
 过、getSchema 两发 1.8s/13.5s、提交 5.4s 回 st=0）。timer gate 步骤保留当哨兵。
+
+## 运行方法（2026-10-09 实跑口径）
+
+```
+POST /flow/run
+{"name":"doudian-publish",
+ "session_id":"<doudian-login 回执的会话>",   ← 登录态组合
+ "vars":{"args":{ ... 全量业务参数 ... }}}
+```
+
+**args 必带键**（缺一个先死于 step0 换参、后死于 step7 TypeError）：
+`category_leaf_id`、`title`、`main_images[]`、`portrait_images[]`、
+`desc_html`、`freight_id`、`spec_id`、`spec_name`、`spec_values[]`、
+`skus[{price,stock,code}]`、`brand_prop`、`brand_value_id?`、
+`brand_value_name`、`material_prop`、`material_value_name`。
+
+绿单样例：`/tmp/qs-bench/pub-run.json`（10-06 原样，直接抄）；字段源头映射见
+`docs/doudian-fill-payload-20261004.json`（testpack 数据，不进 git）。
+
+## 绿单台账
+
+| 日期 | 引擎 | product_id | 备注 |
+|---|---|---|---|
+| 2026-10-05 | #39 修复版 | 3846431717594366336 | 首绿（手工协议同款）+ flow 重放 3846444003306373208 |
+| 2026-10-06 | 同 | 3846778561813938623 | s_18 接管跑法 |
+| 2026-10-09 | **#237 修复版** | 3847273730942305306 | s_3 当日扫码会话直跑，14 步全绿（timer 门 0ms、submit 0.9s） |
+
+## 2026-10-09 附记
+
+- **API 链不受 UI 挂件门控影响**：当天新版页面 bundle 的上传挂件
+  `isAllowUploadBtnClick:false` + 离屏 input（点击才挂监听）让 UI 传图路径
+  点不开——是引擎 filechooser 面缺口，不是店铺权限；getSchema/addWithSchema
+  照常 st=0。别再从挂件旗子推「权限墙」。
+- #237（MessagePort at-least-once）修复后 boot-storm timer 门照旧当哨兵——
+  它测的是泵活，和投递恢复互补。
