@@ -96,7 +96,12 @@ fire-and-forget fetch + `wait` 泵等 `window.__SHOT` 的老形状，在一次
   fire-and-forget fetch 的 `await` 续体被丢——净层 200 回包、结算已推、
   外层 promise 已 resolve（在飞表键已删），但 async 续体永不执行。零
   terminate 参与；复现是负载条件性的（重 boot=canon 12-15s 必挂，轻
-  boot=1-3s 不挂）。
+  boot=1-3s 不挂）。10-09 晚挂了两道防线：shim 结算改走 `.then` 链
+  （await 续体和 .then 回调是同一 resolve 的两条 V8 投递路径，链形把
+  async-resume 机器从热路径上剥离）+ `_fetchRing` 64 格阶段环
+  （armed/opok/resume/resp…）。九枪未再中；**下次命中直接 eval 读
+  `_fetchRing.slice(-16)` 定尸**：末条是 opok 无 resume=续体丢，有
+  armed 无 opok/takeok=投递死。
 
 所以提交步保持 `(async function(){ … var r = await fetch(…);
 var x = await r.text(); window.__SHOT = x; return x.slice(0,2000); })()`、

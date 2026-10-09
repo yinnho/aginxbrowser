@@ -24,8 +24,13 @@ function __probeInflightFetches() {
     if (raw === "") continue;
     var ent = __inflightFetches.get(keys[i]);
     __inflightFetches.delete(keys[i]);
-    if (raw.charCodeAt(0) === 0) ent.rejectOuter(new TypeError(raw.slice(1) || "fetch settlement lost"));
-    else ent.resolveOuter(raw);
+    if (raw.charCodeAt(0) === 0) {
+      _fetchStage('takerej', keys[i]);
+      ent.rejectOuter(new TypeError(raw.slice(1) || "fetch settlement lost"));
+    } else {
+      _fetchStage('takeok', keys[i]);
+      ent.resolveOuter(raw);
+    }
   }
 }
 // Lazy heartbeat (created with the first in-flight fetch, never during

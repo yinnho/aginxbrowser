@@ -3410,6 +3410,111 @@
         }
     }
 
+    /// #240 face 2, manufactured: a fire-and-forget fetch's await
+    /// continuation vanished under boot-storm load — the net layer
+    /// 200'd, the settlement pushed, the outer promise resolved (the
+    /// in-flight key was deleted) and STILL the `await` continuation
+    /// never ran, with zero terminates anywhere in the log. The live
+    /// repro is a load-gated race (heavy doudian boots wedge, light
+    /// ones don't), so manufacture the window instead: many
+    /// fire-and-forget fetches against a deliberately slow responder,
+    /// settling while the pump is cancelled at randomized sub-slice
+    /// budgets — each `run_event_loop_bounded` timeout DROPS the loop
+    /// future mid-poll, the suspected half-delivery moment —
+    /// interleaved with sync evals exactly like the wait step's poll
+    /// loop, mixing the plain and #66-throttled pump shapes. Every
+    /// fetch must land its marker; the shim's `_fetchRing` stages are
+    /// dumped on failure to name where a lost one died.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_fire_and_forget_survives_pump_cancellation_storm() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        const N: usize = 40;
+
+        // Slow responder: 200-500ms think time, so settlements arrive
+        // continuously while the pump is being dropped at short budgets.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for i in 0..N {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                std::thread::sleep(std::time::Duration::from_millis(
+                    200 + (i as u64 % 6) * 50,
+                ));
+                let body = format!("payload-{i}");
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{port}/"));
+        rt.evaluate(
+            "globalThis.__hits = 0; globalThis.__rej = 0;
+             for (var i = 0; i < 40; i++) {
+               fetch('/slow?i=' + i)
+                 .then(function (r) { return r.text(); })
+                 .then(function () { globalThis.__hits++; },
+                       function () { globalThis.__rej++; });
+             }",
+        )
+        .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let budgets = [2u64, 5, 11, 23, 47];
+        let mut round = 0usize;
+        loop {
+            let b = budgets[round % budgets.len()];
+            if round % 2 == 0 {
+                let _ = rt.run_event_loop_bounded(b).await;
+            } else {
+                let _ = rt.run_event_loop_bounded_throttled(50).await;
+            }
+            // The wait step's exact eval shape: sync expression under its
+            // own watchdog — this is where production observed the loss.
+            let _ = rt.evaluate_with_timeout("globalThis.__hits", std::time::Duration::from_millis(200));
+            let hits = rt
+                .evaluate("globalThis.__hits")
+                .unwrap()
+                .as_f64()
+                .unwrap_or(-1.0);
+            let rej = rt
+                .evaluate("globalThis.__rej")
+                .unwrap()
+                .as_f64()
+                .unwrap_or(-1.0);
+            assert_eq!(rej, 0.0, "probe fetches must not reject under pump churn");
+            if hits as usize == N {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "lost fire-and-forget continuations under pump cancellation: \
+                 hits={hits}/{N} after 30s — ring tail: {}",
+                rt.evaluate("JSON.stringify(_fetchRing.slice(-14))")
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|_| "<ring unreadable>".into())
+            );
+            round += 1;
+        }
+        // The instrumentation itself must have seen the full lifecycle.
+        let ring = rt
+            .evaluate("JSON.stringify(_fetchRing)")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(ring.contains("\"resp\""), "fetch ring must record resp stages: {ring}");
+    }
+
     /// The document's own Referrer Policy (batch-84 leftover): a policy from
     /// the navigation response's Referrer-Policy header beats every <meta
     /// name=referrer>; among metas the FIRST whose content yields a valid

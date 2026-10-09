@@ -787,6 +787,18 @@ let _wheelWakes = 0;     // wake callbacks that matched the armed deadline
 let _wheelStale = 0;     // wake callbacks no-opped as superseded
 let _wheelThrows = 0;    // sync throws out of op_sleep calls (must not half-commit)
 let _wheelPatrols = 0;   // patrol passes run
+// #240 face-2 postmortem ring: the last few fetch lifecycle stages, so a
+// fetch whose await continuation vanishes under load names the stage it
+// died at instead of leaving "outer resolved, continuation never ran" as
+// a four-way contradiction. Stages: armed (registry set), opok/operr (the
+// op promise settled), takeok/takerej (heartbeat-probe recovery path),
+// resume (await _outer continuation ran), resp (Response constructed),
+// fthrow (rethrow after a failed await). [tag, key, Date.now()%1e5].
+let _fetchRing = [];
+function _fetchStage(tag, fk) {
+  _fetchRing.push([tag, fk, Date.now() % 100000]);
+  if (_fetchRing.length > 64) _fetchRing.shift();
+}
 let _timerPatrol = false;
 const _timerPatrolFn = () => {
   _timerPatrol = false;
@@ -8706,47 +8718,57 @@ globalThis.fetch = async (input, init = {}) => {
   let _resOuter, _rejOuter;
   const _outer = new Promise(function (res, rej) { _resOuter = res; _rejOuter = rej; });
   __inflightFetches.set(_fk, { resolveOuter: _resOuter, rejectOuter: _rejOuter });
+  _fetchStage('armed', _fk);
   __armFetchProbeHeartbeat();
   opCall.then(
-    function (raw) { __inflightFetches.delete(_fk); _resOuter(raw); },
-    function (e) { __inflightFetches.delete(_fk); _rejOuter(e); }
+    function (raw) { _fetchStage('opok', _fk); __inflightFetches.delete(_fk); _resOuter(raw); },
+    function (e) { _fetchStage('operr', _fk); __inflightFetches.delete(_fk); _rejOuter(e); }
   );
   // Mid-flight abort: race the op against the signal. There is no JS-to-Rust
   // cancellation channel, so the underlying walk keeps going and its eventual
   // settlement is swallowed — but the fetch() promise rejects at abort time
   // with the signal's reason, which is the observable contract pages race on.
-  let raw;
-  try {
-    raw = await (signal ? _raceAbortSignal(signal, _outer) : _outer);
-  } catch (e) {
+  // #240 face-2 shape change: settle through a plain .then chain, not an
+  // async-function resume. The 10-09 wedge lost a fetch AFTER its outer
+  // promise resolved (in-flight key deleted) — the `await` continuation
+  // simply never ran, zero terminates in the log. await-resume and .then
+  // callbacks are two different V8 delivery paths for the same resolve;
+  // the chain form drops async-resume machinery from this hot path (one
+  // less suspect, one less frame) and the _fetchRing stages name
+  // whichever path dies next.
+  return (signal ? _raceAbortSignal(signal, _outer) : _outer).then(function (raw) {
+    _fetchStage('resume', _fk);
+    const parsed = JSON.parse(raw);
+    __recordFetchTiming(_rtT0, url, _rtInit, parsed);
+    if (parsed.blocked) {
+      const err = new TypeError('net::ERR_FAILED');
+      err.name = 'AbortError';
+      err.__aborted = true;
+      throw err;
+    }
+    if (parsed.corsBlocked) {
+      throw new TypeError('Failed to fetch: ' + (parsed.corsError || 'CORS error'));
+    }
+    const respType = parsed.status === 0 ? "opaque" : (fetchMode === "no-cors" ? "opaque" : "basic");
+    const responseBody = parsed.bodyBase64 ? _base64ToUint8Array(parsed.bodyBase64) : (parsed.body || "");
+    _fetchStage('resp', _fk);
+    return new Response(responseBody, {
+      status: parsed.status,
+      statusText: "",
+      headers: parsed.headers || {},
+      type: respType,
+      // Chrome: Response.url is the FINAL URL after redirects and `redirected`
+      // is true whenever one was followed. The op used to report only the
+      // original URL, so a fetch() that mtop followed into a punish page read
+      // as if it had landed on the API itself (the tmall report chased exactly
+      // that ghost).
+      url: parsed.final_url || parsed.url || url,
+      redirected: !!parsed.redirected,
+    });
+  }, function (e) {
+    _fetchStage('fthrow', _fk);
     __recordFetchTiming(_rtT0, url, _rtInit, null);
     throw e;
-  }
-  const parsed = JSON.parse(raw);
-  __recordFetchTiming(_rtT0, url, _rtInit, parsed);
-  if (parsed.blocked) {
-    const err = new TypeError('net::ERR_FAILED');
-    err.name = 'AbortError';
-    err.__aborted = true;
-    throw err;
-  }
-  if (parsed.corsBlocked) {
-    throw new TypeError('Failed to fetch: ' + (parsed.corsError || 'CORS error'));
-  }
-  const respType = parsed.status === 0 ? "opaque" : (fetchMode === "no-cors" ? "opaque" : "basic");
-  const responseBody = parsed.bodyBase64 ? _base64ToUint8Array(parsed.bodyBase64) : (parsed.body || "");
-  return new Response(responseBody, {
-    status: parsed.status,
-    statusText: "",
-    headers: parsed.headers || {},
-    type: respType,
-    // Chrome: Response.url is the FINAL URL after redirects and `redirected`
-    // is true whenever one was followed. The op used to report only the
-    // original URL, so a fetch() that mtop followed into a punish page read
-    // as if it had landed on the API itself (the tmall report chased exactly
-    // that ghost).
-    url: parsed.final_url || parsed.url || url,
-    redirected: !!parsed.redirected,
   });
 };
 // #235: XHR.send rides THIS closure, never the page-overridable
