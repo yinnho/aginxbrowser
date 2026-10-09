@@ -799,13 +799,16 @@ impl HttpClient {
                 let os = crate::diting_net::emulation_os_for_ua(
                     &self.user_agent.read().await.clone(),
                 );
-                let mut client = crate::diting_net::StealthHttpClient::with_proxy_and_emulation(
+                let client = crate::diting_net::StealthHttpClient::with_proxy_and_emulation(
                     self.cookie_jar.clone(),
                     self.proxy_url.as_deref(),
                     Some(os),
                     profile,
                 );
-                client.allow_private_network = self.allow_private_network;
+                client.allow_private_network.store(
+                    self.allow_private_network,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 Some(Arc::new(client))
             })
             .await

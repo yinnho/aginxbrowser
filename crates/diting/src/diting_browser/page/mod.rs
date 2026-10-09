@@ -476,7 +476,7 @@ impl Page {
             // document requests behind a macOS navigator/platform persona —
             // a one-glance bot tell (obscura #481 class).
             let os = crate::diting_net::emulation_os_for_ua(&context.user_agent);
-            let mut client = StealthHttpClient::with_proxy_and_emulation(
+            let client = StealthHttpClient::with_proxy_and_emulation(
                 context.cookie_jar.clone(),
                 context.proxy_url.as_deref(),
                 Some(os),
@@ -486,7 +486,10 @@ impl Page {
             // transport too, or a context that allows RFC1918 targets opens
             // its document requests on a client that rejects them (the
             // half-threaded-flag shape of obscura#793).
-            client.allow_private_network = context.allow_private_network;
+            client.allow_private_network.store(
+                context.allow_private_network,
+                std::sync::atomic::Ordering::Relaxed,
+            );
             if let Ok(mut guard) = client.user_agent.try_write() {
                 *guard = context.user_agent.clone();
             }

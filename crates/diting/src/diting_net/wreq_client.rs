@@ -3,6 +3,8 @@ use std::collections::HashMap;
 #[cfg(feature = "stealth")]
 use std::error::Error;
 #[cfg(feature = "stealth")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "stealth")]
 use std::sync::Arc;
 #[cfg(feature = "stealth")]
 use std::time::Duration;
@@ -162,6 +164,52 @@ async fn send_get_with_connection_reset_retry(
     }
 }
 
+/// wreq twin of the reqwest-side `SsrfGuardResolver` (#247): resolve, then
+/// reject the whole request if ANY resolved address is in the SSRF deny-set.
+/// The stealth path previously carried only `validate_url`'s host-string
+/// check, so a public name resolving to 127.0.0.1 / 169.254.169.254 / an
+/// RFC1918 address sailed through on the transport release builds actually
+/// use — the resolver-level check closes the DNS-rebinding bypass using the
+/// very addresses wreq will dial. Redirect hops re-resolve through here
+/// too (each hop is a fresh connect). The allow flag is read live:
+/// contexts flip it after construction (obscura#793 shape) and the env
+/// release (`AGINXBROWSER_ALLOW_PRIVATE_NETWORK`) ORs in at resolve time.
+#[cfg(feature = "stealth")]
+struct WreqSsrfGuardResolver {
+    allow_flag: Arc<AtomicBool>,
+}
+
+#[cfg(feature = "stealth")]
+impl wreq::dns::Resolve for WreqSsrfGuardResolver {
+    fn resolve(&self, name: wreq::dns::Name) -> wreq::dns::Resolving {
+        let allow = self.allow_flag.load(Ordering::Relaxed)
+            || crate::diting_net::client::env_allows_private_network();
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(|e| -> Box<dyn Error + Send + Sync> { Box::new(e) })?
+                .collect();
+            if !allow {
+                if let Some(bad) = addrs
+                    .iter()
+                    .find(|sa| crate::diting_net::client::is_forbidden_ip(sa.ip()))
+                {
+                    return Err(format!(
+                        "SSRF blocked: '{}' resolves to forbidden address {}{}",
+                        host,
+                        bad.ip(),
+                        crate::diting_net::client::policy::PRIVATE_NETWORK_HINT
+                    )
+                    .into());
+                }
+            }
+            let iter: wreq::dns::Addrs = Box::new(addrs.into_iter());
+            Ok(iter)
+        })
+    }
+}
+
 #[cfg(feature = "stealth")]
 pub struct StealthHttpClient {
     /// Proxy-configured client. None when no proxy is set.
@@ -185,13 +233,15 @@ pub struct StealthHttpClient {
     pub user_agent: RwLock<String>,
     pub accept_language: RwLock<String>,
     /// When true, `validate_url` lets localhost / RFC1918 / link-local hosts
-    /// through on the stealth path too. Mirrors the HttpClient field of the
-    /// same name: a context built with the private-network opt-in used to
-    /// open its stealth document requests while HttpClient allowed them —
-    /// the same half-threaded-flag shape as obscura#793. The env var
-    /// (`AGINXBROWSER_ALLOW_PRIVATE_NETWORK`) is OR'd inside `validate_url`
-    /// itself, so this field only carries the per-context flag.
-    pub allow_private_network: bool,
+    /// through on the stealth path too, and the direct client's SSRF resolver
+    /// (#247) passes private resolutions. Shared with that resolver as an
+    /// `Arc<AtomicBool>` — contexts set the flag AFTER construction (the
+    /// obscura#793 shape), so a build-time snapshot inside the wreq client
+    /// would go stale the moment `store` lands. Mirrors the HttpClient field
+    /// of the same name; the env var (`AGINXBROWSER_ALLOW_PRIVATE_NETWORK`)
+    /// is OR'd inside `validate_url` and the resolver itself, so this field
+    /// only carries the per-context flag.
+    pub allow_private_network: Arc<AtomicBool>,
     /// Whether the bundled tracker blocklist is consulted before any
     /// request. Stealth documents block trackers as documented, so this
     /// defaults on — but HttpClient carries the same field and honors the
@@ -207,17 +257,22 @@ impl StealthHttpClient {
         Self::with_proxy(cookie_jar, None)
     }
 
-    /// Build a stealth wreq client. When `proxy_url` is Some, the SOCKS5 proxy
-    /// is wired via `Proxy::http` (see note below); otherwise the client is
-    /// direct-only.
     /// Build a stealth wreq client with an optional explicit OS override and a
     /// chosen TLS `emulation` (browser fingerprint). When `os_override` is Some,
     /// it takes precedence over the UA-derived OS, allowing engines like Google
     /// to use Android TLS fingerprints for GSA User-Agent requests.
+    ///
+    /// `ssrf_flag` wires the post-DNS SSRF guard (#247): Some(flag) attaches a
+    /// resolver that vets every resolved address against the deny-set before
+    /// wreq dials it. Only the DIRECT client passes a flag — with a proxy the
+    /// target resolves at the proxy, and the proxy host itself is often
+    /// deliberately loopback (socks5://127.0.0.1), which the guard would
+    /// misfire on. The flag is read live at resolve time.
     fn build_stealth_client_with_os(
         proxy_url: Option<&str>,
         os_override: Option<wreq_util::Platform>,
         emulation: wreq_util::Profile,
+        ssrf_flag: Option<Arc<AtomicBool>>,
     ) -> wreq::Client {
         let os = if let Some(os) = os_override {
             os
@@ -247,6 +302,14 @@ impl StealthHttpClient {
             // CDN) mid-stream at 30s while browsers stream it to completion.
             .read_timeout(Duration::from_secs(30))
             .redirect(wreq::redirect::Policy::none());
+
+        // #247: the post-DNS SSRF gate on the direct path. Replaces wreq's
+        // default GaiResolver (getaddrinfo) with the same lookup_host shape
+        // the reqwest-side guard uses — DNS is invisible to the TLS/JA3
+        // fingerprint, so the emulation is untouched.
+        if let Some(flag) = ssrf_flag {
+            builder = builder.dns_resolver(Arc::new(WreqSsrfGuardResolver { allow_flag: flag }));
+        }
 
         // Honor SSL_CERT_FILE / SSL_CERT_DIR (opt-in only): when set, wire a
         // cert store loaded from those paths, so hosts behind a private/
@@ -314,11 +377,17 @@ impl StealthHttpClient {
         os_override: Option<wreq_util::Platform>,
         emulation: wreq_util::Profile,
     ) -> Self {
-        let proxied_client = proxy_url.map(|_| Self::build_stealth_client_with_os(proxy_url, os_override, emulation));
-        let direct_client = Self::build_stealth_client_with_os(None, os_override, emulation);
+        // The shared flag the direct client's SSRF resolver reads live —
+        // same cell `validate_url` consults, so the two doors can never
+        // disagree about what is allowed.
+        let allow_flag = Arc::new(AtomicBool::new(false));
+        let proxied_client =
+            proxy_url.map(|_| Self::build_stealth_client_with_os(proxy_url, os_override, emulation, None));
+        let direct_client =
+            Self::build_stealth_client_with_os(None, os_override, emulation, Some(allow_flag.clone()));
         let auto_proxied_client = if proxy_url.is_none() {
             crate::env_knobs::proxy_from_env().map(|p| {
-                Self::build_stealth_client_with_os(Some(&p), os_override, emulation)
+                Self::build_stealth_client_with_os(Some(&p), os_override, emulation, None)
             })
         } else {
             None
@@ -340,7 +409,7 @@ impl StealthHttpClient {
                 std::env::var("AGINXBROWSER_ACCEPT_LANGUAGE")
                     .unwrap_or_else(|_| "zh-CN,zh;q=0.9,en;q=0.8".to_string()),
             ),
-            allow_private_network: false,
+            allow_private_network: allow_flag,
             block_trackers: crate::diting_net::blocklist::block_trackers_from_env(),
         }
     }
@@ -422,7 +491,10 @@ impl StealthHttpClient {
         // addresses that HttpClient rejects. The per-context opt-in rides the
         // `allow_private_network` field (obscura#793 shape); the env var is
         // OR'd inside `validate_url`.
-        crate::diting_net::client::validate_url(url, self.allow_private_network)?;
+        crate::diting_net::client::validate_url(
+            url,
+            self.allow_private_network.load(Ordering::Relaxed),
+        )?;
         if url.scheme() == "file" {
             return crate::diting_net::client::fetch_file_url(url).await;
         }
@@ -652,7 +724,7 @@ impl StealthHttpClient {
                     // to a forbidden target (e.g. 302 -> http://127.0.0.1/).
                     crate::diting_net::client::validate_url(
                         &next_url,
-                        self.allow_private_network,
+                        self.allow_private_network.load(Ordering::Relaxed),
                     )?;
                     if next_url.scheme() == "file" {
                         return crate::diting_net::client::fetch_file_url(&next_url).await;
@@ -720,6 +792,41 @@ mod tests {
     use super::StealthHttpClient;
     use super::{fingerprint_family_version, ua_browser_version, warn_on_ua_tls_mismatch};
     use crate::diting_net::cookies::CookieJar;
+
+    // #247: the resolver-level gate blocks post-DNS private targets and
+    // honors the live flag flip — the whole point of the AtomicBool share.
+    // localhost resolves via /etc/hosts to 127.0.0.1, the exact
+    // rebinding shape the host-string check cannot see.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env guard spans the resolve, as everywhere else
+    async fn wreq_ssrf_guard_resolver_blocks_loopback_resolution() {
+        use wreq::dns::Resolve as _;
+
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let guarded = super::WreqSsrfGuardResolver {
+            allow_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        assert!(
+            guarded
+                .resolve(wreq::dns::Name::new("localhost".into()))
+                .await
+                .is_err(),
+            "localhost must be rejected by the guarded resolver"
+        );
+
+        let permissive = super::WreqSsrfGuardResolver {
+            allow_flag: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        };
+        assert!(
+            permissive
+                .resolve(wreq::dns::Name::new("localhost".into()))
+                .await
+                .is_ok(),
+            "the live flag must pass localhost through"
+        );
+    }
 
     const CHROME152_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
     const FIREFOX133_UA: &str =
@@ -898,8 +1005,9 @@ mod tests {
         let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
         std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
         let (port, _heads) = head_recording_fixture().await;
-        let mut client = StealthHttpClient::new(Arc::new(CookieJar::new()));
-        client.allow_private_network = true;
+        let client = StealthHttpClient::new(Arc::new(CookieJar::new()));
+        client.allow_private_network
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         let resp = client
             .fetch(&url)
@@ -920,8 +1028,9 @@ mod tests {
         let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
         std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
         let (port, heads) = head_recording_fixture().await;
-        let mut client = StealthHttpClient::new(Arc::new(CookieJar::new()));
-        client.allow_private_network = true;
+        let client = StealthHttpClient::new(Arc::new(CookieJar::new()));
+        client.allow_private_network
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let same = Url::parse(&format!("http://127.0.0.1:{port}/same.png")).unwrap();
         let cross = Url::parse(&format!("http://127.0.0.1:{port}/cross.png")).unwrap();
         let bare = Url::parse(&format!("http://127.0.0.1:{port}/bare.png")).unwrap();
@@ -1065,8 +1174,9 @@ mod tests {
         let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
         std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
         let (port, log) = method_recording_fixture().await;
-        let mut client = StealthHttpClient::new(Arc::new(CookieJar::new()));
-        client.allow_private_network = true;
+        let client = StealthHttpClient::new(Arc::new(CookieJar::new()));
+        client.allow_private_network
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let url = Url::parse(&format!("http://127.0.0.1:{port}/echo")).unwrap();
         let result = client
             .fetch_with_body(
@@ -1106,8 +1216,9 @@ mod tests {
         let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
         std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
         let (port, log) = method_recording_fixture().await;
-        let mut client = StealthHttpClient::new(Arc::new(CookieJar::new()));
-        client.allow_private_network = true;
+        let client = StealthHttpClient::new(Arc::new(CookieJar::new()));
+        client.allow_private_network
+            .store(true, std::sync::atomic::Ordering::Relaxed);
 
         let mk = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}/{path}")).unwrap();
         let r1 = client
@@ -1162,8 +1273,9 @@ mod tests {
         std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
         let (port, log) = method_recording_fixture().await;
         let jar = Arc::new(CookieJar::new());
-        let mut client = StealthHttpClient::new(jar.clone());
-        client.allow_private_network = true;
+        let client = StealthHttpClient::new(jar.clone());
+        client.allow_private_network
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let mk = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}/{path}")).unwrap();
         jar.set_cookie("sid=legacy", &mk("post"));
 
@@ -1239,8 +1351,9 @@ mod tests {
         std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
         let (port, _log) = method_recording_fixture().await;
         let jar = Arc::new(CookieJar::new());
-        let mut client = StealthHttpClient::new(jar.clone());
-        client.allow_private_network = true;
+        let client = StealthHttpClient::new(jar.clone());
+        client.allow_private_network
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let mk = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}/{path}")).unwrap();
 
         client
