@@ -10,6 +10,31 @@ samples; brew/agpkg installs ship the bare binary (grab `workflow/` from the
 repo when needed). A name is one path segment of lowercase/digits/dashes;
 anything else is rejected before it touches the filesystem.
 
+## The working mode (read this first, agent)
+
+You are a delegator, not a browser operator. The engine + this directory
+is the deliverable: **aginxbrowser + flow = a working capability**, and
+your interface is `POST /flow/run {"name", "vars", "session_id"}` — the
+receipt is the function's return value (`status` / `saved` / `session_id`).
+
+1. **Before anything else, look for an existing flow**: the tables below
+   map intent → flow name; `POST /flow/search` lists what the configured
+   hub can install. Compose login state via `session_id`.
+2. **Only if nothing covers the task**, mine it by hand: drive a session
+   (`/session/*` — create, wait, click, eval). Micro-operations are the
+   discovery scaffold, not the way to keep working — every quirk you hit
+   (anti-bot walls, widget shapes, timing traps) is knowledge the next
+   agent should inherit for free.
+3. **The moment the path runs green, distill it**: export the recording,
+   curate it, land `workflow/<name>/flow.json` + a `flow.md` that says the
+   run recipe, the exact args contract, and the green receipts (dates +
+   evidence). An unrecorded success is a debt — the next agent re-mines
+   what you already paid for.
+4. **A failed flow is data, not a fallback trigger**: the receipt names
+   the failing step, reason, URL, screenshot, and leaves the session alive
+   — repair the flow (or take the session over once to diagnose), then
+   re-run it. Hand-driving as the routine means the knowledge never lands.
+
 ## Authoring loop
 
 1. Drive a session by hand (HTTP `/session/*` or the MCP `session_*` tools):
@@ -30,7 +55,8 @@ anything else is rejected before it touches the filesystem.
 | `bilibili-search` | bilibili.com | runs green | cookie 预热 → 页内 fetch 搜索 API：真浏览器上下文无 412 无 wbi（yt-dlp 被封的那条路我们不走）；video+bangumi 块 — see flow.md |
 | `bsky-post` | bsky.social | runs green | app password (`creds_json` vars) → createRecord → verify; page-context xrpc, no cookies — see flow.md |
 | `doudian-login` | fxg.jinritemai.com | runs green to QR handoff | 页内切换器出码（10-06 翻案：全表单面等齐+真鼠标链，313ms 翻转）；`qr_data` 直递，码 60-100s 寿命、递码要一气呵成；干净登录开新 account（共享 jar 会被旧 cookie 静默 302）— see flow.md |
-| `doudian-publish` | fxg.jinritemai.com | runs green (draft lands) | 纯 API 三发链：getSchema(空)→getSchema(占位 spec 让服务器 canonicalize)→addWithSchema 草稿；组合 doudian-login 的 `session_id` + 全量 `args`（契约见 flow.md）；10-05/06/09 三绿单 — see flow.md |
+| `doudian-publish` | fxg.jinritemai.com | runs green (draft lands) | 纯 API 三发链：getSchema(空)→getSchema(占位 spec 让服务器 canonicalize)→addWithSchema 草稿；组合 doudian-login 的 `session_id` + 全量 `args`（契约见 flow.md）；**带图 = 先 `doudian-upload` 出 URL 填 `main_images`**；10-05/06/09 三绿单 — see flow.md |
+| `doudian-upload` | fxg.jinritemai.com | runs green | 页内 fetch 直打 `/product/img/batchupload` 回 CDN URL（绕开 widget：快喂窗口+不回填两坑）；compose 登录 `session_id`，产出喂 doudian-publish 的 `main_images`/`portrait_images` — see flow.md |
 | `github-read` | api.github.com | runs green | 免 gh/token 公开读：repo 元数据 + issue 列表（search API 避开 PR 混排）；404/403 落 fail 步带原始 body — see flow.md |
 | `taobao-login` | login.taobao.com | runs green to QR handoff | direct login.jhtml (3.7s vs 13.5s via homepage); QR canvas needs no click; cookie lands on .taobao.com — see flow.md |
 | `taobao-live` | live.taobao.com | runs green logged-out | verdict-gated front probe: delivers "no wall + telemetry"; room list awaits engine hydration — see flow.md |

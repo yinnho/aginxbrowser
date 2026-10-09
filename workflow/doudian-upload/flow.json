@@ -1,0 +1,28 @@
+{
+  "args": ["images"],
+  "vars": {
+    "fxg_home": "https://fxg.jinritemai.com/ffa/mshop/view/index",
+    "upload_ms": 60000
+  },
+  "steps": [
+    {
+      "id": "nav",
+      "op": "navigate",
+      "args": { "url": "{{fxg_home}}" }
+    },
+    {
+      "id": "settled",
+      "op": "wait",
+      "args": { "predicate": "document.readyState === 'complete' || document.readyState === 'interactive'", "timeout_ms": 20000 }
+    },
+    {
+      "id": "upload",
+      "op": "eval",
+      "save": "upload",
+      "args": {
+        "timeout_ms": "{{upload_ms}}",
+        "script": "(async function(){ var IMGS = {{args.images}}; if (!IMGS || !IMGS.length) throw new Error('images: pass a non-empty array of {name, content_base64, mime_type}'); function ck(n){ var m = document.cookie.match(new RegExp('(?:^|;\\\\s*)'+n+'=([^;]*)')); return m ? decodeURIComponent(m[1]) : ''; } var vf = ck('s_v_web_id'); var out = []; for (var k = 0; k < IMGS.length; k++) { var im = IMGS[k]; if (!im || !im.content_base64) throw new Error('images[' + k + ']: content_base64 required'); var bin = []; var CH = 0x8000; var b64 = String(im.content_base64); for (var i = 0; i < b64.length; i += CH) { var seg = atob(b64.slice(i, i + CH)); var arr = new Array(seg.length); for (var c = 0; c < seg.length; c++) arr[c] = seg.charCodeAt(c); bin.push(String.fromCharCode.apply(null, arr)); } var s = bin.join(''); var u8 = new Uint8Array(s.length); for (var j = 0; j < s.length; j++) u8[j] = s.charCodeAt(j); var fname = im.name || ('img_' + k + '.jpg'); var f = new File([u8], fname, { type: im.mime_type || 'image/jpeg' }); var q = '/product/img/batchupload?_bid=ffa_goods'; if (vf) q += '&verifyFp=' + encodeURIComponent(vf) + '&fp=' + encodeURIComponent(vf); var fd = new FormData(); fd.append('image[0]', f, fname); fd.append('extra', JSON.stringify({ request_source: 'pc' })); var r = await fetch(q, { method: 'POST', body: fd }); var t = await r.text(); var jx; try { jx = JSON.parse(t); } catch (e) { throw new Error('images[' + k + '] (' + fname + '): batchupload returned non-JSON (status ' + r.status + ', login wall?): ' + t.slice(0, 120)); } if (jx.errno !== 0 || !jx.data || !jx.data[0]) throw new Error('images[' + k + '] (' + fname + '): batchupload errno=' + jx.errno + ' msg=' + String(jx.msg || '').slice(0, 140)); out.push(jx.data[0]); } return JSON.stringify({ urls: out, count: out.length }); })()"
+      }
+    }
+  ]
+}
