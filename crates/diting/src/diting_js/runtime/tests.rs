@@ -3274,6 +3274,142 @@
         );
     }
 
+    /// Issue #240 regression: the timer-wheel corpse. `_timerArmed`
+    /// holding a stale deadline with `_timerPatrol` latched makes
+    /// `_timerArmNext`'s `e.d >= _timerArmed` gate refuse every later
+    /// arm, so timers, intervals and rAF rot for the rest of the session
+    /// while fetches and eval-await stay fine. Observed live on a
+    /// doudian publish run (2026-10-09) with ZERO watchdog fires in the
+    /// log — the wheel's state machine is the whole failure surface.
+    /// The corpse is manufactured through the global-lexical seam (same
+    /// one the port tests use for `_mtQueue`): stale the heap-top entry,
+    /// point `armed` at it with no sleep covering it, latch the patrol.
+    #[tokio::test(flavor = "current_thread")]
+    async fn timer_wheel_corpse_healed_by_pump_witness() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // Pin the witness contract (house style from #227's predicate
+        // pin): present, and a healthy realm answers false.
+        assert_eq!(
+            rt.evaluate("typeof globalThis.__diting_wheel_stalled").unwrap(),
+            serde_json::Value::String("function".into())
+        );
+        assert_eq!(
+            rt.evaluate("globalThis.__diting_wheel_stalled()").unwrap(),
+            serde_json::Value::Bool(false)
+        );
+
+        rt.evaluate(
+            "globalThis.__fired = false;
+             setTimeout(() => { globalThis.__fired = true; }, 5);
+             // The kill: the entry goes stale-past-due while `armed`
+             // points at it with no wake sleep in flight (the +5ms sleep
+             // will arrive and stale-no-op) and the patrol is latched.
+             _timerHeap[0].d -= 700;
+             _timerArmed = _timerHeap[0].d;
+             _timerPatrol = true;",
+        )
+        .unwrap();
+        assert_eq!(
+            rt.evaluate("globalThis.__diting_wheel_stalled()").unwrap(),
+            serde_json::Value::Bool(true),
+            "precondition: a stale-past-due heap-top must trip the witness"
+        );
+
+        // Pump: the loop-entry witness must force-recover the wheel and
+        // deliver the probe.
+        let mut fired = false;
+        for _ in 0..30 {
+            let _ = rt.run_event_loop_bounded(200).await;
+            if rt
+                .evaluate("globalThis.__fired")
+                .unwrap()
+                .as_bool()
+                .unwrap_or(false)
+            {
+                fired = true;
+                break;
+            }
+        }
+        assert!(
+            fired,
+            "probe timer never fired: the wheel corpse was not healed by the pump witness"
+        );
+        // The healed wheel must not leave the state machine wedged: with
+        // the heap drained there is nothing to cover and no patrol to run.
+        let wheel = rt
+            .evaluate("JSON.stringify(globalThis.__MT_STATE().wheel)")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            wheel.contains("\"heap\":0"),
+            "heap should be empty after delivery: {wheel}"
+        );
+    }
+
+    /// The #240 heal from the JS side: the termination recover hook
+    /// (`__diting_mt_recover_termination`, run by the engine at every
+    /// unwind recovery point) must unlatch the patrol and force a fresh
+    /// arm — the same hook the #39/#227 paths already call.
+    #[tokio::test(flavor = "current_thread")]
+    async fn timer_wheel_corpse_healed_by_recover_hook() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.evaluate(
+            "globalThis.__fired = false;
+             setTimeout(() => { globalThis.__fired = true; }, 5);
+             _timerHeap[0].d -= 700;
+             _timerArmed = _timerHeap[0].d;
+             _timerPatrol = true;
+             __diting_mt_recover_termination();",
+        )
+        .unwrap();
+
+        let mut fired = false;
+        for _ in 0..30 {
+            let _ = rt.run_event_loop_bounded(200).await;
+            if rt
+                .evaluate("globalThis.__fired")
+                .unwrap()
+                .as_bool()
+                .unwrap_or(false)
+            {
+                fired = true;
+                break;
+            }
+        }
+        assert!(
+            fired,
+            "probe timer never fired: the recover hook did not heal the wheel"
+        );
+    }
+
+    /// #240 diagnostics: `__MT_STATE().wheel` names the kill when a corpse
+    /// re-forms (wakes/staleWakes tell whether sleeps deliver, throws
+    /// whether op calls fired synchronously, patrols whether the safety
+    /// net lived). Pin the keys so a refactor cannot silently drop them.
+    #[tokio::test(flavor = "current_thread")]
+    async fn timer_wheel_state_counters_surface_in_mt_state() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let v = rt
+            .evaluate("JSON.stringify(globalThis.__MT_STATE().wheel)")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string();
+        for key in [
+            "\"heap\":",
+            "\"armedIn\":",
+            "\"patrol\":",
+            "\"wakes\":",
+            "\"staleWakes\":",
+            "\"throws\":",
+            "\"patrols\":",
+        ] {
+            assert!(v.contains(key), "wheel state must expose {key}: {v}");
+        }
+    }
+
     /// The document's own Referrer Policy (batch-84 leftover): a policy from
     /// the navigation response's Referrer-Policy header beats every <meta
     /// name=referrer>; among metas the FIRST whose content yields a valid

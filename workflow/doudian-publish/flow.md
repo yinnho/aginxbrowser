@@ -80,18 +80,30 @@ product_id 3846431717594366336（18 spec / 18 SKU / 主5图 / 竖5图 / 8图详�
 违反即 throw，receipt 带 `args 校验失败: …` 清单——失败成本从 190s 降到 2s。
 规则源头是实测服务器口径，不是文档口径；服务器再教新规则就往这步加。
 
-## 提交步 = eval 内 await（#240 工作区，2026-10-09 改形）
+## 提交步 = eval 内 await（#240 第一面已修，形状保留，2026-10-09）
 
 fire-and-forget fetch + `wait` 泵等 `window.__SHOT` 的老形状，在一次
-带图跑里死透：fetch 本身发出去了，但 wait 期间会话的宏任务队列死亡，
-`.then` 回调永不投递（同会话 setTimeout(10ms) 跨 eval 永不 fire，
-fresh 会话 A/B 正常；引擎单 #240，蹦床病族 #227/#38/#237 的新形状）。
-当天 5+ 次 eval-await 探针全部 settle——所以提交步改为
-`(async function(){ … var r = await fetch(…); var x = await r.text();
-window.__SHOT = x; return x.slice(0,2000); })()`，`timeout_ms:{{submit_ms}}`，
-回包直接作为步骤返回值（`saved.add_answer`），outcome 步照旧读
-`window.__SHOT` 解析。页内 45s AbortController 兜底保留。#240 修掉前
-别把这条改回 fire-then-wait。
+带图跑里死透。#240 拆成了两具尸体：
+
+- **轮子尸体（已修，bootstrap.js + watchdog.rs）**：`_timerArmed` 持过期
+  死限 + `_timerPatrol` 闩死 → `_timerArmNext` 的门拒绝一切后续 arm，
+  会话级 timer/rAF 永久死亡。修法=patrol 双臂重挂（reject 不再闩死）、
+  recover 钩子强愈轮子、泵侧证人 `__diting_wheel_stalled()`（堆顶过期
+  600ms）并入 #227 探针、`__MT_STATE().wheel` 计数器（wakes/staleWakes/
+  throws/patrols）。回归测试三条。修后 wedge 复跑：timer 跨 eval 活、
+  新发 fetch 活。
+- **fetch 续体丢失（罕见残面，未愈）**：重负载 boot 风暴窗口里，单发
+  fire-and-forget fetch 的 `await` 续体被丢——净层 200 回包、结算已推、
+  外层 promise 已 resolve（在飞表键已删），但 async 续体永不执行。零
+  terminate 参与；复现是负载条件性的（重 boot=canon 12-15s 必挂，轻
+  boot=1-3s 不挂）。
+
+所以提交步保持 `(async function(){ … var r = await fetch(…);
+var x = await r.text(); window.__SHOT = x; return x.slice(0,2000); })()`、
+`timeout_ms:{{submit_ms}}` 的形状——eval-await 路径在 wedge 会话里 5+ 次
+全 settle，对两具尸体都免疫。残面修掉前别改回 fire-then-wait。
+页内 45s AbortController 兜底保留。证据链：issue #240 +
+/tmp/dd-repro/wedge*.py（净层/network 面对拍记录）。
 
 ## 运行方法（2026-10-09 实跑口径）
 

@@ -752,7 +752,8 @@ const _timerPop = () => {
   return top;
 };
 const _timerWake = (d) => {
-  if (d !== _timerArmed) return; // stale: a sleep for a superseded deadline
+  if (d !== _timerArmed) { _wheelStale++; return; } // stale: a sleep for a superseded deadline
+  _wheelWakes++;
   _timerArmed = Infinity;
   // Fixed snapshot: entries whose f() enqueues more timers during this loop
   // must not extend the pop window mid-wake.
@@ -760,7 +761,10 @@ const _timerWake = (d) => {
   let e;
   while ((e = _timerHeap[0]) && e.d <= now) {
     _timerPop();
-    e.f();
+    // #240: e.f() -> _runAsMacrotask -> _mtArm makes op calls; a sync
+    // throw here would abort the pop loop and skip the re-arm below,
+    // leaving the remaining due entries rotting with armed === Infinity.
+    try { e.f(); } catch (err) { _wheelThrows++; globalThis.__diting_reportUncaughtError(err); }
   }
   _timerArmNext();
 };
@@ -768,9 +772,25 @@ const _timerWake = (d) => {
 // the armed sleep can vanish and the earliest deadline would rot while
 // `armed` claims coverage. Same cure as the trampoline patrol — a slow
 // sleep that re-delivers anything already past deadline.
+// #240: the patrol had two silent-death holes of its own. (1) Its reject
+// arm was `() => {}` — a rejected patrol sleep left `_timerPatrol`
+// latched true, so no new patrol could ever arm. (2) A completion that
+// evaporates entirely (severed batch) ALSO leaves the flag latched, and
+// `_timerArmed` keeps the now-stale deadline, so `_timerArmNext`'s
+// `e.d >= _timerArmed` gate refuses every later timer — observed live on
+// a doudian publish run (2026-10-09): fetch callbacks and eval-await
+// fine, every setTimeout/setInterval/rAF dead for the rest of the
+// session, trampoline idle-healthy. Both rejection arms now run the
+// patrol fn itself (idempotent: unlatch, wake due, re-arm), and the
+// engine's recover hook force-heals the wheel (see below).
+let _wheelWakes = 0;     // wake callbacks that matched the armed deadline
+let _wheelStale = 0;     // wake callbacks no-opped as superseded
+let _wheelThrows = 0;    // sync throws out of op_sleep calls (must not half-commit)
+let _wheelPatrols = 0;   // patrol passes run
 let _timerPatrol = false;
 const _timerPatrolFn = () => {
   _timerPatrol = false;
+  _wheelPatrols++;
   const e = _timerHeap[0];
   if (e && e.d <= Date.now()) {
     if (_timerArmed !== Infinity) _timerWake(_timerArmed);
@@ -778,19 +798,31 @@ const _timerPatrolFn = () => {
   }
   if (_timerHeap.length && !_timerPatrol) {
     _timerPatrol = true;
-    _OPS.op_sleep(1500).then(_timerPatrolFn, () => {});
+    _OPS.op_sleep(1500).then(_timerPatrolFn, _timerPatrolFn);
   }
 };
 const _timerArmNext = () => {
   const e = _timerHeap[0];
   if (!e || e.d >= _timerArmed) return;
+  const prev = _timerArmed;
   _timerArmed = e.d;
-  if (!_timerPatrol && _timerHeap.length) {
-    _timerPatrol = true;
-    _OPS.op_sleep(1500).then(_timerPatrolFn, () => {});
+  try {
+    if (!_timerPatrol && _timerHeap.length) {
+      _timerPatrol = true;
+      _OPS.op_sleep(1500).then(_timerPatrolFn, _timerPatrolFn);
+    }
+    const wait = Math.max(0, e.d - Date.now());
+    _OPS.op_sleep(wait).then(() => _timerWake(e.d), () => { _timerPatrolFn(); });
+  } catch (err) {
+    // The armed deadline was committed above; an op call that throws
+    // synchronously would leave it claiming coverage with no sleep in
+    // flight — the #240 corpse's exact state. Revert to the previous
+    // coverage so the next schedule retries the arm instead of rotting
+    // behind the gate.
+    _wheelThrows++;
+    _timerArmed = prev;
+    throw err;
   }
-  const wait = Math.max(0, e.d - Date.now());
-  _OPS.op_sleep(wait).then(() => _timerWake(e.d), () => { _timerPatrolFn(); });
 };
 
 const _scheduleAfter = (delay, level, fn) => {
@@ -928,9 +960,19 @@ const _mtWindow = (body) => {
 // #227: also re-arm when a backlog waits — recovery points are the one
 // place that can retire a corpse chain, and a quiet page (its own timers
 // died with the chain) never pushes to do it from _runAsMacrotask.
+// #240: the timer wheel needs the same heal. A severed completion (or a
+// latched patrol flag) leaves `_timerArmed` holding a stale deadline, so
+// `_timerArmNext`'s `e.d >= _timerArmed` gate refuses every later timer
+// — the wheel has NO self-heal in that state: new pushes don't retry the
+// arm, the patrol flag blocks the patrol, and the page's every
+// timer/interval/rAF rots for the rest of the session while fetches and
+// evals stay fine. Unlatch the patrol and force a fresh arm for whatever
+// is actually pending.
 globalThis.__diting_mt_recover_termination = () => {
   _mtDepth = 0; __probeInflightFetches();
   if (_mtQueue.length) _mtArm();
+  _timerPatrol = false;
+  if (_timerHeap.length) { _timerArmed = Infinity; _timerArmNext(); }
 };
 // #227 stall predicate for the engine pump — the only witness independent
 // of JS continuations. A terminate severs the drain's op_sleep
@@ -942,13 +984,34 @@ globalThis.__diting_mt_recover_termination = () => {
 // with work queued can only be a corpse.
 globalThis.__diting_mt_stalled = () =>
   _mtArmed && _mtQueue.length > 0 && Date.now() - _mtLastBeat > 600;
+// #240 wheel stall predicate, same witness contract: a healthy wheel runs
+// a due heap-top within one event-loop turn of its deadline. A heap-top
+// 600ms past due can only be a corpse (stale armed gate + latched
+// patrol) — the pump force-recovers, which re-arms the wheel. The
+// recover itself is idempotent, so a busy page that merely fell behind
+// pays one redundant arm, nothing more.
+globalThis.__diting_wheel_stalled = () => {
+  const e = _timerHeap[0];
+  return !!e && e.d <= Date.now() - 600;
+};
 // Debug probe for the trampoline's live state (#30 follow-up: macrotask
 // deliveries dying while op+microtask paths stay alive — 2026-10-04 fxg).
 // Read-only snapshot; keep names short, it rides on globalThis.
+// #240: `wheel` exposes the timer wheel's state machine — the counters
+// name the kill when a corpse re-forms (wakes/stale tell whether sleeps
+// deliver, throws whether op calls fired synchronously, patrols whether
+// the safety net lived).
 globalThis.__MT_STATE = () => ({
   depth: _mtDepth, armed: _mtArmed, qlen: _mtQueue.length, defers: _mtDefers,
   beats: _mtBeats, items: _mtItems, rearms: _mtRearms,
   gen: _mtGen, stale: _mtStale, lag: Date.now() - _mtLastBeat,
+  wheel: {
+    heap: _timerHeap.length,
+    armedIn: _timerArmed === Infinity ? null : _timerArmed - Date.now(),
+    patrol: _timerPatrol,
+    wakes: _wheelWakes, staleWakes: _wheelStale,
+    throws: _wheelThrows, patrols: _wheelPatrols,
+  },
 });
 
 // Per HTML, a string timer handler is compiled and run as a classic script in

@@ -436,8 +436,19 @@ impl super::JsRuntime {
         // independent witness left: ask the trampoline whether it stalled
         // and run the recover path. Its depth reset is safe here — nothing
         // JS is executing, so any positive depth is a leaked bracket.
+        // #240: the timer wheel joined the witness contract. The
+        // doudian-publish wedge (2026-10-09) formed with ZERO watchdog
+        // fires anywhere in the log — timers/interval/rAF dead for the
+        // rest of the session while fetches and eval-await stayed fine,
+        // `_timerArmed` stale + patrol latched and no JS-side push able to
+        // retry the arm. A due-past heap-top is the one wheel state a
+        // healthy realm never shows; the recover path now force-heals it
+        // (idempotent — a merely-behind page pays one redundant arm).
         let stalled = self
-            .evaluate("globalThis.__diting_mt_stalled ? __diting_mt_stalled() : false")
+            .evaluate(
+                "globalThis.__diting_mt_stalled ? \
+                 (__diting_mt_stalled() || __diting_wheel_stalled()) : false",
+            )
             .map(|v| v == serde_json::Value::Bool(true))
             .unwrap_or(false);
         if stalled {
@@ -447,7 +458,7 @@ impl super::JsRuntime {
                  globalThis.__diting_mt_recover_termination()"
                     .to_string(),
             );
-            tracing::warn!("#227: re-armed stalled macrotask chain");
+            tracing::warn!("#227/#240: re-armed stalled macrotask chain / timer wheel");
         }
     }
 
