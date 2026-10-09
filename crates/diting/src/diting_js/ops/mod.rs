@@ -2094,11 +2094,20 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 .flatten();
             let epoch = dom.epoch();
             ensure_layout_run(&gs, dom, epoch);
-            let style = gs.layout_cache.borrow().as_ref().and_then(|(e, (_, _, s, _, _, _, _))| {
-                if *e == epoch { s.get(&nid).cloned() } else { None }
+            let style_and_cb = gs.layout_cache.borrow().as_ref().and_then(|(e, r)| {
+                if *e != epoch {
+                    return None;
+                }
+                let (rects, _, styles, _, _, _, _) = r;
+                let style = styles.get(&nid).cloned();
+                // #242: percentage padding/margin resolves to used px against
+                // the containing block — Chrome's gCS posture. Pseudos share
+                // the host's containing block.
+                let cb = cb_inline_for(dom, rects, styles, nid, 8);
+                style.map(|s| (s, cb))
             });
-            match style {
-                Some(s) => {
+            match style_and_cb {
+                Some((s, cb)) => {
                     // The pseudo cascade lives on the host's ComputedStyle;
                     // a pseudo with no rule serializes the initial-value
                     // table rather than an empty declaration.
@@ -2116,7 +2125,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                         COMPUTED_STYLE_PROPS.len() + target.custom.len(),
                     );
                     for prop in COMPUTED_STYLE_PROPS {
-                        if let Some(v) = computed_style_value(&target, prop, tag.as_deref()) {
+                        if let Some(v) = computed_style_value(&target, prop, tag.as_deref(), cb) {
                             obj.insert((*prop).to_string(), serde_json::Value::String(v));
                         }
                     }
@@ -3215,12 +3224,16 @@ fn counter_style_suffix(style: crate::diting_css::CounterStyle) -> String {
 /// computed-value spelling, for the `computed_style` op (getComputedStyle's
 /// cascade layer). `None` means "not in the table" — the JS caller falls
 /// through to its inline/dimension/default chain, so initial values never
-/// shadow a caller that knows better.
+/// shadow a caller that knows better. `cb_inline` is the element's
+/// containing-block inline size when the op had geometry (#242): percentage
+/// padding/margin arms resolve to Chrome's used px; without it (boxless
+/// elements) they keep the declared spelling.
 #[cfg(feature = "screenshot")]
 fn computed_style_value(
     s: &crate::diting_css::ComputedStyle,
     prop: &str,
     cssom_tag: Option<&str>,
+    cb_inline: Option<f32>,
 ) -> Option<String> {
     use crate::diting_css::*;
     let color = |c: &Color| {
@@ -3518,16 +3531,15 @@ fn computed_style_value(
         "background-image" => s.background_image.clone(),
         // Same posture as background-image: the author's stack, verbatim.
         "font-family" => s.font_family.clone(),
-        // Padding/margin longhands: Chrome reports the used px. Percent and
-        // calc keep their declared spelling (resolving needs the containing
-        // block this layer has no geometry for), unset is 0 — all closer to
-        // truth than the JS mask's blanket "0px", which swallowed real
-        // padding from every stylesheet-declared element (the pptx-native
-        // walker read all-zero insets off this).
-        "padding-top" => Some(side_css(&s.padding.top)),
-        "padding-right" => Some(side_css(&s.padding.right)),
-        "padding-bottom" => Some(side_css(&s.padding.bottom)),
-        "padding-left" => Some(side_css(&s.padding.left)),
+        // Padding/margin longhands: Chrome reports the used px — percentage
+        // and calc sides resolve against the containing-block inline size
+        // the op supplies (#242); without geometry the declared spelling
+        // stays (the old posture — resolving needs a containing block this
+        // layer has no geometry for). Unset is 0.
+        "padding-top" => Some(side_css_used(&s.padding.top, cb_inline)),
+        "padding-right" => Some(side_css_used(&s.padding.right, cb_inline)),
+        "padding-bottom" => Some(side_css_used(&s.padding.bottom, cb_inline)),
+        "padding-left" => Some(side_css_used(&s.padding.left, cb_inline)),
         // Border widths ride the same path so the iframe viewport math in
         // bootstrap can peel the UA 2px border off the measured border box.
         // Chrome answers 0px whenever the style is none/hidden — the width
@@ -3559,10 +3571,10 @@ fn computed_style_value(
                 None => "rgb(0, 0, 0)".into(),
             },
         ),
-        "margin-top" => Some(side_css(&s.margin.top)),
-        "margin-right" => Some(side_css(&s.margin.right)),
-        "margin-bottom" => Some(side_css(&s.margin.bottom)),
-        "margin-left" => Some(side_css(&s.margin.left)),
+        "margin-top" => Some(side_css_used(&s.margin.top, cb_inline)),
+        "margin-right" => Some(side_css_used(&s.margin.right, cb_inline)),
+        "margin-bottom" => Some(side_css_used(&s.margin.bottom, cb_inline)),
+        "margin-left" => Some(side_css_used(&s.margin.left, cb_inline)),
         // Chrome's computed border-radius collapses equal corners (up to the
         // shortest form that round-trips); elliptical corners serialize with
         // the slash form. Percent stays percent — resolving against the box
@@ -3842,6 +3854,137 @@ fn format_number(v: f32) -> String {
 /// One side of a padding/margin shorthand in Chrome's computed spelling.
 /// Unset sides are `0px` (the CSS initial for both properties).
 #[cfg(feature = "screenshot")]
+/// #242: used-value spelling for one padding/margin side. Chrome answers
+/// used px from getComputedStyle once layout has run: a percentage side
+/// resolves against the containing-block inline size, calc folds its two
+/// halves. Without a containing block (boxless elements, pseudo cascades
+/// on a boxless host) the declared spelling stays.
+fn side_css_used(l: &Option<crate::diting_css::Length>, cb_inline: Option<f32>) -> String {
+    use crate::diting_css::Length;
+    match (l, cb_inline) {
+        (Some(Length::Percent(p)), Some(cb)) => format!("{}px", format_number(p * cb / 100.0)),
+        (Some(Length::Calc { percent, px }), Some(cb)) => {
+            format!("{}px", format_number(percent * cb / 100.0 + px))
+        }
+        _ => side_css(l),
+    }
+}
+
+/// The initial containing block's inline size: html spans the viewport, so
+/// take the topmost ancestor that laid out (skips #document, which has no
+/// rect).
+#[cfg(feature = "screenshot")]
+fn icb_inline(
+    dom: &DomTree,
+    rects: &std::collections::HashMap<NodeId, [f32; 4]>,
+    nid: NodeId,
+) -> Option<f32> {
+    let mut cur = dom.with_node(nid, |n| n.parent).flatten();
+    let mut html = None;
+    while let Some(p) = cur {
+        if rects.contains_key(&p) {
+            html = Some(p);
+        }
+        cur = dom.with_node(p, |n| n.parent).flatten();
+    }
+    Some(rects.get(&html?)?[2])
+}
+
+/// #242: the inline size of `nid`'s containing block, per CSS box rules:
+/// in-flow boxes (static/relative/sticky) measure the DOM parent's content
+/// box; absolutely positioned boxes measure the nearest positioned
+/// ancestor's padding box; fixed boxes measure the initial containing
+/// block (the html element's border box tracks the viewport). Ancestor
+/// percentage insets resolve recursively (depth-capped; keyword/em insets
+/// count 0 — em would need font metrics). `None` when geometry is missing
+/// or the chain runs out — callers keep the declared spelling then.
+#[cfg(feature = "screenshot")]
+fn cb_inline_for(
+    dom: &DomTree,
+    rects: &std::collections::HashMap<NodeId, [f32; 4]>,
+    styles: &std::collections::HashMap<NodeId, crate::diting_css::ComputedStyle>,
+    nid: NodeId,
+    depth: u8,
+) -> Option<f32> {
+    use crate::diting_css::PositionMode;
+    if depth == 0 {
+        return None;
+    }
+    let own = styles.get(&nid)?;
+    match own.position {
+        Some(PositionMode::Fixed) => icb_inline(dom, rects, nid),
+        Some(PositionMode::Absolute) => {
+            let mut cur = dom.with_node(nid, |n| n.parent).flatten();
+            while let Some(p) = cur {
+                if let Some(st) = styles.get(&p) {
+                    if matches!(
+                        st.position,
+                        Some(PositionMode::Relative)
+                            | Some(PositionMode::Absolute)
+                            | Some(PositionMode::Fixed)
+                            | Some(PositionMode::Sticky)
+                    ) {
+                        // Padding box: subtract the border, keep the padding.
+                        let w = rects.get(&p)?[2];
+                        let border_lr = if st.border_style.is_some() {
+                            used_px(&st.border_width.left) + used_px(&st.border_width.right)
+                        } else {
+                            0.0
+                        };
+                        return Some(w - border_lr);
+                    }
+                }
+                cur = dom.with_node(p, |n| n.parent).flatten();
+            }
+            // No positioned ancestor: the ICB, same as fixed.
+            icb_inline(dom, rects, nid)
+        }
+        _ => {
+            let p = dom.with_node(nid, |n| n.parent).flatten()?;
+            content_inline_for(dom, rects, styles, p, depth)
+        }
+    }
+}
+
+/// The content-box inline size of `nid` (border box minus border minus
+/// padding, percentage insets resolved against nid's own containing block).
+#[cfg(feature = "screenshot")]
+fn content_inline_for(
+    dom: &DomTree,
+    rects: &std::collections::HashMap<NodeId, [f32; 4]>,
+    styles: &std::collections::HashMap<NodeId, crate::diting_css::ComputedStyle>,
+    nid: NodeId,
+    depth: u8,
+) -> Option<f32> {
+    let st = styles.get(&nid)?;
+    let w = rects.get(&nid)?[2];
+    let border_lr = if st.border_style.is_some() {
+        used_px(&st.border_width.left) + used_px(&st.border_width.right)
+    } else {
+        0.0
+    };
+    // nid's own percentage padding resolves against ITS containing block;
+    // at the top of the tree that CB is the ICB ≈ the element's own width
+    // (html spans the viewport), so the recursion's None collapses to w.
+    let cb = cb_inline_for(dom, rects, styles, nid, depth - 1).unwrap_or(w);
+    let side = |l: &Option<crate::diting_css::Length>| match l {
+        Some(crate::diting_css::Length::Px(v)) => *v,
+        Some(crate::diting_css::Length::Percent(p)) => p * cb / 100.0,
+        Some(crate::diting_css::Length::Calc { percent, px }) => percent * cb / 100.0 + px,
+        _ => 0.0,
+    };
+    Some(w - border_lr - side(&st.padding.left) - side(&st.padding.right))
+}
+
+/// Px value of a border side (borders cannot be percentages; keywords are
+/// width keywords that never reach a border arm — 0 for both).
+fn used_px(l: &Option<crate::diting_css::Length>) -> f32 {
+    match l {
+        Some(crate::diting_css::Length::Px(v)) => *v,
+        _ => 0.0,
+    }
+}
+
 fn side_css(l: &Option<crate::diting_css::Length>) -> String {
     use crate::diting_css::Length;
     match l {

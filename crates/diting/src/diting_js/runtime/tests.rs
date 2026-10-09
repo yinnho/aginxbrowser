@@ -310,6 +310,52 @@
         );
     }
 
+    /// #242: percentage padding/margin report Chrome's used px from
+    /// getComputedStyle, resolved against the containing block — in-flow
+    /// against the parent's content box (ancestor percentage insets resolve
+    /// recursively), absolutely positioned against the nearest positioned
+    /// ancestor's padding box.
+    #[test]
+    fn computed_style_resolves_percent_padding_margin_to_used_px() {
+        let mut rt = setup_runtime(
+            "<html><head><style>body { margin: 0 }\
+             #host { width: 500px }\
+             #nested { padding: 4%; width: 400px; box-sizing: border-box }\
+             #abs { position: absolute; margin-left: 10% }\
+             #pos { position: relative; width: 300px; border: 10px solid }\
+             </style></head><body>\
+             <div id='host'><div id='inflow' style='padding: 10%; margin-top: 5%'>x</div>\
+             <div id='nested'><div id='deep' style='padding-top: 25%'>y</div></div></div>\
+             <div id='pos'><div id='abs'>z</div></div>\
+             </body></html>",
+        );
+        let out = rt
+            .evaluate(
+                r#"
+            var g = function (id) { return getComputedStyle(document.getElementById(id)); };
+            [g('inflow').getPropertyValue('padding-top'),
+             g('inflow').getPropertyValue('margin-top'),
+             g('deep').getPropertyValue('padding-top'),
+             g('abs').getPropertyValue('margin-left')].join('|');
+        "#,
+            )
+            .unwrap();
+        // inflow: CB = #host content box 500 → 10% = 50, 5% = 25.
+        // deep: #nested is border-box 400; its padding 4% resolves against
+        // #host content 500 = 20/side → #nested content 360 is #deep's CB →
+        // 25% = 90. (Authored px width + % padding under content-box is the
+        // style-map's known compensation gap — px sizes only map over by
+        // px-valued padding/border — so border-box makes the fixture
+        // unambiguous for engine and Chrome alike.)
+        // abs: CB = #pos PADDING box = content 300 + padding 0 = 300 — the
+        // border sits OUTSIDE the padding box, never subtracted → 10% = 30.
+        assert_eq!(
+            out.as_str().unwrap(),
+            "50px|25px|90px|30px",
+            "percent padding/margin resolve against the CSS containing block"
+        );
+    }
+
     /// Issue #29: `Emulation.setEmulatedMedia` (Playwright's
     /// page.emulateMedia) must flip all three faces together — the
     /// matchMedia script face, its change events, AND the @media cascade

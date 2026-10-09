@@ -118,17 +118,17 @@ fn backdrop_filter_computed_face() {
     assert!(super::COMPUTED_STYLE_PROPS.contains(&"backdrop-filter"));
     let mut s = crate::diting_css::ComputedStyle::default();
     assert_eq!(
-        super::computed_style_value(&s, "backdrop-filter", None).as_deref(),
+        super::computed_style_value(&s, "backdrop-filter", None, None).as_deref(),
         Some("none")
     );
     s.backdrop_blur = Some(12.0);
     assert_eq!(
-        super::computed_style_value(&s, "backdrop-filter", None).as_deref(),
+        super::computed_style_value(&s, "backdrop-filter", None, None).as_deref(),
         Some("blur(12px)")
     );
     s.backdrop_blur = Some(2.5);
     assert_eq!(
-        super::computed_style_value(&s, "backdrop-filter", None).as_deref(),
+        super::computed_style_value(&s, "backdrop-filter", None, None).as_deref(),
         Some("blur(2.5px)")
     );
 }
