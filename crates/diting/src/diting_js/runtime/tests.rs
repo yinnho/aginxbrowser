@@ -356,6 +356,38 @@
         );
     }
 
+    /// #243: gBCR serves Chrome-style subpixel geometry while the IDL
+    /// integer accessors stay rounded. taffy's round_layout pins paint boxes
+    /// to the integer grid; the JS-facing rect map now keeps taffy's
+    /// UNROUNDED border-box size, and offset*/client* Math.round on the JS
+    /// side — so `height: 50.6px; border: 1px` reads 52.6 from gBCR and 53
+    /// from offsetHeight, exactly Chrome's split.
+    #[test]
+    fn gbcr_keeps_subpixel_geometry_while_integer_accessors_round() {
+        let mut rt = setup_runtime(
+            "<html><body style='margin: 0'>\
+             <div id='f' style='height: 50.6px; border: 1px solid; width: 100px'></div>\
+             </body></html>",
+        );
+        let out = rt
+            .evaluate(
+                r#"
+            var f = document.getElementById('f');
+            var r = f.getBoundingClientRect();
+            [r.height, r.width, r.top, r.bottom, f.offsetHeight, f.offsetWidth].join('|');
+        "#,
+            )
+            .unwrap();
+        // height 50.6 + 2px border = 52.6 unrounded (was 53); width 100 + 2px
+        // border = 102 (content-box); top edge is integral either way (body
+        // margin 0); offset* keep rounding.
+        assert_eq!(
+            out.as_str().unwrap(),
+            "52.6|102|0|52.6|53|102",
+            "gBCR returns float geometry; offset* round to integers"
+        );
+    }
+
     /// Issue #29: `Emulation.setEmulatedMedia` (Playwright's
     /// page.emulateMedia) must flip all three faces together — the
     /// matchMedia script face, its change events, AND the @media cascade
@@ -2322,17 +2354,18 @@
             return { c1: g('c1'), c2: g('c2'), c3: g('c3'), c4: g('c4') };
         "#).unwrap();
         let v = result;
-        // Widths wobble 1333/1334 with the integral-coordinate posture
-        // (obscura #576): gBCR width is round(right) - round(left), so a
-        // 1333.33px column shifts by 1 depending on its fractional x. The
-        // property under test is NO collapse — upstream #757 dropped the
+        // Since #243 the rect map carries taffy's UNROUNDED sizes, so every
+        // column reads the true fractional 1333.33 → Math.round → 1333 —
+        // the old 1333/1334 wobble (gBCR = round(right) − round(left) under
+        // the integral-coordinate posture, obscura #576) is gone. The
+        // property under test stays NO collapse — upstream #757 dropped the
         // column to 420/873 the moment a margin appeared.
         assert_eq!(
             v["c1"], serde_json::json!([0, 1333]),
             "bare float percentage width resolves against the row"
         );
         assert_eq!(
-            v["c2"], serde_json::json!([133, 1334]),
+            v["c2"], serde_json::json!([133, 1333]),
             "percentage margin must not collapse the float's percentage width"
         );
         assert_eq!(
@@ -2340,7 +2373,7 @@
             "px margin must not collapse the float's percentage width either"
         );
         assert_eq!(
-            v["c4"], serde_json::json!([133, 1334]),
+            v["c4"], serde_json::json!([133, 1333]),
             "in-flow control: percentage width + percentage margin without float"
         );
     }

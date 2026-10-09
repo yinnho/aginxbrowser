@@ -6825,11 +6825,29 @@ pub fn layout_collect_with_images(
             // mapped bounds — a 4-corner bounding box under rotation;
             // translate is already in `rect` via the offset fold).
             let mrect = child_xf.map_rect(rect);
-            rects.insert(*dom_id, mrect);
+            // #243: the JS-facing geometry maps keep taffy's UNROUNDED size —
+            // Chrome's gBCR serves subpixel border boxes (height:50.6px +
+            // 2px border reads 52.6, not 53). Paint below keeps the rounded
+            // box (whole-pixel text/bands are load-bearing), and the IDL
+            // integer accessors (offset*/client*/scroll*) round in JS
+            // (_ditingExtent's Math.round) — only the DOMRect family wants
+            // the fractional truth. Origins stay the walk's rounded
+            // positions: taffy's rounder pins edges to the integer grid, and
+            // authored origins are integral outside zoom/DPR pages.
+            let raw_rect = {
+                let ul = taffy_tree.unrounded_layout(node);
+                Rect {
+                    x: rect.x,
+                    y: rect.y,
+                    width: ul.size.width,
+                    height: ul.size.height - strut_pad,
+                }
+            };
+            rects.insert(*dom_id, child_xf.map_rect(raw_rect));
             // The un-mapped twin plus the total map (event-coordinate
             // surface, blitz #663 family): offsetX/Y inverse-maps the hit
             // point through the map and subtracts this box's padding edge.
-            local_geom.insert(*dom_id, (rect, child_xf.to_array()));
+            local_geom.insert(*dom_id, (raw_rect, child_xf.to_array()));
             // Items under a SetXf bracket paint in LOCAL coordinates (raw
             // `rect`); the prebaked path uses the mapped box.
             let bg_rect = if prebake { mrect } else { rect };

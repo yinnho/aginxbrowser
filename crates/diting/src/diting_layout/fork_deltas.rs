@@ -1267,8 +1267,13 @@ fn inline_block_baseline_is_its_last_line() {
     });
     let box_last_baseline =
         rbox.y + rbox.height - lh_b + super::text::baseline_offset(m.ascent, m.descent, lh_b);
+    // Since #243 the map height is taffy's UNROUNDED size while the span
+    // union's origin stays the rounded walk position — up to ±0.5 of subpixel
+    // skew rides the approximation formula. 1.0 still separates cleanly from
+    // the failure modes this guards (first-line/bottom-edge are a full line
+    // box ≈ 23px off).
     assert!(
-        (base_t - box_last_baseline).abs() < 0.6,
+        (base_t - box_last_baseline).abs() < 1.0,
         "text baseline must sit on the box's last-line baseline: text={base_t} box_last={box_last_baseline} (rt={rt:?} rbox={rbox:?})"
     );
 }
