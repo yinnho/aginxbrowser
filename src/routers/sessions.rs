@@ -647,8 +647,10 @@ pub(crate) async fn flow_run_handler(Json(body): Json<FlowRunBody>) -> Result<im
         .vars
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
-    let mut mgr = session::SESSIONS.lock().await;
-    let receipt = flow::run_flow(&mut mgr, &doc, &vars, body.session_id).await;
+    // #238: the run drives the GLOBAL manager one command at a time (the
+    // #193 send_command shape) — a flow parked in a long wait no longer
+    // holds the SESSIONS lock against every other endpoint.
+    let receipt = flow::run_flow_global(&doc, &vars, body.session_id).await;
     Ok((StatusCode::OK, Json(receipt)))
 }
 

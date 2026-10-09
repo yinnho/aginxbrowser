@@ -31,10 +31,12 @@ ttwid）。doudian-publish 用 `session_id` 复用直接组合。
 - **要干净登录态就开新 account**（`/session/create {"account":"新名字"}`）：
   共享 jar 的会话开登录页会被自己的旧 cookie 静默 302 进工作台，根本到不了
   码。10-09 实测：`scan-1029` 新 jar 一次成。
-- 长等待别让 flow 自己 `wait` 到底——**flow_run 全程持 SESSIONS 锁**，
-  等待期间这台实例所有 HTTP 端点全堵（引擎已知 bug，另立单）。递码模式用
-  `vars.login_timeout_ms:1000` 拿回执里的 qr_data，自己轮询
-  `/session/:id/wait`。
+- 长等待可以放心让 flow 自己 `wait` 到底——**#238 已修**（2026-10-09）：
+  flow_run 现在逐命令走全局管理器、应答在途不持锁（#193 同款），等待
+  期间实例其余端点照常响应（实测 30s wait 中 /sessions 0.77s、
+  /state 0.01s）。要提前拿回执里的 qr_data 仍可用
+  `vars.login_timeout_ms:1000` + 自己轮询 `/session/:id/wait`，但不再是
+  逃生必需。
 
 ## 真机 receipt
 

@@ -809,3 +809,64 @@ async fn run_flow_verdict_step_branches_on_the_fact_sheet() {
     let sid = receipt["session_id"].as_str().unwrap().to_string();
     assert!(mgr.close_and_wait(&sid).await);
 }
+
+/// #238: a flow run against the GLOBAL manager (the HTTP face's path) must
+/// not hold the SESSIONS lock while a wait step is parked. The flow below
+/// waits 3s for a selector that never appears; while it sits in that wait,
+/// an unrelated lock taker has to get through in well under the budget —
+/// the old shape serialized the whole run under one lock, freezing every
+/// endpoint on the instance for the wait's full duration.
+#[tokio::test]
+async fn run_flow_global_releases_sessions_lock_during_wait() {
+    let _net = crate::server::test_util::net_env_guard();
+    let (port, _hits) = crate::server::test_util::recording_server(&[(
+        "GET /wait.html",
+        "<html><body><div id=never-div></div></body></html>",
+    )]);
+    // This test drives the production path end to end: the session lives in
+    // the GLOBAL manager, not a test-local SessionManager::new().
+    let sid = {
+        let mut mgr = SESSIONS.lock().await;
+        mgr.evict_expired();
+        mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/wait.html")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        )
+    };
+    let flow = json!({
+        "steps": [
+            { "op": "wait", "args": { "selector": "#absent", "timeout_ms": 3000 } }
+        ]
+    });
+    let vars = Map::new();
+    let run = run_flow_global(&flow, &vars, Some(sid.clone()));
+    tokio::pin!(run);
+    // The probe runs while the flow sits in its 3s wait: give the wait
+    // command time to go in flight, then take the lock and time it.
+    let probe = async {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let t0 = std::time::Instant::now();
+        let _mgr = SESSIONS.lock().await;
+        assert!(
+            t0.elapsed() < std::time::Duration::from_millis(1000),
+            "SESSIONS lock took {:?} mid-wait — held across the wait step? (#238 regression)",
+            t0.elapsed()
+        );
+    };
+    let (receipt, ()) = tokio::join!(run.as_mut(), probe);
+    // The wait itself still fails honestly: timed-out selector, evidence
+    // receipt, session left alive for takeover.
+    assert_eq!(receipt["status"], "failed", "receipt: {receipt}");
+    assert_eq!(receipt["failed_step"], 0);
+    assert_eq!(receipt["session_id"], sid.as_str());
+    let reason = receipt["reason"].as_str().unwrap();
+    assert!(reason.contains("timeout") && reason.contains("#absent"), "reason: {reason}");
+    assert!(SESSIONS.lock().await.close_and_wait(&sid).await);
+}

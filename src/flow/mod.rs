@@ -23,7 +23,10 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::session::{ScrollDirection, SessionCommand, SessionManager};
+use crate::session::{
+    ScrollDirection, SessionCommand, SessionError, SessionManager, SESSIONS, send_command,
+};
+use tokio::sync::oneshot;
 
 /// flow_install — pull a flow package from a DupHub remote into the
 /// workflow directory (issue #143, the ecosystem's consumption side).
@@ -541,7 +544,7 @@ fn validate_flow_args(flow: &Value, vars: &Map<String, Value>) -> Option<String>
 /// HTTP handlers drive, so quotas, stealth egress, and recording
 /// behavior are identical whether a human, an agent, or a flow does it.
 async fn exec_step(
-    mgr: &mut SessionManager,
+    mgr: &mut FlowSessions<'_>,
     sid: &str,
     op: &str,
     a: &Value,
@@ -748,7 +751,7 @@ async fn exec_step(
             serde_json::from_str(&text).map_err(|e| e.to_string())
         }
         "close" => {
-            mgr.close(sid);
+            mgr.close(sid).await;
             Ok(json!({ "closed": true }))
         }
         other => Err(format!(
@@ -914,7 +917,7 @@ async fn exec_http_step(a: &Value, vars: &Map<String, Value>) -> Result<Value, S
 /// Selenium IDE's soft "verify" is deliberately not offered, a replay must
 /// not limp on).
 async fn run_expect(
-    mgr: &mut SessionManager,
+    mgr: &mut FlowSessions<'_>,
     sid: &str,
     check: &str,
     spec: &Value,
@@ -959,7 +962,7 @@ async fn run_expect(
 /// is left alive on purpose (manual takeover beats forced cleanup).
 #[allow(clippy::too_many_arguments)]
 async fn fail_receipt(
-    mgr: &mut SessionManager,
+    mgr: &mut FlowSessions<'_>,
     sid: &str,
     step_index: usize,
     step: &Value,
@@ -1007,12 +1010,104 @@ async fn fail_receipt(
     })
 }
 
+/// Where a flow run's session commands go (issue #238): a borrowed private
+/// manager (tests, local orchestrators) or the GLOBAL one. The global mode
+/// hands each command off under the lock and awaits its reply lock-free
+/// (the #193 send_command shape).
+struct FlowSessions<'a>(Option<&'a mut SessionManager>);
+
+impl FlowSessions<'_> {
+    #[allow(clippy::too_many_arguments)]
+    async fn create(
+        &mut self,
+        start_url: Option<&str>,
+        use_proxy: bool,
+        cookies: Vec<String>,
+        storage: Option<Value>,
+        ttl_secs: Option<u64>,
+        pin_viewport: Option<(Option<u32>, Option<u32>, bool)>,
+        keepalive: bool,
+        persistent: bool,
+        account: Option<(String, String)>,
+    ) -> String {
+        if let Some(m) = self.0.as_mut() {
+            return m.create(
+                start_url,
+                use_proxy,
+                cookies,
+                storage,
+                ttl_secs,
+                pin_viewport,
+                keepalive,
+                persistent,
+                account,
+            );
+        }
+        let mut mgr = SESSIONS.lock().await;
+        mgr.create(
+            start_url,
+            use_proxy,
+            cookies,
+            storage,
+            ttl_secs,
+            pin_viewport,
+            keepalive,
+            persistent,
+            account,
+        )
+    }
+
+    /// Same contract as [`SessionManager::send`]; the global mode rides
+    /// [`send_command`] so the reply is awaited lock-free.
+    async fn send<T: Send + 'static, E: Into<SessionError> + Send + 'static>(
+        &mut self,
+        session_id: &str,
+        make_cmd: impl FnOnce(oneshot::Sender<Result<T, E>>) -> SessionCommand,
+    ) -> Result<T, SessionError> {
+        if let Some(m) = self.0.as_mut() {
+            return m.send(session_id, make_cmd).await;
+        }
+        send_command(session_id, make_cmd).await
+    }
+
+    async fn close(&mut self, session_id: &str) {
+        if let Some(m) = self.0.as_mut() {
+            m.close(session_id);
+            return;
+        }
+        SESSIONS.lock().await.close(session_id);
+    }
+}
+
 /// Run a flow to completion (or first failure). Returns the receipt —
 /// `status: ok` with `saved` outputs, or `status: failed` with the evidence
 /// bundle from [`fail_receipt`]. Either way the session stays alive and its
 /// id rides on the receipt.
-pub async fn run_flow(
+#[cfg(test)]
+pub(crate) async fn run_flow(
     mgr: &mut SessionManager,
+    flow: &Value,
+    call_vars: &Map<String, Value>,
+    session_id: Option<String>,
+) -> Value {
+    run_flow_inner(FlowSessions(Some(mgr)), flow, call_vars, session_id).await
+}
+
+/// The HTTP face's entry (issue #238): same receipt semantics as
+/// [`run_flow`], but every session command rides the GLOBAL manager one at
+/// a time — the lock is taken to hand a command off and released while its
+/// reply is in flight, so a flow parked in a 180s wait no longer freezes
+/// every other endpoint on the instance.
+pub async fn run_flow_global(
+    flow: &Value,
+    call_vars: &Map<String, Value>,
+    session_id: Option<String>,
+) -> Value {
+    run_flow_inner(FlowSessions(None), flow, call_vars, session_id).await
+}
+
+async fn run_flow_inner(
+    mut mgr: FlowSessions<'_>,
     flow: &Value,
     call_vars: &Map<String, Value>,
     session_id: Option<String>,
@@ -1135,6 +1230,7 @@ pub async fn run_flow(
                 false,
                 None,
             )
+            .await
         }
     };
 
@@ -1151,7 +1247,7 @@ pub async fn run_flow(
         if executed >= max_steps {
             let raw = &steps[pc];
             return fail_receipt(
-                mgr,
+                &mut mgr,
                 &sid,
                 pc,
                 raw,
@@ -1187,7 +1283,7 @@ pub async fn run_flow(
                 Ok(a) => a,
                 Err(e) => {
                     return fail_receipt(
-                        mgr,
+                        &mut mgr,
                         &sid,
                         pc,
                         raw,
@@ -1211,7 +1307,7 @@ pub async fn run_flow(
                         // id, and every literal was checked) — kept as a
                         // loud failure rather than a panicking executor.
                         return fail_receipt(
-                            mgr,
+                            &mut mgr,
                             &sid,
                             pc,
                             raw,
@@ -1231,7 +1327,7 @@ pub async fn run_flow(
                 }
                 Err(e) => {
                     return fail_receipt(
-                        mgr,
+                        &mut mgr,
                         &sid,
                         pc,
                         raw,
@@ -1254,7 +1350,7 @@ pub async fn run_flow(
                 Ok(a) => a,
                 Err(e) => {
                     return fail_receipt(
-                        mgr,
+                        &mut mgr,
                         &sid,
                         pc,
                         raw,
@@ -1266,12 +1362,12 @@ pub async fn run_flow(
                     .await
                 }
             };
-            exec_step(mgr, &sid, &op, &args).await
+            exec_step(&mut mgr, &sid, &op, &args).await
         };
         let result = match result {
             Ok(v) => v,
             Err(e) => {
-                return fail_receipt(mgr, &sid, pc, raw, e, saved, &last_url, executed).await
+                return fail_receipt(&mut mgr, &sid, pc, raw, e, saved, &last_url, executed).await
             }
         };
         if let Some(u) = result.get("url").and_then(|v| v.as_str()) {
@@ -1281,9 +1377,9 @@ pub async fn run_flow(
         }
         if let Some(expect) = raw.get("expect") {
             for (check, spec) in expect.as_object().into_iter().flatten() {
-                if let Err(e) = run_expect(mgr, &sid, check, spec).await {
+                if let Err(e) = run_expect(&mut mgr, &sid, check, spec).await {
                     return fail_receipt(
-                        mgr,
+                        &mut mgr,
                         &sid,
                         pc,
                         raw,
