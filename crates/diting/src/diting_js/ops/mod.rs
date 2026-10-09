@@ -4016,6 +4016,9 @@ fn content_inline_for(
 
 /// Px value of a border side (borders cannot be percentages; keywords are
 /// width keywords that never reach a border arm — 0 for both).
+// #244 helpers sit behind the same screenshot gate as their only caller
+// (`computed_style_value`) — ungated they break the bare `cargo build`.
+#[cfg(feature = "screenshot")]
 fn used_px(l: &Option<crate::diting_css::Length>) -> f32 {
     match l {
         Some(crate::diting_css::Length::Px(v)) => *v,
@@ -4023,6 +4026,7 @@ fn used_px(l: &Option<crate::diting_css::Length>) -> f32 {
     }
 }
 
+#[cfg(feature = "screenshot")]
 fn side_css(l: &Option<crate::diting_css::Length>) -> String {
     use crate::diting_css::Length;
     match l {
