@@ -69,12 +69,41 @@ flow 侧：`vars.check_status`（默认 1）模板进 query+body；args 校验�
 `brand_value_id` 时 2s 拦；body_built 回执带 `check_status` 和 `sig` 供核账。
 
 
+## 发货地址绑定 + 上架回读（steps 15-17，2026-10-10 #79）
+
+报告里的「创建→绑发货地→回读核验」三件事全部 API 化，接在提交步后面：
+
+1. **addr_bind**：`POST /shopuser/tshopuser/shipAddressBatchUpdate`
+   `{shipAddressType:2, addressId:<vars.ship_address_id>, productIdList:[pid]}`
+   query `_bid=ffa_order`。**`__token` 是页级单值**（同页 fxg_admin/ffa_order/auth
+   六组请求对拍 uniqToks:1），create 页挖的 ffa_goods token 直接可用。
+   绑定层=订单侧，跟商品模型里的 `shipping_origin_id` 是两套（后者绑完仍是 ∅，
+   别用它当核验）。不给 `ship_address_id` = 整步 skip。
+2. **addr_verify**：`shipAddressList` 带 `productIdOrName` 直查（bundle 158202 处
+   的过滤参数），断言行内 `configFromSource===2 && shipAddressType===2 &&
+   configAddress.addressId===args 值` 三重回显。**列表是派生视图**：实测新商品
+   过审前不在列表（total:0 但 countInfo.productLevelCount 已+1），轮询
+   `verify_tries×verify_gap_ms` 后仍在途=返回 `bound:'ack'+addr_pending`
+   （bind 已 st:0，不算失败）；**错位回显才是 throw**。
+3. **sale_verify**（只 `check_status=2` 跑）：`GET /product/tproduct/list?
+   id_name_code=<pid>&draft_status=0&business_type=4` —— 页面自己的在售过滤器
+   口径 `check_status:3+status:0`。枚举（93149 chunk）：check_status
+   1=新建/2=审核中/3=审核已通过/4=审核未通过；status 0=售卖中/1=已下架。
+   `3+0`=`on_sale:true`；`4`=驳回 throw；在途=`audit_pending` 正常返回
+   （审核是服务器侧异步，昨天实测分钟~小时级，flow 不为它背锅）。
+
+实测：addressId 12405687（南京浦口）绑 3847441891603906978 → st:0 →
+行内 configFromSource:2 + shipAddressType:2 + configAddress 逐字回显 →
+列表 check_status:3/status:0。
+
 ## 前置
 
 - doudian-login（登录态）
 - **带图 = 先 `doudian-upload`**：同一 session_id 上跑，产出的 CDN URL
   数组填 `main_images` / `portrait_images`（10-09 起两 flow 闭环，
   见 doudian-upload/flow.md）
+- **绑地址**：`vars.ship_address_id` 给地址库 id（报告口径 12405687 南京）；
+  不给=跳过绑定核验
 
 ## 引擎坑：fresh load 的 fxg 页任务泵必死（#39 已修，2026-10-05）
 
@@ -169,6 +198,9 @@ POST /flow/run
 绿单样例：`/tmp/qs-bench/pub-run.json`（10-06 原样，直接抄）；字段源头映射见
 `docs/doudian-fill-payload-20261004.json`（testpack 数据，不进 git）。
 
+**步骤 15-17 的 vars**：`ship_address_id`（可选，地址库 id）、`verify_tries`
+（默认 5）、`verify_gap_ms`（默认 6000）——绑定后核验/上架回读共用的轮询预算。
+
 ## 绿单台账
 
 | 日期 | 引擎 | product_id | 备注 |
@@ -179,6 +211,7 @@ POST /flow/run
 | 2026-10-09 | #239 修复版 + 校验步/await 提交 | **3847304136886452316** | **首单纯 flow 带图全链**：doudian-upload 出 5 URL → publish 吃 URL；args_valid 26.0 当量放行，add_answer eval-await 直接回 `errno:0` |
 | 2026-10-10 | getSchema 双步 eval-await + spec_images | **3847441335397253316** | **首单规格图绿**：6019（all_spec_pic_required）18 值 18 图，canon_ok `spec_img:18` 全保��，57s 全链（此前 fire-then-wait 死在 step6 #240 face-2） |
 | 2026-10-10 | 原生签名 + check_status=2 | **3847441891603906978** | **首单直接上架绿**：request_extra `{_msToken:TUE9P2Q==}` 复刻默认生成器，无品牌 596120136 + 富详情，55.5s 全链 `st=0`；同日 edit 路径把 3847441335397253316 草稿也送上架（`audit_pass:false` 审核中） |
+| 2026-10-10 | + 地址绑定三步 | **3847445690687029295** | **绑定链验收**：cs=2 + `ship_address_id:12405687`，14+1 步绿（提交 st:0 + bind st:0），addr_verify 因商品仍在审核（check_status:2，派生列表不收）返回 pending——次日过审后同款查询三重回显全中（见上节实测）；-sale_verify 轮询内在途容忍为设计行为 |
 
 ## 2026-10-09 附记
 

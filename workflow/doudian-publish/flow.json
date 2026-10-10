@@ -3,7 +3,11 @@
     "create_url": "https://fxg.jinritemai.com/ffa/g/create",
     "schema_ms": 90000,
     "submit_ms": 120000,
-    "check_status": 1
+    "check_status": 1,
+    "ship_address_id": "",
+    "bind_ms": 45000,
+    "verify_tries": 5,
+    "verify_gap_ms": 6000
   },
   "args": [
     "category_leaf_id",
@@ -150,6 +154,33 @@
       },
       "save": "outcome",
       "note": "receipt: {st:0, product_id} = draft landed (proven 2026-10-05: product_id 3846431717594366336, read-back matched 18 spec/18 sku/5 pics). st!==0 with log_id = a server verdict — record it, do NOT retry. A server rejection is a legitimate flow result; the flow only fails on transport/shape errors. Final publish (draft -> on-sale) is the owner's call from the fxg draft box, per the testpack rule: 素材交接不是无条件上架授权"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(async function(){var AID='{{ship_address_id}}';if(!AID)return 'skip: vars.ship_address_id 未设 — 本步只在需要绑发货地址时运行';var t=window.__SHOT,j;try{j=JSON.parse(t)}catch(e){throw new Error('addr_bind: __SHOT unparsed')};if(j.st!==0||!(j.data||{}).product_id)throw new Error('addr_bind: 提交未绿(st='+j.st+')—绑定步只在 st=0 落地后有意义');var pid=String(j.data.product_id);var tl=window.__TL||{},tk=tl.tok||'',lid=tl.lid||'';var q='appid=1&__token='+encodeURIComponent(tk)+'&_bid=ffa_order&_lid='+lid;var r=await fetch('/shopuser/tshopuser/shipAddressBatchUpdate?'+q,{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:JSON.stringify({shipAddressType:2,addressId:Number(AID),productIdList:[pid]})});var x=await r.text();window.__BIND=x;var b;try{b=JSON.parse(x)}catch(e){throw new Error('addr_bind: non-json '+String(x).slice(0,150))};if(b.st!==0)throw new Error('addr_bind st='+b.st+' '+String(b.msg||'').slice(0,120)+' — 常见因: addressId 不属于本店地址库');return JSON.stringify({st:0,pid:pid,addressId:Number(AID)});})()",
+        "timeout_ms": "{{bind_ms}}"
+      },
+      "save": "addr_bind",
+      "note": "2026-10-10 #79 — 创建后绑发货地址（订单侧 API,与商品模型里的 shipping_origin 是两层）。枪法=报告实测: POST /shopuser/tshopuser/shipAddressBatchUpdate {shipAddressType:2,addressId,productIdList:[pid]} query _bid=ffa_order;__token 页面级长效,create 页挖的 ffa_goods token 直接可用(getSchema/edit 用同一枚打 ffa_order 已实测 st=0)。绿证据: addressId 12405687 → st=0,回显 configFromSource:2+shipAddressType:2+configAddress.addressId 逐字一致。vars.ship_address_id 不给=整步 skip(草稿/不绑场景)"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(async function(){var AID='{{ship_address_id}}';if(!AID)return 'skip: no ship_address_id';var t=window.__SHOT,pid=String(JSON.parse(t).data.product_id);var tl=window.__TL||{},tk=tl.tok||'',lid=tl.lid||'';var q='appid=1&__token='+encodeURIComponent(tk)+'&_bid=ffa_order&_lid='+lid;var tries={{verify_tries}},gap={{verify_gap_ms}},last=null;for(var i=0;i<tries;i++){if(i){await new Promise(function(res){setTimeout(res,gap)});}var r=await fetch('/shopuser/tshopuser/shipAddressList?'+q,{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:JSON.stringify({pageNo:1,pageSize:20,productIdOrName:pid})});var x=await r.text();window.__SLIST=x;var j;try{j=JSON.parse(x)}catch(e){throw new Error('addr_verify: bad list '+String(x).slice(0,150))};if(j.st!==0)throw new Error('addr_verify st='+j.st+' '+String(j.msg||'').slice(0,120));var rows=(j.data&&j.data.productShipAddressList)||[];if(rows.length){var row=rows[0],ca=row.configAddress||{};if(row.configFromSource!==2||row.shipAddressType!==2)throw new Error('addr_verify: 绑定未回显 configFromSource='+row.configFromSource+' shipAddressType='+row.shipAddressType);if(Number(ca.addressId)!==Number(AID))throw new Error('addr_verify: 回显地址错位 got='+ca.addressId+' want='+AID);return JSON.stringify({bound:true,addressId:ca.addressId,region:(ca.provinceName||'')+(ca.cityName||'')+(ca.townName||''),detail:String(ca.addressDetail||'').slice(0,40),tries:i+1});}}return JSON.stringify({bound:'ack',addr_pending:true,pid:pid,hint:'bind 已 st:0(服务端确认),订单侧列表是派生视图(新商品随审核翻)——稍后用 productIdOrName='+pid+' 重查'});})()",
+        "timeout_ms": "{{bind_ms}}"
+      },
+      "save": "addr_verify",
+      "note": "绑定核验: shipAddressList 按 productIdOrName 直查,断言 configFromSource===2 && shipAddressType===2 && configAddress.addressId===args 值 三重回显,错位即 throw。列表是订单侧派生视图——实测新商品过审前不在列表里(total:0 但 productLevelCount 已+1),轮询 verify_tries×verify_gap_ms 后仍在途=返回 bound:'ack'+addr_pending(bind 本身已 st:0),不算失败;错位回显才是失败"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(async function(){if(String({{check_status}})!=='2')return 'skip: check_status!=2 — 草稿不走上架核验';var t=window.__SHOT,pid=String(JSON.parse(t).data.product_id);var tl=window.__TL||{},tk=tl.tok||'',lid=tl.lid||'';var q='appid=1&__token='+encodeURIComponent(tk)+'&_bid=ffa_goods&_lid='+lid+'&id_name_code='+pid+'&page=0&pageSize=5&draft_status=0&business_type=4&sort=desc&order_field=audit_time';var tries={{verify_tries}},gap={{verify_gap_ms}},lastRow=null;for(var i=0;i<tries;i++){if(i){await new Promise(function(res){setTimeout(res,gap)});}var r=await fetch('/product/tproduct/list?'+q);var x=await r.text();window.__SALELIST=x;var j;try{j=JSON.parse(x)}catch(e){throw new Error('sale_verify: non-json '+String(x).slice(0,120))};if(j.st!==0)throw new Error('sale_verify st='+j.st+' '+String(j.msg||'').slice(0,120));var items=Array.isArray(j.data)?j.data:((j.data&&(j.data.list||j.data.items||j.data.data))||[]);var rows=items.filter(function(p){return String(p.product_id||p.id||p.productId)===pid});if(rows.length){var cs=rows[0].check_status,stt=rows[0].status;lastRow={check_status:cs,status:stt,tries:i+1};if(cs===4)throw new Error('sale_verify: 审核未通过(check_status=4) — 商品被驳回');if(cs===3&&stt===0)return JSON.stringify({on_sale:true,check_status:cs,status:stt,tries:i+1});if(cs===3)throw new Error('sale_verify: 审核通过但 status='+stt+'(0=售卖中 1=已下架)');}}return JSON.stringify({on_sale:false,audit_pending:true,last:lastRow,hint:'审核在途(提交已 st=0 落地 pid='+pid+')—稍后重查 /product/tproduct/list'});})()",
+        "timeout_ms": "{{submit_ms}}"
+      },
+      "save": "sale_verify",
+      "note": "上架回读(只 check_status=2 跑): GET /product/tproduct/list — 页面自己的在售过滤器=check_status:3+status:0(93149 chunk 枚举: check_status 1新建/2审核中/3审核已通过/4审核未通过;status 0售卖中/1已下架)。轮询 verify_tries×verify_gap_ms(默认30s)等服务器异步审核;3+0=on_sale:true,4=驳回 throw,仍在途=audit_pending 正常返回(提交本身已 st=0,审核是服务器侧的事,flow 不为它背锅)。实测: 3847441891603906978 提交后过审 check_status:3,status:0"
     }
   ]
 }
