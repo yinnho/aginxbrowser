@@ -318,8 +318,10 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
         xhr._responseHeaders = {};
         xhr.responseText = '';
         xhr.response = '';
-        xhr.readyState = 4;
-        xhr._fireEvent('readystatechange');
+        // _setReadyState, not a raw assignment + _fireEvent: _fireEvent
+        // deliberately skips the onreadystatechange property, so a raw DONE
+        // here leaves property-awaiting code waiting forever (#248).
+        xhr._setReadyState(4);
         xhr._fireEvent('timeout');
         xhr._fireEvent('loadend');
       }, this.timeout);
@@ -392,17 +394,18 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
       if (xhr._timeoutTimer) { clearTimeout(xhr._timeoutTimer); xhr._timeoutTimer = null; }
       if (xhr._aborted) return;
       xhr.status = 0;
-      xhr.readyState = 4;
-      xhr._fireEvent('readystatechange');
+      // _setReadyState so property onreadystatechange sees DONE too —
+      // _fireEvent skips that property on purpose (#248)
+      xhr._setReadyState(4);
       if (err && err.__aborted) {
         xhr._aborted = true;
         xhr._fireEvent('abort');
         xhr._fireEvent('loadend');
-        if (xhr.onabort) xhr.onabort(err);
       } else {
+        // _fireEvent already invokes the on* property — no direct call,
+        // it used to fire onerror/onabort twice (#248)
         xhr._fireEvent('error');
         xhr._fireEvent('loadend');
-        if (xhr.onerror) xhr.onerror(err);
       }
     });
   }

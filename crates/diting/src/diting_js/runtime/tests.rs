@@ -4099,6 +4099,117 @@
         );
     }
 
+    /// (#248) The #116 timeout fix only covered addEventListener handlers:
+    /// the error and timeout paths set readyState with a raw assignment and
+    /// _fireEvent('readystatechange'), which deliberately skips the
+    /// onreadystatechange *property* — real-world code (platform SDKs, our
+    /// probes) awaits rs4 on the property and hung forever. The same paths
+    /// also called onerror/onabort directly after _fireEvent had already
+    /// invoked them, double-firing. Both property-attached here.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_xhr_network_error_delivers_rs4_to_property_handlers_once() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        // Bind then drop: nothing listens, so the fetch rejects fast with a
+        // connection error and the XHR walks the catch path.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{port}/page"));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const events = [];
+                    const xhr = new XMLHttpRequest();
+                    xhr.onreadystatechange = () => events.push('rs' + xhr.readyState);
+                    xhr.onerror = () => events.push('error');
+                    xhr.onload = () => events.push('load');
+                    xhr.open('GET', '/refused');
+                    const done = new Promise(r => { xhr.onloadend = () => { events.push('loadend'); r(); }; });
+                    xhr.send();
+                    await done;
+                    return { events, readyState: xhr.readyState, status: xhr.status };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let v = result.value.unwrap();
+        assert_eq!(
+            v["events"],
+            serde_json::json!(["rs1", "rs4", "error", "loadend"]),
+            "network error must reach property handlers exactly once each: rs4, error, loadend"
+        );
+        assert_eq!(v["readyState"], serde_json::json!(4));
+        assert_eq!(v["status"], serde_json::json!(0));
+    }
+
+    /// (#248) Same property-side contract for the timeout path: the deadline
+    /// must hand DONE to onreadystatechange, not just to listeners (#116).
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_xhr_timeout_delivers_rs4_to_property_handlers() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut parked = Vec::new();
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(s) => parked.push(s), // hold open, never respond
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{port}/page"));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const events = [];
+                    const xhr = new XMLHttpRequest();
+                    xhr.onreadystatechange = () => events.push('rs' + xhr.readyState);
+                    xhr.ontimeout = () => events.push('timeout');
+                    xhr.onerror = () => events.push('error');
+                    xhr.open('GET', '/hang');
+                    xhr.timeout = 300;
+                    const done = new Promise(r => { xhr.onloadend = () => { events.push('loadend'); r(); }; });
+                    xhr.send();
+                    await done;
+                    return { events, readyState: xhr.readyState, status: xhr.status };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let v = result.value.unwrap();
+        assert_eq!(
+            v["events"],
+            serde_json::json!(["rs1", "rs4", "timeout", "loadend"]),
+            "deadline must hand DONE to the property handler too, then timeout+loadend exactly once"
+        );
+        assert_eq!(v["readyState"], serde_json::json!(4));
+        assert_eq!(v["status"], serde_json::json!(0));
+    }
+
     /// (#116) Chrome parity: sync XHR with a non-zero timeout throws
     /// InvalidAccessError on send() — there is no event-loop turn to fire
     /// the deadline on.
