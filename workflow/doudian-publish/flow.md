@@ -230,7 +230,7 @@ POST /flow/run
 | 2026-10-09 | #239 修复版 + 校验步/await 提交 | **3847304136886452316** | **首单纯 flow 带图全链**：doudian-upload 出 5 URL → publish 吃 URL；args_valid 26.0 当量放行，add_answer eval-await 直接回 `errno:0` |
 | 2026-10-10 | getSchema 双步 eval-await + spec_images | **3847441335397253316** | **首单规格图绿**：6019（all_spec_pic_required）18 值 18 图，canon_ok `spec_img:18` 全保��，57s 全链（此前 fire-then-wait 死在 step6 #240 face-2） |
 | 2026-10-10 | 原生签名 + check_status=2 | **3847441891603906978** | **首单直接上架绿**：request_extra `{_msToken:TUE9P2Q==}` 复刻默认生成器，无品牌 596120136 + 富详情，55.5s 全链 `st=0`；同日 edit 路径把 3847441335397253316 草稿也送上架（`audit_pass:false` 审核中） |
-| 2026-10-10 | + 地址绑定三步 | **3847445690687029295** | **绑定链验收**：cs=2 + `ship_address_id:12405687`，14+1 步绿（提交 st:0 + bind st:0），addr_verify 因商品仍在审核（check_status:2，派生列表不收）返回 pending——次日过审后同款查询三重回显全中（见上节实测）；-sale_verify 轮询内在途容忍为设计行为 |
+| 2026-10-10 | + 地址绑定三步 | **3847445690687029295** | **绑定链验收**：cs=2 + `ship_address_id:12405687`，14+1 步绿（提交 st:0 + bind st:0），addr_verify 因商品仍在审核（check_status:2，派生列表不收）返回 pending——次日过审后同款查询三重回显全中（见上节实测）；-sale_verify 轮询内在途容忍为设计行为；本单审核慢（**截至 13:37 提交后 ~50 分钟仍 cs:2**） |
 
 ## 2026-10-09 附记
 
