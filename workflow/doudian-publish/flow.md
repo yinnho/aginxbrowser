@@ -24,9 +24,16 @@ product_id 3846431717594366336（18 spec / 18 SKU / 主5图 / 竖5图 / 8图详�
 ## 关键形状（10013 的三具尸体换来的）
 
 - `pic`/`main_image_three_to_four`/`long_pic`/`white_background_pic`：`[{url:"..."}]`，字符串数组=毒
-- `spec_detail`：`[{id, name, spec_values:[{id,name}]}]`；`sku_detail`：`[{spec_detail_ids:[id],
-  price:"44.9", stock_info:{stock_num:999}, code}]` — spec_name/value_name/spec_desc 都是自造毒键
-- `category_properties`：`{"<prop_id>":[{value_id, value_name}]}`，自由文本属性 value_id 空串合法
+- `spec_detail`：`[{id, name, spec_values:[{id,name,img_url?}]}]`；**规格值图=值对象上的
+  `img_url`**（2026-10-10 两路坐实：页面自己的 zod schema F 里有 `img_url:string.optional()`；
+  canonicalize 差分探针 18/18 回显保留）。6019 这类 `all_spec_pic_required:true` 品类每个值
+  必带；调用方给 `args.spec_images`（与 `spec_values` 平行的 URL 数组，doudian-upload 出），
+  args 校验步拦长度不齐，canon_ok 断言回显数。`sku_pic` 是自造毒键（st=500 组件数据解析失败）。
+- `sku_detail`：`[{spec_detail_ids:[id], price:"44.9", stock_info:{stock_num:999}, code}]`
+  — spec_name/value_name/spec_desc 都是自造毒键
+- `category_properties`：`{"<prop_id>":[{value_id, value_name}]}`，自由文本属性 value_id 空串合法；
+  **6019 必填品牌 1687**——漏了它 getSchema 回 `st=10002 参数错误`（不是 img_url 的锅，
+  绿形状+品牌+品类切换即 st=0）
 - 提交体 model **带 `{value:...}` 壳**（formatSchemaData 原样输出），zod 校验去壳只是埋点
 - `__token` 页面级长效：resource timing 里 `/product/tproduct/` 请求的 query 挖
 - `msToken = btoa(btoa(shop_id))` 本地算；`request_extra` 签名失败前端自己发 `_signError:"1"`
@@ -82,6 +89,14 @@ product_id 3846431717594366336（18 spec / 18 SKU / 主5图 / 竖5图 / 8图详�
 
 ## 提交步 = eval 内 await（#240 第一面已修，形状保留，2026-10-09）
 
+**2026-10-10 补：两个 getSchema 步同款改造。** 带 spec_images 的首跑死在 step6——
+fresh 导航 boot 风暴把 clean getSchema 的 fire-and-forget 续体丢了（wait 泵 90s 空转，
+#240 face-2 残面第三次现身，这次咬的是 schema 步不是提交步）。step5/step8 改成
+`(async function(){ … var x = await afetch(...); window.__CLEAN=x; … })()`、
+`timeout_ms:{{schema_ms}}`，wait 步保留当瞬时通过的哨兵。改完首跑即绿，副作用是
+整链 190s → **57s**（wait 泵不再空转等回包）。净层 200 页内不落时，先查这两步
+是不是被改回了 fire-then-wait。
+
 fire-and-forget fetch + `wait` 泵等 `window.__SHOT` 的老形状，在一次
 带图跑里死透。#240 拆成了两具尸体：
 
@@ -124,6 +139,8 @@ POST /flow/run
 `desc_html`、`freight_id`、`spec_id`、`spec_name`、`spec_values[]`、
 `skus[{price,stock,code}]`、`brand_prop`、`brand_value_id?`、
 `brand_value_name`、`material_prop`、`material_value_name`。
+可选 `spec_images[]`：与 spec_values 平行的规格值图 URL（强制规格图品类
+如 6019 必给，长度不齐 args 校验步 2s 拦）。
 
 绿单样例：`/tmp/qs-bench/pub-run.json`（10-06 原样，直接抄）；字段源头映射见
 `docs/doudian-fill-payload-20261004.json`（testpack 数据，不进 git）。
@@ -136,6 +153,7 @@ POST /flow/run
 | 2026-10-06 | 同 | 3846778561813938623 | s_18 接管跑法 |
 | 2026-10-09 | **#237 修复版** | 3847273730942305306 | s_3 当日扫码会话直跑，14 步全绿（timer 门 0ms、submit 0.9s） |
 | 2026-10-09 | #239 修复版 + 校验步/await 提交 | **3847304136886452316** | **首单纯 flow 带图全链**：doudian-upload 出 5 URL → publish 吃 URL；args_valid 26.0 当量放行，add_answer eval-await 直接回 `errno:0` |
+| 2026-10-10 | getSchema 双步 eval-await + spec_images | **3847441335397253316** | **首单规格图绿**：6019（all_spec_pic_required）18 值 18 图，canon_ok `spec_img:18` 全保留，57s 全链（此前 fire-then-wait 死在 step6 #240 face-2） |
 
 ## 2026-10-09 附记
 
