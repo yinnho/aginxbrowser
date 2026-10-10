@@ -1,0 +1,171 @@
+{
+  "vars": {
+    "publish_url": "https://item.upload.taobao.com/sell/v2/publish.htm",
+    "form_ready_ms": 120000,
+    "submit_result_ms": 120000
+  },
+  "args": [
+    "cat_id",
+    "title",
+    "price",
+    "quantity",
+    "brand_id",
+    "brand_text",
+    "brand_prop_name",
+    "shipping_value",
+    "template_id",
+    "sku_prop_name",
+    "sku_param",
+    "sku_stock",
+    "main_images",
+    "portrait_images",
+    "desc_images",
+    "skus"
+  ],
+  "create": {
+    "width": 1440,
+    "height": 900
+  },
+  "steps": [
+    {
+      "op": "preload",
+      "args": {
+        "scripts": [
+          "(function(){var BLOCK=/merchant-micro-mods\\/qn_header|crs-qn\\/(microapp-loader|qnWorkbench)|ihelper\\/sdk-loader/;function bad(node){try{return node&&node.nodeName==='SCRIPT'&&node.src&&BLOCK.test(node.src)}catch(e){return false}}['appendChild','insertBefore','append','prepend'].forEach(function(m){var proto=Node.prototype;var orig=proto[m];if(typeof orig!=='function')return;proto[m]=function(node){if(bad(node)){try{console.error('[BLOCK] '+node.src)}catch(e){};return node}return orig.apply(this,arguments)}})})()",
+          "(function(){var BAD=/^https?:\\/\\/everyhelp\\.(cdn\\.)?taobao\\.com\\//;var of=window.fetch;if(typeof of==='function'){window.fetch=function(input,init){var u=typeof input==='string'?input:(input&&input.url)||'';try{u=String(u)}catch(e){}if(BAD.test(u)){try{console.error('[BLOCK] '+u)}catch(e){};return Promise.reject(new TypeError('Failed to fetch'))}return of.apply(this,arguments)}}var op=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){if(BAD.test(String(u))){try{console.error('[BLOCK] '+u)}catch(e){};this.__ehb=1;return}return op.apply(this,arguments)};var os=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.send=function(){if(this.__ehb){return}return os.apply(this,arguments)}})()"
+        ]
+      },
+      "note": "block qn_header/microapp-loader/workbench injections — the publish page pulls a dozen qn micro-mods; blocking them was part of the proven stable-boot recipe (fastlayout/witness stubs from the debug runs are deliberately NOT here: fake geometry has no place in a real publish). Also blocks everyhelp.* widget calls at fetch/XHR level: on 4/4 runs (2026-10-06, s_23/s_26/s_27/s_28) the publish page's getWidgetVersion response carried Set-Cookie deletions of unb/sn/uss on an otherwise-200 payload — a server-side session revocation that leaves every later submit.htm answered {sessionExpired:true}. everyhelp is help-center widget infra with zero role in publishing; refusing it keeps the SSO cookie set intact for the whole form fill + submit"
+    },
+    {
+      "op": "navigate",
+      "args": {
+        "url": "{{publish_url}}?catId={{args.cat_id}}"
+      },
+      "note": "catId-pinned publish form (201305805 car-screen film was the proven category). If login is expired this lands on login.taobao.com and the NEXT wait times out — run taobao-login first"
+    },
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "!!window.GlobalStore && !!window.GlobalStore.engine && document.querySelectorAll('input[placeholder]').length > 5",
+        "timeout_ms": "{{form_ready_ms}}"
+      },
+      "save": "form_ready",
+      "note": "engine + form fields up. Login redirect never grows GlobalStore — timeout receipt screenshot shows the login page, hint: taobao-login then re-run"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(function(){window.__tf=null;setTimeout(function(){window.__tf='fired'},100);return 'armed'})()"
+      },
+      "save": "timer_armed",
+      "note": "macrotask wedge probe step 1: the publish page occasionally starves MessageChannel/rAF/setTimeout on a session (per-session engine bug, React commits stall forever) — detect it BEFORE an hour of binding work"
+    },
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "window.__tf==='fired'",
+        "timeout_ms": 8000
+      },
+      "save": "timer_ok",
+      "note": "wedge probe step 2: if this times out the page's timers are dead — re-run the flow (fresh session, wedges are per-session), do NOT wait it out"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(function(){var WANT=['title','shippingArea','template','saleProp','customSaleProp','sku','price','quantity','mainImagesGroup','threeToFourImages','desc'];var els=document.querySelectorAll('input[placeholder]');var seed=null;for(var i=0;i<els.length;i++){if((els[i].placeholder||'').indexOf('汉字')>=0){seed=els[i];break}}if(!seed){var all=document.querySelectorAll('input,textarea');if(!all.length)throw new Error('stash: no form inputs — page shape unexpected (login redirect?)');seed=all[0]}var hk=null;for(var k in seed){if(k.indexOf('__reactInternalInstance')===0||k.indexOf('__reactFiber')===0){hk=k;break}}if(!hk)throw new Error('stash: no react fiber key on seed');var top=seed[hk],g=0;while(top.return&&g<800){top=top.return;g++}window.__F={};var found={};(function walk(f){if(!f||f.memoizedState===undefined)return;var st=f.stateNode;if(st&&typeof st==='object'&&!(st instanceof Element)&&st.props){var nm=st.props.name;if(nm&&WANT.indexOf(nm)>=0&&!found[nm]&&typeof st.props.onChange==='function'){found[nm]=1;window.__F[nm]=st}}walk(f.child);walk(f.sibling)})(top);var SKU_NAME='{{args.sku_prop_name}}';(function walk2(f){if(!f||f.memoizedState===undefined)return;var st=f.stateNode;if(st&&typeof st==='object'&&!(st instanceof Element)&&st.props&&st.props.name===SKU_NAME&&!window.__F[SKU_NAME]&&typeof st.props.onChange==='function'){window.__F[SKU_NAME]=st}walk2(f.child);walk2(f.sibling)})(top);var miss=WANT.filter(function(n){return !found[n]});if(miss.length)throw new Error('stash: fields not found: '+miss.join(','));return Object.keys(window.__F).length})()",
+        "timeout_ms": 120000
+      },
+      "save": "stashed",
+      "note": "fiber-tree walk stashes field instances (props.name + onChange) on window.__F. Throws listing any missing field. The brand Select is deliberately NOT stashed here — see the fire step for why any stashed brand instance is poison"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(function(){var D={{args}};var F=window.__F,eng=window.GlobalStore.engine,fv=eng.getModels().formValues;function st(k,fn){try{fn()}catch(e){throw new Error('bind:'+k+':'+String(e&&e.message||e).slice(0,140))}}st('customSaleProp',function(){var csp=F.customSaleProp,val=csp.props.value;if(!val||!val[0])throw new Error('no prop group');val[0].items=D.skus.map(function(s){return{value:s.value,text:s.value,img:s.img,remark:''}});csp.props.onChange(val)});st('title',function(){F.title.props.onChange(D.title)});st('price',function(){F.price.props.onChange(String(D.price))});st('quantity',function(){F.quantity.props.onChange(String(D.quantity))});st('shippingArea',function(){var ds=F.shippingArea.props.dataSource,nj=null;(ds||[]).forEach(function(t){if(String(t.value)==='1'){(t.children||[]).forEach(function(p){(p.children||[]).forEach(function(c){if(String(c.value)===String(D.shipping_value))nj=c})})}});if(!nj)throw new Error('value '+D.shipping_value+' not in dataSource');F.shippingArea.props.onChange({type:'1',value:nj})});st('template',function(){if(D.template_id){F.template.props.onChange(String(D.template_id))}});st('mainImagesGroup',function(){F.mainImagesGroup.props.onChange(D.main_images.map(function(u){return typeof u==='string'?{url:u}:u}))});st('threeToFourImages',function(){F.threeToFourImages.props.onChange(D.portrait_images.map(function(u){return typeof u==='string'?{url:u}:u}))});st('desc',function(){F.desc.props.onChange('<div>'+D.desc_images.map(function(x){return '<img src=\"'+x.url+'\">'}).join('')+'</div>')});st('sku',function(){var SP=null;try{SP=F[D.sku_prop_name]}catch(e){}var ds=SP&&SP.props&&SP.props.dataSource||null;if(!ds){try{ds=eng.getComponent(D.sku_prop_name).getProps().dataSource||null}catch(e){}}var opt=null;(ds||[]).forEach(function(o){if(o&&String(o.value)===String(D.sku_param))opt=o});var rows=D.skus.map(function(s){var r={salePropKey:'custom_-1-'+s.value,props:[{name:'custom_-1',value:s.value,text:s.value}],skuPrice:String(s.price),skuStock:D.sku_stock,skuPicture:s.img,readonlyFields:[]};r[D.sku_prop_name]=opt?[{value:opt.value,text:opt.text}]:[String(D.sku_param)];return r});F.sku.props.onChange(rows);window.__skuParamShape=opt?'object-from-dataSource':'legacy-naked-string'});st('mainImagesGroup-obj',function(){var mi={images:D.main_images.map(function(u){return typeof u==='string'?{url:u}:u})};var mc=eng.getComponent('mainImagesGroup');mc.setProps({value:mi});mc.emit('change');fv.mainImagesGroup=mi});return (eng.getModels().formValues.sku||[]).length})()",
+        "timeout_ms": 120000
+      },
+      "save": "sku_bound",
+      "note": "official-path binding of every field via props.onChange (engine model + validators both see it): customSaleProp items rebuilt with sku images, title/price/quantity, shippingArea node picked from LIVE dataSource by value, freight template, main+portrait images, plain desc html, 18 sku rows (salePropKey custom_-1-<value>, skuParam packing-list in bracket notation), then mainImagesGroup AGAIN as the {images:[{url}]} object form via component setProps+emit+fv write (the bare-array onChange serializes to a server-visible empty — both shapes needed). Brand is NOT bound here — it gets its own fresh-instance fire step later. Returns sku row count"
+    },
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "(window.GlobalStore.engine.getModels().formValues.sku||[]).length === 0",
+        "timeout_ms": 20000
+      },
+      "save": "sku_settled",
+      "note": "async commits settle into the engine model"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(function(){return 'skipped-singlesku'})()",
+        "timeout_ms": 120000
+      },
+      "save": "skuparam_shape",
+      "note": "single-sku mode: custom_-1 axis rows are rejected by the 2026-10-10 category validator (CHK_SKU_JSON_ERROR even on unchanged edits of live items); sku:[] + price + quantity is the accepted single-sku publish"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(function(){var D={{args}},eng=window.GlobalStore.engine,fv=eng.getModels().formValues;var cur=fv.descRepublicOfSell?JSON.parse(JSON.stringify(fv.descRepublicOfSell)):{descPageCommitParam:{}};var groups=D.desc_images.map(function(x,i){var h=Math.round(620*x.height/x.width);var gid='group'+(1770000000000+i*977)+'01';var cid='component'+(1770000000000+i*977)+'02';return{propertyPanelVisible:true,hide:false,boxStyle:{'background-color':'transparent',width:620,height:h},groupName:'模块',components:[{componentType:'pic',boxStyle:{rotate:0,top:0,left:0,width:620,'background-image':x.url,height:h},sellerEditable:true,imgStyle:{top:0,left:0,width:620,height:h},componentId:cid,level:2,isEdit:false,groupId:gid,componentName:'图片组件',type:'component',clipType:'',selected:false}],level:1,bizName:'图文模块',bizCode:0,groupId:gid,type:'group'}});var dcp=cur.descPageCommitParam||{};dcp.templateContent=JSON.stringify({groups:groups,sellergroups:[]});dcp.opt=2;dcp.editType='high';dcp.changed=true;cur.descPageCommitParam=dcp;var c=eng.getComponent('descRepublicOfSell');c.setProps({value:cur});c.emit('change');fv.descRepublicOfSell=cur;return dcp.templateContent.length})()",
+        "timeout_ms": 120000
+      },
+      "save": "desc_len",
+      "note": "wangpu desc — the LAST server gate. descRepublicOfSell.descPageCommitParam.templateContent = JSON {groups:[...],sellergroups:[]} in the FULL group form (cloned from a real editor-built draft: type:group, bizName 图文模块, one pic component, background-image url, 620-wide box, height from image aspect). opt=2 editType=high. Simplified picGroup shape gets 保存详情数据失败; descType=0 does NOT bypass. Returns templateContent length"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(function(){window.__subResp=null;function cap(u,b){try{if(String(u).indexOf('submit.htm')>=0&&window.__subResp===null)window.__subResp=String(b).slice(0,4000)}catch(e){}}var fo=window.fetch;window.fetch=function(u,o){var p;try{p=fo.apply(this,arguments)}catch(e){throw e}try{var ru=String(u);if(ru.indexOf('submit.htm')>=0){var pr=p.then(function(r){r.clone().text().then(function(t){cap(ru,t)}).catch(function(){})}).catch(function(){})}}catch(e){};return p};var xo=XMLHttpRequest.prototype.open,so=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.open=function(m,u){this.__u=String(u);return xo.apply(this,arguments)};XMLHttpRequest.prototype.send=function(b){var x=this;if(this.__u&&this.__u.indexOf('submit.htm')>=0){x.addEventListener('load',function(){cap(x.__u,x.responseText)})}return so.apply(this,arguments)};return 'armed'})()"
+      },
+      "save": "hook_armed",
+      "note": "capture the submit.htm response body in-page (fetch + XHR both hooked) — the page may navigate away on success before the network face can be read"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(function(){var D={{args}};function walk(){var bins=document.querySelectorAll('input');var bel=null;for(var i=0;i<bins.length;i++){if((bins[i].placeholder||'')==='请输入'){bel=bins[i];break}}if(!bel)return null;var hk=null;for(var k in bel){if(k.indexOf('__reactFiber')===0||k.indexOf('__reactInternalInstance')===0){hk=k;break}}if(!hk)return null;var f=bel[hk];for(var up=0;f&&up<40;up++){var sn=f.stateNode;if(sn&&sn.props&&sn.props.name===D.brand_prop_name&&typeof sn.props.onChange==='function')return sn;f=f.return}return null}function fire(s,v,o){window.__brandUsed={value:o.value,text:o.text};s.props.onChange(v,null,o)}function family(t){return String(t).indexOf('无品牌')===0}var sel=walk();if(!sel)throw new Error('fire: brand select '+D.brand_prop_name+' not found above input');window.__brandSel=sel;var cur=null;try{cur=sel.props.value}catch(e){}var isOpt=function(o){return o&&typeof o==='object'&&o.value!==undefined&&String(o.value)!=='-1'};if(cur&&typeof cur==='object'&&isOpt(cur)){if(String(cur.value)===String(D.brand_id)){fire(sel,cur.value,cur);window.__brandVia='verified-default';return 'brand-fired(verified-default)'}var ds0=null;try{ds0=sel.props.dataSource}catch(e){}var o0=null;(ds0||[]).forEach(function(x){if(x&&String(x.value)===String(D.brand_id))o0=x});if(o0){fire(sel,o0.value,o0);window.__brandVia='verified';return 'brand-fired(verified)'}if(family(cur.text)&&family(D.brand_text)){fire(sel,cur.value,cur);window.__brandVia='verified-default-alias';return 'brand-fired(verified-default-alias:'+cur.value+')'}}var bins=document.querySelectorAll('input');var bel=null;for(var i=0;i<bins.length;i++){if((bins[i].placeholder||'')==='请输入'){bel=bins[i];break}}function typeInto(t){if(!bel)return;var wrap=bel.closest('div[class*=select]')||bel.parentElement;['mousedown','mouseup','click'].forEach(function(ev){wrap.dispatchEvent(new MouseEvent(ev,{bubbles:true,cancelable:true,composed:true}))});try{bel.focus()}catch(e){};var setter=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;setter.call(bel,t);bel.dispatchEvent(new Event('input',{bubbles:true,composed:true}))}typeInto(family(D.brand_text)?'无品牌':String(D.brand_text));window.__brandVia='armed-waiting-async';window.__brandArm={id:String(D.brand_id),armedAt:Date.now(),firedAt:null,ticks:0,retyped:false};var iv=setInterval(function(){var A=window.__brandArm;A.ticks++;if(A.ticks===10&&!A.retyped){A.retyped=true;typeInto(family(D.brand_text)?'无品牌':String(D.brand_text).slice(0,6))}var s=walk();if(!s)return;var v=null;try{v=s.props.value}catch(e){}if(isOpt(v)){var ok=null,via=null;if(String(v.value)===String(D.brand_id)){ok=v;via='verified-typed'}else if(String(v.text)===String(D.brand_text)){ok=v;via='verified-typed-text'}else if(family(v.text)&&family(D.brand_text)){ok=v;via='verified-default-alias'}if(ok){clearInterval(iv);A.firedAt=Date.now();window.__brandVia=via;fire(s,ok.value,ok);return}}var dd=null;try{dd=s.props.dataSource}catch(e){}if(Array.isArray(dd)){var o=null;(dd||[]).forEach(function(x){if(x&&String(x.value)===String(D.brand_id))o=x});if(o){clearInterval(iv);A.firedAt=Date.now();window.__brandVia='armed-fired';fire(s,o.value,o);return}}if(Date.now()-A.armedAt>88000){clearInterval(iv);if(!window.__brandUsed){window.__brandVia='legacy-direct';s.props.onChange(String(D.brand_id),null,{value:String(D.brand_id),text:D.brand_text})}}},400);return 'brand-armed(materializing)'})()",
+        "timeout_ms": 120000
+      },
+      "save": "brand_fired",
+      "note": "brand fire v4 — official faces first, typed materialization second. Dry-run 2026-10-08 (s_82/s_83/s_84): the fresh form's select value is UNDEFINED until the dropdown is opened AND text is typed into the search input — only then Fusion Next resolves it to the official option object ({value:3246379,text:无品牌} for cat 201305805; the 50-entry dataSource is a hot-brand list that never contains the no-brand entry, and the async search cannot be fired synthetically). Precedence: (1) value already an object — exact id match (verified-default), dataSource id match (verified), 无品牌-family alias (verified-default-alias: the form's own default IS the official face); (2) materialize: open dropdown + type brand text (family probe types 无品牌, else the full text; one retype with a 6-char prefix at tick 10), poll 400ms for the value to resolve to an object — exact id (verified-typed), exact text (verified-typed-text: the official option for that text wins over a stale args id), or family alias; (3) dataSource arrival of args.brand_id (armed-fired); (4) at 88s the legacy direct fire of args (marked legacy-direct — the 10-04/10-07 items were built this way, server normalizes). The fired object is recorded on window.__brandUsed; step 13 binds THAT. Never fire an id no official face vouched for while a verified face is visible (#203). NOTE: Fusion materializes the typed text as a PENDING synthetic object {value:-1,text} first — the -1 is the custom-input marker, not an official option (dry-run s_85 tick 1 caught it; the engine resolved it by text, but recording -1 into __brandUsed would bind garbage into the submit). isOpt() rejects -1 everywhere; the poll waits the extra ~1s for the resolved official object."
+    },
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "!!((window.GlobalStore.engine.getModels().formValues.catProp||{})['{{args.brand_prop_name}}'])",
+        "timeout_ms": 90000
+      },
+      "save": "brand_settled",
+      "note": "engine catProp committed as {p-20000:{value:-1,text:...}} — the client validator's passing shape. If this never lands the instance was stale and the run is dead"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(function(){var D={{args}},eng=window.GlobalStore.engine,fv=eng.getModels().formValues;var cp={};var bu=window.__brandUsed||null;var bnum=Number(D.brand_id);cp[D.brand_prop_name]=bu?{value:bu.value,text:bu.text}:{value:(typeof D.brand_id==='string'&&isNaN(bnum))?D.brand_id:bnum,text:D.brand_text};fv.catProp=cp;var pre={brandVia:(window.__brandVia||'unknown'),skuParam:'singlesku-empty',catProp:JSON.stringify(fv.catProp),tpl:((fv.descRepublicOfSell||{}).descPageCommitParam||{}).templateContent?1:0,main:(fv.mainImagesGroup&&fv.mainImagesGroup.images||[]).length,sku:(fv.sku||[]).length};if(pre.tpl!==1)throw new Error('preflight: desc templateContent missing');if(pre.main<1)throw new Error('preflight: mainImagesGroup empty');var app=window.GlobalStore.app;var hs=app.handles||[];var idx=-1;for(var i=0;i<hs.length;i++){try{if(String(hs[i]).indexOf('pageState.submit')>=0){idx=i;break}}catch(e){}}if(idx<0)throw new Error('preflight: pageState handle not found');var ctx={};try{for(var k in app){try{ctx[k]=app[k]}catch(e){}}}catch(e){}ctx.pageState={submit:function(cfg){return new Promise(function(res,rej){var d=cfg.data||{};var parts=[];for(var kk in d){if(kk==='_tb_token_')continue;var v=d[kk];if(v===null||v===undefined)v='';parts.push(encodeURIComponent(kk)+'='+encodeURIComponent(typeof v==='string'?v:JSON.stringify(v)))}var mc=document.cookie.match(/(?:^|;\\s*)_tb_token_=([^;]+)/);if(mc)parts.push('_tb_token_='+encodeURIComponent(mc[1]));var hdrs={'Accept':'application/json, text/plain, */*','Content-Type':'application/x-www-form-urlencoded','X-Requested-With':'XMLHttpRequest'};if(window.csrfToken&&window.csrfToken.tokenValue)hdrs['X-XSRF-TOKEN']=window.csrfToken.tokenValue;var ch=cfg.headers||{};for(var hk in ch)hdrs[hk]=ch[hk];var x=new XMLHttpRequest();var url=cfg.url||'/sell/v2/submit.htm';if(url.indexOf('/')!==0){url=location.href.replace(/[^\\/]*$/,'').replace(/\\/$/,'')+'/'+url}x.open('POST',url,true);for(var hk2 in hdrs){try{x.setRequestHeader(hk2,hdrs[hk2])}catch(e2){}}x.onreadystatechange=function(){if(x.readyState===4){window.__subResp=String(x.responseText||'').slice(0,4000);res(null)}};x.send(parts.join('&').replace(/%20/g,'+'))})}};try{hs[idx](ctx)}catch(e){}eng.getComponent('button-submit').emit('click');return JSON.stringify(pre)})()",
+        "timeout_ms": 120000
+      },
+      "save": "preflight",
+      "note": "single-sku submit: the 0.7.91 bundle killed the button chain (emit click = zero requests, edit pages too), so the pageState boot-closure rebind fires the native validate+serialize chain into a faithful axios-replica XHR (toQueryString encoding, Accept/Content-Type/XSRF/x-gpf headers). sku:[] rides the validator's single-sku mode. Verified green 2026-10-10: item 1090804069864 in 1207ms"
+    },
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "!!window.__subResp || location.href.indexOf('success.htm')>=0",
+        "timeout_ms": "{{submit_result_ms}}"
+      },
+      "save": "answered",
+      "note": "either the hooked body lands or the page navigates to success.htm"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(function(){var out={url:location.href.slice(0,140)};if(window.__subResp){out.raw_head=window.__subResp.slice(0,200);try{var j=JSON.parse(window.__subResp);var gm=(j.models||{}).globalMessage||{};out.success=gm.type==='success';if(gm.successUrl){var m=/primaryId=(\\d+)/.exec(gm.successUrl);if(m)out.item_id=m[1]}if((j.models||{}).formError){var fe=[];Object.keys(j.models.formError).forEach(function(k){var msgs=(j.models.formError[k]||{}).message||[];msgs.forEach(function(x){fe.push(k+':'+(x.code||'')+':'+String(x.msg||'').slice(0,60))})});out.form_error=fe}}catch(e){out.parse_error=String(e).slice(0,80)}}else{out.success=out.url.indexOf('success.htm')>=0;if(out.success){var m=/primaryId=(\\d+)/.exec(location.href);if(m)out.item_id=m[1]}out.note='no captured submit.htm body — page navigated before hook read?'}return JSON.stringify(out)})()"
+      },
+      "save": "outcome",
+      "note": "parse the receipt: {success, item_id, form_error[], url}. A server REJECTION is a legitimate flow result (status:ok) — read outcome.form_error for the next gate; the flow only fails on transport/shape errors. Single submit per run — the testpack rule: never blind-retry"
+    }
+  ]
+}
