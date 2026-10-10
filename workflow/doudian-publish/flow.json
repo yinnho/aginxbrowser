@@ -2,7 +2,8 @@
   "vars": {
     "create_url": "https://fxg.jinritemai.com/ffa/g/create",
     "schema_ms": 90000,
-    "submit_ms": 120000
+    "submit_ms": 120000,
+    "check_status": 1
   },
   "args": [
     "category_leaf_id",
@@ -39,7 +40,7 @@
       "save": "args_valid",
       "note": "fail in seconds, not after the whole 3-minute chain (#240-adjacent lesson: server 10013 says 30汉字/60字符)",
       "args": {
-        "script": "(function(){var D={{args}};function ceq(s){var n=0;for(var i=0;i<s.length;i++){var c=s.charCodeAt(i);n+=(c>=0x2E80)?1:0.5;}return n;}var errs=[];if(!D.title){errs.push('title: required');}else{var q=ceq(D.title);if(q>30){errs.push('title: 汉字当量 '+q.toFixed(1)+' 超限（30汉字/60字符，服务器 10013）');}}if(!D.main_images||!D.main_images.length){errs.push('main_images: required（doudian-upload 出 URL）');}else if(D.main_images.length>5){errs.push('main_images: 最多5张, got '+D.main_images.length);}if(!D.portrait_images||!D.portrait_images.length){errs.push('portrait_images: required（3:4 图, doudian-upload 出 URL）');}if(!D.freight_id){errs.push('freight_id: required');}if(!D.category_leaf_id){errs.push('category_leaf_id: required');}if(!D.skus||!D.skus.length){errs.push('skus: required');}if(D.spec_images){if(!Array.isArray(D.spec_images)){errs.push('spec_images: 须为 URL 数组（与 spec_values 平行）');}else if(D.spec_images.length!==D.spec_values.length){errs.push('spec_images: 长度 '+D.spec_images.length+' ≠ spec_values '+D.spec_values.length+'（逐值对齐）');}else{for(var si=0;si<D.spec_images.length;si++){if(!/^https:\\/\\//.test(String(D.spec_images[si]))){errs.push('spec_images['+si+']: 须为 https URL（doudian-upload 出 URL）');}}}}if(errs.length){throw new Error('args 校验失败: '+errs.join('; '));}return JSON.stringify({validated:true,title_eq:ceq(D.title).toFixed(1),main_images:D.main_images.length,portrait_images:D.portrait_images.length,skus:D.skus.length});})()"
+        "script": "(function(){var D={{args}};function ceq(s){var n=0;for(var i=0;i<s.length;i++){var c=s.charCodeAt(i);n+=(c>=0x2E80)?1:0.5;}return n;}var errs=[];if(!D.title){errs.push('title: required');}else{var q=ceq(D.title);if(q>30){errs.push('title: 汉字当量 '+q.toFixed(1)+' 超限（30汉字/60字符，服务器 10013）');}}if(!D.main_images||!D.main_images.length){errs.push('main_images: required（doudian-upload 出 URL）');}else if(D.main_images.length>5){errs.push('main_images: 最多5张, got '+D.main_images.length);}if(!D.portrait_images||!D.portrait_images.length){errs.push('portrait_images: required（3:4 图, doudian-upload 出 URL）');}if(!D.freight_id){errs.push('freight_id: required');}if(!D.category_leaf_id){errs.push('category_leaf_id: required');}if(!D.skus||!D.skus.length){errs.push('skus: required');}if(String({{check_status}})==='2'&&!D.brand_value_id){errs.push('check_status=2 直接上架需要真品牌 value_id（6019 用无品牌 596120136；DIY 空壳品牌会被 canonicalize 剥掉→10013 品牌必填）');}if(D.spec_images){if(!Array.isArray(D.spec_images)){errs.push('spec_images: 须为 URL 数组（与 spec_values 平行）');}else if(D.spec_images.length!==D.spec_values.length){errs.push('spec_images: 长度 '+D.spec_images.length+' ≠ spec_values '+D.spec_values.length+'（逐值对齐）');}else{for(var si=0;si<D.spec_images.length;si++){if(!/^https:\\/\\//.test(String(D.spec_images[si]))){errs.push('spec_images['+si+']: 须为 https URL（doudian-upload 出 URL）');}}}}if(errs.length){throw new Error('args 校验失败: '+errs.join('; '));}return JSON.stringify({validated:true,title_eq:ceq(D.title).toFixed(1),main_images:D.main_images.length,portrait_images:D.portrait_images.length,skus:D.skus.length});})()"
       }
     },
     {
@@ -125,7 +126,7 @@
     {
       "op": "eval",
       "args": {
-        "script": "(function(){var d=window.__CANONJ,m=d.model||{},ctx=d.context||{};var ctxClean=Object.assign({},ctx);delete ctxClean.gray_components;var sid=String(ctx.shop_id||'');if(!sid)throw new Error('canon: server context has no shop_id');var body={schema:{model:m,context:ctx},category_id:'{{args.category_leaf_id}}',context:ctxClean,pass_through_extra:{},check_status:1,session:{},_signError:'1'};window.__FINAL_BODY=JSON.stringify(body);window.__MSTOKEN=btoa(btoa(sid));return JSON.stringify({bytes:window.__FINAL_BODY.length,shop_id:sid,model_keys:Object.keys(m).length})})()",
+        "script": "(function(){var d=window.__CANONJ,m=d.model||{},ctx=d.context||{};var ctxClean=Object.assign({},ctx);delete ctxClean.gray_components;var sid=String(ctx.shop_id||'');if(!sid)throw new Error('canon: server context has no shop_id');var _sig=(function(){var a=btoa(btoa('0')).split('');a.splice(5,0,'2');return a.join('')})();var body={schema:{model:m,context:ctx},category_id:'{{args.category_leaf_id}}',context:ctxClean,pass_through_extra:{},check_status:{{check_status}},session:{},request_extra:{_msToken:_sig}};window.__FINAL_BODY=JSON.stringify(body);window.__MSTOKEN=btoa(btoa(sid));return JSON.stringify({bytes:window.__FINAL_BODY.length,shop_id:sid,model_keys:Object.keys(m).length,check_status:{{check_status}},sig:_sig})})()",
         "timeout_ms": 30000
       },
       "save": "body_built",
@@ -138,7 +139,7 @@
       "note": "API call 3 — THE submit, awaited inside the eval (#240): the old fire-and-forget + wait-pump shape left the fetch response undelivered — the session's macrotask queue died mid-wait. check_status:1 = draft (query string, per bundle module 51313); check_status:2 = live publish — that path hits the 10001010A risk wall which waits on a real msToken. ONE SHOT ONLY: 45s in-page abort, eval timeout = outcome UNKNOWN (the request may still land server-side), never blind-retry — testpack rule",
       "args": {
         "timeout_ms": "{{submit_ms}}",
-        "script": "(async function(){var t=window.__TL;t.mst=window.__MSTOKEN;window.__SHOT=null;var ctrl=(typeof AbortController!=='undefined')?new AbortController():null;var to=ctrl?setTimeout(function(){try{ctrl.abort()}catch(e){}},45000):null;var q='appid=1&__token='+t.tok+'&_bid=ffa_goods&_lid='+t.lid+'&msToken='+encodeURIComponent(t.mst);var r=await fetch('/product/tproduct/addWithSchema?check_status=1&'+q,{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:window.__FINAL_BODY,signal:ctrl?ctrl.signal:undefined});var x=await r.text();if(to){clearTimeout(to);}window.__SHOT=x;return x.slice(0,2000);})()"
+        "script": "(async function(){var t=window.__TL;t.mst=window.__MSTOKEN;window.__SHOT=null;var ctrl=(typeof AbortController!=='undefined')?new AbortController():null;var to=ctrl?setTimeout(function(){try{ctrl.abort()}catch(e){}},45000):null;var q='appid=1&__token='+t.tok+'&_bid=ffa_goods&_lid='+t.lid+'&msToken='+encodeURIComponent(t.mst);var r=await fetch('/product/tproduct/addWithSchema?check_status={{check_status}}&'+q,{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:window.__FINAL_BODY,signal:ctrl?ctrl.signal:undefined});var x=await r.text();if(to){clearTimeout(to);}window.__SHOT=x;return x.slice(0,2000);})()"
       }
     },
     {

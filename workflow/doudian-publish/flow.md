@@ -1,7 +1,13 @@
 # doudian-publish
 
-抖店商品发布（草稿落库）— 纯 API 链。2026-10-05 真机绿：
+抖店商品发布（草稿或直接上架）— 纯 API 链。2026-10-05 真机绿：
 product_id 3846431717594366336（18 spec / 18 SKU / 主5图 / 竖5图 / 8图详情 / 运费模板 29507137 / 无品牌 596120136 / 材质 钢化玻璃），edit 模式 getSchema 回读全一致。
+**2026-10-10 起 `vars.check_status:2` 直接上架绿**（原生签名已破，见下）。
+
+## 纪律
+
+- 只提交一次：45s 超时=结果未知，不盲重试（testpack 规则）
+- `vars.check_status:1`=草稿（默认）、`2`=直接上架（审核中落库，`audit_pass:false` 属正常）
 
 ## 为什么是纯 API（不走 UI）
 
@@ -39,11 +45,29 @@ product_id 3846431717594366336（18 spec / 18 SKU / 主5图 / 竖5图 / 8图详�
 - `msToken = btoa(btoa(shop_id))` 本地算；`request_extra` 签名失败前端自己发 `_signError:"1"`
   （genSignatureNew 的降级通道），不是服务器硬门
 
-## 纪律
+## 原生签名已破（2026-10-10，genSignatureNew 全解码）
 
-- 只提交一次：45s 超时=结果未知，不盲重试（testpack 规则）
-- 草稿→上架是店主的事，本 flow 止步于草稿回执
-- 上架路径的 10001010A 风控墙：等真 msToken，别用桩硬闯
+10-05 的旧结论「上架路径有 10001010A 风控墙，等真 msToken」作废。签名生成器在
+chunk `50445.5912e03a.js` module 93250（本地 curl CDN 全量 97 chunk 挖出）：
+
+- `_signError:"1"` 是生成器**模块加载失败时的兜底返回**——我们此前一直在发兜底标记
+- 真生成器（字符表混淆，全解码）：富化源 = 表单 `$globa.edit_sign_info.{p_idy,p_key}`
+  ——但 97 个 chunk 里**没有任何生产者**，getSchema 响应也不带 → 本页版本实际走默认参：
+  `request_extra = {"_msToken": doubleBtoa("0") 第5位插"2"}` = `{"_msToken":"TUE9P2Q=="}`
+- query 侧 msToken 仍是 `btoa(btoa(shop_id))`；secureProxy 拦截器另自动补 a_bogus
+- 实测三枪（edit check_status=2 两枪 + add check_status=2 一枪）**10001010A 全程未开火**
+
+## check_status=2 与草稿的三处校验差（10013 逐层教出来的）
+
+| 项 | check_status=1 草稿 | check_status=2 上架 |
+|---|---|---|
+| 品牌 1687 | DIY 空壳 `value_id:""+value_name` 可（canon 会剥掉但不拦） | **必须真 value_id**（DIY 被 canonicalize 剥→`品牌必填`；6019 用无品牌 `596120136`） |
+| 详情 desc_html | 任意字符串 | **富内容**（裸短串→`商品详情内容不能为空`，带图富文本过） |
+| 规格图（6019） | 未单测差异 | img_url 逐值必带（见规格图节） |
+
+flow 侧：`vars.check_status`（默认 1）模板进 query+body；args 校验步在 =2 且缺
+`brand_value_id` 时 2s 拦；body_built 回执带 `check_status` 和 `sig` 供核账。
+
 
 ## 前置
 
@@ -153,7 +177,8 @@ POST /flow/run
 | 2026-10-06 | 同 | 3846778561813938623 | s_18 接管跑法 |
 | 2026-10-09 | **#237 修复版** | 3847273730942305306 | s_3 当日扫码会话直跑，14 步全绿（timer 门 0ms、submit 0.9s） |
 | 2026-10-09 | #239 修复版 + 校验步/await 提交 | **3847304136886452316** | **首单纯 flow 带图全链**：doudian-upload 出 5 URL → publish 吃 URL；args_valid 26.0 当量放行，add_answer eval-await 直接回 `errno:0` |
-| 2026-10-10 | getSchema 双步 eval-await + spec_images | **3847441335397253316** | **首单规格图绿**：6019（all_spec_pic_required）18 值 18 图，canon_ok `spec_img:18` 全保留，57s 全链（此前 fire-then-wait 死在 step6 #240 face-2） |
+| 2026-10-10 | getSchema 双步 eval-await + spec_images | **3847441335397253316** | **首单规格图绿**：6019（all_spec_pic_required）18 值 18 图，canon_ok `spec_img:18` 全保��，57s 全链（此前 fire-then-wait 死在 step6 #240 face-2） |
+| 2026-10-10 | 原生签名 + check_status=2 | **3847441891603906978** | **首单直接上架绿**：request_extra `{_msToken:TUE9P2Q==}` 复刻默认生成器，无品牌 596120136 + 富详情，55.5s 全链 `st=0`；同日 edit 路径把 3847441335397253316 草稿也送上架（`audit_pass:false` 审核中） |
 
 ## 2026-10-09 附记
 
