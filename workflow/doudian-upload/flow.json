@@ -1,27 +1,841 @@
 {
-  "args": ["images"],
+  "args": [
+    "images"
+  ],
   "vars": {
     "fxg_home": "https://fxg.jinritemai.com/ffa/mshop/view/index",
-    "upload_ms": 60000
+    "img_ms": 45000,
+    "gap_ms": 1000,
+    "gap_calm_ms": 6000,
+    "done": {}
   },
   "steps": [
     {
       "id": "nav",
       "op": "navigate",
-      "args": { "url": "{{fxg_home}}" }
+      "args": {
+        "url": "{{fxg_home}}"
+      }
     },
     {
       "id": "settled",
       "op": "wait",
-      "args": { "predicate": "document.readyState === 'complete' || document.readyState === 'interactive'", "timeout_ms": 20000 }
+      "args": {
+        "predicate": "document.readyState === 'complete' || document.readyState === 'interactive'",
+        "timeout_ms": 20000
+      }
     },
     {
-      "id": "upload",
+      "id": "pump_arm",
+      "op": "eval",
+      "save": "pump_arm",
+      "note": "boot-storm gate, same sentinel as doudian-publish: the fxg fresh-load storm starves timers AND fetch callbacks for tens of seconds — an upload fired into it dies of EVAL_TIMEOUT with the fetch settled at net layer but the continuation lost (issue #240 face-2 class; first live hit 2026-10-10: 6 uploads, all 200 at net layer, zero settled in JS). Arm a 100ms timer; it fires the moment the pump frees",
+      "args": {
+        "script": "(function(){window.__agxPump='pending';setTimeout(function(){window.__agxPump='fired'},100);return 'armed'})()"
+      }
+    },
+    {
+      "id": "pump_ok",
+      "op": "wait",
+      "args": {
+        "predicate": "window.__agxPump==='fired'",
+        "timeout_ms": 120000
+      },
+      "save": "pump_ok",
+      "note": "pump alive once. If this times out the page is hard-wedged: re-run (fresh navigation), do NOT wait it out"
+    },
+    {
+      "id": "calm_arm",
+      "op": "eval",
+      "save": "calm_arm",
+      "note": "continuing-calm window: the homepage keeps churning modules after the first pump-free moment (run B: gate passed, uploads still wedged) — hold for gap_calm_ms of page time before the first upload",
+      "args": {
+        "script": "(function(){window.__agxCalm=Date.now();return 'armed'})()"
+      }
+    },
+    {
+      "id": "calm_ok",
+      "op": "wait",
+      "args": {
+        "predicate": "(function(){return Date.now()-(window.__agxCalm||0)>{{gap_calm_ms}}})()",
+        "timeout_ms": 20000
+      },
+      "save": "calm_ok"
+    },
+    {
+      "id": "args_check",
+      "op": "eval",
+      "save": "img_count",
+      "note": "fail in seconds + the branch-guard feed: returns images.length as a NUMBER (at_most guards skip img_N steps beyond the count). >36 per call is refused — the flow carries 36 literal steps (YU7 shape); split bigger sets and chain with vars.done",
+      "args": {
+        "timeout_ms": 15000,
+        "script": "(function(){var ALL={{args.images}};if(!ALL||!ALL.length)throw new Error('images: pass a non-empty array of {name, content_base64, mime_type}');if(ALL.length>36)throw new Error('images: max 36 per call (img_0..img_35) — split larger sets, re-run with vars.done carrying earlier urls');var seen={},errs=[];for(var i=0;i<ALL.length;i++){var im=ALL[i]||{};if(!im.name){errs.push('images['+i+']: name required');continue;}if(seen[im.name])errs.push('images['+i+']: duplicate name '+im.name+' — done-map resume keys on name, dupes collide');seen[im.name]=1;if(!im.content_base64)errs.push('images['+i+'] ('+im.name+'): content_base64 required');else{var b=String(im.content_base64).replace(/\\s+/g,'');if(!/^[A-Za-z0-9+/]+={0,2}$/.test(b)||b.length%4!==0)errs.push('images['+i+'] ('+im.name+'): content_base64 is not valid base64');}}if(errs.length)throw new Error('args 校验失败: '+errs.join('; '));return ALL.length;})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 0
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_0",
+      "op": "eval",
+      "save": "img_0",
+      "note": "per-image save point: ONE fetch, ONE continuation per eval — a lost continuation (issue #240 face-2) costs this image and 45s, never the batch; receipt saved img_0..img_k is the resume map",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.0}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:0,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[0]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[0]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[0]=rec;return rec;}rec.url=jx.data[0];U[0]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[0]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 1
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_1",
+      "op": "eval",
+      "save": "img_1",
+      "note": "image 1",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.1}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:1,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[1]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[1]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[1]=rec;return rec;}rec.url=jx.data[0];U[1]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[1]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 2
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_2",
+      "op": "eval",
+      "save": "img_2",
+      "note": "image 2",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.2}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:2,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[2]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[2]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[2]=rec;return rec;}rec.url=jx.data[0];U[2]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[2]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 3
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_3",
+      "op": "eval",
+      "save": "img_3",
+      "note": "image 3",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.3}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:3,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[3]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[3]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[3]=rec;return rec;}rec.url=jx.data[0];U[3]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[3]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 4
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_4",
+      "op": "eval",
+      "save": "img_4",
+      "note": "image 4",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.4}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:4,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[4]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[4]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[4]=rec;return rec;}rec.url=jx.data[0];U[4]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[4]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 5
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_5",
+      "op": "eval",
+      "save": "img_5",
+      "note": "image 5",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.5}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:5,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[5]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[5]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[5]=rec;return rec;}rec.url=jx.data[0];U[5]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[5]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 6
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_6",
+      "op": "eval",
+      "save": "img_6",
+      "note": "image 6",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.6}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:6,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[6]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[6]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[6]=rec;return rec;}rec.url=jx.data[0];U[6]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[6]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 7
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_7",
+      "op": "eval",
+      "save": "img_7",
+      "note": "image 7",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.7}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:7,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[7]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[7]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[7]=rec;return rec;}rec.url=jx.data[0];U[7]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[7]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 8
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_8",
+      "op": "eval",
+      "save": "img_8",
+      "note": "image 8",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.8}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:8,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[8]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[8]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[8]=rec;return rec;}rec.url=jx.data[0];U[8]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[8]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 9
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_9",
+      "op": "eval",
+      "save": "img_9",
+      "note": "image 9",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.9}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:9,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[9]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[9]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[9]=rec;return rec;}rec.url=jx.data[0];U[9]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[9]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 10
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_10",
+      "op": "eval",
+      "save": "img_10",
+      "note": "image 10",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.10}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:10,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[10]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[10]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[10]=rec;return rec;}rec.url=jx.data[0];U[10]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[10]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 11
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_11",
+      "op": "eval",
+      "save": "img_11",
+      "note": "image 11",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.11}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:11,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[11]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[11]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[11]=rec;return rec;}rec.url=jx.data[0];U[11]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[11]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 12
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_12",
+      "op": "eval",
+      "save": "img_12",
+      "note": "image 12",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.12}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:12,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[12]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[12]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[12]=rec;return rec;}rec.url=jx.data[0];U[12]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[12]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 13
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_13",
+      "op": "eval",
+      "save": "img_13",
+      "note": "image 13",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.13}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:13,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[13]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[13]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[13]=rec;return rec;}rec.url=jx.data[0];U[13]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[13]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 14
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_14",
+      "op": "eval",
+      "save": "img_14",
+      "note": "image 14",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.14}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:14,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[14]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[14]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[14]=rec;return rec;}rec.url=jx.data[0];U[14]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[14]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 15
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_15",
+      "op": "eval",
+      "save": "img_15",
+      "note": "image 15",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.15}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:15,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[15]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[15]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[15]=rec;return rec;}rec.url=jx.data[0];U[15]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[15]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 16
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_16",
+      "op": "eval",
+      "save": "img_16",
+      "note": "image 16",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.16}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:16,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[16]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[16]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[16]=rec;return rec;}rec.url=jx.data[0];U[16]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[16]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 17
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_17",
+      "op": "eval",
+      "save": "img_17",
+      "note": "image 17",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.17}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:17,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[17]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[17]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[17]=rec;return rec;}rec.url=jx.data[0];U[17]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[17]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 18
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_18",
+      "op": "eval",
+      "save": "img_18",
+      "note": "image 18",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.18}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:18,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[18]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[18]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[18]=rec;return rec;}rec.url=jx.data[0];U[18]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[18]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 19
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_19",
+      "op": "eval",
+      "save": "img_19",
+      "note": "image 19",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.19}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:19,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[19]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[19]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[19]=rec;return rec;}rec.url=jx.data[0];U[19]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[19]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 20
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_20",
+      "op": "eval",
+      "save": "img_20",
+      "note": "image 20",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.20}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:20,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[20]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[20]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[20]=rec;return rec;}rec.url=jx.data[0];U[20]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[20]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 21
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_21",
+      "op": "eval",
+      "save": "img_21",
+      "note": "image 21",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.21}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:21,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[21]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[21]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[21]=rec;return rec;}rec.url=jx.data[0];U[21]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[21]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 22
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_22",
+      "op": "eval",
+      "save": "img_22",
+      "note": "image 22",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.22}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:22,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[22]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[22]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[22]=rec;return rec;}rec.url=jx.data[0];U[22]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[22]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 23
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_23",
+      "op": "eval",
+      "save": "img_23",
+      "note": "image 23",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.23}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:23,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[23]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[23]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[23]=rec;return rec;}rec.url=jx.data[0];U[23]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[23]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 24
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_24",
+      "op": "eval",
+      "save": "img_24",
+      "note": "image 24",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.24}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:24,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[24]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[24]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[24]=rec;return rec;}rec.url=jx.data[0];U[24]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[24]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 25
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_25",
+      "op": "eval",
+      "save": "img_25",
+      "note": "image 25",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.25}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:25,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[25]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[25]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[25]=rec;return rec;}rec.url=jx.data[0];U[25]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[25]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 26
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_26",
+      "op": "eval",
+      "save": "img_26",
+      "note": "image 26",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.26}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:26,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[26]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[26]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[26]=rec;return rec;}rec.url=jx.data[0];U[26]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[26]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 27
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_27",
+      "op": "eval",
+      "save": "img_27",
+      "note": "image 27",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.27}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:27,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[27]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[27]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[27]=rec;return rec;}rec.url=jx.data[0];U[27]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[27]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 28
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_28",
+      "op": "eval",
+      "save": "img_28",
+      "note": "image 28",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.28}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:28,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[28]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[28]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[28]=rec;return rec;}rec.url=jx.data[0];U[28]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[28]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 29
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_29",
+      "op": "eval",
+      "save": "img_29",
+      "note": "image 29",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.29}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:29,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[29]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[29]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[29]=rec;return rec;}rec.url=jx.data[0];U[29]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[29]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 30
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_30",
+      "op": "eval",
+      "save": "img_30",
+      "note": "image 30",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.30}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:30,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[30]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[30]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[30]=rec;return rec;}rec.url=jx.data[0];U[30]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[30]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 31
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_31",
+      "op": "eval",
+      "save": "img_31",
+      "note": "image 31",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.31}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:31,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[31]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[31]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[31]=rec;return rec;}rec.url=jx.data[0];U[31]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[31]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 32
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_32",
+      "op": "eval",
+      "save": "img_32",
+      "note": "image 32",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.32}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:32,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[32]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[32]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[32]=rec;return rec;}rec.url=jx.data[0];U[32]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[32]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 33
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_33",
+      "op": "eval",
+      "save": "img_33",
+      "note": "image 33",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.33}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:33,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[33]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[33]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[33]=rec;return rec;}rec.url=jx.data[0];U[33]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[33]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 34
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_34",
+      "op": "eval",
+      "save": "img_34",
+      "note": "image 34",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.34}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:34,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[34]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[34]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[34]=rec;return rec;}rec.url=jx.data[0];U[34]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[34]=rec;return rec;}})()"
+      }
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "img_count",
+          "is": "at_most",
+          "value": 35
+        },
+        "goto": "manifest"
+      }
+    },
+    {
+      "id": "img_35",
+      "op": "eval",
+      "save": "img_35",
+      "note": "image 35",
+      "args": {
+        "timeout_ms": "{{img_ms}}",
+        "script": "(async function(){var im={{args.images.35}},DONE={{done}},GAP={{gap_ms}},U=(window.__agxUp=window.__agxUp||{});await new Promise(function(res){setTimeout(res,GAP)});var rec={i:35,name:im.name};if(DONE[im.name]){rec.skipped=1;rec.url=DONE[im.name];U[35]=rec;return rec;}var st='build';try{var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,'');for(var q2=0;q2<b64.length;q2+=CH){var s=atob(b64.slice(q2,q2+CH));var arr=new Array(s.length);for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr));}var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j);var f=new File([u8],im.name,{type:im.mime_type||'image/jpeg'});st='fetch';var m=document.cookie.match(new RegExp('(?:^|;\\s*)s_v_web_id=([^;]*)'));var vf=m?decodeURIComponent(m[1]):'';var qq='/product/img/batchupload?_bid=ffa_goods'+(vf?('&verifyFp='+encodeURIComponent(vf)+'&fp='+encodeURIComponent(vf)):'');var fd=new FormData();fd.append('image[0]',f,im.name);fd.append('extra',JSON.stringify({request_source:'pc'}));var r=await fetch(qq,{method:'POST',body:fd});var t=await r.text();st='parse';var jx;try{jx=JSON.parse(t);}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};U[35]=rec;return rec;}st='errno';if(jx.errno!==0||!jx.data||!jx.data[0]){rec.failed={stage:'batchupload',errno:jx.errno,msg:String(jx.msg||'').slice(0,140)};U[35]=rec;return rec;}rec.url=jx.data[0];U[35]=rec;return rec;}catch(e){rec.failed={stage:st,msg:String((e&&e.message)||e).slice(0,140)};U[35]=rec;return rec;}})()"
+      }
+    },
+    {
+      "id": "manifest",
       "op": "eval",
       "save": "upload",
+      "note": "the merge: caller's image order preserved; done-map entries and fresh uploads unified. Reads window.__agxUp (written by every img step before returning) — not per-step saves — so skipped steps' missing vars never bite. Throws only here: receipt keeps every img_i save; re-run with vars.done={name:url} to resume",
       "args": {
-        "timeout_ms": "{{upload_ms}}",
-        "script": "(async function(){ var IMGS = {{args.images}}; if (!IMGS || !IMGS.length) throw new Error('images: pass a non-empty array of {name, content_base64, mime_type}'); function ck(n){ var m = document.cookie.match(new RegExp('(?:^|;\\\\s*)'+n+'=([^;]*)')); return m ? decodeURIComponent(m[1]) : ''; } var vf = ck('s_v_web_id'); var out = []; for (var k = 0; k < IMGS.length; k++) { var im = IMGS[k]; if (!im || !im.content_base64) throw new Error('images[' + k + ']: content_base64 required'); var bin = []; var CH = 0x8000; var b64 = String(im.content_base64); for (var i = 0; i < b64.length; i += CH) { var seg = atob(b64.slice(i, i + CH)); var arr = new Array(seg.length); for (var c = 0; c < seg.length; c++) arr[c] = seg.charCodeAt(c); bin.push(String.fromCharCode.apply(null, arr)); } var s = bin.join(''); var u8 = new Uint8Array(s.length); for (var j = 0; j < s.length; j++) u8[j] = s.charCodeAt(j); var fname = im.name || ('img_' + k + '.jpg'); var f = new File([u8], fname, { type: im.mime_type || 'image/jpeg' }); var q = '/product/img/batchupload?_bid=ffa_goods'; if (vf) q += '&verifyFp=' + encodeURIComponent(vf) + '&fp=' + encodeURIComponent(vf); var fd = new FormData(); fd.append('image[0]', f, fname); fd.append('extra', JSON.stringify({ request_source: 'pc' })); var r = await fetch(q, { method: 'POST', body: fd }); var t = await r.text(); var jx; try { jx = JSON.parse(t); } catch (e) { throw new Error('images[' + k + '] (' + fname + '): batchupload returned non-JSON (status ' + r.status + ', login wall?): ' + t.slice(0, 120)); } if (jx.errno !== 0 || !jx.data || !jx.data[0]) throw new Error('images[' + k + '] (' + fname + '): batchupload errno=' + jx.errno + ' msg=' + String(jx.msg || '').slice(0, 140)); out.push(jx.data[0]); } return JSON.stringify({ urls: out, count: out.length }); })()"
+        "timeout_ms": 30000,
+        "script": "(function(){var ALL={{args.images}},DONE={{done}},N={{img_count}},U=window.__agxUp||{};var urls=[],missing=[],failed=[],fatals=[],newCount=0,skipped=0;for(var i=0;i<N;i++){var n=ALL[i].name;if(DONE[n]){urls.push(DONE[n]);skipped++;continue;}var u=U[i];if(u&&u.url){urls.push(u.url);newCount++;}else if(u&&u.fatal){fatals.push(u.fatal);missing.push(n);}else if(u&&u.failed){failed.push(u.failed);missing.push(n);}else{missing.push(n+'(no-attempt)');}}if(missing.length||fatals.length){throw new Error('upload incomplete: '+urls.length+'/'+N+' urls; missing='+JSON.stringify(missing.slice(0,10))+'; failed='+JSON.stringify(failed.slice(0,10))+(fatals.length?('; fatal(login wall?)='+JSON.stringify(fatals.slice(0,3))):'')+' — re-run with vars.done={name:url} for everything landed (receipt saved img_i values) to resume');}return {count:urls.length,total:N,urls:urls,uploaded_new:newCount,skipped_done:skipped,fed_done:Object.keys(DONE).length};})()"
       }
     }
   ]
