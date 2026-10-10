@@ -178,7 +178,26 @@ var x = await r.text(); window.__SHOT = x; return x.slice(0,2000); })()`、
 页内 45s AbortController 兜底保留。证据链：issue #240 +
 /tmp/dd-repro/wedge*.py（净层/network 面对拍记录）。
 
-## 运行方法（2026-10-09 实跑口径）
+## 运行方法（2026-10-10 实跑口径）
+
+**一键全链**（=报告 抖店YU7组合商品上传过程 的引擎化）：
+
+```
+session = doudian-login 扫码 → session_id
+POST /flow/run {"name":"doudian-upload",
+  "vars":{"args":{"images":[{name,content_base64,mime_type},...]}},
+  "session_id":session}
+→ urls = saved.upload.urls          # 主图/竖图/规格图全部从这里出
+
+POST /flow/run {"name":"doudian-publish",
+  "vars":{"args":{...全量业务参数, main_images/portrait_images/spec_images 吃 urls...},
+          "check_status":2,          # 直接上架（默认 1=草稿）
+          "ship_address_id":"12405687"},  # 绑发货地（不给=跳过 15-17 的绑定）
+  "session_id":session}
+→ outcome.product_id + addr_bind st:0 + addr_verify/sale_verify 回执
+```
+
+单跑 publish：
 
 ```
 POST /flow/run
