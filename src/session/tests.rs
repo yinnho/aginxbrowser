@@ -4573,3 +4573,19 @@
             "session thread must ack close"
         );
     }
+
+    /// #251 tripwire: a bare `cargo test --bin aginxbrowser` builds diting
+    /// without the screenshot feature, and the whole layout engine is cfg'd
+    /// behind it — pages still load but geometry silently degrades (button
+    /// computes to display:block, body margin 0, rects land mid-viewport),
+    /// which 30+ session tests then fail with misleading assertions. One
+    /// loud failure naming the fix beats 32 cryptic ones (batch246's
+    /// "bare构建32挂" face).
+    #[test]
+    fn session_geometry_tests_require_the_layout_engine() {
+        assert!(
+            cfg!(feature = "screenshot"),
+            "the diting layout engine is feature-gated; rerun with --features screenshot \
+             (see batch246 / #251 — bare runs fail 30+ geometry tests misleadingly)"
+        );
+    }
