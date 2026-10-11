@@ -483,10 +483,14 @@ impl JsRuntime {
     /// `contentDocument`/`contentWindow` getters: those apply the web-facing
     /// same-origin gate, while CDP clients are privileged and automate
     /// cross-origin frames as a matter of course (Chrome does the same from
-    /// the inspector side).
+    /// the inspector side). A detached iframe is refused: Chrome discards
+    /// the browsing context on removal, so its execution context is gone —
+    /// running script (let alone XHR, which the spec gates on a
+    /// fully-active document) from a retired frame is not a face (#256 /
+    /// moli#1328).
     fn frame_swap(&mut self, nid: u32) -> Result<bool, String> {
         let code = format!(
-            "(function() {{ var el = globalThis._wrap && globalThis._wrap({nid}); var doc = el && (el._iframeDoc || el.contentDocument); var win = el && (el._iframeWin || el.contentWindow); if (!doc || !win) return 'not-ready'; globalThis.__diting_frame_saved = [document, window, self, frames]; document = doc; window = win; self = win; frames = win; Object.defineProperty(globalThis, '__diting_frame_location', {{ value: win.location, configurable: true, writable: true, enumerable: false }}); return 'ok'; }})()",
+            "(function() {{ var el = globalThis._wrap && globalThis._wrap({nid}); if (!el || !el.isConnected) return 'not-ready'; var doc = el._iframeDoc || el.contentDocument; var win = el._iframeWin || el.contentWindow; if (!doc || !win) return 'not-ready'; globalThis.__diting_frame_saved = [document, window, self, frames]; document = doc; window = win; self = win; frames = win; Object.defineProperty(globalThis, '__diting_frame_location', {{ value: win.location, configurable: true, writable: true, enumerable: false }}); return 'ok'; }})()",
         );
         let v = self
             .runtime

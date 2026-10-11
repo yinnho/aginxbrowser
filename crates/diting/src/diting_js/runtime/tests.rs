@@ -8001,6 +8001,68 @@
     /// isolate), so this pins the structural immunity: eval into live
     /// frames, detach them while JS still references them, allocate to
     /// pressure the GC, then drop the runtime — repeatedly.
+    /// #256 / moli#1328: script must not run in a retired frame. Chrome
+    /// discards a detached iframe's browsing context (its execution context
+    /// is gone; the XHR spec additionally gates open() on a fully-active
+    /// document), so frame eval into a detached iframe errors instead of
+    /// silently executing — in particular, no network can be initiated
+    /// from the retired frame.
+    #[tokio::test(flavor = "current_thread")]
+    async fn frame_eval_into_detached_iframe_is_refused_and_fires_nothing() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = captured.clone();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for _ in 0..1 {
+                let (mut stream, _) = match listener.accept() { Ok(s) => s, Err(_) => break };
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap();
+                seen.lock().unwrap().push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let body = b"{}";
+                let resp = format!("HTTP/1.1 200 OK\r\naccess-control-allow-origin: *\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len());
+                stream.write_all(resp.as_bytes()).unwrap();
+                stream.write_all(body).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        let mut rt = setup_runtime(r#"<html><body><div id="host"><iframe id="f"></iframe></div></body></html>"#);
+        let nid = rt
+            .with_dom(|dom| dom.query_selector_all("#f").unwrap()[0].index() as u32)
+            .unwrap();
+
+        // Attached: the frame answers.
+        let ok = rt
+            .evaluate_for_cdp_outcome("1 + 1", true, false, DEFAULT_AWAIT_BUDGET_MS, Some(nid))
+            .await
+            .unwrap();
+        assert_eq!(ok.info.value, Some(serde_json::json!(2)));
+
+        // Detached (element detached but still JS-reachable — the retained
+        // retired-frame shape): refused, before any script runs.
+        rt.evaluate("document.getElementById('host').innerHTML = '';").unwrap();
+        let err = rt
+            .evaluate_for_cdp_outcome(
+                &format!(
+                    "fetch('http://127.0.0.1:{port}/retired').then(() => 'fired')",
+                ),
+                true,
+                true,
+                DEFAULT_AWAIT_BUDGET_MS,
+                Some(nid),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("content not ready"), "got: {err}");
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "no request may leave a retired frame"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn teardown_with_retained_detached_iframes_does_not_crash() {
         for _round in 0..8 {
