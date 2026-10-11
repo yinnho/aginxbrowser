@@ -639,14 +639,14 @@ impl Page {
                 }
             }
         }
-        #[cfg(feature = "stealth")]
-        if let Some(ref stealth) = self.stealth_client {
-            return stealth.fetch(url).await;
-        }
         // A JS/link-initiated navigation carries the referring document's
         // URL per browser semantics; direct automation navigations leave
         // self.referrer empty (edb1785) and go out bare.
         let referrer = if self.referrer.is_empty() { None } else { Some(self.referrer.as_str()) };
+        #[cfg(feature = "stealth")]
+        if let Some(ref stealth) = self.stealth_client {
+            return stealth.fetch_navigation(url, referrer).await;
+        }
         self.http_client
             .fetch_with_callbacks(url, Some(&self.callbacks), crate::diting_net::ResourceType::Document, referrer)
             .await

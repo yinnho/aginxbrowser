@@ -17,7 +17,7 @@ use url::Url;
 #[cfg(feature = "stealth")]
 use crate::diting_net::cookies::CookieJar;
 #[cfg(feature = "stealth")]
-use crate::diting_net::client::{Response, NetError};
+use crate::diting_net::client::{Response, NetError, ResourceType};
 
 #[cfg(feature = "stealth")]
 pub const STEALTH_USER_AGENT: &str =
@@ -432,7 +432,20 @@ impl StealthHttpClient {
     }
 
     pub async fn fetch(&self, url: &Url) -> Result<Response, NetError> {
-        self.fetch_inner(url, None, wreq::Method::GET, None, None, None, true).await
+        self.fetch_inner(url, None, wreq::Method::GET, None, None, None, true, ResourceType::Document).await
+    }
+
+    /// Navigation fetch (`fetch_document`): like [`fetch`] but carrying the
+    /// referring document, so link-click navigations send the initiator's
+    /// Referer and a `sec-fetch-site` keyed to it instead of the emulation's
+    /// hardcoded `none` (#254).
+    pub async fn fetch_navigation(
+        &self,
+        url: &Url,
+        referrer: Option<&str>,
+    ) -> Result<Response, NetError> {
+        self.fetch_inner(url, referrer, wreq::Method::GET, None, None, None, true, ResourceType::Document)
+            .await
     }
 
     /// Subresource GET (band-paint image fetch, 反馈⑫ shape): like [`fetch`]
@@ -445,7 +458,7 @@ impl StealthHttpClient {
         url: &Url,
         referrer: Option<&str>,
     ) -> Result<Response, NetError> {
-        self.fetch_inner(url, referrer, wreq::Method::GET, None, None, None, true)
+        self.fetch_inner(url, referrer, wreq::Method::GET, None, None, None, true, ResourceType::Image)
             .await
     }
 
@@ -471,7 +484,7 @@ impl StealthHttpClient {
     ) -> Result<Response, NetError> {
         let method = wreq::Method::from_bytes(method.as_bytes())
             .map_err(|e| NetError::Network(format!("invalid method {method:?}: {e}")))?;
-        self.fetch_inner(url, referrer, method, body, content_type, request_headers, include_cookies)
+        self.fetch_inner(url, referrer, method, body, content_type, request_headers, include_cookies, ResourceType::Fetch)
             .await
     }
 
@@ -485,6 +498,7 @@ impl StealthHttpClient {
         content_type: Option<&str>,
         request_headers: Option<&HashMap<String, String>>,
         include_cookies: bool,
+        resource_type: ResourceType,
     ) -> Result<Response, NetError> {
         // The stealth path must enforce the same SSRF rules as the reqwest
         // path — without this, StealthHttpClient could reach loopback/private
@@ -570,6 +584,44 @@ impl StealthHttpClient {
                 && !extra.contains_key("Sec-Ch-Ua-Platform")
             {
                 req = req.header("Sec-Ch-Ua-Platform", &platform);
+            }
+
+            // Fetch-Metadata per resource class: the emulation bakes the
+            // navigation triple (document/navigate/none) into every request
+            // as transport defaults, so a subresource or scripted fetch that
+            // stays silent still advertises a navigation — a WAF tell
+            // (#254). Scripted request-local triples win on the first hop;
+            // redirect hops fall back to the per-class values, never the
+            // emulation's navigation default. `sec-fetch-site` is keyed per
+            // hop against the original initiator, like the plain client.
+            let metadata = crate::diting_net::client::metadata::metadata_for(resource_type);
+            let scripted_this_hop = |name: &str| redirects.is_empty() && request_local(name);
+            if !scripted_this_hop("sec-fetch-dest") {
+                req = req.header("sec-fetch-dest", metadata.dest);
+            }
+            if !scripted_this_hop("sec-fetch-mode") {
+                req = req.header("sec-fetch-mode", metadata.mode);
+            }
+            if !scripted_this_hop("sec-fetch-site") {
+                let initiator = referrer.and_then(|s| url::Url::parse(s).ok());
+                req = req.header(
+                    "sec-fetch-site",
+                    crate::diting_net::site::sec_fetch_site(initiator.as_ref(), &current_url),
+                );
+            }
+            if crate::diting_net::client::metadata::is_navigation(resource_type) {
+                // Chrome marks navigations with these two; the emulation
+                // ships neither, so a stealth navigation was identifiable
+                // by their absence alone.
+                if !scripted_this_hop("sec-fetch-user") {
+                    req = req.header("sec-fetch-user", "?1");
+                }
+                if !scripted_this_hop("upgrade-insecure-requests") {
+                    req = req.header("upgrade-insecure-requests", "1");
+                }
+            }
+            if !scripted_this_hop("accept") && !extra.contains_key("Accept") {
+                req = req.header("Accept", metadata.default_accept);
             }
 
             // Document-initiated subresource requests carry the initiator's
@@ -1336,6 +1388,83 @@ mod tests {
         assert!(
             !omitted.contains("cookie:"),
             "credentials:'omit' must not leak the jar cookie: {omitted}"
+        );
+    }
+
+    /// #254: the stealth transport's Fetch-Metadata vocabulary. The wreq
+    /// emulation hardcodes document/navigate/none into every request, so a
+    /// bare `fetch` looked like a typed navigation minus the two Chrome
+    /// navigation markers, a subresource advertised a navigation, and a
+    /// referrered navigation claimed `site: none` while carrying a Referer.
+    #[allow(clippy::await_holding_lock)] // env-lock guard spans the fixture fetch, as above
+    #[tokio::test]
+    async fn stealth_fetch_metadata_matches_resource_class() {
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+        let (port, log) = method_recording_fixture().await;
+        let client = StealthHttpClient::new(Arc::new(CookieJar::new()));
+        client.allow_private_network
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let mk = |path: &str| Url::parse(&format!("http://127.0.0.1:{port}/{path}")).unwrap();
+        let doc = format!("http://127.0.0.1:{port}/doc");
+
+        client.fetch(&mk("bare")).await.expect("bare navigation");
+        client
+            .fetch_navigation(&mk("link"), Some(doc.as_str()))
+            .await
+            .expect("link-click navigation");
+        client
+            .fetch_subresource(&mk("img"), Some(doc.as_str()))
+            .await
+            .expect("image subresource");
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let log = log.lock().unwrap();
+        let wire = |path: &str| {
+            log.iter()
+                .find(|r| r.starts_with(&format!("GET /{path} ")))
+                .unwrap_or_else(|| panic!("no GET /{path} recorded: {log:?}"))
+                .to_ascii_lowercase()
+        };
+        let bare = wire("bare");
+        for want in [
+            "sec-fetch-dest: document",
+            "sec-fetch-mode: navigate",
+            "sec-fetch-site: none",
+            "sec-fetch-user: ?1",
+            "upgrade-insecure-requests: 1",
+        ] {
+            assert!(
+                bare.contains(want),
+                "bare navigation must carry {want:?}: {bare}"
+            );
+        }
+        let link = wire("link");
+        for want in [
+            "sec-fetch-site: same-origin",
+            &format!("referer: {doc}"),
+            "sec-fetch-user: ?1",
+        ] {
+            assert!(
+                link.contains(want),
+                "referrered navigation must carry {want:?}: {link}"
+            );
+        }
+        let img = wire("img");
+        for want in [
+            "sec-fetch-dest: image",
+            "sec-fetch-mode: no-cors",
+            "sec-fetch-site: same-origin",
+            "accept: image/avif",
+        ] {
+            assert!(
+                img.contains(want),
+                "image subresource must carry {want:?}: {img}"
+            );
+        }
+        assert!(
+            !img.contains("sec-fetch-user"),
+            "subresources never carry sec-fetch-user: {img}"
         );
     }
 

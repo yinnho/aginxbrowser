@@ -11,7 +11,7 @@ use url::Url;
 use crate::diting_net::cookies::CookieJar;
 
 pub(crate) mod policy;
-mod metadata;
+pub(crate) mod metadata;
 mod observer;
 mod ssrf;
 
