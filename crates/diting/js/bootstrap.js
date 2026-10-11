@@ -6150,6 +6150,18 @@ for (const [k, v] of Object.entries(_XP_CONSTS)) {
 
 class Document extends Node {
   get documentElement() { return _wrapEl(+_dom("document_element")); }
+  // ParentNode face (#250): document.children is the HTMLCollection holding
+  // just the documentElement (doctype is a node, not an element). tbtracker
+  // reads `var e = document.firstElementChild` at boot and attaches its
+  // listeners from a DOMContentLoaded handler — undefined there crashed
+  // `e.addEventListener` on myseller and poisoned the workbench boot.
+  get children() {
+    const de = this.documentElement;
+    return HTMLCollection._from(de ? [de] : []);
+  }
+  get firstElementChild() { return this.documentElement || null; }
+  get lastElementChild() { return this.documentElement || null; }
+  get childElementCount() { return this.documentElement ? 1 : 0; }
   get head() { return this.querySelector("head"); }
   get body() { return this.querySelector("body"); }
   get doctype() {

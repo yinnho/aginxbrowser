@@ -7491,6 +7491,46 @@
         assert_eq!(result.class_name, "HTMLDocument");
     }
 
+    /// Document's ParentNode face (#250): children/firstElementChild/
+    /// lastElementChild/childElementCount mirror Chrome — the collection
+    /// holds exactly the documentElement. tbtracker on myseller boots with
+    /// `var e = document.firstElementChild` and attaches its listeners from
+    /// DOMContentLoaded; the old undefined crashed `e.addEventListener`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn document_parent_node_face() {
+        let mut rt = setup_runtime("<html><head></head><body><p>hi</p></body></html>");
+        let result = rt
+            .evaluate_for_cdp(
+                r#"(function() {
+                    const c = document.children;
+                    const de = document.documentElement;
+                    return {
+                        len: c.length,
+                        isHtml: c[0] === de && de.localName === 'html',
+                        first: document.firstElementChild === de,
+                        last: document.lastElementChild === de,
+                        count: document.childElementCount,
+                        tag: String(document.firstElementChild),
+                    };
+                })()"#,
+                true,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!({
+                "len": 1,
+                "isHtml": true,
+                "first": true,
+                "last": true,
+                "count": 1,
+                "tag": "[object HTMLHtmlElement]",
+            })
+        );
+    }
+
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_evaluate_for_cdp_awaits_resolved_promise() {
