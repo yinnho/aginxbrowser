@@ -3373,3 +3373,74 @@ ms.addEventListener('sourceopen', function(){ \
             "the pump watchdog must not terminate legitimate long tasks (#100)"
         );
     }
+
+    /// #252: three latent-intercept debts pinned in one drive — the paused
+    /// view never carries the internal base64-body marker (a header Chrome
+    /// would never send), a Fulfilled fetch records a real network event
+    /// (it used to read as "never happened"), and the fetch entry throws
+    /// Chrome's TypeError face on an unparseable URL (the op gate now fails
+    /// closed as the backstop).
+    #[tokio::test(flavor = "current_thread")]
+    async fn intercept_fulfill_strips_marker_and_records_network_event() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![
+            ("/app", 200, "<html><body>ok</body></html>".into()),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/app")).await.unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        p.set_fetch_intercept(Some(tx));
+        let target = format!("http://127.0.0.1:{port}/x");
+        let marker_target = target.clone();
+        tokio::spawn(async move {
+            let req = rx.recv().await.expect("pause must arrive");
+            assert!(
+                !req.headers.keys().any(|k| k == "__diting_body_b64"),
+                "the internal base64-body marker must not leak into the paused view: {:?}",
+                req.headers
+            );
+            assert_eq!(req.url, marker_target);
+            let _ = req.resolver.send(crate::diting_js::ops::InterceptResolution::Fulfill {
+                status: 200,
+                headers: [("content-type".to_string(), "text/plain".to_string())]
+                    .into_iter()
+                    .collect(),
+                body: b"fulfilled!".to_vec(),
+            });
+        });
+
+        let info = p
+            .evaluate_for_cdp(
+                &format!(
+                    "fetch('{target}', {{ method: 'POST', body: new Uint8Array([1,2,3]) }}) \
+                     .then(function(r) {{ return r.text().then(function(t) {{ return r.status + ':' + t; }}); }}, \
+                           function(e) {{ return 'ERR:' + e.name; }})"
+                ),
+                true,
+                true,
+            )
+            .await;
+        let out = info.value.and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        assert_eq!(out, "200:fulfilled!", "the fulfilled body must reach the page");
+
+        p.sync_js_network_events();
+        let fulfilled = p
+            .network_events
+            .iter()
+            .find(|e| e.url.ends_with("/x"))
+            .unwrap_or_else(|| panic!("a fulfilled fetch must record a network event: {:?}", p.network_events.iter().map(|e| &e.url).collect::<Vec<_>>()));
+        assert_eq!(fulfilled.status, 200);
+
+        // Face pin: the fetch entry throws Chrome's TypeError for an
+        // unparseable URL — synchronously, before any op involvement.
+        let face = p
+            .evaluate(
+                "(function(){ try { fetch('http://['); return 'no-throw'; } \
+                 catch (e) { return e.name + '|' + e.message; } })()",
+            )
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(face, "TypeError|Failed to parse URL from http://[", "Chrome face: {face}");
+    }

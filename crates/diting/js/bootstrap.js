@@ -8587,17 +8587,7 @@ function __recordFetchTiming(t0, url, initiator, parsed, opts) {
 var _initiatorHint = null;
 
 
-globalThis.fetch = async (input, init = {}) => {
-  // AbortSignal (fetch §4.1): a pre-aborted signal rejects before anything
-  // else happens — no request, no scheme handling. Checked first so data:
-  // fetches abort too (Chrome does the same: the signal gate precedes the
-  // scheme fetch).
-  const signal = init.signal !== undefined
-    ? init.signal
-    : (input instanceof Request ? input.signal : undefined);
-  if (signal && signal.aborted) {
-    throw signal.reason;
-  }
+function _fetchInputUrl(input) {
   let url = typeof input === "string"
     ? input
     : (input instanceof Request
@@ -8609,6 +8599,30 @@ globalThis.fetch = async (input, init = {}) => {
       url = new URL(url, base).href;
     } catch(e) { /* keep as-is if URL resolution fails */ }
   }
+  return url;
+}
+// Chrome parses the request URL at the API entry and throws TypeError
+// SYNCHRONOUSLY (an async impl body can only reject the promise, which the
+// page observably distinguishes). The op's SSRF gate fails closed on
+// unparseable URLs too (#252) — this wrapper gives pages the Chrome face
+// before any op involvement.
+globalThis.fetch = function (input, init) {
+  const _u = _fetchInputUrl(input);
+  try { new URL(_u); } catch (e) { throw new TypeError("Failed to parse URL from " + _u); }
+  return __ditingFetchImpl(input, init);
+};
+const __ditingFetchImpl = async (input, init = {}) => {
+  // AbortSignal (fetch §4.1): a pre-aborted signal rejects before anything
+  // else happens — no request, no scheme handling. Checked first so data:
+  // fetches abort too (Chrome does the same: the signal gate precedes the
+  // scheme fetch).
+  const signal = init.signal !== undefined
+    ? init.signal
+    : (input instanceof Request ? input.signal : undefined);
+  if (signal && signal.aborted) {
+    throw signal.reason;
+  }
+  let url = _fetchInputUrl(input);
   // Fetch-spec "normalize a method" (obscura #969 family) — same rule as the
   // XHR open() path below: standard tokens get uppercased for the
   // case-sensitive CORS tables, custom tokens ride as authored.

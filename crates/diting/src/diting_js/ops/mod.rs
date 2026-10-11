@@ -4281,6 +4281,30 @@ fn gather_fetch_parts(
                 "error": e,
             }).to_string());
         }
+    } else {
+        // Fail closed (#252): an unparseable URL used to skip the gate
+        // entirely — harmless while reqwest re-parsed the same string with
+        // the same url crate, a hole the moment a transport disagrees. The
+        // JS fetch entry throws Chrome's TypeError face before the op call,
+        // so this is the backstop for direct op callers (module loader,
+        // XHR's shared closure).
+        let reason = "invalid URL (failed to parse)".to_string();
+        record_failed_fetch(state, &FetchFailure {
+            url: url.to_string(),
+            method: method.to_string(),
+            reason: reason.clone(),
+            final_url: url.to_string(),
+            redirects: Vec::new(),
+            started,
+        });
+        return Err(serde_json::json!({
+            "status": 0,
+            "body": "",
+            "url": url,
+            "headers": {},
+            "blocked": true,
+            "error": reason,
+        }).to_string());
     }
 
     // The JS shim sets this out-of-band header to signal that `body` is
@@ -4559,12 +4583,18 @@ async fn op_fetch_url(
     let mut override_headers: Option<HashMap<String, String>> = None;
     let mut override_body: Option<Vec<u8>> = None;
     if let Some(tx) = intercept_tx {
-        let custom_headers: HashMap<String, String> = serde_json::from_str(&headers_json).unwrap_or_default();
+        let mut request_headers_view: HashMap<String, String> =
+            serde_json::from_str(&headers_json).unwrap_or_default();
+        // The base64-body marker is an internal transport signal, never a
+        // request header — the wire path strips it; the paused view must
+        // too, or an intercepting client sees a header Chrome would never
+        // send (#252).
+        request_headers_view.remove("__diting_body_b64");
         let (resolve_tx, resolve_rx) = tokio::sync::oneshot::channel();
         let intercepted = InterceptedRequest {
             url: url.clone(),
             method: method.clone(),
-            headers: custom_headers.clone(),
+            headers: request_headers_view.clone(),
             resource_type: "Fetch".to_string(),
             resolver: resolve_tx,
         };
@@ -4578,15 +4608,32 @@ async fn op_fetch_url(
             let timeout_ms = INTERCEPT_RESOLUTION_TIMEOUT_MS.load(std::sync::atomic::Ordering::Relaxed);
             match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), resolve_rx).await {
                 Ok(Ok(InterceptResolution::Fulfill { status, headers: h, body: b })) => {
-                    let resp_headers: HashMap<String, String> = h;
+                    // Chrome emits network events for fulfilled requests
+                    // too — a fulfilled fetch must not read as "never
+                    // happened" in the network log (#252); Fail already
+                    // replays through record_failed_fetch.
+                    let body_b64 = BASE64.encode(&b);
+                    record_fetch_network_event(&state.borrow(), &FetchNetworkEvent {
+                        url: url.clone(),
+                        method: method.clone(),
+                        status,
+                        response_headers: h.clone(),
+                        request_headers: request_headers_view.clone(),
+                        body_size: b.len(),
+                        stored_text: None,
+                        resp_body_base64: body_b64.clone(),
+                        final_url: url.clone(),
+                        redirects: Vec::new(),
+                        started: started_unix,
+                    });
                     // Byte-native: the synthetic body rides the same base64
                     // channel as real network responses (binary payloads
                     // survive; text is reconstructed on the JS side).
                     let resp = serde_json::json!({
                         "status": status,
-                        "bodyBase64": BASE64.encode(b),
+                        "bodyBase64": body_b64,
                         "url": url,
-                        "headers": resp_headers,
+                        "headers": h,
                     }).to_string();
                     push_fetch_settlement(&state, &settle_key, resp.clone());
                     return Ok(resp);
