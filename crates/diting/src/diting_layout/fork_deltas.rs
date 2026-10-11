@@ -167,11 +167,8 @@
             Style { item_is_replaced: true, ..Style::default() },
             Style::default(),
         );
-        // 100x50 — natural size for a compressible replaced element. The
-        // `normal`→start provenance upstream absorbed (taffy main by
-        // 2d936b77, 2026-10-09) now produces the fork expectation; the old
-        // lock here was stock 0.13.0 stretching the inline axis (300) and
-        // ratio-deriving the block axis (150).
+        // 100x50 natural size — upstream absorbed the fork (taffy 2d936b77);
+        // the old lock was stock stretching inline (300) + ratio block (150).
         assert_eq!(replaced, Size { width: 100.0, height: 50.0 });
 
         let (_, ordinary) = layout_replaced_grid_item(Style::default(), Style::default());
@@ -237,8 +234,8 @@
         let (_, block_stretch) =
             layout_replaced_grid_item(Style { align_self: Some(AlignSelf::STRETCH), ..base.clone() }, Style::default());
         // 400x200 — block stretch supplies height, ratio derives width.
-        // Upstream absorbed this (taffy main by 2d936b77); the old lock was
-        // stock ignoring explicit block stretch for a replaced item.
+        // Upstream absorbed this (taffy 2d936b77); the old lock was stock
+        // ignoring explicit block stretch for a replaced item.
         assert_eq!(block_stretch, Size { width: 400.0, height: 200.0 });
 
         let (_, both_stretch) = layout_replaced_grid_item(
@@ -1267,11 +1264,9 @@ fn inline_block_baseline_is_its_last_line() {
     });
     let box_last_baseline =
         rbox.y + rbox.height - lh_b + super::text::baseline_offset(m.ascent, m.descent, lh_b);
-    // Since #243 the map height is taffy's UNROUNDED size while the span
-    // union's origin stays the rounded walk position — up to ±0.5 of subpixel
-    // skew rides the approximation formula. 1.0 still separates cleanly from
-    // the failure modes this guards (first-line/bottom-edge are a full line
-    // box ≈ 23px off).
+    // #243: map height is taffy's UNROUNDED size, span origin is the rounded
+    // walk position — up to ±0.5 subpixel skew rides the approximation; 1.0
+    // still separates from the guarded failure modes (a full line box ≈ 23px).
     assert!(
         (base_t - box_last_baseline).abs() < 1.0,
         "text baseline must sit on the box's last-line baseline: text={base_t} box_last={box_last_baseline} (rt={rt:?} rbox={rbox:?})"

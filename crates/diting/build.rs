@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-changed=js/bootstrap.js");
+    println!("cargo:rerun-if-changed=js/fetch.js");
     println!("cargo:rerun-if-changed=js/xhr.js");
     println!("cargo:rerun-if-changed=js/interface_sweep.js");
     println!("cargo:rerun-if-changed=js/message_port.js");
@@ -39,16 +40,23 @@ fn main() {
     let snapshot_path = out_dir.join("DITING_SNAPSHOT.bin");
 
     let bootstrap_js = include_str!("js/bootstrap.js");
-    // Second script, same realm, runs after bootstrap.js: message_port.js
+    // Second script, same realm (#252 god-file ratchet split): the fetch
+    // family moved out of bootstrap.js wholesale. Its top level only
+    // declares bindings (var/const/function + the globalThis.fetch
+    // assignment) — every helper it references (_docBase, __recordFetchTiming,
+    // Headers…) is touched at call time, by which point bootstrap.js has
+    // run. It must precede xhr.js, whose send() rides __ditingFetchShim.
+    let fetch_js = include_str!("js/fetch.js");
+    // Third script, same realm, runs after bootstrap.js: message_port.js
     // only consumes bindings the first script defined, so plain sequential
     // execute_script calls are equivalent to one concatenated script.
     let message_port_js = include_str!("js/message_port.js");
-    // Third script, same rule: the #226 fetch-settlement registry only
+    // Fourth script, same rule: the #226 fetch-settlement registry only
     // touches bindings bootstrap.js defined, and only at call time.
     let fetch_probe_js = include_str!("js/fetch_probe.js");
-    // Fourth script, same rule (#236 absorption split): the XHR family moved
+    // Fifth script, same rule (#236 absorption split): the XHR family moved
     // out of bootstrap.js wholesale — it consumes the fetch shim closure and
-    // the initiator-hint var the bootstrap defined, both at class-definition
+    // the initiator-hint var fetch.js defined, both at class-definition
     // and at send() time.
     let xhr_js = include_str!("js/xhr.js");
     // LAST script (#236 absorption split): the snapshot-time interface sweeps
@@ -70,6 +78,9 @@ fn main() {
                 runtime
                     .execute_script("<diting:bootstrap>", bootstrap_js.to_string())
                     .expect("bootstrap.js should not fail during snapshot creation");
+                runtime
+                    .execute_script("<diting:fetch>", fetch_js.to_string())
+                    .expect("fetch.js should not fail during snapshot creation");
                 runtime
                     .execute_script("<diting:xhr>", xhr_js.to_string())
                     .expect("xhr.js should not fail during snapshot creation");
