@@ -4321,7 +4321,7 @@
     /// fields (status 0, readyState 4), not an exception.
     #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
     #[tokio::test(flavor = "current_thread")]
-    async fn sync_xhr_dead_endpoint_status_zero() {
+    async fn sync_xhr_dead_endpoint_throws_network_error() {
         let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
         std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
 
@@ -4337,8 +4337,9 @@
                     const x = new XMLHttpRequest();
                     x.open('GET', '/gone', false);
                     let threw = 'no';
-                    try { x.send(); } catch (e) { threw = 'yes'; }
-                    return { threw, status: x.status, text: x.responseText, state: x.readyState };
+                    let name = '';
+                    try { x.send(); } catch (e) { threw = 'yes'; name = e.name; }
+                    return { threw, name, status: x.status, text: x.responseText, state: x.readyState };
                 }"#,
                 None,
                 &[],
@@ -4349,10 +4350,13 @@
             .unwrap();
         std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
 
+        // Chrome ground truth (headless, 2026-10-11): sync XHR network error
+        // throws NetworkError, readyState already 4, status 0, empty body.
         assert_eq!(
             result.value.unwrap(),
             serde_json::json!({
-                "threw": "no",
+                "threw": "yes",
+                "name": "NetworkError",
                 "status": 0,
                 "text": "",
                 "state": 4,

@@ -253,7 +253,12 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
           xhr.responseText = '';
           xhr.response = '';
           xhr.readyState = 4;
-          return;
+          // Chrome pins (headless, 2026-10-11): a sync XHR network error
+          // surfaces as a NetworkError DOMException with readyState already
+          // DONE and status 0 — not a silent return. SDKs that branch on
+          // try/catch (PDD SDK.sync face, #249) read the silent form as
+          // success-shaped.
+          throw new DOMException("A network error occurred.", "NetworkError");
         }
         xhr.status = parsed.status;
         xhr.statusText = '';
@@ -296,6 +301,9 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
         xhr.responseText = '';
         xhr.response = '';
         xhr.readyState = 4;
+        // Same Chrome face as the blocked branch above: send() throws
+        // NetworkError once state is DONE, responseText empty.
+        throw new DOMException("A network error occurred.", "NetworkError");
       }
       return;
     }
