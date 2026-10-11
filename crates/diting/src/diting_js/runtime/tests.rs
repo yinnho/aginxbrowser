@@ -4468,6 +4468,93 @@
         );
     }
 
+    /// (#228) Script rows used to surface only the JS-shaped header set —
+    /// the Cookie the transport actually sent never reached the network
+    /// faces, so HAR/CDP forensics on "which cookies did this signed call
+    /// carry" (the #226 doudian WAF, the taobao cookie-rotation race) had
+    /// to infer from the nav row. The hop's cookie now rides the recorded
+    /// set on the plain path; served Buffered outcomes prefer the
+    /// transport's own #97 wire snapshot.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn scripted_fetch_event_carries_wire_cookie_header() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            // First connection plants the cookie; the second echoes the
+            // Cookie header it received, so the wire truth is assertable
+            // alongside the recorded event.
+            let (mut s1, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = s1.read(&mut buf).unwrap();
+            s1.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\nset-cookie: forensics=k1; Path=/\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok").unwrap();
+            s1.flush().unwrap();
+            let (mut s2, _) = listener.accept().unwrap();
+            let mut buf2 = [0u8; 4096];
+            let n = s2.read(&mut buf2).unwrap();
+            let req = String::from_utf8_lossy(&buf2[..n]).to_string();
+            let cookie = req
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("cookie:"))
+                .map(|l| l["cookie:".len()..].trim().to_string())
+                .unwrap_or_default();
+            let body = format!("cookie-was:{}", cookie);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            s2.write_all(resp.as_bytes()).unwrap();
+            s2.flush().unwrap();
+        });
+
+        let (mut rt, _jar) = setup_runtime_with_cookies("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    await fetch('/login');
+                    const r = await fetch('/api');
+                    return await r.text();
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!("cookie-was:forensics=k1"),
+            "the wire must have carried the jar cookie"
+        );
+
+        let events = rt.take_js_network_events();
+        let api = events
+            .iter()
+            .rev()
+            .find(|e| e.url.ends_with("/api"))
+            .expect("/api must leave a recorded event");
+        let cookie_hdr = api
+            .request_headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+            .map(|(_, v)| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            cookie_hdr.contains("forensics=k1"),
+            "recorded script row must carry the wire Cookie header, got: {:?}",
+            cookie_hdr
+        );
+    }
+
     fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack
             .windows(needle.len())

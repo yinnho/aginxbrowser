@@ -486,6 +486,7 @@ pub(crate) async fn fetch_url_walk(
         }
 
         let credentials_allowed = credentials.allows(&page_origin, &current_url);
+        let mut hop_cookie_header: Option<String> = None;
         if credentials_allowed {
             if let Some(ref jar) = cookie_jar {
                 if let Ok(parsed_url) = url::Url::parse(&current_url) {
@@ -496,6 +497,11 @@ pub(crate) async fn fetch_url_walk(
                     );
                     let cookie_header = jar.get_cookie_header_for(&parsed_url, &send_ctx);
                     if !cookie_header.is_empty() {
+                        // #228: the cookie rides `req` only — the JS-shaped
+                        // `hop_headers` map (and everything derived from it,
+                        // e.g. the stealth hop's args) must not carry it or
+                        // the stealth stack would double-send its own jar copy.
+                        hop_cookie_header = Some(cookie_header.clone());
                         req = req.header("Cookie", &cookie_header);
                     }
                 }
@@ -661,6 +667,12 @@ pub(crate) async fn fetch_url_walk(
             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
             .map(|(_, v)| v.clone());
         final_hop_headers = hop_headers.clone();
+        // #228: HAR/network faces read the wire set — the hop's headers plus
+        // the Cookie the transport sent. Nav rows always had it; script rows
+        // lost it because the cookie only ever touched the reqwest builder.
+        if let Some(ck) = &hop_cookie_header {
+            final_hop_headers.insert("Cookie".to_string(), ck.clone());
+        }
 
         if !current_body.is_empty() {
             req = req.body(current_body.clone());
@@ -987,6 +999,7 @@ pub(crate) async fn fetch_url_walk(
     // The legacy fallback resolved (and revalidated) its redirects inside
     // the HttpClient; adopt its final URL so the CORS check and the passive
     // observers below see where the content actually came from.
+    let mut wire_request_headers: Option<std::collections::HashMap<String, String>> = None;
     let (status, resp_headers, buffered_body): (
         u16,
         std::collections::HashMap<String, String>,
@@ -999,6 +1012,11 @@ pub(crate) async fn fetch_url_walk(
         }
         OpFetchOutcome::Buffered(r) => {
             current_url = r.url.to_string();
+            // #228: a served Buffered outcome knows its own #97 wire
+            // snapshot — the set the transport actually sent, cookies
+            // included. Prefer it over the walk's reconstruction; the
+            // empty map of a synthesized response falls back below.
+            wire_request_headers = Some(r.request_headers.clone());
             (r.status, r.headers.clone(), Some(r.body.clone()))
         }
     };
@@ -1152,6 +1170,15 @@ pub(crate) async fn fetch_url_walk(
     );
     let resp_body_base64 = BASE64.encode(&resp_bytes);
 
+    // #228: the transport's own wire snapshot when one exists (stealth /
+    // legacy-TLS Buffered outcomes), else the walk's reconstruction (plain
+    // Live path — hop headers + the Cookie inserted at hop build time).
+    let event_request_headers = wire_request_headers
+        .as_ref()
+        .filter(|m| !m.is_empty())
+        .cloned()
+        .unwrap_or_else(|| final_hop_headers.clone());
+
     // Hand the success network event to the driver (recorded once the walk
     // returns and OpState is reachable again), then fire the passive
     // on_response observers.
@@ -1160,7 +1187,7 @@ pub(crate) async fn fetch_url_walk(
         method: method.clone(),
         status,
         response_headers: resp_headers.clone(),
-        request_headers: final_hop_headers.clone(),
+        request_headers: event_request_headers.clone(),
         body_size: resp_bytes.len(),
         stored_text: stored_text.clone(),
         resp_body_base64: resp_body_base64.clone(),
@@ -1185,7 +1212,7 @@ pub(crate) async fn fetch_url_walk(
                 body: resp_bytes.to_vec(),
                 redirected_from: Vec::new(),
                 redirect_hops: Vec::new(),
-                request_headers: final_hop_headers.clone(),
+                request_headers: event_request_headers.clone(),
             };
             cbs.fire_response(&info, &net_resp).await;
         }
