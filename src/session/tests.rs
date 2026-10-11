@@ -1749,6 +1749,109 @@
 
     #[cfg(feature = "screenshot")]
     #[tokio::test]
+    async fn screenshot_anonymous_flow_text_refreshes_on_style_write() {
+        // #253 / blitz#1174 pin: the inline run inside an anonymous flow
+        // column (block child forces the wrap) snapshots its resolved text
+        // values into the layout leaf. A style write on the container must
+        // rebuild those leaf values — stale anonymous-run styles would
+        // freeze the old color through the damage-cache path.
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /anon",
+            "<html><body style='margin:0'>\
+             <div id='host' style='color:rgb(0,0,255);font-size:40px;width:380px'>\
+             loose words <span>tail</span>\
+             <div style='height:12px;background:rgb(204,204,204)'></div>\
+             </div></body></html>",
+        )]);
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/anon")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        async fn shoot(mgr: &mut SessionManager, sid: &str) -> (usize, usize) {
+            {
+                let shot = mgr
+                    .send(&sid, |reply| SessionCommand::Screenshot {
+                        width: Some(400),
+                        height: Some(300),
+                        full_page: false,
+                        selector: None,
+                        selector_all: false,
+                        dpr: None,
+                        reply,
+                    })
+                    .await
+                    .unwrap();
+                let v: serde_json::Value = serde_json::from_str(&shot).expect("screenshot JSON");
+                use base64::{engine::general_purpose::STANDARD, Engine as _};
+                let png = STANDARD
+                    .decode(v["image_base64"].as_str().expect("base64 body"))
+                    .expect("decodable base64");
+                let decoder = png::Decoder::new(std::io::Cursor::new(&png));
+                let mut reader = decoder.read_info().expect("png read_info");
+                let mut buf = vec![0; reader.output_buffer_size().expect("png buffer size")];
+                let info = reader.next_frame(&mut buf).expect("png decode");
+                let px = &buf[..info.buffer_size()];
+                let (mut blue, mut red) = (0usize, 0usize);
+                for y in 0..info.height {
+                    for x in 0..info.width {
+                        let i = ((y * info.width + x) * 4) as usize;
+                        let (r, g, b) = (px[i] as u32, px[i + 1] as u32, px[i + 2] as u32);
+                        if b > 140 && r < 110 && g < 110 {
+                            blue += 1;
+                        }
+                        if r > 140 && b < 110 && g < 110 {
+                            red += 1;
+                        }
+                    }
+                }
+                (red, blue)
+            }
+        }
+
+        let (red0, blue0) = shoot(&mut mgr, &sid).await;
+        assert!(
+            blue0 > 200 && red0 == 0,
+            "baseline: anonymous-run text must be blue (blue={blue0}, red={red0})"
+        );
+
+        mgr.send(&sid, |reply| SessionCommand::Eval {
+            script: "document.getElementById('host').style.color='rgb(255,0,0)'".to_string(),
+            timeout_ms: None,
+            reply,
+        })
+        .await
+        .unwrap();
+        let (red1, blue1) = shoot(&mut mgr, &sid).await;
+        assert!(
+            red1 > 200 && blue1 == 0,
+            "after the style write the run must repaint red (red={red1}, blue={blue1}) \
+             — stale anonymous-run values would stay blue (blitz#1174 shape)"
+        );
+
+        // Same damage signature → cached frame must carry the same fresh
+        // pixels, not a stale pre-write capture.
+        let (red2, blue2) = shoot(&mut mgr, &sid).await;
+        assert!(
+            red2 > 200 && blue2 == 0,
+            "cache-hit frame must stay red (red={red2}, blue={blue2})"
+        );
+
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    #[cfg(feature = "screenshot")]
+    #[tokio::test]
     async fn screenshot_captures_current_dom_state() {
         let _net = crate::server::test_util::net_env_guard();
         let (port, _hits) = crate::server::test_util::recording_server(&[(

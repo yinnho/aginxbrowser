@@ -2702,3 +2702,80 @@ mod direction_rtl_tests {
         assert!(hi_rtl > 120.0, "rtl ink reaches near the right edge; hi={hi_rtl}");
     }
 }
+
+/// #253 / blitz#1167 pin: an abspos element nested inside inline content —
+/// its containing block is the nearest POSITIONED block ancestor (the p),
+/// which claims the out-of-flow box on the inline run's behalf; the em
+/// itself leaves the inline flow entirely (no hole with explicit offsets),
+/// so the surviving runs stay one contiguous line.
+#[cfg(test)]
+mod abspos_inline_root_tests {
+    use crate::diting_css::{parse_stylesheet_for, CssMediaType};
+    use crate::diting_dom::tree_sink::parse_html;
+    use crate::diting_layout::{compute_styles, layout_dom_with_paint_order_and_images, PaintItem};
+
+    fn render(body: &str) -> Vec<PaintItem> {
+        let html = format!("<html><body style=\"margin:0\">{body}</body></html>");
+        let tree = parse_html(&html);
+        let rules = parse_stylesheet_for("", (800.0, 600.0), CssMediaType::Screen);
+        let styles = compute_styles(&tree, &rules, (800.0, 600.0));
+        let (_, items, ..) = layout_dom_with_paint_order_and_images(
+            &tree, &styles, &crate::diting_fonts::font_book(), 800.0, 600.0, None, None,
+        );
+        items
+    }
+
+    fn text_item<'a>(items: &'a [PaintItem], needle: &str) -> (&'a str, f32, f32, [u8; 4]) {
+        items
+            .iter()
+            .find_map(|it| match it {
+                PaintItem::Text { text, x, y, color, .. } if text.contains(needle) => {
+                    Some((text.as_str(), *x, *y, *color))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no text item for {needle:?}"))
+    }
+
+    #[test]
+    fn abspos_inside_inline_span_claims_the_positioned_block() {
+        let items = render(
+            r#"<p style="position:relative;font-size:20px;line-height:20px;margin:0">\
+               aaa <span>bbb <em style="position:absolute;left:2px;top:1px;color:rgb(255,0,0)">ABS</em> ccc</span> ddd</p>"#,
+        );
+        // The abspos box: red, positioned by the p's padding-box origin —
+        // NOT by the em's inline spot, NOT dropped.
+        let (abs_txt, abs_x, abs_y, abs_color) = text_item(&items, "ABS");
+        assert_eq!(abs_txt, "ABS");
+        assert_eq!(abs_color, [255, 0, 0, 255]);
+        assert!(
+            (abs_x - 2.0).abs() < 1.5 && (abs_y - 1.0).abs() < 1.5,
+            "abs must sit at the containing block's left:2/top:1, got ({abs_x},{abs_y})"
+        );
+        // The surviving runs stay one contiguous line: same y, ascending x,
+        // "bbb" and "ccc" adjacent (the em left the flow — no hole).
+        let (_, aaa_x, aaa_y, _) = text_item(&items, "aaa");
+        let (_, bbb_x, bbb_y, _) = text_item(&items, "bbb");
+        let (_, ccc_x, ccc_y, _) = text_item(&items, "ccc");
+        let (_, ddd_x, ddd_y, _) = text_item(&items, "ddd");
+        let ys = [aaa_y, bbb_y, ccc_y, ddd_y];
+        assert!(
+            ys.iter().all(|y| (y - aaa_y).abs() < 1.0),
+            "surviving runs share one line: {ys:?}"
+        );
+        assert!(
+            aaa_x < bbb_x && bbb_x < ccc_x && ccc_x < ddd_x,
+            "runs keep document order: aaa={aaa_x} bbb={bbb_x} ccc={ccc_x} ddd={ddd_x}"
+        );
+        // Contiguity: the gap where the em sat must be a normal space's
+        // width, not the ABS box's — "bbb" ends before "ccc" starts with
+        // no ABS-sized hole. Exact widths are font-dependent; assert the
+        // hole is smaller than the ABS text itself is wide (roughly its
+        // paint width ~30px at 20px font), i.e. the em truly isn't in flow.
+        // ccc starts right after bbb's run — a single space (~5px).
+        assert!(
+            ccc_x - bbb_x < 200.0,
+            "ccc follows bbb without an ABS-sized hole: bbb={bbb_x} ccc={ccc_x}"
+        );
+    }
+}
