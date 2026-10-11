@@ -7993,6 +7993,57 @@
         assert!(err.contains("content not ready"), "got: {err}");
     }
 
+    /// #255 / obscura#1197 negative evidence: tearing down a realm that
+    /// still holds RETAINED DETACHED iframes must not crash. Their engine
+    /// keeps borrowed native context annexes per frame and crashed in
+    /// finalizers during isolate teardown under GC stress; ours is
+    /// single-realm (frame windows are plain JS objects inside the main
+    /// isolate), so this pins the structural immunity: eval into live
+    /// frames, detach them while JS still references them, allocate to
+    /// pressure the GC, then drop the runtime — repeatedly.
+    #[tokio::test(flavor = "current_thread")]
+    async fn teardown_with_retained_detached_iframes_does_not_crash() {
+        for _round in 0..8 {
+            let mut rt = setup_runtime(
+                r#"<html><body><div id="host">
+                    <iframe></iframe><iframe></iframe><iframe></iframe>
+                </div></body></html>"#,
+            );
+            let nids = rt
+                .with_dom(|dom| {
+                    dom.query_selector_all("iframe")
+                        .unwrap()
+                        .iter()
+                        .map(|e| e.index() as u32)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap();
+            rt.evaluate(
+                "globalThis.__kept = Array.from(document.querySelectorAll('iframe')); \
+                 globalThis.__mainDoc = document; \
+                 __kept.push(...Array.from({length: 5000}, (_, i) => ({ i })));",
+            )
+            .unwrap();
+            for &nid in &nids {
+                let outcome = rt
+                    .evaluate_for_cdp_outcome(
+                        "document !== globalThis.__mainDoc ? 'swapped' : 'same'",
+                        true,
+                        false,
+                        DEFAULT_AWAIT_BUDGET_MS,
+                        Some(nid),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(outcome.info.value, Some(serde_json::json!("swapped")));
+            }
+            rt.evaluate("document.getElementById('host').innerHTML = '';").unwrap();
+            // The detached frames stay reachable through __kept past this
+            // point — the exact "retained detached frames" shape — and the
+            // next loop iteration's setup drops the runtime.
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn test_call_function_frame_nid_scopes_this_arg() {
         let mut rt = setup_runtime(r#"<html><body><iframe id="f"></iframe></body></html>"#);
