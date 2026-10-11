@@ -4600,16 +4600,16 @@ async fn op_fetch_url(
                     if let Err(reason) = validate_fetch_url(&parsed) {
                         let error = format!("Intercept rewrite to forbidden URL blocked: {}", reason);
                         record_failed_fetch(&state.borrow(), &FetchFailure {
-                        url: new_url.clone(),
-                        method: method.clone(),
-                        reason: error.clone(),
-                        final_url: new_url.clone(),
-                        redirects: Vec::new(),
-                        started: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs_f64(),
-                    });
+                            url: new_url.clone(),
+                            method: method.clone(),
+                            reason: error.clone(),
+                            final_url: new_url.clone(),
+                            redirects: Vec::new(),
+                            started: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs_f64(),
+                        });
                         return Ok(serde_json::json!({
                             "status": 0,
                             "body": "",
