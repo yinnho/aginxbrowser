@@ -4154,6 +4154,61 @@
         assert_eq!(v["status"], serde_json::json!(0));
     }
 
+    /// (#248) The client-blocked face — the channel the refused-connection
+    /// test above cannot reach: with the private-network gate armed (no
+    /// env allow), the transport never leaves the client layer and the op
+    /// resolves status-0 + blocked, which the fetch shim rejects with an
+    /// AbortError-shaped TypeError. XHR must still fire 'error' (Chrome's
+    /// face for a blocked request); the #234 absorption keyed the catch on
+    /// err.__aborted and fired 'abort' instead, starving onerror on every
+    /// client-blocked request. Live-verified on 8129 before the fix: rs4 +
+    /// loadend with error missing on both the property and listener
+    /// channels.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_xhr_client_blocked_fires_error_not_abort() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{port}/page"));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const events = [];
+                    const xhr = new XMLHttpRequest();
+                    xhr.onreadystatechange = () => events.push('rs' + xhr.readyState);
+                    xhr.onerror = () => events.push('error');
+                    xhr.onabort = () => events.push('abort');
+                    xhr.open('GET', '/gate-blocked');
+                    const done = new Promise(r => { xhr.onloadend = () => { events.push('loadend'); r(); }; });
+                    xhr.send();
+                    await done;
+                    return { events, readyState: xhr.readyState, status: xhr.status };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let v = result.value.unwrap();
+        assert_eq!(
+            v["events"],
+            serde_json::json!(["rs1", "rs4", "error", "loadend"]),
+            "client-blocked XHR is an 'error' in Chrome, never 'abort'"
+        );
+        assert_eq!(v["status"], serde_json::json!(0));
+    }
+
     /// (#248) Same property-side contract for the timeout path: the deadline
     /// must hand DONE to onreadystatechange, not just to listeners (#116).
     #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization

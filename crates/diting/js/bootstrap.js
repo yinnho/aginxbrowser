@@ -8794,9 +8794,12 @@ globalThis.fetch = async (input, init = {}) => {
     const parsed = JSON.parse(raw);
     __recordFetchTiming(_rtT0, url, _rtInit, parsed);
     if (parsed.blocked) {
+      // #224 face: fetch() rejects rather than handing the page a fake
+      // status-0 Response. No __aborted marker — that marker once made
+      // XHR classify client-blocked requests as user aborts and fire
+      // onabort instead of onerror (#248).
       const err = new TypeError('net::ERR_FAILED');
       err.name = 'AbortError';
-      err.__aborted = true;
       throw err;
     }
     if (parsed.corsBlocked) {

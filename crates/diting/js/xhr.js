@@ -405,16 +405,14 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
       // _setReadyState so property onreadystatechange sees DONE too —
       // _fireEvent skips that property on purpose (#248)
       xhr._setReadyState(4);
-      if (err && err.__aborted) {
-        xhr._aborted = true;
-        xhr._fireEvent('abort');
-        xhr._fireEvent('loadend');
-      } else {
-        // _fireEvent already invokes the on* property — no direct call,
-        // it used to fire onerror/onabort twice (#248)
-        xhr._fireEvent('error');
-        xhr._fireEvent('loadend');
-      }
+      // Every rejection that reaches here (wire error, DNS, SSRF/tracker
+      // block) is an 'error' in Chrome — 'abort' is only for xhr.abort(),
+      // which sets _aborted and delivers its own events above. The blocked
+      // path used to carry err.__aborted from the fetch shim, so client-
+      // blocked XHRs fired abort and starved onerror (live-verified: rs4
+      // + loadend with error missing on both channels).
+      xhr._fireEvent('error');
+      xhr._fireEvent('loadend');
     });
   }
 
