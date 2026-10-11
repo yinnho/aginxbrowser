@@ -712,6 +712,13 @@ fn finish_event(gs: &mut super::ops::JsState, id: u32, ev: WsInbound) -> String 
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs_f64(),
+                // The row is stamped at handshake completion (#229); the
+                // dispatch time is not plumbed through the WS face, so it
+                // reads as an instantaneous request (duration 0).
+                started: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64(),
                 error: None,
                 // A WebSocket open never redirects — the upgrade is 101 or
                 // the open fails.

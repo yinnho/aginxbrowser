@@ -388,6 +388,10 @@ pub struct JsNetworkEvent {
     pub final_url: String,
     /// Hops followed in order, each with the 3xx status (#203).
     pub redirects: Vec<crate::diting_net::RedirectHop>,
+    /// Request dispatch, unix seconds (#229). `timestamp` is response
+    /// completion (walk return), so the pair reconstructs which request
+    /// left first — completion order alone cannot.
+    pub started: f64,
 }
 
 /// A response body retained for `Network.getResponseBody`. Bodies are
@@ -4265,6 +4269,10 @@ fn gather_fetch_parts(
                 reason: e.clone(),
                 final_url: url.to_string(),
                 redirects: Vec::new(),
+                started: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64(),
             });
             return Err(serde_json::json!({
                 "status": 0,
@@ -4329,6 +4337,10 @@ fn gather_fetch_parts(
                 reason: format!("blocked by Network.setBlockedURLs pattern: {pattern}"),
                 final_url: url.to_string(),
                 redirects: Vec::new(),
+                started: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64(),
             },
         );
         return Err(serde_json::json!({
@@ -4388,6 +4400,7 @@ fn record_fetch_network_event(state: &OpState, ev: &FetchNetworkEvent) -> String
         error: None,
         final_url: ev.final_url.clone(),
         redirects: ev.redirects.clone(),
+        started: ev.started,
     });
     const MAX_JS_NETWORK_EVENTS: usize = 4096;
     if gs.js_network_events.len() > MAX_JS_NETWORK_EVENTS {
@@ -4546,6 +4559,10 @@ async fn op_fetch_url(
                         reason: reason.clone(),
                         final_url: url.clone(),
                         redirects: Vec::new(),
+                        started: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs_f64(),
                     });
                     return Ok(serde_json::json!({
                         "status": 0,
@@ -4588,6 +4605,10 @@ async fn op_fetch_url(
                         reason: error.clone(),
                         final_url: new_url.clone(),
                         redirects: Vec::new(),
+                        started: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs_f64(),
                     });
                         return Ok(serde_json::json!({
                             "status": 0,
@@ -4606,6 +4627,10 @@ async fn op_fetch_url(
                         reason: error.clone(),
                         final_url: new_url.clone(),
                         redirects: Vec::new(),
+                        started: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs_f64(),
                     });
                     return Ok(serde_json::json!({
                         "status": 0,
@@ -4668,6 +4693,13 @@ async fn op_fetch_url(
         referrer_init,
         callbacks,
         failures: Vec::new(),
+        // #229: op entry = request dispatch. Stamped before the first hop
+        // goes out so the HAR face can order concurrent requests by start,
+        // not by which response landed first.
+        started_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64(),
     };
 
     let outcome = match fetch_url_walk(&mut deps).await {
@@ -4887,6 +4919,7 @@ fn record_failed_fetch(state: &OpState, f: &FetchFailure) {
         error: Some(f.reason.clone()),
         final_url: f.final_url.clone(),
         redirects: f.redirects.clone(),
+        started: f.started,
     });
     const MAX_JS_NETWORK_EVENTS: usize = 4096;
     if gs.js_network_events.len() > MAX_JS_NETWORK_EVENTS {
@@ -4972,6 +5005,13 @@ fn op_fetch_url_sync(
         referrer_init: "about:client".to_string(),
         callbacks,
         failures: Vec::new(),
+        // #229: op entry = request dispatch. Stamped before the first hop
+        // goes out so the HAR face can order concurrent requests by start,
+        // not by which response landed first.
+        started_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64(),
     };
 
     let (tx, rx) = std::sync::mpsc::channel();

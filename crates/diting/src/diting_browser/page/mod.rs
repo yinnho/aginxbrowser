@@ -193,6 +193,12 @@ pub struct NetworkEvent {
     /// The redirect hops followed, in order, each with the 3xx status that
     /// sent it there (#203). Empty when the request went straight through.
     pub redirects: Vec<crate::diting_net::RedirectHop>,
+    /// When the request was DISPATCHED (#229). `None` on
+    /// navigation/subresource rows (their `timestamp` already stamps early
+    /// in the lifecycle); `Some` on script rows, whose `timestamp` is
+    /// response completion. The HAR face reads the pair as
+    /// startedDateTime + time.
+    pub started: Option<f64>,
 }
 
 /// A response body retained for `get_response_body` (upstream #360). Bodies

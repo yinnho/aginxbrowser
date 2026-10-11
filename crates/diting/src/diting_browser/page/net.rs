@@ -50,6 +50,7 @@ impl Page {
             // #102); script rows get theirs from sync_js_network_events.
             final_url: String::new(),
             redirects: Vec::new(),
+            started: None,
         });
         request_id
     }
@@ -214,6 +215,9 @@ impl Page {
                 // and the hops it took follow it onto the page-level rows.
                 final_url: ev.final_url,
                 redirects: ev.redirects,
+                // #229: script rows know their dispatch time; nav rows keep
+                // None (timestamp already stamps early in their lifecycle).
+                started: Some(ev.started),
             });
         }
     }

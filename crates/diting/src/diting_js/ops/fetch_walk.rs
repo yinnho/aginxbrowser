@@ -44,6 +44,8 @@ pub(crate) struct FetchNetworkEvent {
     // #203 redirect observability — threaded to the recorded event.
     pub(crate) final_url: String,
     pub(crate) redirects: Vec<crate::diting_net::RedirectHop>,
+    /// Request dispatch time, unix seconds (#229).
+    pub(crate) started: f64,
 }
 
 /// A walk failure to replay into the network-event log. `url` is the
@@ -57,6 +59,8 @@ pub(crate) struct FetchFailure {
     pub(crate) reason: String,
     pub(crate) final_url: String,
     pub(crate) redirects: Vec<crate::diting_net::RedirectHop>,
+    /// Request dispatch time, unix seconds (#229).
+    pub(crate) started: f64,
 }
 
 /// What [`fetch_url_walk`] produces: the exact JSON envelope the op returns,
@@ -90,6 +94,11 @@ pub(crate) struct FetchWalkDeps {
     pub(crate) referrer_init: String,
     pub(crate) callbacks: Option<std::sync::Arc<crate::diting_net::CallbackRegistry>>,
     pub(crate) failures: Vec<FetchFailure>,
+    /// Unix seconds at op entry (#229) — request dispatch, before the first
+    /// hop goes out. Threading this apart from the completion-time stamp is
+    /// what lets the HAR face reconstruct wire causality (a request that
+    /// left first but answered second must read as started earlier).
+    pub(crate) started_unix: f64,
 }
 
 /// Drop-remove a pushed in-flight entry — the walk returns from a dozen
@@ -329,6 +338,7 @@ pub(crate) async fn fetch_url_walk(
                                         reason: error.clone(),
                                         final_url: url.clone(),
                                         redirects: Vec::new(),
+                                        started: deps.started_unix,
                                     });
                                 return Err(deno_error::JsErrorBox::generic(error));
                             }
@@ -348,6 +358,7 @@ pub(crate) async fn fetch_url_walk(
                 reason: message.clone(),
                 final_url: url.clone(),
                 redirects: Vec::new(),
+                started: deps.started_unix,
             });
             deno_error::JsErrorBox::generic(message)
         };
@@ -815,6 +826,7 @@ pub(crate) async fn fetch_url_walk(
                             reason: fallback_err.to_string(),
                             final_url: current_url.clone(),
                             redirects: redirect_hops.clone(),
+                            started: deps.started_unix,
                         });
                         return Err(deno_error::JsErrorBox::generic(fallback_err.to_string()))
                     }
@@ -825,6 +837,7 @@ pub(crate) async fn fetch_url_walk(
                             reason: e.to_string(),
                             final_url: current_url.clone(),
                             redirects: redirect_hops.clone(),
+                            started: deps.started_unix,
                         });
                         return Err(deno_error::JsErrorBox::generic(e.to_string()))
                     }
@@ -883,6 +896,7 @@ pub(crate) async fn fetch_url_walk(
                 reason: error.clone(),
                 final_url: next_url.to_string(),
                 redirects: redirect_hops.clone(),
+                started: deps.started_unix,
             });
             return Ok(FetchWalkOutcome {
                 json: serde_json::json!({
@@ -913,6 +927,7 @@ pub(crate) async fn fetch_url_walk(
                 reason: error.clone(),
                 final_url: next_url.to_string(),
                 redirects: redirect_hops.clone(),
+                started: deps.started_unix,
             });
             return Ok(FetchWalkOutcome {
                 json: serde_json::json!({
@@ -954,6 +969,7 @@ pub(crate) async fn fetch_url_walk(
                     reason: error.clone(),
                     final_url: current_url.clone(),
                     redirects: redirect_hops.clone(),
+                    started: deps.started_unix,
                 });
                 return Ok(FetchWalkOutcome {
                     json: serde_json::json!({
@@ -1037,6 +1053,7 @@ pub(crate) async fn fetch_url_walk(
             reason: error.clone(),
             final_url: current_url.clone(),
             redirects: redirect_hops.clone(),
+            started: deps.started_unix,
         });
         return Ok(FetchWalkOutcome {
             json: serde_json::json!({
@@ -1090,6 +1107,7 @@ pub(crate) async fn fetch_url_walk(
                     reason: error.clone(),
                     final_url: current_url.clone(),
                     redirects: redirect_hops.clone(),
+                    started: deps.started_unix,
                 });
             return Ok(FetchWalkOutcome {
                 json: serde_json::json!({
@@ -1193,6 +1211,7 @@ pub(crate) async fn fetch_url_walk(
         resp_body_base64: resp_body_base64.clone(),
         final_url: current_url.clone(),
         redirects: redirect_hops.clone(),
+        started: deps.started_unix,
     };
 
     if let Some(cbs) = callbacks.as_ref() {

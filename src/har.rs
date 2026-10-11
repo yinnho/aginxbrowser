@@ -484,8 +484,16 @@ pub fn har_log(page_title: &str, events: &[NetworkEvent], body_of: &dyn Fn(&str)
                 }
             }
             let mut entry = json!({
-                "startedDateTime": iso8601(e.timestamp),
-                "time": -1.0,
+                // #229: request start when the row knows it (script rows —
+                // `timestamp` is response completion there), else the row's
+                // own stamp (nav/subresource rows stamp early in their
+                // lifecycle already). Chrome semantics: startedDateTime =
+                // request start, time = total duration in ms.
+                "startedDateTime": iso8601(e.started.unwrap_or(e.timestamp)),
+                "time": e
+                    .started
+                    .map(|s| (e.timestamp - s).max(0.0) * 1000.0)
+                    .unwrap_or(-1.0),
                 "_resourceType": e.resource_type,
                 "request": {
                     "method": e.method,
@@ -578,6 +586,7 @@ mod tests {
             error: None,
             final_url: String::new(),
             redirects: Vec::new(),
+            started: None,
         }
     }
 
@@ -1049,5 +1058,37 @@ mod tests {
         // and without it a timed-out attempt's rows are indistinguishable
         // from the current document's.
         assert_eq!(rows[0]["nav"], 0);
+    }
+
+    /// (#229) Script rows know their dispatch time; the pair
+    /// (startedDateTime = request start, time = duration in ms) is what
+    /// reconstructs wire causality — a request that left first but
+    /// answered second must read as started earlier, which completion-
+    /// order stamping could not express. Nav rows (started: None) keep
+    /// their own stamp and `time: -1` ("not available").
+    #[test]
+    fn script_rows_stamp_request_start_and_duration() {
+        // Left first (t=100), answered last (t=105.5).
+        let mut slow = event("https://e.example/slow.json", "Fetch", 200, 105.5);
+        slow.started = Some(100.0);
+        // Left second (t=101), answered first (t=102).
+        let mut fast = event("https://e.example/fast.json", "Fetch", 200, 102.0);
+        fast.started = Some(101.0);
+        let log = har_log("t", &[slow, fast], &|_| None);
+        let entries = log["log"]["entries"].as_array().unwrap();
+        assert_eq!(entries[0]["startedDateTime"], iso8601(100.0));
+        assert_eq!(entries[0]["time"], serde_json::json!(5500.0));
+        assert_eq!(entries[1]["startedDateTime"], iso8601(101.0));
+        assert_eq!(entries[1]["time"], serde_json::json!(1000.0));
+        assert!(
+            entries[0]["startedDateTime"].as_str().unwrap()
+                < entries[1]["startedDateTime"].as_str().unwrap(),
+            "completion order (fast answered first) must not reorder starts"
+        );
+
+        let nav = har_log("t", &[event("https://e.example/", "Document", 200, 50.0)], &|_| None);
+        let e = &nav["log"]["entries"][0];
+        assert_eq!(e["startedDateTime"], iso8601(50.0));
+        assert_eq!(e["time"], serde_json::json!(-1.0));
     }
 }

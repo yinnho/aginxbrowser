@@ -4555,6 +4555,63 @@
         );
     }
 
+    /// (#229) Script rows used to stamp startedDateTime at walk return —
+    /// response completion. A request that left first but answered second
+    /// read as later, which is exactly the ambiguity the taobao
+    /// cookie-rotation race could not resolve. The recorded row now
+    /// carries the op-entry dispatch time, strictly earlier than the
+    /// completion stamp when the transport takes measurable time.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn scripted_fetch_event_records_dispatch_before_completion() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok")
+                .unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        let result = rt
+            .call_function_on_for_cdp(
+                r#"async () => {
+                    const r = await fetch('/slow');
+                    return await r.text();
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+        assert_eq!(result.value.unwrap(), serde_json::json!("ok"));
+
+        let events = rt.take_js_network_events();
+        let ev = events
+            .iter()
+            .find(|e| e.url.ends_with("/slow"))
+            .expect("/slow must leave a recorded event");
+        assert!(ev.started > 0.0, "dispatch stamp is unix seconds");
+        assert!(
+            ev.timestamp - ev.started >= 0.3,
+            "dispatch must precede completion by the transport delay, got Δ={}",
+            ev.timestamp - ev.started
+        );
+    }
+
     fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack
             .windows(needle.len())
