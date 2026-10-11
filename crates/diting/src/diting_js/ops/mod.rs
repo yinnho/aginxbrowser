@@ -4260,6 +4260,7 @@ fn gather_fetch_parts(
     url: &str,
     method: &str,
     headers_json: &str,
+    started: f64,
 ) -> Result<(FetchRequestInit, bool), String> {
     if let Ok(parsed_url) = url::Url::parse(url) {
         if let Err(e) = validate_fetch_url(&parsed_url) {
@@ -4269,10 +4270,7 @@ fn gather_fetch_parts(
                 reason: e.clone(),
                 final_url: url.to_string(),
                 redirects: Vec::new(),
-                started: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs_f64(),
+                started,
             });
             return Err(serde_json::json!({
                 "status": 0,
@@ -4337,10 +4335,7 @@ fn gather_fetch_parts(
                 reason: format!("blocked by Network.setBlockedURLs pattern: {pattern}"),
                 final_url: url.to_string(),
                 redirects: Vec::new(),
-                started: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs_f64(),
+                started,
             },
         );
         return Err(serde_json::json!({
@@ -4459,6 +4454,34 @@ impl FetchSettlements {
     }
 }
 
+/// Unix seconds "now" — the one clock every fetch-row stamp shares (#229:
+/// op entry = request dispatch; stamps taken later, after an intercept
+/// wait or gate walk, would misorder HAR rows).
+fn now_unix() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}
+
+/// Mirror one fetch settlement onto the #226 ring. Every async-op exit —
+/// the walk's success/error AND the pre-walk short-circuits (SSRF /
+/// setBlockedURLs return, intercept Fulfill/Fail, rewrite blocks) — owes
+/// the JS probe a settlement; an exit that skips this turns a
+/// watchdog-eaten completion into a promise that never settles.
+fn push_fetch_settlement(
+    state: &std::rc::Rc<std::cell::RefCell<OpState>>,
+    key: &str,
+    value: String,
+) {
+    if !key.is_empty() {
+        state
+            .borrow_mut()
+            .borrow_mut::<FetchSettlements>()
+            .push(key.to_string(), value);
+    }
+}
+
 /// Probe-and-take one mirrored completion. `""` = not completed (or already
 /// evicted); a payload starting with NUL is a rejection notice, anything else
 /// is the op's JSON result verbatim.
@@ -4501,11 +4524,25 @@ async fn op_fetch_url(
     };
     tracing::debug!("op_fetch_url called: {} {} (intercept check pending)", method, url);
 
-    let (init, body_is_base64) =
-        match gather_fetch_parts(&state.borrow(), &url, &method, &headers_json) {
-            Ok(parts) => parts,
-            Err(json) => return Ok(json),
-        };
+    // One entry stamp, every exit's truth (#229): rows stamped later —
+    // after the intercept wait or gate walk — would order behind requests
+    // dispatched after them.
+    let started_unix = now_unix();
+    // Bind first: the `state.borrow()` temporary must drop before the arm
+    // body re-borrows for the settlement push (same nesting rule gather's
+    // own record_failed_fetch follows).
+    let gathered =
+        gather_fetch_parts(&state.borrow(), &url, &method, &headers_json, started_unix);
+    let (init, body_is_base64) = match gathered {
+        Ok(parts) => parts,
+        Err(json) => {
+            // Pre-walk short-circuit (SSRF / blocked pattern): still an
+            // op exit, still owes the probe its settlement (#226 — the
+            // mirror must cover every exit, not just the walk's).
+            push_fetch_settlement(&state, &settle_key, json.clone());
+            return Ok(json);
+        }
+    };
     let FetchRequestInit {
         cookie_jar,
         in_flight,
@@ -4545,12 +4582,14 @@ async fn op_fetch_url(
                     // Byte-native: the synthetic body rides the same base64
                     // channel as real network responses (binary payloads
                     // survive; text is reconstructed on the JS side).
-                    return Ok(serde_json::json!({
+                    let resp = serde_json::json!({
                         "status": status,
                         "bodyBase64": BASE64.encode(b),
                         "url": url,
                         "headers": resp_headers,
-                    }).to_string());
+                    }).to_string();
+                    push_fetch_settlement(&state, &settle_key, resp.clone());
+                    return Ok(resp);
                 }
                 Ok(Ok(InterceptResolution::Fail { reason })) => {
                     record_failed_fetch(&state.borrow(), &FetchFailure {
@@ -4559,19 +4598,18 @@ async fn op_fetch_url(
                         reason: reason.clone(),
                         final_url: url.clone(),
                         redirects: Vec::new(),
-                        started: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs_f64(),
+                        started: started_unix,
                     });
-                    return Ok(serde_json::json!({
+                    let resp = serde_json::json!({
                         "status": 0,
                         "body": "",
                         "url": url,
                         "headers": {},
                         "blocked": true,
                         "error": reason,
-                    }).to_string());
+                    }).to_string();
+                    push_fetch_settlement(&state, &settle_key, resp.clone());
+                    return Ok(resp);
                 }
                 Ok(Ok(InterceptResolution::Continue { url: new_url, method: new_method, headers: new_headers, body: new_body })) => {
                     override_url = new_url;
@@ -4605,18 +4643,17 @@ async fn op_fetch_url(
                             reason: error.clone(),
                             final_url: new_url.clone(),
                             redirects: Vec::new(),
-                            started: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs_f64(),
+                            started: started_unix,
                         });
-                        return Ok(serde_json::json!({
+                        let resp = serde_json::json!({
                             "status": 0,
                             "body": "",
                             "url": new_url,
                             "blocked": true,
                             "error": error,
-                        }).to_string());
+                        }).to_string();
+                        push_fetch_settlement(&state, &settle_key, resp.clone());
+                        return Ok(resp);
                     }
                 }
                 Err(_) => {
@@ -4627,18 +4664,17 @@ async fn op_fetch_url(
                         reason: error.clone(),
                         final_url: new_url.clone(),
                         redirects: Vec::new(),
-                        started: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs_f64(),
+                        started: started_unix,
                     });
-                    return Ok(serde_json::json!({
+                    let resp = serde_json::json!({
                         "status": 0,
                         "body": "",
                         "url": new_url,
                         "blocked": true,
                         "error": error,
-                    }).to_string());
+                    }).to_string();
+                    push_fetch_settlement(&state, &settle_key, resp.clone());
+                    return Ok(resp);
                 }
             }
             new_url
@@ -4696,22 +4732,14 @@ async fn op_fetch_url(
         // #229: op entry = request dispatch. Stamped before the first hop
         // goes out so the HAR face can order concurrent requests by start,
         // not by which response landed first.
-        started_unix: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64(),
+        started_unix,
     };
 
     let outcome = match fetch_url_walk(&mut deps).await {
         Ok(outcome) => outcome,
         Err(e) => {
             replay_fetch_failures(&state.borrow(), &deps.failures);
-            if !settle_key.is_empty() {
-                state
-                    .borrow_mut()
-                    .borrow_mut::<FetchSettlements>()
-                    .push(settle_key, format!("\u{0}{e}"));
-            }
+            push_fetch_settlement(&state, &settle_key, format!("\u{0}{e}"));
             return Err(e);
         }
     };
@@ -4731,10 +4759,7 @@ async fn op_fetch_url(
         );
     }
     if !settle_key.is_empty() {
-        state
-            .borrow_mut()
-            .borrow_mut::<FetchSettlements>()
-            .push(settle_key, outcome.json.clone());
+        push_fetch_settlement(&state, &settle_key, outcome.json.clone());
     }
     Ok(outcome.json)
 }
@@ -4960,7 +4985,10 @@ fn op_fetch_url_sync(
     #[string] mode: String,
     #[string] credentials: String,
 ) -> Result<String, deno_error::JsErrorBox> {
-    let (init, body_is_base64) = gather_fetch_parts(state, &url, &method, &headers_json)
+    // Same #229 entry stamp as the async driver — gather's short-circuit
+    // rows and the walk's deps both read the dispatch time.
+    let started_unix = now_unix();
+    let (init, body_is_base64) = gather_fetch_parts(state, &url, &method, &headers_json, started_unix)
         .map_err(deno_error::JsErrorBox::generic)?;
     let FetchRequestInit {
         cookie_jar,
@@ -5008,10 +5036,7 @@ fn op_fetch_url_sync(
         // #229: op entry = request dispatch. Stamped before the first hop
         // goes out so the HAR face can order concurrent requests by start,
         // not by which response landed first.
-        started_unix: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64(),
+        started_unix,
     };
 
     let (tx, rx) = std::sync::mpsc::channel();
