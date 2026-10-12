@@ -252,14 +252,125 @@ impl SessionManager {
     /// operator left running, login state intact. Stale snapshots age out
     /// inside revival instead of coming back. Returns how many sessions
     /// were restored.
+    ///
+    /// Gated by [`eager_restore_mode`] (`AGINXBROWSER_RESTORE_SESSIONS`):
+    /// parallel dogfood ports sharing `~/.aginxbrowser/cache.db` otherwise
+    /// revive every leftover keepalive SPA and wedge the fresh process
+    /// (8129 / #224 class). Prefer per-instance `AGINXBROWSER_STORE_PATH`
+    /// or `AGINXBROWSER_COOKIE_STORE_DIR` isolation; use the env when the
+    /// store must stay shared. Lazy revive-on-first-touch is unchanged.
     pub(crate) fn restore_all(&mut self) -> usize {
-        let ids = self.snapshots.ids();
-        let mut restored = 0usize;
-        for id in ids {
-            if self.revive_session(&id) {
-                restored += 1;
+        match eager_restore_mode() {
+            EagerRestoreMode::Off => {
+                tracing::info!(
+                    "eager session restore disabled (AGINXBROWSER_RESTORE_SESSIONS=0) —                      snapshots stay on disk for lazy revive-on-touch;                      isolate with AGINXBROWSER_STORE_PATH / AGINXBROWSER_COOKIE_STORE_DIR                      when running parallel serves"
+                );
+                0
+            }
+            mode => {
+                let ids = self.snapshots.ids();
+                let mut restored = 0usize;
+                let mut skipped_keepalive = 0usize;
+                for id in ids {
+                    if mode == EagerRestoreMode::SkipKeepalive {
+                        let is_keepalive = self
+                            .snapshots
+                            .load(&id)
+                            .and_then(|(text, _)| serde_json::from_str::<Value>(&text).ok())
+                            .and_then(|v| v.get("keepalive").and_then(Value::as_bool))
+                            .unwrap_or(false);
+                        if is_keepalive {
+                            skipped_keepalive += 1;
+                            tracing::info!(
+                                session = %id,
+                                "skipping eager restore of keepalive snapshot                                  (AGINXBROWSER_RESTORE_SESSIONS=skip-keepalive) —                                  still revivable on first touch"
+                            );
+                            continue;
+                        }
+                    }
+                    if self.revive_session(&id) {
+                        restored += 1;
+                    }
+                }
+                if skipped_keepalive > 0 {
+                    tracing::info!(
+                        restored,
+                        skipped_keepalive,
+                        "eager restore finished (keepalive snapshots deferred)"
+                    );
+                }
+                restored
             }
         }
-        restored
+    }
+}
+
+/// How serve-start [`SessionManager::restore_all`] behaves.
+///
+/// Parsed from `AGINXBROWSER_RESTORE_SESSIONS` (case-insensitive, trimmed):
+/// - unset / `1` / `true` / `on` / `all` → [`EagerRestoreMode::All`] (#88 default)
+/// - `0` / `false` / `off` / `no` → [`EagerRestoreMode::Off`]
+/// - `skip-keepalive` / `non-keepalive` / `no-keepalive` → [`EagerRestoreMode::SkipKeepalive`]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EagerRestoreMode {
+    All,
+    Off,
+    SkipKeepalive,
+}
+
+/// Test lock — parallel tests that flip `AGINXBROWSER_RESTORE_SESSIONS`
+/// hold this so they do not observe each other's env writes.
+#[cfg(test)]
+pub(crate) static RESTORE_SESSIONS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn eager_restore_mode() -> EagerRestoreMode {
+    match std::env::var("AGINXBROWSER_RESTORE_SESSIONS")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        None | Some("") | Some("1") | Some("true") | Some("yes") | Some("on") | Some("all") => {
+            EagerRestoreMode::All
+        }
+        Some("0") | Some("false") | Some("no") | Some("off") => EagerRestoreMode::Off,
+        Some("skip-keepalive") | Some("non-keepalive") | Some("no-keepalive") => {
+            EagerRestoreMode::SkipKeepalive
+        }
+        Some(other) => {
+            tracing::warn!(
+                value = other,
+                "unknown AGINXBROWSER_RESTORE_SESSIONS — treating as all                  (want 0|off|skip-keepalive|all)"
+            );
+            EagerRestoreMode::All
+        }
+    }
+}
+
+#[cfg(test)]
+mod restore_mode_tests {
+    use super::*;
+
+    #[test]
+    fn eager_restore_mode_parses_env() {
+        let _lock = RESTORE_SESSIONS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("AGINXBROWSER_RESTORE_SESSIONS");
+        assert_eq!(eager_restore_mode(), EagerRestoreMode::All);
+        for v in ["1", "true", "ON", "all", ""] {
+            std::env::set_var("AGINXBROWSER_RESTORE_SESSIONS", v);
+            assert_eq!(eager_restore_mode(), EagerRestoreMode::All, "{v:?}");
+        }
+        for v in ["0", "false", "OFF", "no"] {
+            std::env::set_var("AGINXBROWSER_RESTORE_SESSIONS", v);
+            assert_eq!(eager_restore_mode(), EagerRestoreMode::Off, "{v:?}");
+        }
+        for v in ["skip-keepalive", "non-keepalive", "NO-KEEPALIVE"] {
+            std::env::set_var("AGINXBROWSER_RESTORE_SESSIONS", v);
+            assert_eq!(eager_restore_mode(), EagerRestoreMode::SkipKeepalive, "{v:?}");
+        }
+        std::env::remove_var("AGINXBROWSER_RESTORE_SESSIONS");
     }
 }

@@ -22,6 +22,8 @@
 //! Also named here (opt-in only): `taobao-block-everyhelp` — fetch/XHR
 //! reject for `everyhelp.(cdn.)taobao.com` (2026-10-06/07 wall). Shared
 //! by taobao-* / tmall-* flows so the script is not pasted eight times.
+//! `taobao-block-qn-header` blocks qn_header / microapp-loader / workbench
+//! script injection on publish pages (four publish flows share one body).
 
 /// Canonical recipe name for the xhs signing wrapper.
 pub const XHS_SIGN_NAME: &str = "xhs-sign";
@@ -144,6 +146,15 @@ pub const TAOBAO_BLOCK_EVERYHELP_NAME: &str = "taobao-block-everyhelp";
 /// shop / publish pages moving.
 pub const TAOBAO_BLOCK_EVERYHELP: &str = r#"(function(){var BAD=/^https?:\/\/everyhelp\.(cdn\.)?taobao\.com\//;var of=window.fetch;if(typeof of==='function'){window.fetch=function(input,init){var u=typeof input==='string'?input:(input&&input.url)||'';try{u=String(u)}catch(e){}if(BAD.test(u)){try{console.error('[BLOCK] '+u)}catch(e){};return Promise.reject(new TypeError('Failed to fetch'))}return of.apply(this,arguments)}}var op=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){if(BAD.test(String(u))){try{console.error('[BLOCK] '+u)}catch(e){};this.__ehb=1;return}return op.apply(this,arguments)};var os=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.send=function(){if(this.__ehb){return}return os.apply(this,arguments)}})()"#;
 
+
+/// Canonical recipe name for the taobao/tmall qn micro-mod script wall.
+pub const TAOBAO_BLOCK_QN_HEADER_NAME: &str = "taobao-block-qn-header";
+
+/// Block qn_header / crs-qn microapp-loader / qnWorkbench / ihelper sdk-loader
+/// `<script>` injection (publish stable-boot recipe). Opt-in via
+/// `{"recipe":"taobao-block-qn-header"}` (alias `"taobao-qn-header"`).
+pub const TAOBAO_BLOCK_QN_HEADER: &str = r#"(function(){var BLOCK=/merchant-micro-mods\/qn_header|crs-qn\/(microapp-loader|qnWorkbench)|ihelper\/sdk-loader/;function bad(node){try{return node&&node.nodeName==='SCRIPT'&&node.src&&BLOCK.test(node.src)}catch(e){return false}}['appendChild','insertBefore','append','prepend'].forEach(function(m){var proto=Node.prototype;var orig=proto[m];if(typeof orig!=='function')return;proto[m]=function(node){if(bad(node)){try{console.error('[BLOCK] '+node.src)}catch(e){};return node}return orig.apply(this,arguments)}})})()"#;
+
 /// Resolve a recipe name (aliases included) to its source. None for
 /// unknown names — callers surface the error rather than silently
 /// mounting nothing.
@@ -151,6 +162,7 @@ pub fn resolve(name: &str) -> Option<&'static str> {
     match name {
         XHS_SIGN_NAME | "xhs" => Some(XHS_SIGN),
         TAOBAO_BLOCK_EVERYHELP_NAME | "taobao-everyhelp" => Some(TAOBAO_BLOCK_EVERYHELP),
+        TAOBAO_BLOCK_QN_HEADER_NAME | "taobao-qn-header" => Some(TAOBAO_BLOCK_QN_HEADER),
         _ => None,
     }
 }
@@ -225,6 +237,8 @@ mod tests {
         assert!(resolve("xhs").is_some());
         assert!(resolve("taobao-block-everyhelp").is_some());
         assert!(resolve("taobao-everyhelp").is_some());
+        assert!(resolve("taobao-block-qn-header").is_some());
+        assert!(resolve("taobao-qn-header").is_some());
         assert!(resolve("nope").is_none());
     }
 
@@ -254,4 +268,15 @@ mod tests {
             assert!(XHS_SIGN.contains(needle), "script lost: {needle}");
         }
     }
+
+    #[test]
+    fn taobao_qn_header_script_carries_the_contract() {
+        for needle in ["qn_header", "microapp-loader", "appendChild", "BLOCK"] {
+            assert!(
+                TAOBAO_BLOCK_QN_HEADER.contains(needle),
+                "script lost: {needle}"
+            );
+        }
+    }
 }
+

@@ -3088,7 +3088,56 @@
     /// takes its snapshot with it — on access (send) and in the eviction
     /// sweep — so touching the id later is NotFound, not a zombie revival
     /// with stale login cookies.
+    
+    /// AGINXBROWSER_RESTORE_SESSIONS=0 skips eager restore_all; snapshots
+    /// stay on disk for lazy revive-on-touch (parallel dogfood ports).
     #[tokio::test]
+    async fn restore_sessions_env_off_skips_eager_restore() {
+        let _net = crate::server::test_util::net_env_guard();
+        let _env = crate::session::manager::RESTORE_SESSIONS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("AGINXBROWSER_RESTORE_SESSIONS", "0");
+
+        let shared: SharedSnapshots = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let mut mgr = manager_on(shared.clone());
+        let sid = mgr.create(
+            Some("about:blank"),
+            false,
+            vec!["x=1".to_string()],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+        mgr.send(&sid, |reply| SessionCommand::Eval {
+            script: "1".to_string(),
+            timeout_ms: None,
+            reply,
+        })
+        .await
+        .unwrap();
+        assert_eq!(mgr.flush_for_shutdown().await, 1);
+        assert!(shared.lock().unwrap().contains_key(&sid));
+
+        let mut mgr2 = manager_on(shared.clone());
+        assert_eq!(mgr2.restore_all(), 0, "eager restore must be off");
+        assert!(
+            mgr2.list().is_empty(),
+            "no sessions revived eagerly"
+        );
+        assert!(
+            shared.lock().unwrap().contains_key(&sid),
+            "snapshot must remain for lazy touch"
+        );
+
+        std::env::remove_var("AGINXBROWSER_RESTORE_SESSIONS");
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+#[tokio::test]
     async fn restored_non_persistent_sessions_do_not_zombie_revive() {
         let _net = crate::server::test_util::net_env_guard();
         let shared: SharedSnapshots = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));

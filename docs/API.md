@@ -866,7 +866,9 @@ The full listing — every live session with its current page URL, so an agent r
 
 `expires_in_secs` is absent for `keepalive` sessions (they never auto-evict); `persistent` marks sessions whose login state is snapshotted and revivable. Close entries with `POST /session/{id}/close`. `/session/list` remains the lightweight sibling (id + idle age only, no per-session round-trips).
 
-**Restarts and upgrades** — on SIGTERM/SIGINT every live session (persistent or not) is flushed to the store before the process exits, and the next process revives them all under their own ids before it opens its listener: a binary swap costs no login state and no session ids, and `GET /sessions` right after a restart already shows the fleet. Restored sessions keep their original flags — a non-persistent session that then idle-expires takes its restart snapshot with it (a later touch of the id is `SESSION_NOT_FOUND`, not a revival with stale cookies). The flush is budgeted (60s overall, 10s per session): a session stuck mid-command keeps whatever its last per-command snapshot held. An explicit `close` still means done.
+**Restarts and upgrades** — on SIGTERM/SIGINT every live session (persistent or not) is flushed to the store before the process exits, and the next process revives them under their own ids before it opens its listener: a binary swap costs no login state and no session ids, and `GET /sessions` right after a restart already shows the fleet. Restored sessions keep their original flags — a non-persistent session that then idle-expires takes its restart snapshot with it (a later touch of the id is `SESSION_NOT_FOUND`, not a revival with stale cookies). The flush is budgeted (60s overall, 10s per session): a session stuck mid-command keeps whatever its last per-command snapshot held. An explicit `close` still means done.
+
+**Eager restore gate / store isolation** — parallel dogfood ports that share the default `~/.aginxbrowser/cache.db` will otherwise revive every leftover session (including `keepalive` SPAs) into the new process and can wedge it. Pin a per-instance database with `AGINXBROWSER_STORE_PATH` or `AGINXBROWSER_COOKIE_STORE_DIR` / `AGINXBROWSER_STORAGE_DIR` (snapshots live in that store). When the store must stay shared, set `AGINXBROWSER_RESTORE_SESSIONS=0` to skip eager restore at serve start (snapshots remain for lazy revive-on-first-touch), or `skip-keepalive` to restore only non-keepalive snapshots. Default remains `all` (#88 upgrade continuity).
 
 ### Named Accounts (multi-login)
 
@@ -1630,7 +1632,9 @@ Every successful `fetch` and `search` is persisted to a local SQLite database at
 | Env | Default | Meaning |
 |-----|---------|---------|
 | `AGINXBROWSER_STORE` | on | Set `0` to disable persistence entirely |
-| `AGINXBROWSER_STORE_PATH` | `~/.aginxbrowser/cache.db` | Database file location |
+| `AGINXBROWSER_STORE_PATH` | `~/.aginxbrowser/cache.db` | Database file location (page/search rows **and** session snapshots). Prefer a per-instance path when running parallel serves |
+| `AGINXBROWSER_COOKIE_STORE_DIR` / `AGINXBROWSER_STORAGE_DIR` | (unset) | When set and `STORE_PATH` is unset, the store file is `<dir>/cache.db` — isolates snapshots so `restore_all` cannot revive foreign sessions into a "fresh" instance |
+| `AGINXBROWSER_RESTORE_SESSIONS` | `all` | Eager serve-start restore: `all`/`1`/`on` (default) revive every snapshot; `0`/`off` skip eager restore (lazy on touch); `skip-keepalive` restore only non-keepalive snapshots |
 | `AGINXBROWSER_STORE_TTL_HOURS` | `720` | Page rows time-to-live |
 | `AGINXBROWSER_STORE_SEARCH_TTL_HOURS` | `168` | Search-result rows time-to-live |
 | `AGINXBROWSER_STORE_SCOPE` | `global` | `global` = one shared pool, right for single-user instances; `session` = rows are scoped per session — set this on multi-client deployments |

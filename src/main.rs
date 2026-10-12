@@ -461,6 +461,9 @@ async fn main() -> anyhow::Result<()> {
     // costs no login state, and the first /sessions shows the fleet the
     // operator left running. (Lazy revival remains the standing fallback:
     // any snapshot id still revives on first touch.)
+    // Gated by AGINXBROWSER_RESTORE_SESSIONS (0|skip-keepalive|all); parallel
+    // serves must also isolate via AGINXBROWSER_STORE_PATH /
+    // AGINXBROWSER_COOKIE_STORE_DIR so they do not share cache.db snapshots.
     {
         let restored = crate::session::SESSIONS.lock().await.restore_all();
         if restored > 0 {

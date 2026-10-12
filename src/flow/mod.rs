@@ -711,21 +711,31 @@ async fn exec_step(
         "preload" => {
             // Platform site recipes (e.g. xhs-sign) are opt-in here or via
             // POST /session/:id/preload — never host-auto-mounted in core.
-            let mut scripts = a
-                .get("scripts")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|s| s.as_str().map(String::from))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            // `recipe` (one) and `recipes` (many) both resolve; order is
+            // recipe then recipes[] then inline scripts.
+            let mut scripts = Vec::new();
+            let mut names: Vec<String> = Vec::new();
             if let Some(name) = a.get("recipe").and_then(|v| v.as_str()) {
+                names.push(name.to_string());
+            }
+            if let Some(arr) = a.get("recipes").and_then(|v| v.as_array()) {
+                for v in arr {
+                    if let Some(n) = v.as_str() {
+                        names.push(n.to_string());
+                    }
+                }
+            }
+            for name in &names {
                 match crate::session::preload_recipes::resolve(name) {
                     Some(src) => scripts.push(src.to_string()),
                     None => {
                         return Err(format!("unknown preload recipe '{name}'"));
                     }
+                }
+            }
+            if let Some(arr) = a.get("scripts").and_then(|v| v.as_array()) {
+                for s in arr.iter().filter_map(|s| s.as_str()) {
+                    scripts.push(s.to_string());
                 }
             }
             mgr.send(sid, |reply| C::SetPreload { scripts, reply })

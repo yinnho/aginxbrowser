@@ -35,6 +35,9 @@ pub struct SessionManager {
 mod actor;
 mod persist;
 
+#[cfg(test)]
+pub(crate) use persist::RESTORE_SESSIONS_ENV_LOCK;
+
 /// Global session manager, shared between HTTP handlers.
 pub static SESSIONS: std::sync::LazyLock<tokio::sync::Mutex<SessionManager>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(SessionManager::new()));
