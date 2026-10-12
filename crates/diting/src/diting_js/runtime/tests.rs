@@ -13682,6 +13682,43 @@
     }
 
     #[test]
+    fn test_domparser_spec_collections_on_parsed_documents() {
+        // XHS 2026-10-12: an SDK read document.scripts on a DOMParser-parsed
+        // document and got undefined — the hand-rolled docNode predated the
+        // spec collection family. Chrome hands every HTML document the
+        // scripts/forms/images/links HTMLCollections (document order across
+        // head AND body) and a null currentScript (no script of a detached
+        // document executes).
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            const doc = new DOMParser().parseFromString(
+                '<html><head><script src="a.js"><' + '/script></head>'
+                + '<body><form id="f1"></form><img src="i.png">'
+                + '<a href="x">l</a><a>no-href</a><script>1<' + '/script></body></html>',
+                'text/html');
+            return [
+                typeof doc.scripts,
+                doc.scripts.length,
+                doc.scripts[0].getAttribute('src'),
+                doc.scripts instanceof HTMLCollection,
+                doc.scripts.namedItem ? doc.scripts.item(1).tagName : 'no-namedItem',
+                doc.forms.length,
+                doc.forms.namedItem('f1') === doc.forms[0],
+                doc.images.length,
+                doc.links.length,
+                doc.currentScript === null,
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                "object", 2, "a.js", true, "SCRIPT",
+                1, true, 1, 1, true,
+            ])
+        );
+    }
+
+    #[test]
     fn test_domparser_xml_tree_builder_namespaces_and_structure() {
         // obscura#883: valid XML under an XML mime must come back as a real
         // tree — source-case qualified names, xmlns-resolved namespaceURI

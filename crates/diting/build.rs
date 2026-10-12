@@ -4,6 +4,7 @@ fn main() {
     println!("cargo:rerun-if-changed=js/bootstrap.js");
     println!("cargo:rerun-if-changed=js/fetch.js");
     println!("cargo:rerun-if-changed=js/xhr.js");
+    println!("cargo:rerun-if-changed=js/domparser.js");
     println!("cargo:rerun-if-changed=js/interface_sweep.js");
     println!("cargo:rerun-if-changed=js/message_port.js");
     println!("cargo:rerun-if-changed=js/fetch_probe.js");
@@ -59,6 +60,10 @@ fn main() {
     // the initiator-hint var fetch.js defined, both at class-definition
     // and at send() time.
     let xhr_js = include_str!("js/xhr.js");
+    // Sixth script, same rule (#97 ratchet split): DOMParser moved out of
+    // bootstrap.js wholesale — the XML gates and node classes it names are
+    // bootstrap bindings, touched only at parseFromString call time.
+    let domparser_js = include_str!("js/domparser.js");
     // LAST script (#236 absorption split): the snapshot-time interface sweeps
     // walk globalThis to finish every interface (native marks, non-enumerable
     // globals, enumerable members, WebIDL toStringTag brands) — running them
@@ -84,6 +89,9 @@ fn main() {
                 runtime
                     .execute_script("<diting:xhr>", xhr_js.to_string())
                     .expect("xhr.js should not fail during snapshot creation");
+                runtime
+                    .execute_script("<diting:domparser>", domparser_js.to_string())
+                    .expect("domparser.js should not fail during snapshot creation");
                 runtime
                     .execute_script("<diting:message_port>", message_port_js.to_string())
                     .expect("message_port.js should not fail during snapshot creation");
