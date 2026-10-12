@@ -99,11 +99,21 @@
                     .and_then(|l| l.split_whitespace().nth(1))
                     .unwrap_or("/")
                     .to_string();
-                let (status, ctype, body) = routes
-                    .iter()
-                    .find(|(p, _, _, _)| *p == path)
-                    .map(|(_, s, c, b)| (*s, *c, b.clone()))
-                    .unwrap_or((404, "text/html", String::new()));
+                let (status, ctype, body) = if path.starts_with("/__echo") {
+                    // Request-echo route: the raw request head back as the
+                    // body, so a test can pin exactly what the transport put
+                    // on the wire (header name/value stringification, group
+                    // survival) without a recording side channel.
+                    let head = String::from_utf8_lossy(&buf[..n]);
+                    let head = head.split("\r\n\r\n").next().unwrap_or("").to_string();
+                    (200u16, "text/plain", head)
+                } else {
+                    routes
+                        .iter()
+                        .find(|(p, _, _, _)| *p == path)
+                        .map(|(_, s, c, b)| (*s, *c, b.clone()))
+                        .unwrap_or((404, "text/html", String::new()))
+                };
                 let response = format!(
                     "HTTP/1.1 {status}\r\ncontent-type: {ctype}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                     body.len()
@@ -2311,6 +2321,78 @@ ms.addEventListener('sourceopen', function(){ \
         assert_eq!(
             p.network_events.iter().filter(|e| e.url.ends_with("/api")).count(),
             1
+        );
+    }
+
+    /// WebIDL ByteString coercion on the wire: XHR setRequestHeader and
+    /// fetch()'s plain-object headers must stringify numeric values before
+    /// the transport sees them. A raw JSON number in the header map made the
+    /// transport's string-typed deserialization reject the WHOLE header
+    /// group — Content-Type went with it and the platform read the body as
+    /// non-JSON (XHS 2026-10-12 report). The /__echo route returns the raw
+    /// request head, so this pins what actually went on the wire.
+    #[tokio::test(flavor = "current_thread")]
+    async fn numeric_request_headers_stringify_before_the_wire() {
+        let _g = net_test_guard();
+        let port = local_http_server(vec![
+            (
+                "/app",
+                200,
+                "<html><script>\
+                 (async () => {\
+                   const x = new XMLHttpRequest();\
+                   x.open('POST', '/__echo?via=xhr');\
+                   x.setRequestHeader('content-type', 'application/json');\
+                   x.setRequestHeader('X-t', 1760000000000);\
+                   const done = new Promise(r => { x.onloadend = r; });\
+                   x.send('{}');\
+                   await done;\
+                   const fr = await fetch('/__echo?via=fetch', {\
+                     method: 'POST',\
+                     headers: { 'content-type': 'application/json', 'X-t2': 1760000000001 },\
+                     body: '{}',\
+                   });\
+                   window.__out = JSON.stringify({\
+                     xhr: x.responseText.toLowerCase(),\
+                     fetch: (await fr.text()).toLowerCase(),\
+                   });\
+                 })();\
+                 </script></html>"
+                    .into(),
+            ),
+            ("/__echo", 200, String::new()),
+        ]);
+        let mut p = test_page();
+        p.navigate(&format!("http://127.0.0.1:{port}/app")).await.unwrap();
+        let mut out = serde_json::Value::Null;
+        for _ in 0..50 {
+            out = p.evaluate("window.__out");
+            if out.is_string() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let out = out.as_str().unwrap_or("").to_string();
+        assert!(!out.is_empty(), "echo round-trips never settled: {out:?}");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&out).expect("window.__out JSON");
+        let xhr = parsed["xhr"].as_str().unwrap_or_default().to_lowercase();
+        let fetch = parsed["fetch"].as_str().unwrap_or_default().to_lowercase();
+        assert!(
+            xhr.contains("x-t: 1760000000000"),
+            "XHR numeric header must stringify: {xhr}"
+        );
+        assert!(
+            xhr.contains("content-type: application/json"),
+            "XHR header group must survive a numeric sibling: {xhr}"
+        );
+        assert!(
+            fetch.contains("x-t2: 1760000000001"),
+            "fetch numeric header must stringify: {fetch}"
+        );
+        assert!(
+            fetch.contains("content-type: application/json"),
+            "fetch header group must survive a numeric sibling: {fetch}"
         );
     }
 

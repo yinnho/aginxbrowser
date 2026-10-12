@@ -118,7 +118,13 @@ const __ditingFetchImpl = async (input, init = {}) => {
       });
     });
   }
-  const hdrObj = init.headers instanceof Headers ? Object.fromEntries(init.headers.entries()) : Object.assign({}, init.headers || {});
+  const hdrObj = init.headers instanceof Headers
+    ? Object.fromEntries(init.headers.entries())
+    // Plain-object headers get the same WebIDL ByteString stringification
+    // Headers.set applies — a numeric value stored raw kills the whole
+    // header group at the transport's string-typed map (same family as the
+    // XHR setRequestHeader hole, XHS 2026-10-12).
+    : Object.fromEntries(Object.entries(init.headers || {}).map(([k, v]) => [k, String(v)]));
   // fetch(request) with no explicit init.body inherits the Request's body
   // (upstream #716 split, item: "A Request object's inherited body is also
   // dropped when fetch(request) has no explicit init.body").

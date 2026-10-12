@@ -72,7 +72,12 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
   }
 
   setRequestHeader(name, value) {
-    this._headers[name] = value;
+    // WebIDL ByteString: Chrome stringifies both sides before storing. A
+    // numeric X-t timestamp stored raw rides into the op as a JSON number,
+    // and the transport's string-typed header map rejects the WHOLE group
+    // (XHS 2026-10-12: Content-Type went with it and the platform could
+    // not parse the body as JSON).
+    this._headers[String(name)] = String(value);
   }
 
   getResponseHeader(name) {
