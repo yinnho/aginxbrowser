@@ -992,7 +992,7 @@ The engine still ships the maintained `xhs-sign` source for explicit callers:
 
 | Recipe | How to mount | What it does |
 |------|------|------|
-| `xhs-sign` (alias `xhs`) | `POST /session/{id}/preload` with `{"recipe":"xhs-sign"}`, or paste equivalent JS via flow `preload` / `eval` | xhs signing wrapper: swallows the page's own `x-s`/`x-t` (computed in-engine, rejected 406 by the server) and re-signs both at send time via the page's own `_webmsxyw`; fuses `/sso/logout` (unsigned-API 406s misread as session death) with a synthetic 200; mounts itself as the fetch/XHR natives before the inline jsvmp can capture them |
+| `xhs-sign` (alias `xhs`) | `POST /session/{id}/preload` `{"recipe":"xhs-sign"}`, or flow step `{"op":"preload","args":{"recipe":"xhs-sign"}}`, or paste JS via flow `preload`/`eval` | xhs signing wrapper: swallows the page's own `x-s`/`x-t` (computed in-engine, rejected 406 by the server) and re-signs both at send time via the page's own `_webmsxyw`; fuses `/sso/logout` (unsigned-API 406s misread as session death) with a synthetic 200; mounts itself as the fetch/XHR natives before the inline jsvmp can capture them |
 
 Observability counters live on `window` for post-hoc checks via `eval`: `__xs_installed` (mounted), `__xs_swallowed` (page signatures swallowed), `__xs_signed` (fresh signatures issued), `__xs_fuse` (logout attempts defused).
 

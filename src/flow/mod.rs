@@ -709,7 +709,9 @@ async fn exec_step(
             .map_err(|e| e.to_string())
         }
         "preload" => {
-            let scripts = a
+            // Platform site recipes (e.g. xhs-sign) are opt-in here or via
+            // POST /session/:id/preload — never host-auto-mounted in core.
+            let mut scripts = a
                 .get("scripts")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
@@ -718,6 +720,14 @@ async fn exec_step(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            if let Some(name) = a.get("recipe").and_then(|v| v.as_str()) {
+                match crate::session::preload_recipes::resolve(name) {
+                    Some(src) => scripts.push(src.to_string()),
+                    None => {
+                        return Err(format!("unknown preload recipe '{name}'"));
+                    }
+                }
+            }
             mgr.send(sid, |reply| C::SetPreload { scripts, reply })
                 .await
                 .map_err(|e| e.to_string())

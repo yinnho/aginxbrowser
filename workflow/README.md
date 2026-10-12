@@ -10,6 +10,15 @@ samples; brew/agpkg installs ship the bare binary (grab `workflow/` from the
 repo when needed). A name is one path segment of lowercase/digits/dashes;
 anything else is rejected before it touches the filesystem.
 
+## Platform policy lives here (not in the engine)
+
+Signing wrappers, logout fuses, seller MMS quirks, and other site-specific
+compat belong in `workflow/<name>/` (or an explicit `preload` / HTTP
+`{"recipe":"…"}` call). The engine does **not** auto-mount recipes by host
+(e.g. `xhs-sign` on `*.xiaohongshu.com` was demoted 2026-10-12). Core stays
+generic Web/compat; flows carry the business face.
+
+
 ## The working mode (read this first, agent)
 
 You are a delegator, not a browser operator. The engine + this directory
