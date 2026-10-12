@@ -18,7 +18,7 @@ compat belong in `workflow/<name>/` (or an explicit `preload` / HTTP
 (e.g. `xhs-sign` on `*.xiaohongshu.com` was demoted 2026-10-12). Core stays
 generic Web/compat; flows carry the business face.
 
-P2: `scripts/xhs-qr-login.py` should become `workflow/xhs-login/` (same bare-create → preload → navigate shape as taobao/doudian login); not started this pass.
+`workflow/xhs-login/` is the QR login flow (was P2); `scripts/xhs-qr-login.py` remains a local QR-render CLI that points here.
 
 
 ## The working mode (read this first, agent)
@@ -87,6 +87,7 @@ receipt is the function's return value (`status` / `saved` / `session_id`).
 | `x-search` | x.com | runs green logged-in | SearchTimeline, results sorted by views — campaign target discovery |
 | `x-follow` | x.com | runs green logged-in | friendships create/destroy; response `following` echoes pre-action state |
 | `x-notifs` | x.com | runs green logged-in | v2 URT notifications feed, read-only triage — the inbox half of the loop |
+| `xhs-login` | xiaohongshu.com | QR handoff (engine poll) | bare create → preload `xhs-sign`+QR hook → navigate login → `saved.qr` → signed status poll to code_status=2；人侧渲染 `qr.url`；compose `xhs-post` via `session_id`；环境异常 → import_curl — see flow.md |
 | `xhs-post` | xiaohongshu.com | login wall logged-out | creator-platform page automation (no API for personal accounts) — login via `import_curl` + `account`, see flow.md |
 
 Account state enters a flow one of three ways — each flow.md says which it

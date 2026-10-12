@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""Engine-born xhs QR login, one command (ledger chain of 2026-09-25).
+"""CLI helper around workflow/xhs-login (ledger chain of 2026-09-25).
 
-  create (account-bound) session -> preload [mega signer, qr hook]
-  -> navigate the login page -> capture the page's own qrcode/create
-  data.url (fallback: one manual signed create) -> render the QR locally
-  -> poll signed qrcode/status until code_status==2 -> the Set-Cookie
-  (web_session family) lands in the session jar by itself, and the
-  account layer writes it back under --account after every command.
+Prefer the flow for automation:
 
-The page's own status polling does not run in the engine (visibility
-quirk), so status is polled by hand with _webmsxyw signing — that part
-is load-bearing, do not "simplify" it away. Reuses the page's own QR
-rather than minting a second one: repeated qrcode/create in one session
-is the behavior fingerprint that got QR logins risk-checked on 09-22.
+  POST /session/create {"account": "xhs4", ...}
+  POST /flow/run {"name": "xhs-login", "session_id": "..."}
+  # render receipt saved.qr.url with qrcode, scan in App
+  # then compose xhs-post on the same session_id
+
+This script keeps the local UX (venv qrcode + `open` the PNG) for humans.
+It still drives the engine HTTP API directly (preload/navigate/eval/poll)
+with the same semantics as workflow/xhs-login/flow.json — if the two
+drift, trust the flow and update this file.
 
 Usage:
   python3 scripts/xhs-qr-login.py --account xhs4

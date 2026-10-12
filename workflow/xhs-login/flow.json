@@ -1,0 +1,65 @@
+{
+  "vars": {
+    "login_url": "https://www.xiaohongshu.com/login",
+    "login_timeout_ms": 120000
+  },
+  "create": {
+    "width": 1440,
+    "height": 900
+  },
+  "steps": [
+    {
+      "op": "preload",
+      "args": {
+        "recipe": "xhs-sign",
+        "scripts": [
+          "(() => {\n  if (window.__qrhook) return 'already';\n  window.__qrhook = true;\n  const stash = (txt) => {\n    try {\n      const j = JSON.parse(txt);\n      const u = j && j.data && j.data.url;\n      if (!u) return;\n      const p = new URL(u).searchParams;\n      window.__xhs_qr = {\n        url: u,\n        qr_id: p.get('qrId') || p.get('qr_id') || '',\n        code: p.get('xhs_code') || p.get('code') || ''\n      };\n    } catch (e) {}\n  };\n  const hit = (u) => /\\/api\\/sns\\/web\\/v1\\/login\\/qrcode\\/create/.test(String(u));\n  const O = XMLHttpRequest.prototype.open, S = XMLHttpRequest.prototype.send;\n  XMLHttpRequest.prototype.open = function (m, u) {\n    this.__qr_u = String(u);\n    return O.apply(this, arguments);\n  };\n  XMLHttpRequest.prototype.send = function () {\n    if (hit(this.__qr_u)) this.addEventListener('loadend', () => stash(this.responseText));\n    return S.apply(this, arguments);\n  };\n  const F = window.fetch;\n  window.fetch = function (u) {\n    const us = String(typeof u === 'object' && u ? u.url : u);\n    const p = F.apply(this, arguments);\n    if (hit(us)) return p.then((r) => { r.clone().text().then(stash).catch(() => {}); return r; });\n    return p;\n  };\n  return 'hooked';\n})()"
+        ]
+      },
+      "note": "document-start xhs-sign (logout fuse + resign) + QR create hook that stashes window.__xhs_qr. create block has no url — preload must win before first xhs navigation (same race kill as xhs-post)."
+    },
+    {
+      "op": "navigate",
+      "args": {
+        "url": "{{login_url}}"
+      },
+      "note": "default www login. Prefer a clean account-bound session (POST /session/create {account}) then flow_run with session_id — shared/dead jars get risk-checked. Engines-native QR is the path; Chrome import_curl remains the fallback when App shows 环境异常."
+    },
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "typeof window._webmsxyw === 'function' || !!(window.__xhs_qr && window.__xhs_qr.url)",
+        "timeout_ms": 60000
+      },
+      "save": "signer_ready",
+      "note": "jsvmp signer or page QR must appear before we mint/poll. Dev builds may need AGINXBROWSER_SCRIPT_DEADLINE_MS=60000 on heavy login SPAs."
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(async () => {\n  const deadline = Date.now() + 20000;\n  while (Date.now() < deadline) {\n    if (window.__xhs_qr && window.__xhs_qr.url && window.__xhs_qr.qr_id && window.__xhs_qr.code) {\n      return JSON.stringify(Object.assign({ source: 'page' }, window.__xhs_qr));\n    }\n    await new Promise((r) => setTimeout(r, 500));\n  }\n  if (typeof window._webmsxyw !== 'function') {\n    throw new Error('page QR missing and _webmsxyw not ready for manual create');\n  }\n  const path = '/api/sns/web/v1/login/qrcode/create';\n  const body = { qr_type: 1 };\n  const sg = window._webmsxyw(path, body);\n  const r = await fetch('https://edith.xiaohongshu.com' + path, {\n    method: 'POST', credentials: 'include',\n    headers: {\n      'content-type': 'application/json',\n      'x-s': String((sg && sg['X-s']) || ''),\n      'x-t': String((sg && sg['X-t']) || '')\n    },\n    body: JSON.stringify(body)\n  });\n  const j = await r.json();\n  const u = j && j.data && j.data.url;\n  if (!u) throw new Error('qrcode/create has no data.url: ' + JSON.stringify(j).slice(0, 240));\n  const p = new URL(u).searchParams;\n  const qr = {\n    source: 'manual',\n    url: u,\n    qr_id: p.get('qrId') || p.get('qr_id') || '',\n    code: p.get('xhs_code') || p.get('code') || ''\n  };\n  if (!qr.qr_id || !qr.code) throw new Error('cannot parse qrId/code from ' + u.slice(0, 120));\n  window.__xhs_qr = qr;\n  return JSON.stringify(qr);\n})()",
+        "timeout_ms": 45000
+      },
+      "save": "qr",
+      "note": "Handoff artifact: {url, qr_id, code, source}. Prefer page's own qrcode/create (source=page) — repeated manual create in one session is the 09-22 risk fingerprint. Render saved.qr.url as a QR image locally (python qrcode / any encoder) and open for the human; or watch /live?session=<id>. Do NOT mint a second QR while polling."
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(async () => {\n  const qr = window.__xhs_qr;\n  if (!qr || !qr.qr_id || !qr.code) throw new Error('no __xhs_qr — ensure_qr step failed?');\n  if (typeof window._webmsxyw !== 'function') throw new Error('_webmsxyw missing — cannot sign status poll');\n  const budget = Number({{login_timeout_ms}}) || 120000;\n  const deadline = Date.now() + Math.min(budget, 120000);\n  let last = null;\n  while (Date.now() < deadline) {\n    const path = '/api/sns/web/v1/login/qrcode/status?qr_id=' + encodeURIComponent(qr.qr_id)\n      + '&code=' + encodeURIComponent(qr.code);\n    const sg = window._webmsxyw(path, undefined);\n    const r = await fetch('https://edith.xiaohongshu.com' + path, {\n      credentials: 'include',\n      headers: {\n        'x-s': String((sg && sg['X-s']) || ''),\n        'x-t': String((sg && sg['X-t']) || '')\n      }\n    });\n    const text = await r.text();\n    let st = null;\n    try { st = JSON.parse(text).data.code_status; } catch (e) {}\n    last = { code_status: st, raw: String(text).slice(0, 200) };\n    if (st === 2) {\n      return JSON.stringify({ ok: true, code_status: 2, qr_id: qr.qr_id });\n    }\n    if (st === 3 || st === 471) {\n      throw new Error('QR expired or rejected (code_status=' + st + ') — re-run flow for a fresh QR');\n    }\n    await new Promise((r) => setTimeout(r, 2500));\n  }\n  throw new Error('no confirmation within budget; last=' + JSON.stringify(last));\n})()",
+        "timeout_ms": "{{login_timeout_ms}}"
+      },
+      "save": "login_done",
+      "note": "HUMAN: scan the QR (from saved.qr.url) with the 小红书 App and confirm BEFORE/WHILE this step runs. Page-native status polling is blind in-engine (visibility quirk) — we poll GET .../qrcode/status signed via _webmsxyw (GET-only; param names qr_id/code not qrId/xhs_code). code_status 0=wait 1=scanned 2=confirmed 3/471=dead. Fast-fail pattern: vars.login_timeout_ms=5000, take saved.qr from the failed receipt, render+scan, then poll /session/:id/eval yourself or re-run with a longer budget on the same session_id after ensure_qr (session still has __xhs_qr)."
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(async () => {\n  const jar = document.cookie || '';\n  const has = /(?:^|;\\s*)web_session=/.test(jar);\n  return JSON.stringify({\n    url: location.href,\n    title: document.title,\n    web_session_in_document_cookie: has,\n    hint: has\n      ? 'web_session visible on document.cookie — account jar write-back happens if the session was created with account='\n      : 'document.cookie may hide HttpOnly web_session; prefer GET /session/:id/cookies on the receipt session_id'\n  });\n})()",
+        "timeout_ms": 15000
+      },
+      "save": "landing",
+      "note": "Evidence only. Persist cookies via GET /session/:id/cookies — if the session was created with account=, the engine writes the jar back after commands. Compose xhs-post with this session_id."
+    }
+  ]
+}
