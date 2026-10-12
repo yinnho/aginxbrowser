@@ -10,7 +10,8 @@
 //! engine already has (current URL, the risk-control rows
 //! [`crate::har::challenge_rows`] builds, the main document's status and
 //! size, console errors) and runs a rule table generalized out of
-//! captcha.rs's hardcoded markers. No screenshots, no page evals, no
+//! captcha / risk_markers plus a disk overlay for platform login fronts
+//! (`config/verdict_rules.json`). No screenshots, no page evals, no
 //! model — the target is single-digit milliseconds. The honest limit:
 //! verdict sees network and URL facts, not the DOM — a rich set_content
 //! page with zero subresource traffic reads as `empty`.
@@ -61,50 +62,139 @@ impl Verdict {
 /// ("punish.taobao.com") are unambiguous; path-shaped ones
 /// ("_____tmd_____/punish", "/signin") stay narrow on purpose — a
 /// marker that fires on ordinary article URLs is worse than no rule.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UrlRule {
-    pub needle: &'static str,
+    pub needle: String,
     pub verdict: Verdict,
 }
 
-/// The seed rule table: Ali challenge needles from [`crate::risk_markers`],
-/// generic captcha interstitials, plus the login fronts of the sites the
-/// playbook flows drive. A needle appearing in two rules resolves by list
-/// order — keep challenge and captcha needles ahead of login ones.
-pub const DEFAULT_RULES: &[UrlRule] = &[
-    // Risk control (Ali TMD / punish hosts) — needles from risk_markers
-    // so har/captcha/verdict cannot drift. Login fronts stay below.
-    UrlRule {
-        needle: crate::risk_markers::ALI_TMD_PUNISH_PATH,
-        verdict: Verdict::Challenge,
-    },
-    UrlRule {
-        needle: crate::risk_markers::ALI_PUNISH_HOSTS[0],
-        verdict: Verdict::Challenge,
-    },
-    UrlRule {
-        needle: crate::risk_markers::ALI_PUNISH_HOSTS[1],
-        verdict: Verdict::Challenge,
-    },
-    // CAPTCHA interstitials.
-    UrlRule { needle: "sorry.google.com", verdict: Verdict::Captcha },
-    UrlRule { needle: "/sorry/", verdict: Verdict::Captcha },
-    UrlRule { needle: "/antispider", verdict: Verdict::Captcha },
-    UrlRule { needle: "wappass.baidu.com", verdict: Verdict::Captcha },
-    UrlRule { needle: "captcha.qq.com", verdict: Verdict::Captcha },
-    UrlRule { needle: "challenges.cloudflare.com", verdict: Verdict::Captcha },
-    UrlRule { needle: "challenge-platform", verdict: Verdict::Captcha },
-    // Login fronts.
-    UrlRule { needle: "login.taobao.com", verdict: Verdict::Login },
-    UrlRule { needle: "login.tmall.com", verdict: Verdict::Login },
-    UrlRule { needle: "passport.zhihu.com/signin", verdict: Verdict::Login },
-    UrlRule { needle: "accounts.google.com/servicelogin", verdict: Verdict::Login },
-    UrlRule { needle: "x.com/login", verdict: Verdict::Login },
-    UrlRule { needle: "twitter.com/login", verdict: Verdict::Login },
-    UrlRule { needle: "passport.bilibili.com/login", verdict: Verdict::Login },
-    UrlRule { needle: "xiaohongshu.com/login", verdict: Verdict::Login },
-    UrlRule { needle: "weibo.com/login", verdict: Verdict::Login },
-];
+impl UrlRule {
+    pub fn new(needle: impl Into<String>, verdict: Verdict) -> Self {
+        Self {
+            needle: needle.into(),
+            verdict,
+        }
+    }
+}
+
+fn parse_verdict_name(s: &str) -> Option<Verdict> {
+    match s {
+        "challenge" => Some(Verdict::Challenge),
+        "captcha" => Some(Verdict::Captcha),
+        "login" => Some(Verdict::Login),
+        "empty" => Some(Verdict::Empty),
+        "landed" => Some(Verdict::Landed),
+        "unknown" => Some(Verdict::Unknown),
+        _ => None,
+    }
+}
+
+/// Generic walls that stay in Rust: Ali TMD (via [`crate::risk_markers`])
+/// plus Cloudflare / Google / Baidu / QQ captcha interstitials.
+/// Platform login fronts live in `config/verdict_rules.json`.
+pub fn core_rules() -> Vec<UrlRule> {
+    vec![
+        UrlRule::new(crate::risk_markers::ALI_TMD_PUNISH_PATH, Verdict::Challenge),
+        UrlRule::new(crate::risk_markers::ALI_PUNISH_HOSTS[0], Verdict::Challenge),
+        UrlRule::new(crate::risk_markers::ALI_PUNISH_HOSTS[1], Verdict::Challenge),
+        UrlRule::new("sorry.google.com", Verdict::Captcha),
+        UrlRule::new("/sorry/", Verdict::Captcha),
+        UrlRule::new("/antispider", Verdict::Captcha),
+        UrlRule::new("wappass.baidu.com", Verdict::Captcha),
+        UrlRule::new("captcha.qq.com", Verdict::Captcha),
+        UrlRule::new("challenges.cloudflare.com", Verdict::Captcha),
+        UrlRule::new("challenge-platform", Verdict::Captcha),
+    ]
+}
+
+/// Embedded fallback — same bytes as repo `config/verdict_rules.json` so
+/// tests and bare binaries keep login classification without a cwd file.
+const EMBEDDED_VERDICT_RULES_JSON: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/config/verdict_rules.json"));
+
+/// Parse an overlay document `{ "rules": [ { "needle", "verdict" }, ... ] }`.
+/// Unknown verdict names and empty needles are skipped (warn via tracing).
+pub fn parse_overlay_json(raw: &str) -> Vec<UrlRule> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+        tracing::warn!("verdict_rules: overlay JSON did not parse");
+        return Vec::new();
+    };
+    let Some(arr) = v.get("rules").and_then(|r| r.as_array()) else {
+        tracing::warn!("verdict_rules: overlay missing rules[]");
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in arr {
+        let Some(needle) = item.get("needle").and_then(|n| n.as_str()) else {
+            continue;
+        };
+        if needle.is_empty() {
+            continue;
+        }
+        let Some(name) = item.get("verdict").and_then(|n| n.as_str()) else {
+            continue;
+        };
+        let Some(verdict) = parse_verdict_name(name) else {
+            tracing::warn!("verdict_rules: unknown verdict {name:?} for needle {needle:?}");
+            continue;
+        };
+        out.push(UrlRule::new(needle, verdict));
+    }
+    out
+}
+
+fn overlay_candidates() -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(p) = std::env::var_os("AGINXBROWSER_VERDICT_RULES") {
+        paths.push(std::path::PathBuf::from(p));
+    }
+    paths.push(std::path::PathBuf::from("config/verdict_rules.json"));
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            paths.push(dir.join("config/verdict_rules.json"));
+        }
+    }
+    paths
+}
+
+fn load_overlay_rules() -> Vec<UrlRule> {
+    for path in overlay_candidates() {
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => {
+                let rules = parse_overlay_json(&raw);
+                tracing::debug!(
+                    "verdict_rules: loaded {} overlay rule(s) from {}",
+                    rules.len(),
+                    path.display()
+                );
+                return rules;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                tracing::warn!(
+                    "verdict_rules: failed to read {}: {e} — falling through",
+                    path.display()
+                );
+            }
+        }
+    }
+    parse_overlay_json(EMBEDDED_VERDICT_RULES_JSON)
+}
+
+fn build_effective_rules() -> Vec<UrlRule> {
+    // Core first: challenge/captcha cannot be shadowed by a login overlay
+    // needle (verdict_for returns on first hit).
+    let mut rules = core_rules();
+    rules.extend(load_overlay_rules());
+    rules
+}
+
+/// Effective rule table: core walls + disk/embedded platform login overlay.
+/// Cached for the process lifetime (edit the file → restart to pick up).
+pub fn rules() -> &'static [UrlRule] {
+    static RULES: std::sync::OnceLock<Vec<UrlRule>> = std::sync::OnceLock::new();
+    RULES.get_or_init(build_effective_rules).as_slice()
+}
 
 /// The signals a session can hand the classifier, all collected without
 /// evals by the session thread.
@@ -150,7 +240,7 @@ pub fn verdict_for(input: &VerdictInput, rules: &[UrlRule]) -> (Verdict, Vec<Str
     }
     let lower = input.url.to_ascii_lowercase();
     for rule in rules {
-        if lower.contains(rule.needle) {
+        if lower.contains(&rule.needle) {
             signals.push(format!("url_rule:{}", rule.needle));
             return (rule.verdict, signals);
         }
@@ -188,7 +278,7 @@ pub fn verdict_for(input: &VerdictInput, rules: &[UrlRule]) -> (Verdict, Vec<Str
 /// `{verdict, url, facts, signals, elapsed_ms}` plus `account` and the
 /// human-handoff instruction when the verdict is `challenge`.
 pub fn fact_sheet(input: &VerdictInput, elapsed_ms: u64) -> Value {
-    let (verdict, signals) = verdict_for(input, DEFAULT_RULES);
+    let (verdict, signals) = verdict_for(input, rules());
     let mut facts = json!({
         "challenge_events": input.challenge_events,
         "requests": input.requests,
@@ -271,7 +361,7 @@ mod tests {
             ("https://x.com/login", Verdict::Login),
         ];
         for (url, want) in cases {
-            let (got, _) = verdict_for(&input(url), DEFAULT_RULES);
+            let (got, _) = verdict_for(&input(url), rules());
             assert_eq!(got, want, "url {url}");
         }
     }
@@ -282,7 +372,7 @@ mod tests {
     fn risk_control_rows_outrank_url_rules() {
         let mut i = input("https://login.taobao.com/member/login.jhtml");
         i.challenge_events = 2;
-        let (v, signals) = verdict_for(&i, DEFAULT_RULES);
+        let (v, signals) = verdict_for(&i, rules());
         assert_eq!(v, Verdict::Challenge);
         assert_eq!(signals, ["risk_control_rows:2"]);
     }
@@ -293,27 +383,27 @@ mod tests {
         let mut i = input("about:blank");
         i.doc_status = None;
         i.requests = 0;
-        assert_eq!(verdict_for(&i, DEFAULT_RULES).0, Verdict::Empty);
+        assert_eq!(verdict_for(&i, rules()).0, Verdict::Empty);
         // about:blank with traffic = set_content landing.
         i.requests = 3;
-        assert_eq!(verdict_for(&i, DEFAULT_RULES).0, Verdict::Landed);
+        assert_eq!(verdict_for(&i, rules()).0, Verdict::Landed);
         // 2xx document → landed; a near-empty 200 → empty.
         let mut i = input("https://www.zhihu.com/question/1");
-        assert_eq!(verdict_for(&i, DEFAULT_RULES).0, Verdict::Landed);
+        assert_eq!(verdict_for(&i, rules()).0, Verdict::Landed);
         i.doc_bytes = Some(40);
-        assert_eq!(verdict_for(&i, DEFAULT_RULES).0, Verdict::Empty);
+        assert_eq!(verdict_for(&i, rules()).0, Verdict::Empty);
         // Non-2xx is neither wall nor content — unknown with the status
         // in facts (the zhihu burst-403 backoff case).
         i.doc_status = Some(403);
         i.doc_bytes = Some(4_000);
-        let (v, signals) = verdict_for(&i, DEFAULT_RULES);
+        let (v, signals) = verdict_for(&i, rules());
         assert_eq!(v, Verdict::Unknown);
         assert!(signals.contains(&"doc_status_403".to_string()), "{signals:?}");
         // No document event, no rule → unknown.
         let mut i = input("https://example.com/x");
         i.doc_status = None;
         i.requests = 0;
-        let (v, _) = verdict_for(&i, DEFAULT_RULES);
+        let (v, _) = verdict_for(&i, rules());
         assert_eq!(v, Verdict::Unknown);
     }
 
@@ -337,12 +427,25 @@ mod tests {
         assert!(handoff.contains("/live?session=s-test"), "{handoff}");
     }
 
+    #[test]
+    fn overlay_json_loads_login_needles() {
+        let overlay = parse_overlay_json(EMBEDDED_VERDICT_RULES_JSON);
+        assert!(
+            overlay.iter().any(|r| r.needle == "xiaohongshu.com/login" && r.verdict == Verdict::Login),
+            "embedded overlay must carry xhs login: {overlay:?}"
+        );
+        // effective table = core + overlay
+        let all = rules();
+        assert!(all.iter().any(|r| r.needle.contains("punish.taobao.com")));
+        assert!(all.iter().any(|r| r.needle == "login.taobao.com"));
+    }
+
     /// The table is pluggable: a caller (or a future site pack) can
     /// classify what the defaults don't know without touching this
     /// module.
     #[test]
     fn custom_rules_extend_classification() {
-        let rules = [UrlRule { needle: "old.reddit.com/login", verdict: Verdict::Login }];
+        let rules = [UrlRule::new("old.reddit.com/login", Verdict::Login)];
         let (v, signals) = verdict_for(&input("https://old.reddit.com/login?dest=x"), &rules);
         assert_eq!(v, Verdict::Login);
         assert_eq!(signals, ["url_rule:old.reddit.com/login"]);

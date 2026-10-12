@@ -381,6 +381,13 @@ pub(crate) async fn maybe_bypass_challenge(page: &mut crate::page::Page) -> Resu
 /// SHA256 PoW over 1ms ticks and reloads with a `_wafchallengeid` answer
 /// cookie. Signature: a global `readygo` function + almost no visible text
 /// (real pages don't define that global; challenge stubs carry no content).
+///
+/// **Gray / deploy-facing (not platform business):** this is acquisition-path
+/// challenge *shape* detection for `/fetch` (and kin) so a PoW interstitial
+/// does not look like empty content. It is not a seller/login flow and must
+/// not grow into site-specific publish logic — leave WAF ride-out here;
+/// site policy stays in `workflow/`. See architecture note: core = generic
+/// engine, platform compat → flow.
 fn is_byte_waf_challenge(page: &mut crate::page::Page) -> bool {
     let val = page.evaluate(
         "(function() {\

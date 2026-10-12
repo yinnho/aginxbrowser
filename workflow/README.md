@@ -18,6 +18,8 @@ compat belong in `workflow/<name>/` (or an explicit `preload` / HTTP
 (e.g. `xhs-sign` on `*.xiaohongshu.com` was demoted 2026-10-12). Core stays
 generic Web/compat; flows carry the business face.
 
+P2: `scripts/xhs-qr-login.py` should become `workflow/xhs-login/` (same bare-create → preload → navigate shape as taobao/doudian login); not started this pass.
+
 
 ## The working mode (read this first, agent)
 

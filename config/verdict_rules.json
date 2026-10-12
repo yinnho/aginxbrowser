@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "description": "Platform login-front URL needles for session verdict. Core keeps Ali TMD + generic CF/captcha in Rust (risk_markers / CORE_RULES); this file extends with site login shapes so new sites grow without a Rust edit. Loaded from AGINXBROWSER_VERDICT_RULES, then ./config/verdict_rules.json, then the copy embedded at build time.",
+  "rules": [
+    { "needle": "login.taobao.com", "verdict": "login" },
+    { "needle": "login.tmall.com", "verdict": "login" },
+    { "needle": "passport.zhihu.com/signin", "verdict": "login" },
+    { "needle": "accounts.google.com/servicelogin", "verdict": "login" },
+    { "needle": "x.com/login", "verdict": "login" },
+    { "needle": "twitter.com/login", "verdict": "login" },
+    { "needle": "passport.bilibili.com/login", "verdict": "login" },
+    { "needle": "xiaohongshu.com/login", "verdict": "login" },
+    { "needle": "weibo.com/login", "verdict": "login" }
+  ]
+}
