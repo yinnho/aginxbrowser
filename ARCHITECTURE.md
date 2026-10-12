@@ -1,12 +1,15 @@
 # AginxBrowser Architecture
 
-> **Status: authoritative.** This file legislates the layering of the codebase and the
-> 2026-09 architecture upgrade program (phases P0–P3). A change that moves code across a
-> layer boundary updates this file first — in the same commit — or it does not land.
+> **Status: authoritative.** This file legislates the layering of the codebase.
+> A change that moves code across a layer boundary updates this file first — in
+> the same commit — or it does not land.
 >
-> Audit basis: 2026-09-19, v0.4.5, commit 5718f2b. Line counts in Appendix A.
->
-> **Update (2026-10-13, v0.5.42 / HEAD):** MCP and CDP faces were removed in `439cbb7` — HTTP is the whole interface. Appendix A and §1–§3 narration that still name MCP/CDP are historical; refresh in a dedicated docs pass. God-file cap remains 1500 **production** lines (`scripts/audit_layers.py`): `#[cfg(test)]` items and `tests.rs` do not count — do not split colocated tests just to dodge the cap. Search god-file split landed in `99eb67c`.
+> Audit basis: 2026-10-13, v0.5.42, commit 5f3cbed (architecture refresh).
+> Prior program note: the 2026-09 upgrade (P0–P3) is largely executed inside the
+> product crate; the four-crate end state in §4 remains aspirational and is
+> **soft-deferred** (see §6). God-file ratchet: 1500 **production** lines
+> (`scripts/audit_layers.py`); `#[cfg(test)]` items and `tests.rs` do not count —
+> do not split colocated tests (or production modules) just to dodge the cap.
 
 ## 1. What AginxBrowser is
 
@@ -14,15 +17,16 @@ A server-side browser engine with a built-in V8, exposed as an information-acqui
 layer for agents: pages are fetched, rendered, searched, watched, driven, and re-emitted
 as data or artifacts — with no Chromium. The product thesis is one sentence:
 
-> **The agent's eyes, hands, and mouth — on an engine we own, behind protocol doors.**
+> **The agent's eyes, hands, and mouth — on an engine we own, behind an HTTP door.**
 
 - **Eyes** — acquire: fetch (tiered render pipeline), metasearch, download, cache.
 - **Hands** — interact: sessions, flows, accounts/personas, recording & replay.
 - **Mouth** — author: screenshots, PDF, video, PPTX/DOCX, markdown documents.
 - **Foundation** — the Diting (谛听) engine: DOM, CSS, layout, paint, fonts, JS runtime,
   network, page orchestration.
-- **Doors** — the protocol faces: HTTP (REST), MCP (stdio + streamable HTTP), CDP
-  (WebSocket, Playwright/Puppeteer-compatible).
+- **Door** — the protocol face: HTTP (REST). Assembly also includes the CLI / `doctor`
+  entrypoints. MCP and CDP faces were removed (`439cbb7`); they are not part of the
+  current product surface and must not be reintroduced casually.
 
 ## 2. Organizing principle: architecture is the directory
 
@@ -34,13 +38,14 @@ The dependency direction is fixed and one-way:
 
 ```
         ┌──────────────────────────────────────────────┐
-        │  faces: HTTP · MCP · CDP · CLI               │  doors — no business logic
+        │  faces: HTTP (routers) · CLI / doctor          │  door — no business logic
         └───────────────┬──────────────────────────────┘
                         ▼
         ┌───────────────────────────────┐   ┌──────────────────────┐
-        │  core: eyes + hands           │──▶│  authoring: mouth    │
-        │  sessions, flows, accounts,   │   │  pdf, video, ooxml,  │
-        │  fetch, search, cache, guard  │   │  docgen, page pump   │
+        │  product (eyes + hands +      │──▶│  authoring cluster    │
+        │  mouth, still one crate):     │   │  (same crate today):  │
+        │  sessions, flows, accounts,   │   │  pdf, video, ooxml,   │
+        │  fetch, search, cache, guard  │   │  docgen, page pump    │
         └───────────────┬───────────────┘   └──────────┬───────────┘
                         ▼                              │
         ┌─────────────────────────────────────────────┴──────────┐
@@ -49,21 +54,23 @@ The dependency direction is fixed and one-way:
         └─────────────────────────────────────────────────────────┘
 ```
 
-Rules (enforced in review, checked in CI by `scripts/audit_layers.py` — the
-P2 layering audit; its exception table is empty):
+Rules (enforced in review, checked in CI by `scripts/audit_layers.py` — its
+exception table is empty):
 
-- **R1 — Downward only.** `faces → core → diting`, `authoring → core → diting`.
-  Nothing imports faces. Nothing in diting imports core/authoring/faces.
+- **R1 — Downward only.** `faces → product → diting`. Nothing imports faces.
+  Nothing in diting imports product/faces.
 - **R2 — Engine purity.** The `diting` crate is a browser engine, self-contained.
-  Its only allowed product-facing surface is the `Page`-level API. (Today's single
-  exception — the `screenshot_reference` fork-delta cross-check — moves to a
-  dev-dependency test path in P1 and stops being an exception.)
-- **R3 — Faces are thin.** Faces hold parameter structs, routing, tool declarations,
-  and wire-compat shims. Business logic lives in core. If a face grows an `if` about
-  page behavior, the logic moves down.
+  Its only allowed product-facing surface is the `Page`-level API. The former
+  `screenshot_reference` / blitz cross-check lives in the product tree, not in
+  the engine (R2b clean).
+- **R3 — Faces are thin.** Faces hold parameter structs, routing, and wire-compat
+  shims (`routers/`, `firecrawl_compat`, `doctor_cli`, thin `main.rs`). Business
+  logic lives in product modules. If a face grows an `if` about page behavior,
+  the logic moves down.
 - **R4 — Contracts are types.** Anything crossing a boundary is a named type
   (`SessionCommand`, `FetchRequest`, `SessionClickResponse`, …) with docs. Ad-hoc
-  JSON shapes do not cross layers.
+  JSON shapes do not cross layers (flow DSL `Value` steps are the deliberate
+  exception — validated at run time).
 - **R5 — Features stay few.** Exactly three build gates exist today — `stealth`,
   `screenshot`, `blitz-reference` — each with a written reason in `Cargo.toml`.
   New features require an entry here justifying the compile-time cost.
@@ -72,70 +79,96 @@ P2 layering audit; its exception table is empty):
 
 ### 3.1 Already right
 
-- **Engine/product boundary is real.** Across all `diting_*` modules there is exactly
-  one import of product code (`diting_layout → screenshot_reference`, the dual-engine
-  cross-check). The `diting_*` naming discipline held.
+- **Engine/product boundary is real and CI-backed.** R1a/R1b/R2a/R2b/R3/G all
+  green; `R1B_EXCEPTIONS` empty. Engine never names product modules.
+- **HTTP is the only protocol face.** MCP and CDP modules are gone; faces are
+  `src/routers/`, `firecrawl_compat`, `doctor_cli`, and thin `main.rs`.
+- **Session is modular.** `src/session/{manager,commands,interact,record,state,
+  screenshot,preload_recipes}` — the old five-job monolith is repaid.
+- **Page is decomposed.** `crates/diting/.../diting_browser/page/{mod,navigate,
+  eval,net,scripts,viewport}` (+ colocated `tests.rs`). Residual CDP-era names
+  (`evaluate_for_cdp*`) remain on the live eval API — rename when touching, not
+  a reason to revive a CDP face.
+- **Search split by domain.** `src/search/` orchestration + per-engine files +
+  `captcha` / `obs` / `validate` / `dual_path` (`99eb67c`) — split when domains
+  diverge, not when line counts scare CI.
 - **Feature surface is small and documented** (three gates, none accidental).
-- **Tests are colocated and massive**: 1453 passing (baseline, `--features screenshot`),
-  contract suites live beside the code they pin (e.g. `diting_js/runtime/tests.rs`,
-  13.6k lines / 260 tests).
+- **Tests are colocated.** Prefer keeping large `tests.rs` next to the code they
+  pin; the god-file ratchet counts **production** lines only (`5f3cbed`).
 - **Workspace started.** `crates/diting` is the engine package; the product
   binary remains `aginxbrowser` at the workspace root. Further splits
-  (`core` / `authoring` / thin bin) are still the §4 target — not done.
+  (`core` / `authoring` / thin bin) are the §4 *end state* — soft-deferred.
 
-### 3.2 The four debts this program repays
+### 3.2 The four debts — status
 
-| # | Debt | Evidence |
-|---|------|----------|
-| D1 | **Page is a god object.** Navigation, eval, layout cache, interaction, network sniffing on one struct. | `diting_browser/page.rs` = 5,275 lines; 9 product files import `diting_browser` directly. |
-| D2 | **session.rs carries five jobs.** Session actor, command enum, interaction JS, recording/replay, snapshot persistence (+ humanized drag). | `session.rs` = 5,423 lines; `session_thread` alone ≈ 900. |
-| D3 | **The three-face tax.** Every capability is wired three times (HTTP route in `main.rs`, MCP tool in `mcp.rs`, CDP method), each face re-declaring parameters. | 52 inline routes in `main.rs` (2,726 lines), 37 tools in `mcp.rs` (2,125 lines). |
-| D4 | **Authoring is compiled into the acquisition server.** | `docgen/` 12.4k + `video.rs` + `pptx_native.rs` + `ooxml.rs` + `pages.rs` ≈ 17k lines that CDP-only and device builds never execute. |
+| # | Debt | Status (2026-10-13) |
+|---|------|---------------------|
+| D1 | **Page was a god object.** | **Mostly repaid.** Live code lives under `page/`; large colocated tests remain. Cosmetic: `evaluate_for_cdp*` naming on the eval path. |
+| D2 | **session.rs carried five jobs.** | **Repaid.** Tree under `src/session/`; interact holds the observe/act contract. |
+| D3 | **Three-face tax (HTTP + MCP + CDP).** | **Eliminated** by removing MCP/CDP. Residual: `routers/sessions.rs` is a wide but thin catalog of handlers — optional navigation split only if handler count keeps growing. |
+| D4 | **Authoring compiled into the acquisition server.** | **Still true as lines-in-tree** (`pages` / `video` / `ooxml` / `pptx` / `docgen`). Weaker as day-to-day pain now that CDP-only builds are gone. Prefer an `authoring` **feature gate** (R5) if device/musl size or CI time bites; full crate extract is not the next batch. |
+
+**Active product cohesion watch (not a 2026-09 D-row):** `src/server/mod.rs`
+(~1561 prod, grandfathered) still mixes browser/jar factory, challenge helpers,
+stateless `do_fetch`/`do_click`/`do_eval`, search cache glue, and output
+entrypoints. Split by **job** when next editing that area — not to dodge the
+cap. `src/flow/mod.rs` (~1463 prod) is one interpreter near the cap; do not
+carve it for the ratchet alone.
+
+**`screenshot.rs`:** ~600 production / ~900 test lines. Eye-side HTML→PNG path;
+domain already distinct from `session/screenshot`, `pages`, and
+`screenshot_reference`. **Keep monolithic.** Live band paint and re-parse paths
+must stay separate (different damage signatures / caches).
 
 ## 4. Target layout — Cargo workspace
 
 > **Progress (2026-10):** `crates/diting` exists and owns the engine.
 > Root `Cargo.toml` is already a workspace (`members = ["crates/diting"]`).
-> The diagram below is still the *end state* (core/authoring/bin split).
+> The diagram below is the *end state*. After MCP/CDP removal, extracting
+> `core` / `authoring` / thin bin is **soft-deferred**: highest ROI is keeping
+> legislation true, domain-splitting `server/` when edited, and carving engine
+> seams only when a change already forces one. Revisit full crate packaging if
+> a second binary/face or external library consumers appear. Prefer feature-gating
+> authoring (D4 outcome) over workspace surgery when binary size matters.
 
 ```
 aginxbrowser/                    # workspace root
 ├── ARCHITECTURE.md              # this file
 ├── Cargo.toml                   # [workspace] members + shared release profile
 ├── crates/
-│   ├── diting/                  # the engine (foundation)
-│   ├── core/                    # aginxbrowser-core: eyes + hands
-│   ├── authoring/               # aginxbrowser-authoring: mouth (feature-gated)
-│   └── aginxbrowser/            # the binary + faces (doors)
-├── js/                          # bootstrap.js — part of diting, moves with it
+│   ├── diting/                  # the engine (foundation) — EXISTS
+│   ├── core/                    # aginxbrowser-core: eyes + hands — deferred
+│   ├── authoring/               # aginxbrowser-authoring: mouth — deferred
+│   └── aginxbrowser/            # the binary + faces — deferred (bin still at root)
+├── js/                          # bootstrap.js lives under crates/diting/js today
 ├── workflow/ · web/ · docs/ · ...
 ```
 
 ### Crate responsibilities (one line each)
 
-| Crate | Package | Responsibility |
-|-------|---------|----------------|
-| diting | `diting` | Render and drive a page: network → DOM → CSS → layout → paint; V8 runtime; the `Page` API. |
-| core | `aginxbrowser-core` | Everything an agent does with a page short of authoring: sessions & interaction contracts, flows, accounts, fetch/search/download/cache, robots/rate/sanitize governance. |
-| authoring | `aginxbrowser-authoring` | Turn pages and documents into artifacts: PDF/PNG page pump, video, PPTX/DOCX, docgen. |
-| aginxbrowser | `aginxbrowser` (bin) | Doors: HTTP routes, MCP tools, CDP mounting, CLI, doctor — assembly and parameter structs only. |
+| Crate | Package | Responsibility | Status |
+|-------|---------|----------------|--------|
+| diting | `diting` | Render and drive a page: network → DOM → CSS → layout → paint; V8 runtime; the `Page` API. | **Shipped** |
+| core | `aginxbrowser-core` | Everything an agent does with a page short of authoring: sessions & interaction contracts, flows, accounts, fetch/search/download/cache, robots/rate/sanitize governance. | Deferred (code lives in root `src/` today) |
+| authoring | `aginxbrowser-authoring` | Turn pages and documents into artifacts: PDF/PNG page pump, video, PPTX/DOCX, docgen. | Deferred (same crate; feature-gate is the cheaper D4 lever) |
+| aginxbrowser | `aginxbrowser` (bin) | Door: HTTP routers, CLI, doctor — assembly and parameter structs only. | Bin at workspace root today |
 
-### Module → crate map (P1/P2 ledger)
+### Module map (actual homes today → deferred crate)
 
-| Today (src/) | → Crate | → Module inside |
+| Today | Home now | Deferred crate (if P1 resumes) |
 |---|---|---|
-| `diting_js` `diting_dom` `diting_css` `diting_layout` `diting_fonts(.rs)` `diting_net` `diting_browser` + `js/bootstrap.js` | diting | unchanged names |
-| `diting_cdp` | aginxbrowser | `cdp/` — CDP is a face riding core/engine |
-| `screenshot_reference.rs` | diting (dev-dep) | cross-check tests only, `blitz-reference` |
-| `session.rs` | core | `session/{mod,manager,commands,interact,record,state}` |
-| `server.rs` `search/` `download.rs` `store.rs` `robots.rs` `rate.rs` `sanitize.rs` `har.rs` `captcha.rs` `curl_import.rs` `cookie.rs` | core | `acquire/`, `governance/` |
-| `account.rs` `flow.rs` `browser.rs` | core | `interact/` |
-| `screenshot.rs` `render.rs` | core | `render/` (eyes: the /screenshot capability + band primitives) |
-| `pages.rs` `video.rs` `ooxml.rs` `pptx_native.rs` `docgen/` | authoring | `pagepump/`, `video/`, `ooxml/`, `docgen/` |
-| `firecrawl_compat.rs` | aginxbrowser | `compat/` (wire shim = face) |
-| `main.rs` | aginxbrowser | `main.rs` (thin) + `routers/{acquisition,sessions,outputs}` + `cli/` |
-| `mcp.rs` | aginxbrowser | `mcp/` |
-| `config.rs` `error.rs` `doctor_cli.rs` | split | config/error → core; doctor → aginxbrowser `cli/` |
+| `crates/diting` (`diting_*` + `js/bootstrap.js`) | diting | unchanged |
+| `screenshot_reference` / bridge cross-check | product (`src/`) | stays out of engine |
+| `session/` | product | core `session/` |
+| `server/` `search/` `download` `store` `robots` `rate` `sanitize` `har` `captcha` `curl_import` `cookie` `verdict` `risk_markers` | product | core `acquire/` / `governance/` |
+| `account` `flow/` `browser` (product Page adapter) | product | core `interact/` |
+| `screenshot.rs` `render.rs` | product | core `render/` |
+| `pages` `video` `ooxml` `pptx_native` `docgen/` | product | authoring |
+| `firecrawl_compat` | face | bin `compat/` |
+| `main.rs` + `routers/{acquisition,sessions,outputs,render}` | face | bin |
+| `config` `error` `doctor_cli` | split today | config/error → core; doctor → bin `cli/` |
+
+MCP / CDP rows are intentionally absent — those faces do not exist.
 
 ### 4.1 Workflow assets (deployable data, not crates)
 
@@ -157,66 +190,88 @@ Safe recent extractions (recipes): `xhs-sign`, `xhs-qrcode`, `x-p256`,
 `x-bearer`, `x-auth-ctx`, `taobao-block-everyhelp`, `taobao-block-qn-header`.
 Details and mount shapes: `workflow/README.md`.
 
+Vendor *signals* (e.g. `risk_markers`, verdict rule overlays) may live in
+product core so agents can detect walls without loading a flow. Vendor
+*actions* (sign, publish, upload) stay in `workflow/`.
+
 ## 5. Contracts at the boundaries
 
-Existing typed contracts: `Page` (engine), `SessionCommand`/`Session*Response` (session
-actor), the three wire protocols (HTTP REST schema, MCP tool schemas, CDP methods).
+Existing typed contracts: `Page` (engine), `SessionCommand` / `Session*Response`
+(session actor), HTTP REST request/response structs in `routers/`.
 
-**P3 adds the interaction contract** — observe/act with verifiable identity
-(tracked in issues #45/#46):
+**Interaction contract (P3) — largely landed** (issues #45 / #46):
 
-- `session_state` (observe) emits, per element: index, identity, and a lightweight
-  semantic signature (tag/id/name/value/checked/disabled/visibility) plus a page-level
-  fingerprint.
-- `session_click` / `session_input` (act) verify before mutating: identity unchanged,
-  element enabled, visible, not occluded (center-point `elementFromPoint` containment).
+- `session_state` (observe) emits per-element index, identity, and a lightweight
+  semantic signature (tag/id/name/value/checked/disabled/visibility) plus a
+  page-level fingerprint.
+- `session_click` / `session_input` (act) verify before mutating: element
+  enabled, visible, not occluded (center-point `elementFromPoint` containment).
 - Failure is structured, never a false success: `covered_by`, `disabled`,
-  `not_visible`, `identity_changed` — a caller can distinguish "acted, no effect"
-  from "refused, here is why".
-- `Element.checkVisibility` becomes a real implementation (display/visibility/opacity
-  chains), retiring the always-true stub (#45).
+  `not_visible` — a caller can distinguish "acted, no effect" from "refused,
+  here is why". (`identity_changed` remains a soft/residual reason name if
+  tightened later; do not treat §5 as unfinished work for the shipped reasons.)
+- `Element.checkVisibility` is a real implementation in `bootstrap.js`
+  (display / visibility / opacity chains; #45 tests in the JS runtime suite).
 
-## 6. Migration program
+## 6. Migration program — status
 
-| Phase | Deliverable | Acceptance gate |
-|-------|-------------|-----------------|
-| **P0** | This document (legislation). | Reviewed and committed. |
-| **P1** | Workspace split into the four crates; behavior byte-identical. | Full suite 1453+ green; feature-combination check (`stealth`/`screenshot`/`blitz-reference`, no-feature) green; release binary builds on the CI matrix; six distribution channels unaffected. |
-| **P2** | Internal modularization inside crates: `session/` five-module split, `routers/`, `page.rs` decomposition; add the layering audit script (grep-level R1–R3 check in CI). | Same gates as P1 per batch; god files ≤ ~1,500 **production** lines each (`#[cfg(test)]` / `tests.rs` excluded). |
-| **P3** | Interaction contract (§5) lands as typed core API; closes #45/#46. | New contract tests; agent-visible failures carry reasons; no false successes. |
+| Phase | Deliverable | Status |
+|-------|-------------|--------|
+| **P0** | This document (legislation). | **Done**; this revision restores fidelity after MCP/CDP removal and in-crate P2/P3 landings. |
+| **P1** | Workspace split into four crates; behavior byte-identical. | **~diting only.** Soft-deferred as a program; see §4. Prefer authoring feature-gate over full extract when D4 bites. |
+| **P2** | Internal modularization + layering audit in CI. | **Mostly done:** `session/`, `routers/`, `page/`, `search/` domain split, `audit_layers.py` (prod-line god ratchet). Remaining: `server/` job split when edited; engine layout/css/ops carved only on touch. |
+| **P3** | Interaction contract (§5); closes #45/#46. | **Mostly done** in code and tests. Docs no longer list it as future work. |
 
-Each phase ships as a series of small batches — every batch independently revertible,
-every batch green on the full suite.
+Each future batch still ships small, independently revertible, and green on the
+full suite. **Explicit non-goals this quarter:** split `screenshot.rs` for line
+count; extract taobao-publish / doudian-upload clones without witnesses;
+reintroduce MCP/CDP; host auto-mount of recipes.
 
 ## 7. Non-negotiable migration discipline
 
-1. **Wire freeze.** HTTP, MCP, and CDP protocol behavior stays byte-identical through
-   P1/P2. Any wire-visible change is its own feature batch, never smuggled into a move.
-2. **Moves ≠ changes.** Pure code moves (rename/re-path) and logic changes never share
-   a batch. A moved file that needed an edit gets the edit in the next batch.
-3. **Every batch green.** `cargo test --features screenshot` full-suite pass (1453
-   baseline, count may only grow) plus clippy with no new warnings in the touched hunks.
-4. **No bulk rustfmt.** History readability outweighs formatting uniformity; formatting
-   only ever touches lines a batch already edits.
+1. **Wire freeze.** HTTP protocol behavior stays byte-identical through any
+   structural move. Any wire-visible change is its own feature batch, never
+   smuggled into a move. (MCP/CDP are gone — there is no multi-face wire tax.)
+2. **Moves ≠ changes.** Pure code moves (rename/re-path) and logic changes never
+   share a batch. A moved file that needed an edit gets the edit in the next batch.
+3. **Every batch green.** `cargo test --features screenshot` full-suite pass
+   (count may only grow vs the last recorded CI baseline) plus clippy with no
+   new warnings in the touched hunks.
+4. **No bulk rustfmt.** History readability outweighs formatting uniformity;
+   formatting only ever touches lines a batch already edits.
 5. **Coarse to fine.** Crates split before their internals do; no crate is born
-   pre-shattered.
-6. **Feature gates travel with their code** and keep their `Cargo.toml` justification
-   comments verbatim.
+   pre-shattered. Soft-deferral of P1 does not license random micro-splits.
+6. **Feature gates travel with their code** and keep their `Cargo.toml`
+   justification comments verbatim.
+7. **Split for domains, not caps.** The 1500-production-line ratchet stops
+   silent growth; it is not a mandate to shatter a cohesive module that sits
+   three lines under or over the number.
 
-## Appendix A — line-count audit (2026-09-19, 5718f2b)
+## Appendix A — line-count snapshot (2026-10-13, 5f3cbed)
 
-Tracked text lines ≈ 167k: `src/` 131,326 (112 files) · `js/` 15,683 · `docs/` 9,779 ·
-`web/` 1,874 · `tests/` 242.
+Counts are **production lines** from `scripts/audit_layers.py` unless noted
+(total = all lines including tests).
 
-Engine (`diting_*`): js 24,924 (runtime tests 13,647 / 260 tests) · layout 24,079 ·
-cdp 11,817 · css 8,521 · browser 5,869 (`page.rs` 5,275) · net 5,559 · dom 4,563 ·
-fonts 446.
+**Faces:** `main.rs` ~918 prod · `routers/sessions.rs` ~1191 ·
+`routers/acquisition.rs` ~669 · `routers/outputs.rs` ~404.
 
-Product: session 5,423 · main 2,726 · server 2,194 · mcp 2,125 · store 1,734 ·
-video 1,672 · screenshot 1,344 · pages 1,152 · flow 1,099 · pptx_native 1,034 ·
-screenshot_reference 974 · har 870 · render 852 · download 692 · robots 675 ·
-firecrawl_compat 651 · curl_import 558 · account 531 · ooxml 520 · captcha 413 ·
-sanitize 386 · config 235 · rate 231 · browser 112 · cookie 60 · error 16 ·
-`docgen/` 12,355 · `search/` 4,445.
+**Product (selected):** `server/mod.rs` 1561 (grandfather) · `flow/mod.rs` 1463 ·
+`session/interact.rs` 1348 · `session/manager/actor.rs` 1131 · `search/mod.rs`
+1073 · `screenshot.rs` 600 prod / 1497 total · `video.rs` 887 prod ·
+`pages.rs` 673 prod · `render.rs` 482 prod.
 
-Test baseline: 1453 passed + 1 ignored.
+**Engine (grandfathered / large):** `js/bootstrap.js` 19094 ·
+`diting_layout/mod.rs` 9253 · `diting_css/mod.rs` 7402 ·
+`diting_js/ops/mod.rs` 5846 · `diting_layout/paint.rs` 2720 ·
+`diting_layout/fork_deltas.rs` 2257 · `diting_js/runtime.rs` 1743 ·
+`diting_browser/page/mod.rs` 1090 · `page/navigate.rs` 911 ·
+`page/scripts.rs` 752 · `page/tests.rs` 3528 (tests; excluded from ratchet).
+
+**Workflow (deployable data):** ~44 workflow dirs · 36 `flow.json` · 7 `recipe.js`.
+
+**Test baseline:** historical 2026-09 figure was 1453 passed (`--features
+screenshot`). Attribute density on HEAD is higher (`#[test]` / `#[tokio::test]`
+well above that); treat CI’s latest full-suite run as the source of truth rather
+than freezing a stale number here.
+
+**Version:** crate `0.5.42`.
