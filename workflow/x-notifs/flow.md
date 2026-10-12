@@ -1,7 +1,10 @@
 # x-notifs
 
-Pull the X notifications feed and triage it. Read-only — two `eval` steps:
-`bearer` (shared refresh) → `notifs`.
+> 2026-10-12：bearer 探针收成 named recipe `x-bearer`（`preload` + `apply_now`）；本 flow 不再内联 843B 探针。
+
+
+Pull the X notifications feed and triage it. Read-only — `preload` `x-bearer` then two `eval` steps:
+`bearer` (thin call) → `notifs`.
 
 Uses the **v2 URT REST endpoint** (`GET /i/api/2/notifications/{tab}.json`),
 not GraphQL — notifications are the one X surface still on the old URT

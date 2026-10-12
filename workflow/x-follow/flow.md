@@ -2,6 +2,8 @@
 
 > 2026-10-12：P-256 收成 named recipe `x-p256`（`preload` + `apply_now`），本 flow 不再内联库正文。
 
+> 2026-10-12：bearer 探针收成 named recipe `x-bearer`（与 `x-p256` 同 preload）；本 flow 不再内联 843B 探针。
+
 Follow / unfollow an X account via the v1.1 `friendships/{create,destroy}`
 endpoint, with the full write-op anti-automation header set
 (`x-client-transaction-id` + `x-twitter-session-signature` trio). Four steps,

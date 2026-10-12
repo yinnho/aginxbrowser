@@ -414,6 +414,11 @@ pub(crate) struct SessionPreloadBody {
     /// platform flows own the default path.
     #[serde(default)]
     recipe: Option<String>,
+    /// Also evaluate the same sources on the *current* document (mirrors
+    /// flow `preload` `apply_now`). Document-start alone only arms the next
+    /// navigation; set this when attaching a recipe to an already-open page.
+    #[serde(default)]
+    apply_now: bool,
 }
 
 pub(crate) async fn session_preload_handler(
@@ -432,11 +437,35 @@ pub(crate) async fn session_preload_handler(
         }
     }
     let resp = session::send_command(&id, |reply| session::SessionCommand::SetPreload {
-        scripts,
+        scripts: scripts.clone(),
         reply,
     })
     .await
     .map_err(session_err)?;
+    // Document-start alone only arms the *next* navigation. Mirror flow
+    // preload `apply_now` so HTTP callers can install recipes on a live page.
+    if body.apply_now {
+        for (i, src) in scripts.iter().enumerate() {
+            session::send_command(&id, |reply| session::SessionCommand::Eval {
+                script: src.clone(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .map_err(|e| {
+                // Keep session-lifecycle codes (404/503); script failures become
+                // a BadRequest naming which source index failed (mirrors flow).
+                match &e {
+                    session::SessionError::NotFound(_)
+                    | session::SessionError::Expired(_)
+                    | session::SessionError::ThreadDied(_) => session_err(e),
+                    other => AppError::BadRequest(format!(
+                        "preload apply_now script[{i}]: {other}"
+                    )),
+                }
+            })?;
+        }
+    }
     Ok((StatusCode::OK, Json(resp)))
 }
 

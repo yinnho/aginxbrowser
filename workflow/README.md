@@ -35,6 +35,7 @@ never appear in `flow/run{name=…}`.
 | `xhs-sign/` | `{"recipe":"xhs-sign"}` |
 | `xhs-qrcode/` | `{"recipe":"xhs-qrcode"}` (xhs-login SVG QR lib) |
 | `x-p256/` | `{"recipe":"x-p256","apply_now":true}` (X write flows) |
+| `x-bearer/` | `{"recipe":"x-bearer","apply_now":true}` (X read/write bearer probe) |
 | `taobao-block-everyhelp/` | `{"recipe":"taobao-block-everyhelp"}` |
 | `taobao-block-qn-header/` | `{"recipe":"taobao-block-qn-header"}` (or `recipes:[…]`) |
 

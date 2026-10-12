@@ -29,6 +29,7 @@
 //! script injection on publish pages (four publish flows share one body).
 //! `xhs-qrcode` is the vendored QR lib for `xhs-login` (no inline in flow.json).
 //! `x-p256` is the shared X.com P-256 helper for write flows.
+//! `x-bearer` is the shared X.com bearer probe (localStorage cache / main.js scrape).
 
 /// Canonical recipe name for the xhs signing wrapper.
 pub const XHS_SIGN_NAME: &str = "xhs-sign";
@@ -76,6 +77,15 @@ pub const X_P256_NAME: &str = "x-p256";
 /// attaching to an already-navigated session.
 pub const X_P256: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/workflow/x-p256/recipe.js"));
 
+/// Canonical recipe name for the shared X.com bearer probe.
+pub const X_BEARER_NAME: &str = "x-bearer";
+
+/// Refresh `localStorage.abx_bearer` from live `main.*.js` when >12h old.
+/// Installs `globalThis.abxProbeBearer`. Shared by x-reply / x-follow /
+/// x-notifs / x-search / x-read. Prefer `apply_now` when attaching to a
+/// live session.
+pub const X_BEARER: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/workflow/x-bearer/recipe.js"));
+
 /// Resolve a recipe name (aliases included) to its source. None for
 /// unknown names — callers surface the error rather than silently
 /// mounting nothing.
@@ -84,6 +94,7 @@ pub fn resolve(name: &str) -> Option<&'static str> {
         XHS_SIGN_NAME | "xhs" => Some(XHS_SIGN),
         XHS_QRCODE_NAME => Some(XHS_QRCODE),
         X_P256_NAME => Some(X_P256),
+        X_BEARER_NAME => Some(X_BEARER),
         TAOBAO_BLOCK_EVERYHELP_NAME | "taobao-everyhelp" => Some(TAOBAO_BLOCK_EVERYHELP),
         TAOBAO_BLOCK_QN_HEADER_NAME | "taobao-qn-header" => Some(TAOBAO_BLOCK_QN_HEADER),
         _ => None,
@@ -164,6 +175,7 @@ mod tests {
         assert!(resolve("taobao-qn-header").is_some());
         assert!(resolve("xhs-qrcode").is_some());
         assert!(resolve("x-p256").is_some());
+        assert!(resolve("x-bearer").is_some());
         assert!(resolve("nope").is_none());
     }
 
@@ -215,6 +227,13 @@ mod tests {
     fn x_p256_script_carries_the_contract() {
         for needle in ["globalThis.P256", "genKeyPair", "Jacobian", "0xffffffff00000001"] {
             assert!(X_P256.contains(needle), "script lost: {needle}");
+        }
+    }
+
+    #[test]
+    fn x_bearer_script_carries_the_contract() {
+        for needle in ["globalThis.abxProbeBearer", "abx_bearer_at", "script[src*='main']", "Bearer "] {
+            assert!(X_BEARER.contains(needle), "script lost: {needle}");
         }
     }
 }

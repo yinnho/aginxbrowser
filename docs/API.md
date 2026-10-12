@@ -973,6 +973,7 @@ Replace the session's document-start preload group (issue #96). Sources run befo
 |------|------|------|------|
 | scripts | string[] | ✅ | Full JS sources, in order. `[]` clears the group |
 | recipe | string | ❌ | Builtin recipe name appended after `scripts` (e.g. `"xhs-sign"`) — opt-in document-start wrapper (#84). Unknown names are an error, not a silent no-op. **Not** auto-mounted by host; platform policy lives in `workflow/` |
+| apply_now | bool | ❌ | Also evaluate the same sources on the *current* document (default `false`). Document-start alone only arms the next navigation — set this when attaching a recipe to an already-open page (mirrors flow `preload` `apply_now`) |
 
 Set the group before the session's first navigate (create without `url` → preload → navigate) and it applies to every navigation from then on, `set_content` included.
 
@@ -996,7 +997,8 @@ The engine still ships the maintained `xhs-sign` source for explicit callers:
 |------|------|------|
 | `xhs-sign` (alias `xhs`) | `POST /session/{id}/preload` `{"recipe":"xhs-sign"}`, or flow step `{"op":"preload","args":{"recipe":"xhs-sign"}}`, or paste JS via flow `preload`/`eval` | xhs signing wrapper: swallows the page's own `x-s`/`x-t` (computed in-engine, rejected 406 by the server) and re-signs both at send time via the page's own `_webmsxyw`; fuses `/sso/logout` (unsigned-API 406s misread as session death) with a synthetic 200; mounts itself as the fetch/XHR natives before the inline jsvmp can capture them |
 | `xhs-qrcode` | flow `preload` `{"recipes":["xhs-sign","xhs-qrcode"]}` (used by `xhs-login`) | vendored qrcode-generator for scannable SVG QR — keeps ~20KB out of `flow.json` |
-| `x-p256` | flow `preload` `{"recipe":"x-p256","apply_now":true}` (`x-reply` / `x-follow`) | shared in-page P-256 for X write headers; `apply_now` evals on the current document when attaching to a live session |
+| `x-p256` | flow `preload` `{"recipes":["x-p256","x-bearer"],"apply_now":true}` (`x-reply` / `x-follow`) | shared in-page P-256 for X write headers; `apply_now` evals on the current document when attaching to a live session |
+| `x-bearer` | flow `preload` `{"recipe":"x-bearer","apply_now":true}` (all five x-* flows); HTTP `{"recipe":"x-bearer","apply_now":true}` | shared bearer probe — installs `abxProbeBearer` (12h `localStorage` cache / scrape from live `main.*.js`) |
 
 Observability counters live on `window` for post-hoc checks via `eval`: `__xs_installed` (mounted), `__xs_swallowed` (page signatures swallowed), `__xs_signed` (fresh signatures issued), `__xs_fuse` (logout attempts defused).
 

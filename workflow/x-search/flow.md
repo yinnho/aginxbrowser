@@ -1,8 +1,10 @@
 # x-search
 
+> 2026-10-12：bearer 探针收成 named recipe `x-bearer`（`preload` + `apply_now`）；本 flow 不再内联 843B 探针。
+
+
 Search X via the GraphQL `SearchTimeline` (POST-only — the GET form 404s) and
-return tweets deduped and sorted by view count. Two steps, all `eval`:
-`bearer` → `search`.
+return tweets deduped and sorted by view count. `preload` `x-bearer`, then two `eval` steps: `bearer` → `search`.
 
 ## Run
 

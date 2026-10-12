@@ -1,7 +1,9 @@
 # x-read
 
-Two read modes over the GraphQL API, sharing one `bearer` prefix step (all
-`eval`):
+> 2026-10-12：bearer 探针收成 named recipe `x-bearer`（`preload` + `apply_now`）；本 flow 不再内联 843B 探针。
+
+
+Two read modes over the GraphQL API, sharing one `bearer` prefix (recipe `x-bearer` + thin `eval`):
 
 - `{screen_name}` → **user mode**: `UserByScreenName` — profile with counts
   and, most usefully, `relationship_perspectives` (is the logged-in account

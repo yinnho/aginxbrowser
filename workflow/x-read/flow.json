@@ -1,16 +1,28 @@
 {
- "args": ["screen_name", "tweet_id"],
+ "args": [
+  "screen_name",
+  "tweet_id"
+ ],
  "vars": {
   "args_json": "{\"tweet_id\": \"\"}",
   "uid": "2092400482920656896"
  },
  "steps": [
   {
+   "op": "preload",
+   "args": {
+    "recipe": "x-bearer",
+    "apply_now": true
+   },
+   "note": "shared bearer probe (workflow/x-bearer/recipe.js); apply_now so attach-to-live-session works"
+  },
+  {
    "op": "eval",
    "args": {
-    "script": "\n(async () => {\n  const at = Number(localStorage.getItem('abx_bearer_at') || 0);\n  const cur = localStorage.getItem('abx_bearer') || '';\n  const fresh = cur && at && (Date.now() - at) < 12 * 3600e3;\n  if (fresh) return JSON.stringify({ok: true, src: 'cached', len: cur.length});\n  const src = [...document.querySelectorAll(\"script[src*='main']\")].map(s => s.src)[0];\n  if (!src) return JSON.stringify({ok: !!cur, src: 'kept-no-main', len: cur.length});\n  const t = await (await fetch(src, {credentials: 'omit'})).text();\n  const m = t.match(/Bearer ([A-Za-z0-9%/+=]{80,})/);\n  if (!m) return JSON.stringify({ok: !!cur, src: 'kept-no-match', len: cur.length});\n  localStorage.setItem('abx_bearer', m[1]);\n  localStorage.setItem('abx_bearer_at', String(Date.now()));\n  return JSON.stringify({ok: true, src: 'refreshed', len: m[1].length});\n})()\n"
+    "script": "(async () => {\n  const fn = (typeof abxProbeBearer === 'function')\n    ? abxProbeBearer\n    : (typeof globalThis !== 'undefined' && typeof globalThis.abxProbeBearer === 'function')\n      ? globalThis.abxProbeBearer\n      : null;\n  if (!fn) return JSON.stringify({ok: false, err: 'abxProbeBearer missing — preload recipe x-bearer apply_now?'});\n  return await fn();\n})()\n"
    },
-   "save": "bearer"
+   "save": "bearer",
+   "note": "thin call into recipe x-bearer"
   },
   {
    "op": "eval",
