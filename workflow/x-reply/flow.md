@@ -4,21 +4,21 @@
 
 > 2026-10-12：bearer 探针收成 named recipe `x-bearer`（与 `x-p256` 同 preload）；本 flow 不再内联 843B 探针。
 
+> 2026-10-12：txid ctx+bind / b64 / derEncode / authHeaders 收成 named recipe `x-auth-ctx`（与 `x-p256`/`x-bearer` 同 preload）；本 flow 的 `ctx_bind` 改为薄封装，写路径 eval 改调 `abxB64keep`/`abxDerEncode`/`abxTxidGen`。
+
+
 Post a tweet or a reply on X with the full write-op anti-automation header set
 (`x-client-transaction-id` + `x-twitter-session-signature` trio), generated
-in-page. Five steps, all `eval`:
+in-page. Preload mounts `x-p256` + `x-bearer` + `x-auth-ctx`, then five
+`eval` steps:
 
-1. `p256` — install the pure-JS P-256 library (engine `crypto.subtle` has no
-   ECDSA) + sign/verify self-test.
-2. `bearer` — refresh `localStorage.abx_bearer` from the live `main.*.js`
-   when older than 12h.
-3. `ctx_bind` — ensure txid context (key + animation frames, cached 72h in
-   `localStorage.abx_txid_ctx`) and the web session binding (`abx_bind`,
-   ~3h TTL; re-established via `/i/session_binding/challenge` +
-   `CreateWebSessionBind` when stale).
-4. `post` — CreateTweet with txid + signature trio. Root tweet when
-   `reply_to` is empty; reply otherwise. Result saved as `post`:
-   `{ok, status, tweet_id, err_code, err_msg}`.
+1. `p256` — smoke sign/verify against recipe `x-p256` (`globalThis.P256`).
+2. `bearer` — thin call into recipe `x-bearer` (`abxProbeBearer`).
+3. `ctx_bind` — thin call into recipe `x-auth-ctx` (`abxEnsureAuthCtx`):
+   txid context (72h `abx_txid_ctx`) + web session binding (`abx_bind`).
+4. `post` — CreateTweet with txid + signature trio (helpers from
+   `x-auth-ctx`). Root tweet when `reply_to` is empty; reply otherwise.
+   Result saved as `post`: `{ok, status, tweet_id, err_code, err_msg}`.
 5. `verify` — after a reply (skipped for root tweets): sleeps 1.5s, pulls
    `TweetDetail` on the parent, and reports whether our reply is actually in
    the thread: `{ok, verified, mine_in_thread}`. This is the only reliable

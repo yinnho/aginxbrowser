@@ -406,14 +406,20 @@ pub(crate) async fn session_list_handler() -> impl IntoResponse {
 /// applies to every navigation from then on.
 #[derive(Deserialize)]
 pub(crate) struct SessionPreloadBody {
-    /// Full JS sources, in order. `[]` clears the group.
+    /// Full JS sources, in order. `[]` clears the group when no recipes.
     #[serde(default)]
     scripts: Vec<String>,
     /// Builtin recipe name appended after `scripts` (e.g. "xhs-sign") —
     /// opt-in document-start wrapper (#84). Not auto-mounted by host;
-    /// platform flows own the default path.
+    /// platform flows own the default path. Kept for back-compat; prefer
+    /// `recipes` when mounting several.
     #[serde(default)]
     recipe: Option<String>,
+    /// Builtin recipe names appended after `recipe` (same resolve path as
+    /// flow `preload` `recipes:[]`). Order: `scripts`, then `recipe`, then
+    /// `recipes[]`. Unknown names are an error, not a silent no-op.
+    #[serde(default)]
+    recipes: Vec<String>,
     /// Also evaluate the same sources on the *current* document (mirrors
     /// flow `preload` `apply_now`). Document-start alone only arms the next
     /// navigation; set this when attaching a recipe to an already-open page.
@@ -426,7 +432,16 @@ pub(crate) async fn session_preload_handler(
     Json(body): Json<SessionPreloadBody>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut scripts = body.scripts;
-    if let Some(name) = &body.recipe {
+    // Resolve recipe then recipes[] (mirrors flow name order; HTTP keeps
+    // inline `scripts` first for back-compat with earlier callers).
+    let mut names: Vec<&str> = Vec::new();
+    if let Some(name) = body.recipe.as_deref() {
+        names.push(name);
+    }
+    for name in &body.recipes {
+        names.push(name.as_str());
+    }
+    for name in names {
         match session::preload_recipes::resolve(name) {
             Some(src) => scripts.push(src.to_string()),
             None => {

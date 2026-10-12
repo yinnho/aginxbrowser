@@ -4,11 +4,14 @@
 
 > 2026-10-12：bearer 探针收成 named recipe `x-bearer`（与 `x-p256` 同 preload）；本 flow 不再内联 843B 探针。
 
+> 2026-10-12：txid ctx+bind / b64 / derEncode / authHeaders 收成 named recipe `x-auth-ctx`（与 `x-p256`/`x-bearer` 同 preload）；本 flow 的 `ctx_bind` 改为薄封装，写路径 eval 改调 `abxB64keep`/`abxDerEncode`/`abxTxidGen`。
+
+
 Follow / unfollow an X account via the v1.1 `friendships/{create,destroy}`
 endpoint, with the full write-op anti-automation header set
-(`x-client-transaction-id` + `x-twitter-session-signature` trio). Four steps,
-all `eval`: `p256` → `bearer` → `ctx_bind` → `follow` (same self-healing
-prefix as `x-reply`, shared verbatim).
+(`x-client-transaction-id` + `x-twitter-session-signature` trio). Preload
+`x-p256` + `x-bearer` + `x-auth-ctx`, then four `eval` steps: `p256` →
+`bearer` → `ctx_bind` → `follow` (same self-healing prefix as `x-reply`).
 
 ## Run
 

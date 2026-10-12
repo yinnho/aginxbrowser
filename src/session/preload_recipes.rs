@@ -30,6 +30,7 @@
 //! `xhs-qrcode` is the vendored QR lib for `xhs-login` (no inline in flow.json).
 //! `x-p256` is the shared X.com P-256 helper for write flows.
 //! `x-bearer` is the shared X.com bearer probe (localStorage cache / main.js scrape).
+//! `x-auth-ctx` is the shared X.com txid ctx + session-bind helpers for write flows.
 
 /// Canonical recipe name for the xhs signing wrapper.
 pub const XHS_SIGN_NAME: &str = "xhs-sign";
@@ -86,6 +87,16 @@ pub const X_BEARER_NAME: &str = "x-bearer";
 /// live session.
 pub const X_BEARER: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/workflow/x-bearer/recipe.js"));
 
+/// Canonical recipe name for the shared X.com txid ctx + session bind helpers.
+pub const X_AUTH_CTX_NAME: &str = "x-auth-ctx";
+
+/// Txid context + CreateWebSessionBind helpers for X write flows.
+///
+/// Installs `globalThis.abxEnsureAuthCtx` plus `abxB64keep` / `abxDerEncode` /
+/// `abxAuthHeaders` / `abxTxidGen`. Requires `x-p256`. Shared by `x-reply` /
+/// `x-follow`. Prefer `apply_now` when attaching to a live session.
+pub const X_AUTH_CTX: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/workflow/x-auth-ctx/recipe.js"));
+
 /// Resolve a recipe name (aliases included) to its source. None for
 /// unknown names — callers surface the error rather than silently
 /// mounting nothing.
@@ -95,6 +106,7 @@ pub fn resolve(name: &str) -> Option<&'static str> {
         XHS_QRCODE_NAME => Some(XHS_QRCODE),
         X_P256_NAME => Some(X_P256),
         X_BEARER_NAME => Some(X_BEARER),
+        X_AUTH_CTX_NAME => Some(X_AUTH_CTX),
         TAOBAO_BLOCK_EVERYHELP_NAME | "taobao-everyhelp" => Some(TAOBAO_BLOCK_EVERYHELP),
         TAOBAO_BLOCK_QN_HEADER_NAME | "taobao-qn-header" => Some(TAOBAO_BLOCK_QN_HEADER),
         _ => None,
@@ -176,6 +188,7 @@ mod tests {
         assert!(resolve("xhs-qrcode").is_some());
         assert!(resolve("x-p256").is_some());
         assert!(resolve("x-bearer").is_some());
+        assert!(resolve("x-auth-ctx").is_some());
         assert!(resolve("nope").is_none());
     }
 
@@ -234,6 +247,22 @@ mod tests {
     fn x_bearer_script_carries_the_contract() {
         for needle in ["globalThis.abxProbeBearer", "abx_bearer_at", "script[src*='main']", "Bearer "] {
             assert!(X_BEARER.contains(needle), "script lost: {needle}");
+        }
+    }
+
+    #[test]
+    fn x_auth_ctx_script_carries_the_contract() {
+        for needle in [
+            "globalThis.abxEnsureAuthCtx",
+            "globalThis.abxB64keep",
+            "globalThis.abxDerEncode",
+            "globalThis.abxAuthHeaders",
+            "globalThis.abxTxidGen",
+            "abx_txid_ctx",
+            "CreateWebSessionBind",
+            "session_binding/challenge",
+        ] {
+            assert!(X_AUTH_CTX.contains(needle), "script lost: {needle}");
         }
     }
 }
