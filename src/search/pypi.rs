@@ -10,15 +10,13 @@ use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError};
 /// ("http client" → `httpclient`, `http-client`, `http_client`) and probes
 /// each — exact/kebab/snake resolution covers the dominant agent need
 /// ("find the package for X") even though it's not ranked search.
-pub struct PypiEngine {
-    client: reqwest::Client,
-}
+/// Connectivity: pypi.org is overseas; each candidate probe rides
+/// [`super::get_direct_first`] (proxy-first when available).
+pub struct PypiEngine;
 
 impl PypiEngine {
     pub fn new() -> Self {
-        PypiEngine {
-            client: super::build_plain_client(10),
-        }
+        PypiEngine
     }
 }
 
@@ -50,24 +48,27 @@ impl SearchEngine for PypiEngine {
         .collect();
 
         let _ = params.pageno; // per-package API has no paging
+        const PY_HEADERS: &[(&str, &str)] = &[("Accept", "application/json")];
         let mut results = Vec::new();
+        let mut last_err = None;
         for cand in candidates.iter().take(3) {
             let url = format!("https://pypi.org/pypi/{}/json", cand);
-            let resp = match self.client.get(&url).send().await {
-                Ok(r) => r,
-                Err(e) => return Err(SearchEngineError::Transient(format!("fetch error: {e}"))),
-            };
-            if !resp.status().is_success() {
-                continue;
-            }
-            let body = match resp.text().await {
-                Ok(b) => b,
-                Err(e) => {
-                    return Err(SearchEngineError::Transient(format!("read error: {e}")))
+            match super::get_direct_first(&url, PY_HEADERS, super::proxied_plain_client).await {
+                Ok(body) => {
+                    if let Ok(mut parsed) = parse_pypi_json(&body) {
+                        results.append(&mut parsed);
+                    }
                 }
-            };
-            if let Ok(mut parsed) = parse_pypi_json(&body) {
-                results.append(&mut parsed);
+                Err(e) => {
+                    // 404-ish bodies already come back Ok from get_direct_first;
+                    // transport failures: remember and try next candidate.
+                    last_err = Some(e);
+                }
+            }
+        }
+        if results.is_empty() {
+            if let Some(e) = last_err {
+                return Err(e);
             }
         }
         Ok(results)

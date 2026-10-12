@@ -17,8 +17,6 @@ use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError};
 pub struct DuckDuckGoEngine {
     #[cfg(feature = "stealth")]
     stealth: std::sync::Arc<diting::diting_net::wreq_client::StealthHttpClient>,
-    #[cfg(feature = "stealth")]
-    stealth_proxied: Option<std::sync::Arc<diting::diting_net::wreq_client::StealthHttpClient>>,
 }
 
 impl DuckDuckGoEngine {
@@ -28,10 +26,22 @@ impl DuckDuckGoEngine {
             // the entire point of the stealth client.
             #[cfg(feature = "stealth")]
             stealth: super::build_stealth_client(false),
-            #[cfg(feature = "stealth")]
-            stealth_proxied: crate::config::proxy_from_env()
-                .map(|_| super::build_stealth_client(true)),
         }
+    }
+
+    /// Proxied stealth client resolved per request via [`super::search_proxy_url`]
+    /// (AGINXBROWSER_PROXY or live local :8800) so a late-starting stunnel
+    /// still gets used.
+    #[cfg(feature = "stealth")]
+    fn stealth_proxied(&self) -> Option<std::sync::Arc<diting::diting_net::wreq_client::StealthHttpClient>> {
+        let proxy = super::search_proxy_url()?;
+        let cookie_jar = std::sync::Arc::new(diting::diting_net::cookies::CookieJar::new());
+        Some(std::sync::Arc::new(
+            diting::diting_net::wreq_client::StealthHttpClient::with_proxy(
+                cookie_jar,
+                Some(proxy.as_str()),
+            ),
+        ))
     }
 
     /// Direct first (stealth Chrome fingerprint); a body without result
@@ -42,11 +52,11 @@ impl DuckDuckGoEngine {
     async fn fetch_results_html(&self, url: &str) -> Result<String, SearchEngineError> {
         let mut rejected: Option<String> = None;
         let mut last_err: Option<SearchEngineError> = None;
-        // 12s cap on the direct attempt (parity with the plain path's client):
-        // GFW blackholes DDG SYNs, and without a cap the built-in 30s client
-        // timeout burns before the proxied attempt even starts.
+        // 4s cap on the direct attempt (parity with DIRECT_PROBE_TIMEOUT_SECS):
+        // GFW blackholes DDG SYNs; a short probe then falls through to the
+        // proxied stealth client (AGINXBROWSER_PROXY / local :8800).
         let direct = tokio::time::timeout(
-            std::time::Duration::from_secs(12),
+            std::time::Duration::from_secs(4),
             super::stealth_fetch(self.stealth.as_ref(), url),
         )
         .await;
@@ -62,11 +72,11 @@ impl DuckDuckGoEngine {
             }
             Err(_) => {
                 last_err = Some(SearchEngineError::Transient(
-                    "direct attempt timed out (12s)".into(),
+                    "direct attempt timed out (4s)".into(),
                 ));
             }
         }
-        if let Some(ref proxied) = self.stealth_proxied {
+        if let Some(ref proxied) = self.stealth_proxied() {
             return match super::stealth_fetch(proxied.as_ref(), url).await {
                 Ok((body, _)) => {
                     if !has_results(&body) {

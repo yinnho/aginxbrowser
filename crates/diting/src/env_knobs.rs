@@ -44,6 +44,7 @@ pub fn should_auto_proxy(url: &str) -> bool {
         "googleusercontent.com",
         "wikipedia.org",
         "stackoverflow.com",
+        "stackexchange.com",
         "medium.com",
         "x.com",
         "twitter.com",
@@ -52,6 +53,23 @@ pub fn should_auto_proxy(url: &str) -> bool {
         "reddit.com",
         "openai.com",
         "anthropic.com",
+        // Search engines / registries that time out from CN without a proxy
+        // (redfin aginxbrowser.log 2026-10-12: duckduckgo / huggingface /
+        // github decode/timeout; /search used to miss the auto-proxy path).
+        "duckduckgo.com",
+        "huggingface.co",
+        "arxiv.org",
+        "export.arxiv.org",
+        "pypi.org",
+        "pythonhosted.org",
+        "npms.io",
+        "npmjs.com",
+        "npmjs.org",
+        "rubygems.org",
+        "openalex.org",
+        "developer.mozilla.org",
+        "ycombinator.com",
+        "algolia.com",
     ];
 
     for domain in BLOCKED_DOMAINS {
@@ -224,6 +242,10 @@ mod tests {
         // CDN assets went direct arrives scriptless.
         assert!(should_auto_proxy("https://abs.twimg.com/client-web/main.js"));
         assert!(should_auto_proxy("https://pbs.twimg.com/profile/x.jpg"));
+        assert!(should_auto_proxy("https://html.duckduckgo.com/html/"));
+        assert!(should_auto_proxy("https://huggingface.co/api/models"));
+        assert!(should_auto_proxy("https://api.github.com/search/repositories"));
+        assert!(should_auto_proxy("https://export.arxiv.org/api/query"));
         assert!(!should_auto_proxy("https://notwikipedia.org/"));
         assert!(!should_auto_proxy("https://example.com/"));
         assert!(!should_auto_proxy("not a url"));

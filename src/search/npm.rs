@@ -6,15 +6,13 @@ use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError};
 /// uses the same endpoint). "packages" category source. Snippet packs
 /// version/description/author — the signals an agent needs to pick a
 /// package without opening npmjs.com.
-pub struct NpmEngine {
-    client: reqwest::Client,
-}
+/// Connectivity: api.npms.io is overseas; fetch rides
+/// [`super::get_direct_first`] (proxy-first when available).
+pub struct NpmEngine;
 
 impl NpmEngine {
     pub fn new() -> Self {
-        NpmEngine {
-            client: super::build_plain_client(12),
-        }
+        NpmEngine
     }
 }
 
@@ -41,24 +39,8 @@ impl SearchEngine for NpmEngine {
             from,
         );
 
-        let resp = self
-            .client
-            .get(&url)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|e| SearchEngineError::Transient(format!("fetch error: {e}")))?;
-
-        if !resp.status().is_success() {
-            return Err(SearchEngineError::Transient(format!(
-                "HTTP {} from api.npms.io",
-                resp.status()
-            )));
-        }
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| SearchEngineError::Transient(format!("read error: {e}")))?;
+        const NPM_HEADERS: &[(&str, &str)] = &[("Accept", "application/json")];
+        let body = super::get_direct_first(&url, NPM_HEADERS, super::proxied_plain_client).await?;
         parse_npm_json(&body)
     }
 }

@@ -38,9 +38,18 @@ impl SearchEngine for BingNewsEngine {
     ) -> Result<Vec<RawSearchResult>, SearchEngineError> {
         // SearXNG's request shape: 10 items per page, `first` is the 1-based
         // item offset and SFX the 0-based page echo.
+        // CN exits geo-substitute www.bing.com → cn.bing.com ("Object moved");
+        // start on cn.bing when the request language is Chinese so the direct
+        // leg has a chance, and still fall through get_direct_first_if's
+        // proxy retry for the www fragment when needed.
         let page = params.pageno.saturating_sub(1);
+        let host = if params.language.to_ascii_lowercase().starts_with("zh") {
+            "cn.bing.com"
+        } else {
+            "www.bing.com"
+        };
         let url = format!(
-            "https://www.bing.com/news/infinitescrollajax?q={}&InfiniteScroll=1&first={}&SFX={}&form=PTFTNR&setlang={}",
+            "https://{host}/news/infinitescrollajax?q={}&InfiniteScroll=1&first={}&SFX={}&form=PTFTNR&setlang={}",
             urlencoding::encode(query),
             page * 10 + 1,
             page,
@@ -65,7 +74,10 @@ impl SearchEngine for BingNewsEngine {
         // helper retry through the proxy whenever the direct body isn't a
         // news fragment (the blocked-target signature for this engine).
         fn is_fragment(body: &str) -> bool {
-            body.contains("newsitem")
+            // Real fragment. Reject the CN "Object moved" portal and empty
+            // home pages that www.bing geo-substitutes for CN exits.
+            (body.contains("newsitem") || body.contains("news-card"))
+                && !body.to_ascii_lowercase().contains("object moved")
         }
         let body =
             super::get_direct_first_if(&url, BN_HEADERS, super::proxied_plain_client, is_fragment).await?;
@@ -224,5 +236,14 @@ mod tests {
         // parse crash, so /doctor shows it as healthy-but-empty.
         let results = parse_bing_news_fragment("<html><body>portal</body></html>").unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn object_moved_body_is_not_a_news_fragment() {
+        // Mirrors the CN geo-302 body that used to pass HTTP and fail later.
+        let body = r#"<html><head><title>Object moved</title></head><body><h2>Object moved to <a href="https://cn.bing.com/">here</a>.</h2></body></html>"#;
+        let ok = (body.contains("newsitem") || body.contains("news-card"))
+            && !body.to_ascii_lowercase().contains("object moved");
+        assert!(!ok);
     }
 }

@@ -6,15 +6,13 @@ use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError};
 /// SearXNG-parity "code" category source: programming Q&A with score and
 /// answered-state in the snippet, exactly what an agent needs to judge
 /// result quality before fetching.
-pub struct StackExchangeEngine {
-    client: reqwest::Client,
-}
+/// Connectivity: api.stackexchange.com is overseas; fetch rides
+/// [`super::get_direct_first`] (proxy-first when available).
+pub struct StackExchangeEngine;
 
 impl StackExchangeEngine {
     pub fn new() -> Self {
-        StackExchangeEngine {
-            client: super::build_plain_client(10),
-        }
+        StackExchangeEngine
     }
 }
 
@@ -40,28 +38,12 @@ impl SearchEngine for StackExchangeEngine {
             page,
         );
 
-        let resp = self
-            .client
-            .get(&url)
-            .header("Accept", "application/json")
+        const SE_HEADERS: &[(&str, &str)] = &[
+            ("Accept", "application/json"),
             // The API 403s the default reqwest UA; a normal client UA passes.
-            .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
-            .send()
-            .await
-            .map_err(|e| SearchEngineError::Transient(format!("fetch error: {e}")))?;
-
-        if !resp.status().is_success() {
-            return Err(SearchEngineError::Transient(format!(
-                "HTTP {} from api.stackexchange.com",
-                resp.status()
-            )));
-        }
-
-        // The API answers gzip-compressed JSON; reqwest decodes transparently.
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| SearchEngineError::Transient(format!("read error: {e}")))?;
+            ("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"),
+        ];
+        let body = super::get_direct_first(&url, SE_HEADERS, super::proxied_plain_client).await?;
         parse_stack_exchange_json(&body)
     }
 }

@@ -7,15 +7,15 @@ use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError};
 /// Transient so the caller's retry/backoff handles them without CAPTCHA-style
 /// suspension). "code" category source: stars/description/language give an
 /// agent the quality signals to pick a repo without fetching it.
-pub struct GithubEngine {
-    client: reqwest::Client,
-}
+///
+/// Connectivity: api.github.com is blocked from CN; fetch rides
+/// [`super::get_direct_first`] (proxy-first via should_auto_proxy +
+/// AGINXBROWSER_PROXY / local :8800).
+pub struct GithubEngine;
 
 impl GithubEngine {
     pub fn new() -> Self {
-        GithubEngine {
-            client: super::build_plain_client(10),
-        }
+        GithubEngine
     }
 }
 
@@ -43,33 +43,16 @@ impl SearchEngine for GithubEngine {
             page,
         );
 
-        let resp = self
-            .client
-            .get(&url)
-            .header("Accept", "application/vnd.github+json")
-            // The API requires a User-Agent; the plain client's UA is generic
-            // but present — set an identifying one per GitHub guidelines.
-            .header("User-Agent", "aginxbrowser-search")
-            .send()
-            .await
-            .map_err(|e| SearchEngineError::Transient(format!("fetch error: {e}")))?;
-
-        if resp.status() == reqwest::StatusCode::FORBIDDEN || resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        const GH_HEADERS: &[(&str, &str)] = &[
+            ("Accept", "application/vnd.github+json"),
+            ("User-Agent", "aginxbrowser-search"),
+        ];
+        let body = super::get_direct_first(&url, GH_HEADERS, super::proxied_plain_client).await?;
+        if body.contains("API rate limit exceeded") || body.contains("rate limit") {
             return Err(SearchEngineError::Transient(
                 "github api rate limited (unauthenticated quota 10/min)".into(),
             ));
         }
-        if !resp.status().is_success() {
-            return Err(SearchEngineError::Transient(format!(
-                "HTTP {} from api.github.com",
-                resp.status()
-            )));
-        }
-
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| SearchEngineError::Transient(format!("read error: {e}")))?;
         parse_github_json(&body)
     }
 }

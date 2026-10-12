@@ -8,15 +8,13 @@ use super::{SearchParams, RawSearchResult, SearchEngine, SearchEngineError};
 /// quantum-memory abstracts). The other verticals (npm/pypi/github/…) match
 /// name spaces and stay in general; arXiv's precision does not. SearXNG's
 /// taxonomy agrees: arxiv is science-only, never general.
-pub struct ArxivEngine {
-    client: reqwest::Client,
-}
+/// Connectivity: export.arxiv.org often times out from CN; fetch rides
+/// [`super::get_direct_first`] (proxy-first when AGINXBROWSER_PROXY / :8800).
+pub struct ArxivEngine;
 
 impl ArxivEngine {
     pub fn new() -> Self {
-        ArxivEngine {
-            client: super::build_plain_client(15),
-        }
+        ArxivEngine
     }
 }
 
@@ -44,24 +42,8 @@ impl SearchEngine for ArxivEngine {
             start,
         );
 
-        let resp = self
-            .client
-            .get(&url)
-            .header("Accept", "application/atom+xml")
-            .send()
-            .await
-            .map_err(|e| SearchEngineError::Transient(format!("fetch error: {e}")))?;
-
-        if !resp.status().is_success() {
-            return Err(SearchEngineError::Transient(format!(
-                "HTTP {} from export.arxiv.org",
-                resp.status()
-            )));
-        }
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| SearchEngineError::Transient(format!("read error: {e}")))?;
+        const AX_HEADERS: &[(&str, &str)] = &[("Accept", "application/atom+xml")];
+        let body = super::get_direct_first(&url, AX_HEADERS, super::proxied_plain_client).await?;
         parse_arxiv_atom(&body)
     }
 }

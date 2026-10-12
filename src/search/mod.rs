@@ -369,11 +369,33 @@ pub async fn native_search(
 
     // Filter engines by category.
     let requested: Vec<&str> = categories.split(',').map(|s| s.trim()).collect();
+    let cjk_heavy = is_cjk_heavy(query);
+    // Explicit engine_filter always wins; otherwise CJK-heavy general queries
+    // drop registry/AI engines that fuzzy-match Chinese into irrelevant
+    // English hits (measured: huggingface/arxiv-class noise on TCM queries).
+    let general_only = requested.iter().all(|c| *c == "general")
+        || (requested.contains(&"general")
+            && !requested.iter().any(|c| {
+                matches!(*c, "code" | "packages" | "ai" | "academic" | "news" | "images")
+            }));
     let eligible: Vec<Arc<dyn SearchEngine>> = registry
         .engines
         .iter()
         .filter(|e| e.categories().iter().any(|c| requested.contains(c)))
         .filter(|e| params.engine_filter.is_empty() || params.engine_filter.iter().any(|n| n.as_str() == e.name()))
+        .filter(|e| {
+            if !params.engine_filter.is_empty() {
+                return true;
+            }
+            if cjk_heavy && general_only && is_cjk_noise_engine(e.name()) {
+                tracing::debug!(
+                    "search: skipping engine {} for CJK-heavy general query",
+                    e.name()
+                );
+                return false;
+            }
+            true
+        })
         .cloned() // Arc clone — cheap
         .collect();
 
@@ -621,9 +643,94 @@ fn merge_results(results: Vec<RawSearchResult>, max_results: usize) -> Vec<Searc
     // Sort by score descending.
     merged.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Truncate to max_results.
-    merged.truncate(max_results);
-    merged
+    // Soft domain diversity: at most MAX_PER_HOST from one host before
+    // filling remaining slots, so a single noisy engine (arxiv/hf) cannot
+    // dominate the page for a Chinese medical query.
+    diversify_by_host(merged, max_results)
+}
+
+
+// ---------------------------------------------------------------------------
+// Query / merge helpers (CJK selection + host diversity)
+// ---------------------------------------------------------------------------
+
+/// True when ≥40% of non-whitespace/punctuation characters are CJK/Kana/Hangul.
+pub(crate) fn is_cjk_heavy(query: &str) -> bool {
+    let mut cjk = 0usize;
+    let mut letters = 0usize;
+    for c in query.chars() {
+        if c.is_whitespace() || c.is_ascii_punctuation() {
+            continue;
+        }
+        letters += 1;
+        if is_cjk_char(c) {
+            cjk += 1;
+        }
+    }
+    letters > 0 && (cjk as f64 / letters as f64) >= 0.4
+}
+
+fn is_cjk_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{4E00}'..='\u{9FFF}' // CJK Unified Ideographs
+            | '\u{3400}'..='\u{4DBF}' // Extension A
+            | '\u{F900}'..='\u{FAFF}' // Compatibility Ideographs
+            | '\u{3040}'..='\u{30FF}' // Hiragana + Katakana
+            | '\u{AC00}'..='\u{D7AF}' // Hangul Syllables
+    )
+}
+
+/// Engines whose fuzzy / namespace matching turns CJK medical / news queries
+/// into irrelevant English registry hits when the request is general-only.
+fn is_cjk_noise_engine(name: &str) -> bool {
+    matches!(
+        name,
+        "huggingface"
+            | "npm"
+            | "pypi"
+            | "rubygems"
+            | "hn"
+            | "github"
+            | "stackexchange"
+    )
+}
+
+const MAX_PER_HOST: usize = 2;
+
+fn host_of(url: &str) -> String {
+    Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.trim_start_matches("www.").to_lowercase()))
+        .unwrap_or_default()
+}
+
+fn diversify_by_host(merged: Vec<SearchResultItem>, max_results: usize) -> Vec<SearchResultItem> {
+    // Prefer breadth: take up to MAX_PER_HOST per host first, then fill any
+    // remaining slots from the deferred surplus so a single-host SERP still
+    // reaches max_results. The early slots therefore cannot be all-arxiv
+    // when another host is available.
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut out = Vec::with_capacity(max_results.min(merged.len()));
+    let mut deferred = Vec::new();
+    for item in merged {
+        let h = host_of(&item.url);
+        let n = counts.entry(h).or_insert(0);
+        if *n < MAX_PER_HOST {
+            *n += 1;
+            out.push(item);
+        } else {
+            deferred.push(item);
+        }
+    }
+    for item in deferred {
+        if out.len() >= max_results {
+            break;
+        }
+        out.push(item);
+    }
+    out.truncate(max_results);
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -667,13 +774,65 @@ pub fn build_plain_client(timeout_secs: u64) -> reqwest::Client {
         .expect("failed to build reqwest client for search")
 }
 
-/// Build a reqwest client through `AGINXBROWSER_PROXY` — the proxy-retry leg
-/// of [`get_direct_first_if`]. Returns None when no proxy is configured.
-/// Shared by every direct-first engine (bing_news, duckduckgo, wikipedia,
-/// huggingface).
+/// Resolve the proxy URL used by search engines' retry / proxy-first legs.
+///
+/// Order:
+/// 1. `AGINXBROWSER_PROXY` (canonical knob; HTTPS_PROXY is ignored by design).
+/// 2. Local aginx-proxy stunnel at `127.0.0.1:8800` when that socket is
+///    listening — the CN device default (research / grok use the same
+///    `socks5h://127.0.0.1:8800`). Covers the historical redfin miss where
+///    the unit set no `AGINXBROWSER_PROXY` and duckduckgo/huggingface timed
+///    out with no fallback.
+pub(crate) fn search_proxy_url() -> Option<String> {
+    if let Some(proxy) = crate::config::proxy_from_env() {
+        return Some(normalize_socks5h(&proxy));
+    }
+    if local_socks_proxy_up("127.0.0.1:8800") {
+        return Some("socks5h://127.0.0.1:8800".into());
+    }
+    None
+}
+
+/// Cached TCP probe for the local socks listen socket. 30s TTL so a /search
+/// that fans out to a dozen engines does not pay a connect() each.
+fn local_socks_proxy_up(addr: &str) -> bool {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    struct Cache {
+        addr: String,
+        up: bool,
+        checked_at: Instant,
+    }
+    static CACHE: std::sync::OnceLock<Mutex<Option<Cache>>> = std::sync::OnceLock::new();
+    let lock = CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(c) = guard.as_ref() {
+        if c.addr == addr && c.checked_at.elapsed() < Duration::from_secs(30) {
+            return c.up;
+        }
+    }
+    let up = std::net::TcpStream::connect_timeout(
+        &addr.parse().unwrap_or_else(|_| {
+            std::net::SocketAddr::from(([127, 0, 0, 1], 8800))
+        }),
+        Duration::from_millis(50),
+    )
+    .is_ok();
+    *guard = Some(Cache {
+        addr: addr.to_string(),
+        up,
+        checked_at: Instant::now(),
+    });
+    up
+}
+
+/// Build a reqwest client through [`search_proxy_url`] — the proxy-retry /
+/// proxy-first leg of [`get_direct_first_if`]. Returns None when no proxy is
+/// configured and the local 8800 stunnel is down. Shared by every
+/// direct-first engine (bing_news, duckduckgo, wikipedia, huggingface,
+/// github, arxiv, …).
 pub(crate) fn proxied_plain_client() -> Option<reqwest::Client> {
-    crate::config::proxy_from_env().map(|proxy| {
-        let proxy_str = normalize_socks5h(&proxy);
+    search_proxy_url().map(|proxy_str| {
         let mut builder = diting::diting_net::client::reqwest_builder_no_env_proxy()
             .timeout(Duration::from_secs(12))
             .redirect(reqwest::redirect::Policy::none());
@@ -1041,9 +1200,19 @@ where
     // Built up front: the skip decision below needs to know whether a proxy
     // exists at all — skipping the probe without a fallback would just fail.
     let proxied = build_proxied_client();
+    // Known-overseas hosts (should_auto_proxy) go proxy-first when a proxy
+    // is available — the direct leg on a CN box is a guaranteed timeout, and
+    // the operator asked for proxy-for-overseas rather than fail-fast/skip.
+    // Recent-failure memory still skips the probe for other hosts.
     let skip_direct = proxied.is_some()
         && host.as_deref().is_some_and(|h| {
-            direct_skip_remaining(&direct_fails().lock().unwrap_or_else(|e| e.into_inner()), h, crate::now_secs()) > 0
+            let auto = crate::config::should_auto_proxy(&format!("https://{h}/"));
+            let sentenced = direct_skip_remaining(
+                &direct_fails().lock().unwrap_or_else(|e| e.into_inner()),
+                h,
+                crate::now_secs(),
+            ) > 0;
+            auto || sentenced
         });
 
     let plain = build_plain_client(DIRECT_PROBE_TIMEOUT_SECS);
@@ -1051,10 +1220,10 @@ where
 
     if skip_direct {
         tracing::debug!(
-            "search: skipping direct probe for {} (recent consecutive failures; straight to proxy)",
+            "search: skipping direct probe for {} (auto-proxy host or recent failures; straight to proxy)",
             host.as_deref().unwrap_or("?")
         );
-        last_err = "direct skipped: host on recent-failure list".into();
+        last_err = "direct skipped: overseas auto-proxy or recent-failure list".into();
     } else {
         // Attempt 1: direct.
         let mut req = plain.get(url);
@@ -1329,5 +1498,67 @@ mod tests {
         assert_eq!(normalize_socks5h("socks5h://h:1080"), "socks5h://h:1080");
         assert_eq!(normalize_socks5h("http://h:8080"), "http://h:8080");
         assert_eq!(normalize_socks5h("https://h:8443"), "https://h:8443");
+    }
+
+    // ---- CJK query heuristic ----
+
+    #[test]
+    fn cjk_heavy_detects_chinese_medical_query() {
+        assert!(is_cjk_heavy("杜仲、续断、桑寄生治疗腰痛"));
+        assert!(is_cjk_heavy("中医药 骨关节炎 RCT"));
+        assert!(!is_cjk_heavy("rust async tokio tutorial"));
+        assert!(!is_cjk_heavy(""));
+        // Mixed but English-dominant stays non-CJK.
+        assert!(!is_cjk_heavy("how to use 杜仲 in rust"));
+    }
+
+    #[test]
+    fn overseas_hosts_auto_proxy_for_search() {
+        // Mirrors env_knobs::should_auto_proxy — search relies on this list
+        // for proxy-first overseas engines.
+        assert!(crate::config::should_auto_proxy("https://html.duckduckgo.com/html/"));
+        assert!(crate::config::should_auto_proxy("https://huggingface.co/api/models"));
+        assert!(crate::config::should_auto_proxy("https://api.github.com/search/repositories"));
+        assert!(crate::config::should_auto_proxy("https://export.arxiv.org/api/query"));
+        assert!(crate::config::should_auto_proxy("https://pypi.org/pypi/requests/json"));
+        assert!(!crate::config::should_auto_proxy("https://www.baidu.com/s"));
+        assert!(!crate::config::should_auto_proxy("https://www.sogou.com/web"));
+    }
+
+    #[test]
+    fn cjk_noise_engines_named() {
+        assert!(is_cjk_noise_engine("huggingface"));
+        assert!(is_cjk_noise_engine("github"));
+        assert!(!is_cjk_noise_engine("baidu"));
+        assert!(!is_cjk_noise_engine("sogou"));
+        assert!(!is_cjk_noise_engine("duckduckgo"));
+    }
+
+    #[test]
+    fn diversify_limits_per_host() {
+        let results: Vec<RawSearchResult> = (0..6)
+            .map(|i| {
+                raw(
+                    &format!("t{i}"),
+                    &format!("https://arxiv.org/abs/{i}"),
+                    "arxiv",
+                    10.0 - i as f64,
+                )
+            })
+            .collect();
+        // Plus one other host that should still appear early, before
+        // deferred arxiv padding fills the rest of the page.
+        let mut results = results;
+        results.push(raw("other", "https://example.com/a", "bing", 1.0));
+        let merged = merge_results(results, 5);
+        let example_pos = merged
+            .iter()
+            .position(|r| r.url.contains("example.com"))
+            .expect("other host squeezed out");
+        assert!(
+            example_pos <= MAX_PER_HOST,
+            "other host should appear among the early diverse slots, got pos {example_pos} in {:?}",
+            merged.iter().map(|r| &r.url).collect::<Vec<_>>()
+        );
     }
 }
