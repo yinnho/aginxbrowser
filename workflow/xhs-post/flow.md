@@ -1,12 +1,13 @@
+> 2026-10-12：签名/保险丝只走 `preload recipe: xhs-sign`（含 `_webmsxyw` 缺失时的 x-s passthrough）。已删 flow 内 eval mega-patch 双源；续票步（CAS service-ticket）仍保留。
+
 # xhs-post — 小红书图文笔记发布 flow
 
 > 2026-09-24：签名补丁升双面 + 封死页面自杀保险丝 + 新增引擎侧续票步。全链根因（live 抓包）：
 > publish 页挂载时一批要签名的 API（`upload/creator/permit` 等）裸奔 → 406 →
 > **页面自己调 `/sso/logout` + `/api/galaxy/user/logout`（真 200）把服务端会话杀掉**再弹
 > /login——不是服务端踢、不是多端互踢。旧补丁只包 XHR，页面一半 burst 走 jsvmp 的
-> fetch wrapper，照样裸奔。修法三层：①补丁双面（XHR+fetch，send 时查 `x-s` 缺才签）
-> ②logout 两端点直接合成 200 应答（保险丝拆掉，boot 期裸奔的 406 不再致死）
-> ③新步 1.6 续票：galaxy 探 401 时用 `_webmsxyw` 签名调 CAS service-ticket
+> fetch wrapper，照样裸奔。修法现收敛为：①`recipe: xhs-sign` document-start（XHR+fetch swallow/resign + logout 保险丝；Ark 无 `_webmsxyw` 时 passthrough）
+> ②续票步：galaxy 探 401 时用 `_webmsxyw` 签名调 CAS service-ticket
 > （TGC=customer-sso-sid 比 AT 长寿），换新 AT 落 Set-Cookie——页面自己的 autoLogin
 > 同调用因启动竞速不签名恒 406。续票成功时当前文档 boot 态已脏，**重跑一次 flow**；
 > TGC 也死了回 import_curl。实操：galaxy 判死快路=`sed 换 URL 成 /api/galaxy/user/info`

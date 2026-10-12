@@ -17,8 +17,8 @@ first so challenge/captcha cannot be shadowed by a login needle):
 2. `./config/verdict_rules.json` (cwd)
 3. embedded copy baked at compile time from this repo path
 
-## P2 note
+## Related
 
-`scripts/xhs-qr-login.py` is still the QR helper; a future
-`workflow/xhs-login/` should absorb it (create bare → preload recipe →
-navigate login → QR handoff), same shape as `taobao-login` / `doudian-login`.
+`workflow/xhs-login/` owns QR login end-to-end (create bare → preload
+`xhs-sign` → navigate → QR handoff / cookies recovery). 
+`scripts/xhs-qr-login.py` is an optional thin `flow/run` CLI only.
