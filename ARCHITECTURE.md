@@ -135,6 +135,26 @@ aginxbrowser/                    # workspace root
 | `mcp.rs` | aginxbrowser | `mcp/` |
 | `config.rs` `error.rs` `doctor_cli.rs` | split | config/error → core; doctor → aginxbrowser `cli/` |
 
+### 4.1 Workflow assets (deployable data, not crates)
+
+`workflow/<name>/` is the delivery unit for platform policy: flows (`flow.json`)
+and opt-in document-start recipes (`recipe.js` included from
+`src/session/preload_recipes.rs`). The engine stays generic Web/compat — no
+per-host auto-mount, no new platform hardcoding in crates. Edit JS under
+`workflow/`; rebuild only when a recipe body changes.
+
+**Known clones — do not extract yet** (shared eval blobs are intentional;
+wait for a green publish witness before collapsing):
+
+| Cluster | Why it stays duplicated |
+|---------|-------------------------|
+| `taobao-publish` / `taobao-publish-singlesku` / `taobao-publish-multisku` / `tmall-publish-singlesku` | stash / fiber walk / brand-fire / submit paths diverge per SKU mode and tmall gate; premature recipe extract risks a green→red publish |
+| `doudian-upload` per-image eval steps (~35 near-copies) | chunked upload died on #240 face-2; one-step-per-image is the stable shape until a safer compaction lands |
+
+Safe recent extractions (recipes): `xhs-sign`, `xhs-qrcode`, `x-p256`,
+`x-bearer`, `x-auth-ctx`, `taobao-block-everyhelp`, `taobao-block-qn-header`.
+Details and mount shapes: `workflow/README.md`.
+
 ## 5. Contracts at the boundaries
 
 Existing typed contracts: `Page` (engine), `SessionCommand`/`Session*Response` (session

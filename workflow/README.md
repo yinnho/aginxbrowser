@@ -20,8 +20,6 @@ generic Web/compat; flows carry the business face.
 
 `workflow/xhs-login/` owns QR login end-to-end；`scripts/xhs-qr-login.py` is an optional thin `flow/run` CLI only.
 
-
-
 ## Named preload recipes (`recipe.js`)
 
 Some directories under `workflow/` are **not** runnable flows — they hold
@@ -39,6 +37,21 @@ never appear in `flow/run{name=…}`.
 | `x-auth-ctx/` | `{"recipes":["x-p256","x-bearer","x-auth-ctx"],"apply_now":true}` (X write txid/bind helpers) |
 | `taobao-block-everyhelp/` | `{"recipe":"taobao-block-everyhelp"}` |
 | `taobao-block-qn-header/` | `{"recipe":"taobao-block-qn-header"}` (or `recipes:[…]`) |
+
+## Known clones — do not extract yet
+
+Shared eval blobs across some flows are **intentional**. Do not collapse them
+into recipes or a shared step until a green publish witness says the extract
+is safe. Core stays generic; these stay as workflow data.
+
+| Cluster | Status |
+|---------|--------|
+| `taobao-publish` · `taobao-publish-singlesku` · `taobao-publish-multisku` · `tmall-publish-singlesku` | stash / walk / brand-fire / submit diverge by SKU mode + tmall gate — wait for green publish witness |
+| `doudian-upload` ~35 near-copy image steps | one eval per image is the stable shape after #240 face-2 chunk failures — compaction is speculative |
+
+Also not a cleanup target: `scripts/xhs-qr-login.py` (thin `flow/run` CLI only;
+login logic lives in `workflow/xhs-login/`). `x-follow`'s single
+`application/x-www-form-urlencoded` body line stays local (not worth a recipe).
 
 ## The working mode (read this first, agent)
 
@@ -92,6 +105,12 @@ receipt is the function's return value (`status` / `saved` / `session_id`).
 | `taobao-login` | login.taobao.com | runs green to QR handoff | direct login.jhtml (3.7s vs 13.5s via homepage); QR canvas needs no click; cookie lands on .taobao.com — see flow.md |
 | `taobao-live` | live.taobao.com | runs green logged-out | verdict-gated front probe: delivers "no wall + telemetry"; room list awaits engine hydration — see flow.md |
 | `taobao-shop-collect` | shop<N>.taobao.com | runs green (reboot handles boot roulette; wall receipt verified ×3) | buyer-side listing collect: 60 cards via React fiber walk + secfont price tokens/cps (offline decode companion in flow.md); data-level gates, no verdict (session-cumulative rows false-wall a rebooted-clean page) — see flow.md |
+| `taobao-orders` | buyertrade.taobao.com | runs green logged-in | buyer order list via hooked XHR bodies — see flow.md |
+| `taobao-publish` | item.upload.taobao.com | green path (multi-sku lineage) | seller publish; known clone of singlesku/multisku/tmall — **do not extract** stash/walk/submit yet — see Known clones |
+| `taobao-publish-singlesku` | item.upload.taobao.com | green path (single-sku) | same family; `custom_-1` axis rejected — **do not extract** yet |
+| `taobao-publish-multisku` | item.upload.taobao.com | green path (multi-sku v17) | same family; ladder binding — **do not extract** yet |
+| `tmall-publish-singlesku` | item.upload.tmall.com | green path (tmall gate) | same family + previewDraftSubmit gate — **do not extract** yet |
+| `xhs-merchant-publish` | ark.xiaohongshu.com | skeleton | merchant listing stub — fill after green moka witness |
 | `v2ex-hot` / `v2ex-node` / `v2ex-topic` / `v2ex-member` | www.v2ex.com/api | runs green (needs `AGINXBROWSER_PROXY` egress + plain UA) | 公开 API 四件套纯 http 步；朴素 UA 过 CF（默认 Chrome UA 配引擎 TLS 指纹=错配会被 managed challenge）——机制与墙见 v2ex-hot/flow.md |
 | `web-read` | any URL | runs green (CF-challenge sites excluded) | 引擎本体=reader 的 Jina 平替：goto + 容器优先级抽取 + 截断；404 页诚实抽取 — see flow.md |
 | `wechat-oa-post` | api.weixin.qq.com | runs green (certified OA) / draft-only (uncertified) | 5 pure http steps (token→cover→draft→publish→verify); account = `creds {app_id, app_secret}` via vars, never in flow.json — see flow.md |
@@ -106,7 +125,7 @@ receipt is the function's return value (`status` / `saved` / `session_id`).
 | `x-search` | x.com | runs green logged-in | SearchTimeline, results sorted by views — campaign target discovery |
 | `x-follow` | x.com | runs green logged-in | friendships create/destroy; response `following` echoes pre-action state |
 | `x-notifs` | x.com | runs green logged-in | v2 URT notifications feed, read-only triage — the inbox half of the loop |
-| `xhs-login` | xiaohongshu.com | self-contained QR / cookies | preload → SVG `qr_data`+`qr_shot` in-flow（vendored qrcode.min.js）→ signed status poll；人只扫码；`mode=cookies`+`import_cookies` 吃 Chrome jar；compose xhs-post — see flow.md |
+| `xhs-login` | xiaohongshu.com | self-contained QR / cookies | preload `xhs-sign`+`xhs-qrcode` → SVG `qr_data`+`qr_shot` in-flow → signed status poll；人只扫码；`mode=cookies`+`import_cookies` 吃 Chrome jar；compose xhs-post — see flow.md |
 | `xhs-post` | xiaohongshu.com | login wall logged-out | creator-platform page automation (no API for personal accounts) — login via `import_curl` + `account`, see flow.md |
 
 Account state enters a flow one of three ways — each flow.md says which it
@@ -117,7 +136,7 @@ a `creds {app_id, app_secret}` object, `bsky-post` a `creds_json` app
 password), read from a local file on the caller's side — secret values
 never live in flow.json or this repo.
 
-The `x-*` family shares one self-healing prefix (p256 / bearer / ctx+bind)
+The `x-*` family shares one self-healing prefix via recipes `x-p256` / `x-bearer` / `x-auth-ctx`
 and composes: `x-search` finds a target → `x-read` resolves ids and follow
 state → `x-reply` posts and self-verifies → `x-follow` if warranted. All of
 them need a logged-in x.com session passed as `session_id`.
