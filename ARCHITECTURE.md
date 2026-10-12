@@ -86,12 +86,14 @@ exception table is empty):
 - **Session is modular.** `src/session/{manager,commands,interact,record,state,
   screenshot,preload_recipes}` — the old five-job monolith is repaid.
 - **Page is decomposed.** `crates/diting/.../diting_browser/page/{mod,navigate,
-  eval,net,scripts,viewport}` (+ colocated `tests.rs`). Residual CDP-era names
-  (`evaluate_for_cdp*`) remain on the live eval API — rename when touching, not
-  a reason to revive a CDP face.
+  eval,net,scripts,viewport}` (+ colocated `tests.rs`). Live rich-eval API is
+  `evaluate_remote*` / `call_function_on_remote*` (CDP-era names retired).
 - **Search split by domain.** `src/search/` orchestration + per-engine files +
   `captcha` / `obs` / `validate` / `dual_path` (`99eb67c`) — split when domains
   diverge, not when line counts scare CI.
+- **Acquire façade split by job.** `src/server/{browser,fetch,outputs,search}.rs`
+  behind a thin `server/mod.rs` re-export — browser/jar factory, challenge +
+  do_fetch/click/eval, screenshot/video/pdf glue, search orchestration.
 - **Feature surface is small and documented** (three gates, none accidental).
 - **Tests are colocated.** Prefer keeping large `tests.rs` next to the code they
   pin; the god-file ratchet counts **production** lines only (`5f3cbed`).
@@ -103,17 +105,15 @@ exception table is empty):
 
 | # | Debt | Status (2026-10-13) |
 |---|------|---------------------|
-| D1 | **Page was a god object.** | **Mostly repaid.** Live code lives under `page/`; large colocated tests remain. Cosmetic: `evaluate_for_cdp*` naming on the eval path. |
+| D1 | **Page was a god object.** | **Mostly repaid.** Live code lives under `page/`; large colocated tests remain. Rich-eval API renamed to `evaluate_remote*`. |
 | D2 | **session.rs carried five jobs.** | **Repaid.** Tree under `src/session/`; interact holds the observe/act contract. |
 | D3 | **Three-face tax (HTTP + MCP + CDP).** | **Eliminated** by removing MCP/CDP. Residual: `routers/sessions.rs` is a wide but thin catalog of handlers — optional navigation split only if handler count keeps growing. |
 | D4 | **Authoring compiled into the acquisition server.** | **Still true as lines-in-tree** (`pages` / `video` / `ooxml` / `pptx` / `docgen`). Weaker as day-to-day pain now that CDP-only builds are gone. Prefer an `authoring` **feature gate** (R5) if device/musl size or CI time bites; full crate extract is not the next batch. |
 
-**Active product cohesion watch (not a 2026-09 D-row):** `src/server/mod.rs`
-(~1561 prod, grandfathered) still mixes browser/jar factory, challenge helpers,
-stateless `do_fetch`/`do_click`/`do_eval`, search cache glue, and output
-entrypoints. Split by **job** when next editing that area — not to dodge the
-cap. `src/flow/mod.rs` (~1463 prod) is one interpreter near the cap; do not
-carve it for the ratchet alone.
+**Active product cohesion watch (not a 2026-09 D-row):** `src/server/` was
+split by job (`browser` / `fetch` / `outputs` / `search`); the old grandfather
+entry on `server/mod.rs` is retired. `src/flow/mod.rs` (~1463 prod) is one
+interpreter near the cap; do not carve it for the ratchet alone.
 
 **`screenshot.rs`:** ~600 production / ~900 test lines. Eye-side HTML→PNG path;
 domain already distinct from `session/screenshot`, `pages`, and
@@ -219,7 +219,7 @@ Existing typed contracts: `Page` (engine), `SessionCommand` / `Session*Response`
 |-------|-------------|--------|
 | **P0** | This document (legislation). | **Done**; this revision restores fidelity after MCP/CDP removal and in-crate P2/P3 landings. |
 | **P1** | Workspace split into four crates; behavior byte-identical. | **~diting only.** Soft-deferred as a program; see §4. Prefer authoring feature-gate over full extract when D4 bites. |
-| **P2** | Internal modularization + layering audit in CI. | **Mostly done:** `session/`, `routers/`, `page/`, `search/` domain split, `audit_layers.py` (prod-line god ratchet). Remaining: `server/` job split when edited; engine layout/css/ops carved only on touch. |
+| **P2** | Internal modularization + layering audit in CI. | **Mostly done:** `session/`, `routers/`, `page/`, `search/` domain split, `audit_layers.py` (prod-line god ratchet). Remaining: engine layout/css/ops carved only on touch (`server/` job split done). |
 | **P3** | Interaction contract (§5); closes #45/#46. | **Mostly done** in code and tests. Docs no longer list it as future work. |
 
 Each future batch still ships small, independently revertible, and green on the
@@ -255,7 +255,7 @@ Counts are **production lines** from `scripts/audit_layers.py` unless noted
 **Faces:** `main.rs` ~918 prod · `routers/sessions.rs` ~1191 ·
 `routers/acquisition.rs` ~669 · `routers/outputs.rs` ~404.
 
-**Product (selected):** `server/mod.rs` 1561 (grandfather) · `flow/mod.rs` 1463 ·
+**Product (selected):** `server/{browser,fetch,outputs,search}.rs` (façade) · `flow/mod.rs` 1463 ·
 `session/interact.rs` 1348 · `session/manager/actor.rs` 1131 · `search/mod.rs`
 1073 · `screenshot.rs` 600 prod / 1497 total · `video.rs` 887 prod ·
 `pages.rs` 673 prod · `render.rs` 482 prod.

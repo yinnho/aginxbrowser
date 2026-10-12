@@ -127,14 +127,14 @@ impl Page {
         }
     }
 
-    pub async fn evaluate_for_cdp(
+    pub async fn evaluate_remote(
         &mut self,
         expression: &str,
         return_by_value: bool,
         await_promise: bool,
     ) -> crate::diting_js::runtime::RemoteObjectInfo {
         if let Some(js) = &mut self.js {
-            match js.evaluate_for_cdp(expression, return_by_value, await_promise).await {
+            match js.evaluate_remote(expression, return_by_value, await_promise).await {
                 Ok(info) => info,
                 Err(e) => {
                     // Bug #24 diagnosis aid: an erroring eval previously surfaced
@@ -142,7 +142,7 @@ impl Page {
                     // here), which is indistinguishable from a JS null return.
                     // warn! so a wedged/degraded runtime is visible in logs.
                     let preview: String = expression.chars().take(120).collect();
-                    tracing::warn!("evaluate_for_cdp error for '{}': {}", preview, e);
+                    tracing::warn!("evaluate_remote error for '{}': {}", preview, e);
                     crate::diting_js::runtime::RemoteObjectInfo {
                         js_type: "undefined".into(),
                         subtype: None,
@@ -171,8 +171,8 @@ impl Page {
         }
     }
 
-    #[allow(dead_code)] // CDP Runtime.callFunctionOn parity; our eval path goes through evaluate_for_cdp
-    pub async fn call_function_on_for_cdp(
+    #[allow(dead_code)] // callFunctionOn parity; our eval path goes through evaluate_remote
+    pub async fn call_function_on_remote(
         &mut self,
         function_declaration: &str,
         object_id: Option<&str>,
@@ -181,7 +181,7 @@ impl Page {
         await_promise: bool,
     ) -> crate::diting_js::runtime::RemoteObjectInfo {
         if let Some(js) = &mut self.js {
-            match js.call_function_on_for_cdp(function_declaration, object_id, args, return_by_value, await_promise).await {
+            match js.call_function_on_remote(function_declaration, object_id, args, return_by_value, await_promise).await {
                 Ok(info) => info,
                 Err(e) => {
                     tracing::debug!("callFunctionOn error: {}", e);
@@ -207,11 +207,10 @@ impl Page {
         }
     }
 
-    /// Exception-preserving variant of [`evaluate_for_cdp`]: a thrown/rejected
-    /// expression comes back as an `EvalOutcome` exception so the CDP layer can
-    /// emit `Runtime.exceptionThrown` + `exceptionDetails` instead of collapsing
+    /// Exception-preserving variant of [`evaluate_remote`]: a thrown/rejected
+    /// expression comes back as an `EvalOutcome` exception instead of collapsing
     /// the throw to `undefined`.
-    pub async fn evaluate_for_cdp_outcome(
+    pub async fn evaluate_remote_outcome(
         &mut self,
         expression: &str,
         return_by_value: bool,
@@ -221,7 +220,7 @@ impl Page {
     ) -> crate::diting_js::runtime::EvalOutcome {
         if let Some(js) = &mut self.js {
             match js
-                .evaluate_for_cdp_outcome(
+                .evaluate_remote_outcome(
                     expression,
                     return_by_value,
                     await_promise,
@@ -233,7 +232,7 @@ impl Page {
                 Ok(outcome) => outcome,
                 Err(e) => {
                     let preview: String = expression.chars().take(120).collect();
-                    tracing::warn!("evaluate_for_cdp error for '{}': {}", preview, e);
+                    tracing::warn!("evaluate_remote error for '{}': {}", preview, e);
                     // The outcome variant exists to NOT collapse failures into
                     // a silent undefined (that's the plain variant's job) — a
                     // watchdog timeout folded to `value: null` here made an
@@ -281,8 +280,8 @@ impl Page {
         }
     }
 
-    /// Exception-preserving variant of [`call_function_on_for_cdp`].
-    pub async fn call_function_on_for_cdp_outcome(
+    /// Exception-preserving variant of [`call_function_on_remote`].
+    pub async fn call_function_on_remote_outcome(
         &mut self,
         function_declaration: &str,
         object_id: Option<&str>,
@@ -293,7 +292,7 @@ impl Page {
     ) -> crate::diting_js::runtime::EvalOutcome {
         if let Some(js) = &mut self.js {
             match js
-                .call_function_on_for_cdp_outcome(
+                .call_function_on_remote_outcome(
                     function_declaration,
                     object_id,
                     args,

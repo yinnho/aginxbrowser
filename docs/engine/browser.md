@@ -134,7 +134,7 @@ history_index`（URL 串数组+游标，push 截断 forward）；网络：
    返回 bool + storm 退避维护）/pump_event_loop_slice（会话后台泵：空则停
    泊等命令，风暴页 park 到退避期满）
 5. **eval 家族 (1304–1424)**：evaluate（无 runtime 时 document.title/URL 静态
-   降级）/evaluate_with_timeout/evaluate_for_cdp/call_function_on_for_cdp
+   降级）/evaluate_with_timeout/evaluate_remote/call_function_on_remote
    （错误降级为 undefined RemoteObjectInfo + warn 日志）
 6. **CDP 辅助**：isolate_handle/cancel_v8_termination（进程级 V8 锁看门狗
    配对）/release_object(_group)/set_blocked_urls/set_intercept_tx/
@@ -170,8 +170,8 @@ f61493f（拒绝非 2xx 脚本响应——wave 3 的动态脚本版；**fetch �
    clear_response_bodies（1ca6047：大响应体流式取回）——服务层
    `/network` 类接口与 MCP 网络可见性可直接受益。
 4. **导航超时组**：set_navigation_timeout/navigation_timeout（结构化字段 vs
-   我们的环境变量——两者可并存）；evaluate_for_cdp_with_timeout/
-   call_function_on_for_cdp_with_timeout；settle_for_duration；
+   我们的环境变量——两者可并存）；evaluate_remote_with_timeout/
+   call_function_on_remote_with_timeout；settle_for_duration；
    run_autonomous_event_loop_turn。
 5. **零散**：add_preload_script（push 语义 vs 我们整组 set）；f4ebf3c obey-robots
    CLI 强制（服务层事项）；6b6ad93 SPA 路由上报（与 fork_virtual_url 同链路）；
@@ -242,8 +242,8 @@ AGINXBROWSER_* 产品化环境变量、`__obscura_css` 注入时点（先于脚�
      是追加制），与整组替换的 `set_preload_scripts` 并存。
    - **set_navigation_timeout/navigation_timeout**：Page 级结构化超时字段，
      None 时回落 `OBSCURA_NAV_TIMEOUT_MS`（默认 30s），与上游并存策略一致。
-   - **明确不吸收**（记档）：`evaluate_for_cdp_with_timeout` /
-     `call_function_on_for_cdp_with_timeout` / `settle_for_duration` /
+   - **明确不吸收**（记档）：`evaluate_remote_with_timeout` /
+     `call_function_on_remote_with_timeout` / `settle_for_duration` /
      `run_autonomous_event_loop_turn`——服务层无消费者，我们的
      settle/settle_until_idle/pump_event_loop_slice 家族已覆盖同职能；
      CDP 层将来需要超时版 eval 时再回来拿。
@@ -309,7 +309,7 @@ AGINXBROWSER_* 产品化环境变量、`__obscura_css` 注入时点（先于脚�
      CDP 对象存储五件（store_object/store_object_with_meta/release_object/
      release_object_group/dom_ref）、isolate_handle+cancel_termination
      （per-command watchdog 管道，CDP server 本体未吸收）、
-     call_function_on_for_cdp、set_blocked_urls、take_pending_binding_calls、
+     call_function_on_remote、set_blocked_urls、take_pending_binding_calls、
      set_intercept_tx+enable_intercept（Fetch 域拦截内核）、
      InterceptResolution::Fulfill/Fail（CDP 客户端才会发的线格式）、
      InterceptedRequest 字段、NetworkEvent 字段（/network 待立）、

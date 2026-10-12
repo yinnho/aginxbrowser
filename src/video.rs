@@ -1290,7 +1290,7 @@ html,body{margin:0;padding:0;width:800px;height:450px;background:#ffffff}
         // write rides a thenable that settles on a timer — the transition
         // drain is a diffing microtask (baseline turn, then diff turn).
         for css in ["0", "1"] {
-            page.evaluate_for_cdp(
+            page.evaluate_remote(
                 &format!(
                     "document.querySelector('#box').style.opacity = '{css}'; \
                      new Promise(r => setTimeout(r, 0))"

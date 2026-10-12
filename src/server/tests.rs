@@ -9,6 +9,7 @@
 mod click_nav_tests {
     use crate::server::test_util::{net_env_guard, recording_server};
     use crate::server::*;
+    use crate::{ClickRequest, EvalRequest};
 
     #[test]
     fn click_on_submit_fires_the_form_post_and_lands() {
@@ -249,6 +250,8 @@ mod sanitize_fetch_tests {
 mod shared_jar_tests {
     use crate::server::*;
     use crate::browser::Browser;
+    use diting::diting_net::CookieJar;
+    use std::sync::Arc;
 
     /// The stateless handlers' CAPTCHA mitigation: two browsers built from
     /// the same shared jar observe each other's cookies, so a repeat visit
@@ -491,6 +494,8 @@ mod cookie_injection_tests {
 #[cfg(test)]
 mod search_fallback_tests {
     use crate::server::*;
+    use crate::SearchRequest;
+    use std::sync::Arc;
 
     enum MockBehavior {
         /// CAPTCHA wall: the engine errors as walled and gets suspended.

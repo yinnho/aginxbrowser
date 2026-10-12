@@ -88,7 +88,6 @@ GOD_FILE_GRANDFATHER = {
     "crates/diting/src/diting_layout/fork_deltas.rs": 2257,
     "crates/diting/src/diting_js/runtime.rs": 1743,
     "src/docgen/workflow.rs": 1592,
-    "src/server/mod.rs": 1561,
 }
 
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)

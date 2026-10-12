@@ -86,7 +86,7 @@ impl Page {
     pub async fn evaluate_async(&mut self, expression: &str) -> Value {
         let info = self
             .inner
-            .evaluate_for_cdp(expression, true, true)
+            .evaluate_remote(expression, true, true)
             .await;
         info.value.unwrap_or(Value::Null)
     }
@@ -110,7 +110,7 @@ impl Page {
             .clamp(100, 120_000);
         let outcome = self
             .inner
-            .evaluate_for_cdp_outcome(expression, true, true, budget, None)
+            .evaluate_remote_outcome(expression, true, true, budget, None)
             .await;
         if let Some(exc) = outcome.exception {
             let mut msg = exc.description;

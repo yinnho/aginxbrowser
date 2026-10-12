@@ -41,9 +41,10 @@ static SNAPSHOT: &[u8] = include_bytes!(env!("AGINXBROWSER_SNAPSHOT_PATH"));
 /// larger budget instead of hitting a silent-null (0.4.1 taobao report).
 pub const DEFAULT_AWAIT_BUDGET_MS: u64 = 5000;
 
-/// CDP `Runtime.RemoteObject` shape returned by evaluate paths. Our HTTP
-/// surface only reads `value`; the rest is the CDP serialization contract
-/// (kept so a CDP consumer can adopt it without reshaping).
+/// Rich evaluate result: typed remote-object metadata plus optional JSON
+/// `value`. HTTP/session callers usually read `value`; `object_id` /
+/// `subtype` / `class_name` support DOM-handle style follow-ups without a
+/// separate wire protocol.
 #[cfg_attr(not(test), allow(dead_code))] // tests cross-check the type metadata
 #[derive(Debug, Clone)]
 pub struct RemoteObjectInfo {
@@ -57,8 +58,8 @@ pub struct RemoteObjectInfo {
     pub value: Option<serde_json::Value>,
 }
 
-/// Outcome of a CDP evaluate / callFunctionOn: the remote object plus any
-/// thrown (or rejected) exception. Captured separately so the CDP layer can
+/// Outcome of [`JsRuntime::evaluate_remote_outcome`] / callFunctionOn: the
+/// remote object plus any thrown (or rejected) exception. Captured separately so callers can
 /// emit `Runtime.exceptionThrown` + `exceptionDetails` instead of collapsing a
 /// throw into a plain `undefined`/`null` result.
 #[derive(Debug, Clone)]
@@ -68,7 +69,7 @@ pub struct EvalOutcome {
 }
 
 /// Details of a sync-thrown or awaited-rejection exception, enough to
-/// synthesize CDP `Runtime.exceptionThrown` and `exceptionDetails`.
+/// surface the exception instead of collapsing it to `undefined`.
 #[derive(Debug, Clone)]
 pub struct ExceptionInfo {
     /// "Uncaught" for a sync throw, "Uncaught (in promise)" for a rejection.
@@ -382,14 +383,14 @@ impl JsRuntime {
         self.v8_to_json(result)
     }
 
-    pub async fn evaluate_for_cdp(
+    pub async fn evaluate_remote(
         &mut self,
         expression: &str,
         return_by_value: bool,
         await_promise: bool,
     ) -> Result<RemoteObjectInfo, String> {
         match self
-            .evaluate_for_cdp_outcome(
+            .evaluate_remote_outcome(
                 expression,
                 return_by_value,
                 await_promise,
@@ -425,11 +426,9 @@ impl JsRuntime {
         }
     }
 
-    /// Like [`evaluate_for_cdp`], but a thrown/rejected expression comes back
+    /// Like [`evaluate_remote`], but a thrown/rejected expression comes back
     /// as an `EvalOutcome` carrying the exception instead of being collapsed
-    /// into `Err("Promise rejected: …")` (await) or `undefined` (sync). The
-    /// CDP Runtime domain consumes this to emit `Runtime.exceptionThrown` +
-    /// `exceptionDetails`.
+    /// into `Err("Promise rejected: …")` (await) or `undefined` (sync).
     ///
     /// `Some(frame_nid)` scopes the eval to that iframe: the single-realm
     /// engine shares one isolate across frames, so the main realm's global
@@ -437,7 +436,7 @@ impl JsRuntime {
     /// iframe's content window for the duration of the call and restored on
     /// every return path. Timers firing mid-await observe the frame's
     /// globals (accepted v1 edge); globalThis/navigator/screen stay main.
-    pub async fn evaluate_for_cdp_outcome(
+    pub async fn evaluate_remote_outcome(
         &mut self,
         expression: &str,
         return_by_value: bool,
@@ -458,7 +457,7 @@ impl JsRuntime {
             }
         };
         let result = self
-            .evaluate_for_cdp_outcome_inner(
+            .evaluate_remote_outcome_inner(
                 expression,
                 return_by_value,
                 await_promise,
@@ -512,7 +511,7 @@ impl JsRuntime {
         }
     }
 
-    async fn evaluate_for_cdp_outcome_inner(
+    async fn evaluate_remote_outcome_inner(
         &mut self,
         expression: &str,
         return_by_value: bool,
@@ -636,8 +635,8 @@ impl JsRuntime {
         })
     }
 
-    #[allow(dead_code)] // CDP Runtime.callFunctionOn parity; Page-level wrapper carries the allow note
-    pub async fn call_function_on_for_cdp(
+    #[allow(dead_code)] // callFunctionOn parity; Page-level wrapper carries the allow note
+    pub async fn call_function_on_remote(
         &mut self,
         function_declaration: &str,
         object_id: Option<&str>,
@@ -646,7 +645,7 @@ impl JsRuntime {
         await_promise: bool,
     ) -> Result<RemoteObjectInfo, String> {
         match self
-            .call_function_on_for_cdp_outcome(
+            .call_function_on_remote_outcome(
                 function_declaration,
                 object_id,
                 arguments,
@@ -741,12 +740,12 @@ impl JsRuntime {
         })
     }
 
-    /// Like [`call_function_on_for_cdp`], but a throwing/rejecting function is
+    /// Like [`call_function_on_remote`], but a throwing/rejecting function is
     /// reported as an `EvalOutcome` exception instead of being collapsed into
     /// `Err("Promise rejected: …")` or a bare `undefined`.
     /// `frame_nid` scopes the call to an iframe via the same global-binding
-    /// swap as [`evaluate_for_cdp_outcome`].
-    pub async fn call_function_on_for_cdp_outcome(
+    /// swap as [`evaluate_remote_outcome`].
+    pub async fn call_function_on_remote_outcome(
         &mut self,
         function_declaration: &str,
         object_id: Option<&str>,
@@ -768,7 +767,7 @@ impl JsRuntime {
             }
         };
         let result = self
-            .call_function_on_for_cdp_outcome_inner(
+            .call_function_on_remote_outcome_inner(
                 function_declaration,
                 object_id,
                 arguments,
@@ -782,7 +781,7 @@ impl JsRuntime {
         result
     }
 
-    async fn call_function_on_for_cdp_outcome_inner(
+    async fn call_function_on_remote_outcome_inner(
         &mut self,
         function_declaration: &str,
         object_id: Option<&str>,
@@ -821,7 +820,7 @@ impl JsRuntime {
                     .unwrap_or(false),
                 DEFAULT_AWAIT_BUDGET_MS,
             ).await;
-            // Same contract as evaluate_for_cdp_outcome: an unsettled budget
+            // Same contract as evaluate_remote_outcome: an unsettled budget
             // must not fall through to an empty result slot (silent null).
             if !settled {
                 return Err(format!(
@@ -981,7 +980,7 @@ impl JsRuntime {
         arguments: &[serde_json::Value],
         return_by_value: bool,
     ) -> Result<RemoteObjectInfo, String> {
-        self.call_function_on_for_cdp(function_declaration, object_id, arguments, return_by_value, false).await
+        self.call_function_on_remote(function_declaration, object_id, arguments, return_by_value, false).await
     }
     #[allow(dead_code)] // CDP Runtime.evaluate-by-object-id half of the object store
     pub fn store_object(&mut self, js_expression: &str) -> Result<String, String> {

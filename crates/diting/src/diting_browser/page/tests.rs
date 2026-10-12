@@ -3493,7 +3493,7 @@ ms.addEventListener('sourceopen', function(){ \
         });
 
         let info = p
-            .evaluate_for_cdp(
+            .evaluate_remote(
                 &format!(
                     "fetch('{target}', {{ method: 'POST', body: new Uint8Array([1,2,3]) }}) \
                      .then(function(r) {{ return r.text().then(function(t) {{ return r.status + ':' + t; }}); }}, \

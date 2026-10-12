@@ -2701,7 +2701,7 @@
     async fn mutation_observer_attribute_filter_is_honored() {
         let mut rt = setup_runtime(r#"<body><div id="d"></div></body>"#);
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const el = document.getElementById('d');
                     const records = [];
@@ -2738,7 +2738,7 @@
     async fn xhr_send_bypasses_page_fetch_wrapper() {
         let mut rt = setup_runtime(r#"<body></body>"#);
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     let wrapped = 0;
                     const orig = window.fetch;
@@ -3158,7 +3158,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/test", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const r = await fetch('/start');
                     return { url: r.url, redirected: String(r.redirected), body: await r.text() };
@@ -3213,7 +3213,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/test", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const out = {};
                     // Leg 1: abort lands while the response is still in flight.
@@ -3830,7 +3830,7 @@
         );
         rt.set_url(&format!("http://127.0.0.1:{}/test", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const out = {};
                     out.surface = document.referrerPolicy;
@@ -3868,7 +3868,7 @@
         );
         rt.set_url(&format!("http://127.0.0.1:{}/test", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const out = {};
                     out.lastValidTokenSurface = document.referrerPolicy;
@@ -3891,7 +3891,7 @@
         );
         rt.set_referrer_policy("no-referrer");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const out = {};
                     out.headerBeatsMetaSurface = document.referrerPolicy;
@@ -3924,7 +3924,7 @@
         );
         rt.set_url(&format!("http://127.0.0.1:{}/test", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const out = {};
                     out.invalidMetaSkipped = await (await fetch('/probe')).text();
@@ -3979,7 +3979,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/page", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"() => {
                     const x = new XMLHttpRequest();
                     x.open('GET', '/api', false);
@@ -4053,7 +4053,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/page", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const events = [];
                     const xhr = new XMLHttpRequest();
@@ -4122,7 +4122,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{port}/page"));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const events = [];
                     const xhr = new XMLHttpRequest();
@@ -4178,7 +4178,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{port}/page"));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const events = [];
                     const xhr = new XMLHttpRequest();
@@ -4232,7 +4232,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{port}/page"));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const events = [];
                     const xhr = new XMLHttpRequest();
@@ -4273,7 +4273,7 @@
     async fn sync_xhr_with_timeout_throws_invalid_access() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"() => {
                     const xhr = new XMLHttpRequest();
                     xhr.open('GET', '/x', false);
@@ -4345,7 +4345,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/page", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"() => {
                     const x = new XMLHttpRequest();
                     x.open('POST', '/submit', false);
@@ -4387,7 +4387,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/page", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"() => {
                     const x = new XMLHttpRequest();
                     x.open('GET', '/gone', false);
@@ -4443,7 +4443,7 @@
         let (mut rt, _jar) = setup_runtime_with_cookies("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/page", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"() => {
                     const x = new XMLHttpRequest();
                     x.open('GET', '/login', false);
@@ -4515,7 +4515,7 @@
         let (mut rt, _jar) = setup_runtime_with_cookies("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/page", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     await fetch('/login');
                     const r = await fetch('/api');
@@ -4584,7 +4584,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/page", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const r = await fetch('/slow');
                     return await r.text();
@@ -4758,7 +4758,7 @@
         let mut rt = setup_runtime("<html><body><p id=\"probe\">x</p></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/page", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const link = document.createElement('link');
                     link.rel = 'stylesheet';
@@ -4821,7 +4821,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/page", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const link = document.createElement('link');
                     link.rel = 'stylesheet';
@@ -4878,7 +4878,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/page", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const img = new Image();
                     let sawError = false;
@@ -4941,7 +4941,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/page", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const img = new Image(); // no width/height args: fallback would be 0
                     const loaded = new Promise(r => { img.onload = () => r('fired'); });
@@ -4991,7 +4991,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url("https://example.com/page");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     // Sig + chunk len + "IHDR" + w=62 + h=33 — offsets 16..24
                     // pin the header parse without a real decoder.
@@ -5046,7 +5046,7 @@
 
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 &format!(
                     r#"async () => {{
                         const mk = async (b64, type) => {{
@@ -5125,7 +5125,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/page", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const img = new Image();
                     let sawLoad = false;
@@ -5156,7 +5156,7 @@
     async fn image_factory_data_url_still_fires_load() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const img = new Image();
                     let sawError = false;
@@ -5191,7 +5191,7 @@
     async fn xhr_sync_data_url_reports_200() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const x = new XMLHttpRequest();
                     x.open('GET', 'data:text/plain,XYZZY', false);
@@ -5228,7 +5228,7 @@
     async fn xhr_send_guard_non_string_url() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const x = new XMLHttpRequest();
                     x.open('GET', 'data:text/plain,hi', false);
@@ -5265,7 +5265,7 @@
     async fn navigator_interface_object_face() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const isFn = typeof Navigator === 'function';
                     const inst = navigator instanceof Navigator;
@@ -5307,7 +5307,7 @@
     async fn webgl_masked_strings_match_chrome() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     // Two canvases: our getContext caches the first context
                     // per canvas, and fp probes always burn a fresh canvas.
@@ -5360,7 +5360,7 @@
     async fn webgl_extension_lists_match_chrome_capture() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const g1 = document.createElement('canvas').getContext('webgl');
                     const g2 = document.createElement('canvas').getContext('webgl2');
@@ -5404,7 +5404,7 @@
     async fn canvas_to_data_url_is_a_real_png() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const c = document.createElement('canvas');
                     c.width = 220; c.height = 30;
@@ -5462,7 +5462,7 @@
     async fn navigator_screen_own_props_hoisted_to_prototype() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const navKeys = Object.keys(navigator).length;
                     const protoKeys = Object.keys(Object.getPrototypeOf(navigator));
@@ -5508,7 +5508,7 @@
     async fn canvas_methods_left_element_prototype() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const bodyHas = 'toDataURL' in document.body;
                     const divHasCtx = 'getContext' in document.createElement('div');
@@ -5551,7 +5551,7 @@
     async fn window_size_props_ignore_page_writes() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const d = Object.getOwnPropertyDescriptor(window, 'innerWidth');
                     const before = window.innerWidth;
@@ -5584,7 +5584,7 @@
     async fn xhr_sync_data_url_base64_and_broken() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const b = new XMLHttpRequest();
                     b.open('GET', 'data:text/plain;base64,WFlaWlk=', false);
@@ -5618,7 +5618,7 @@
     async fn xhr_sync_blob_url_reads_registry() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const u = URL.createObjectURL(new Blob(['BLOBOK'], { type: 'text/x-demo' }));
                     const x = new XMLHttpRequest();
@@ -5650,7 +5650,7 @@
     async fn xhr_async_data_url_fires_load() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const x = new XMLHttpRequest();
                     const how = await new Promise((resolve) => {
@@ -5826,7 +5826,7 @@
             } catch (e) { results.push(e.message); }
             return results;
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         let values = result.value.unwrap();
         let arr = values.as_array().unwrap();
         assert!(
@@ -5874,7 +5874,7 @@
             return out;
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         assert_eq!(
@@ -6057,7 +6057,7 @@
             }
             return [sha256, sha512_224, sha512_256, threw];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
             serde_json::json!([
@@ -6105,7 +6105,7 @@
 
             return [sigHex, verifyOk, !verifyBad, pt, cpt, dkHex];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         // RFC 4231 HMAC-SHA-256("key", "The quick brown fox...") =
         //   f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8
         // RFC 6070 PBKDF2-HMAC-SHA256("password", "salt", 1, 32) =
@@ -6181,7 +6181,7 @@
             return [shape, sigLen, ok, okSpki, !bad, okSig2, jwkShape, okSig3, new Uint8Array(sig384).length, ok384, okRaw];
         }"#;
         let mut result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         let value = result.value.take().unwrap();
@@ -6252,7 +6252,7 @@
             return [shape, symmetric, pt, jwkOk, s384.length, mixedThrew];
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         let v = result.value.unwrap();
@@ -6283,7 +6283,7 @@
                 return e.name;
             }
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(result.value.unwrap(), serde_json::json!("OperationError"));
     }
 
@@ -6301,7 +6301,7 @@
             const sig = await crypto.subtle.sign('HMAC', c.a, enc.encode('msg'));
             return [sameObject, sig instanceof ArrayBuffer, c.a instanceof CryptoKey];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(result.value.unwrap(), serde_json::json!([true, true, true]));
     }
 
@@ -6320,7 +6320,7 @@
             try { crypto.getRandomValues(new Float64Array(4)); } catch (e) { typeErr = e.name === 'TypeMismatchError'; }
             return [nonZero, uuidOk, typeErr];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, false).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, false).await.unwrap();
         assert_eq!(result.value.unwrap(), serde_json::json!([true, true, true]));
     }
 
@@ -7370,7 +7370,7 @@
         // callFunctionOn await-promise channel (evaluate is sync-script
         // semantics and would hand back the function object itself).
         let res = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                 const out = {};
                 // Rust face: entry shape, clock clamp, blocking posture.
@@ -7672,10 +7672,10 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_evaluate_for_cdp_detects_node() {
+    async fn test_evaluate_remote_detects_node() {
         let mut rt = setup_runtime("<html><body><h1>Hello</h1></body></html>");
         let result = rt
-            .evaluate_for_cdp("document.querySelector('h1')", false, false)
+            .evaluate_remote("document.querySelector('h1')", false, false)
             .await.unwrap();
         assert_eq!(result.subtype.as_deref(), Some("node"));
         assert_eq!(result.js_type, "object");
@@ -7683,9 +7683,9 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_evaluate_for_cdp_detects_document() {
+    async fn test_evaluate_remote_detects_document() {
         let mut rt = setup_runtime("<html><body></body></html>");
-        let result = rt.evaluate_for_cdp("document", false, false).await.unwrap();
+        let result = rt.evaluate_remote("document", false, false).await.unwrap();
         assert_eq!(result.subtype.as_deref(), Some("node"));
         assert_eq!(result.class_name, "HTMLDocument");
     }
@@ -7699,7 +7699,7 @@
     async fn document_parent_node_face() {
         let mut rt = setup_runtime("<html><head></head><body><p>hi</p></body></html>");
         let result = rt
-            .evaluate_for_cdp(
+            .evaluate_remote(
                 r#"(function() {
                     const c = document.children;
                     const de = document.documentElement;
@@ -7732,30 +7732,30 @@
 
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_evaluate_for_cdp_awaits_resolved_promise() {
+    async fn test_evaluate_remote_awaits_resolved_promise() {
         let mut rt = setup_runtime("<html><body></body></html>");
-        let result = rt.evaluate_for_cdp("Promise.resolve(42)", true, true).await.unwrap();
+        let result = rt.evaluate_remote("Promise.resolve(42)", true, true).await.unwrap();
         assert_eq!(result.value.unwrap().as_f64().unwrap() as i64, 42);
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_evaluate_for_cdp_awaits_timer_promise() {
+    async fn test_evaluate_remote_awaits_timer_promise() {
         let mut rt = setup_runtime("<html><body></body></html>");
-        let result = rt.evaluate_for_cdp("new Promise(resolve => setTimeout(() => resolve('done'), 1))", true, true).await.unwrap();
+        let result = rt.evaluate_remote("new Promise(resolve => setTimeout(() => resolve('done'), 1))", true, true).await.unwrap();
         assert_eq!(result.value.unwrap().as_str().unwrap(), "done");
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_evaluate_for_cdp_awaits_async_function() {
+    async fn test_evaluate_remote_awaits_async_function() {
         let mut rt = setup_runtime("<html><body></body></html>");
-        let result = rt.evaluate_for_cdp("(async () => 'async-ok')()", true, true).await.unwrap();
+        let result = rt.evaluate_remote("(async () => 'async-ok')()", true, true).await.unwrap();
         assert_eq!(result.value.unwrap().as_str().unwrap(), "async-ok");
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_evaluate_for_cdp_reports_promise_rejection() {
+    async fn test_evaluate_remote_reports_promise_rejection() {
         let mut rt = setup_runtime("<html><body></body></html>");
-        let err = rt.evaluate_for_cdp("Promise.reject(new Error('boom'))", true, true).await.unwrap_err();
+        let err = rt.evaluate_remote("Promise.reject(new Error('boom'))", true, true).await.unwrap_err();
         assert!(err.contains("boom"));
     }
 
@@ -7763,7 +7763,7 @@
     async fn test_evaluate_outcome_reports_sync_throw() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let outcome = rt
-            .evaluate_for_cdp_outcome("(() => { throw new Error('sync-boom') })()", false, false, DEFAULT_AWAIT_BUDGET_MS, None)
+            .evaluate_remote_outcome("(() => { throw new Error('sync-boom') })()", false, false, DEFAULT_AWAIT_BUDGET_MS, None)
             .await
             .unwrap();
         let exc = outcome.exception.expect("expected exception");
@@ -7778,7 +7778,7 @@
     async fn test_evaluate_outcome_reports_sync_throw_by_value() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let outcome = rt
-            .evaluate_for_cdp_outcome("(() => { throw new Error('bv-boom') })()", true, false, DEFAULT_AWAIT_BUDGET_MS, None)
+            .evaluate_remote_outcome("(() => { throw new Error('bv-boom') })()", true, false, DEFAULT_AWAIT_BUDGET_MS, None)
             .await
             .unwrap();
         let exc = outcome.exception.expect("expected exception");
@@ -7790,7 +7790,7 @@
     async fn test_evaluate_outcome_reports_await_rejection() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let outcome = rt
-            .evaluate_for_cdp_outcome("Promise.reject(new Error('boom'))", true, true, DEFAULT_AWAIT_BUDGET_MS, None)
+            .evaluate_remote_outcome("Promise.reject(new Error('boom'))", true, true, DEFAULT_AWAIT_BUDGET_MS, None)
             .await
             .unwrap();
         let exc = outcome.exception.expect("expected exception");
@@ -7808,7 +7808,7 @@
     async fn test_evaluate_outcome_times_out_on_never_settling_promise() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let err = rt
-            .evaluate_for_cdp_outcome("new Promise(() => {})", true, true, 150, None)
+            .evaluate_remote_outcome("new Promise(() => {})", true, true, 150, None)
             .await
             .unwrap_err();
         assert!(err.contains("EVAL_TIMEOUT"), "got: {err}");
@@ -7823,7 +7823,7 @@
     async fn test_evaluate_outcome_late_promise_lands_within_widened_budget() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let outcome = rt
-            .evaluate_for_cdp_outcome(
+            .evaluate_remote_outcome(
                 "new Promise(r => setTimeout(() => r('late-ok'), 150))",
                 true,
                 true,
@@ -7854,7 +7854,7 @@
         .unwrap();
         let t0 = std::time::Instant::now();
         let outcome = rt
-            .evaluate_for_cdp_outcome("1 + 1", false, true, 5000, None)
+            .evaluate_remote_outcome("1 + 1", false, true, 5000, None)
             .await
             .unwrap();
         assert_eq!(outcome.info.value.unwrap(), serde_json::json!(2));
@@ -7869,7 +7869,7 @@
     async fn test_call_function_outcome_reports_throw() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let outcome = rt
-            .call_function_on_for_cdp_outcome(
+            .call_function_on_remote_outcome(
                 "() => { throw new Error('fn-boom') }",
                 None,
                 &[],
@@ -7889,7 +7889,7 @@
     async fn test_call_function_outcome_reports_await_rejection() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let outcome = rt
-            .call_function_on_for_cdp_outcome(
+            .call_function_on_remote_outcome(
                 "() => Promise.reject(new Error('async-fn-boom'))",
                 None,
                 &[],
@@ -7923,7 +7923,7 @@
         // Sync path: document/window/self/frames/location all resolve to the
         // iframe's.
         let outcome = rt
-            .evaluate_for_cdp_outcome(
+            .evaluate_remote_outcome(
                 "document === __probeIframe.contentDocument && window === __probeIframe.contentWindow && self === window && frames === window && location === __probeIframe.contentWindow.location",
                 true,
                 false,
@@ -7936,7 +7936,7 @@
 
         // Awaited path: the swap must survive the promise pump.
         let outcome = rt
-            .evaluate_for_cdp_outcome(
+            .evaluate_remote_outcome(
                 "Promise.resolve(document === __probeIframe.contentDocument && location === __probeIframe.contentWindow.location)",
                 true,
                 true,
@@ -7964,7 +7964,7 @@
             .with_dom(|dom| dom.query_selector_all("#f").unwrap()[0].index() as u32)
             .unwrap();
         let outcome = rt
-            .evaluate_for_cdp_outcome(
+            .evaluate_remote_outcome(
                 "(() => { throw new Error('frame-boom') })()",
                 false,
                 false,
@@ -7987,7 +7987,7 @@
     async fn test_evaluate_frame_nid_unknown_iframe_errors() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let err = rt
-            .evaluate_for_cdp_outcome("1 + 1", true, false, DEFAULT_AWAIT_BUDGET_MS, Some(999_999))
+            .evaluate_remote_outcome("1 + 1", true, false, DEFAULT_AWAIT_BUDGET_MS, Some(999_999))
             .await
             .unwrap_err();
         assert!(err.contains("content not ready"), "got: {err}");
@@ -8036,7 +8036,7 @@
 
         // Attached: the frame answers.
         let ok = rt
-            .evaluate_for_cdp_outcome("1 + 1", true, false, DEFAULT_AWAIT_BUDGET_MS, Some(nid))
+            .evaluate_remote_outcome("1 + 1", true, false, DEFAULT_AWAIT_BUDGET_MS, Some(nid))
             .await
             .unwrap();
         assert_eq!(ok.info.value, Some(serde_json::json!(2)));
@@ -8045,7 +8045,7 @@
         // retired-frame shape): refused, before any script runs.
         rt.evaluate("document.getElementById('host').innerHTML = '';").unwrap();
         let err = rt
-            .evaluate_for_cdp_outcome(
+            .evaluate_remote_outcome(
                 &format!(
                     "fetch('http://127.0.0.1:{port}/retired').then(() => 'fired')",
                 ),
@@ -8088,7 +8088,7 @@
             .unwrap();
             for &nid in &nids {
                 let outcome = rt
-                    .evaluate_for_cdp_outcome(
+                    .evaluate_remote_outcome(
                         "document !== globalThis.__mainDoc ? 'swapped' : 'same'",
                         true,
                         false,
@@ -8115,7 +8115,7 @@
         rt.evaluate("globalThis.__probeIframe = document.getElementById('f')")
             .unwrap();
         let outcome = rt
-            .call_function_on_for_cdp_outcome(
+            .call_function_on_remote_outcome(
                 "() => document === __probeIframe.contentDocument",
                 None,
                 &[],
@@ -8653,7 +8653,7 @@
     async fn worker_import_scripts_expose_declarations_to_worker_body() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .evaluate_for_cdp(
+            .evaluate_remote(
                 r#"new Promise((resolve, reject) => {
                     const body = "importScripts('data:text/javascript,var%20pbVersion=42');" +
                         "self.onmessage = function(e) { self.postMessage(pbVersion + '|' + typeof window); };";
@@ -8680,7 +8680,7 @@
     async fn worker_import_scripts_see_no_dom_globals() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .evaluate_for_cdp(
+            .evaluate_remote(
                 r#"new Promise((resolve, reject) => {
                     const imp = "var __domProbe = [typeof MutationObserver, typeof document, typeof window,"
                         + " typeof localStorage, typeof Promise, typeof Math].join('|');";
@@ -8710,7 +8710,7 @@
     async fn worker_import_scripts_failed_target_fires_error_event() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .evaluate_for_cdp(
+            .evaluate_remote(
                 r#"new Promise((resolve) => {
                     const body = "importScripts('data:text/javascript;base64,!!!!');" +
                         "self.onmessage = function(e) { self.postMessage('unreached'); };";
@@ -8750,7 +8750,7 @@
     async fn worker_bare_onmessage_assignment_receives_messages() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .evaluate_for_cdp(
+            .evaluate_remote(
                 r#"new Promise((resolve, reject) => {
                     const before = globalThis.onmessage;
                     const body = "onmessage = function(e) { postMessage('bare|' + e.data); };";
@@ -8781,7 +8781,7 @@
     async fn shared_worker_port_roundtrips_messages() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .evaluate_for_cdp(
+            .evaluate_remote(
                 r#"new Promise((resolve, reject) => {
                     const body = "self.onconnect = function(e) {"
                         + "  const p = e.ports[0];"
@@ -8813,7 +8813,7 @@
     async fn shared_worker_scope_masks_main_thread_globals() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .evaluate_for_cdp(
+            .evaluate_remote(
                 r#"new Promise((resolve, reject) => {
                     const body = "self.onconnect = function(e) {"
                         + "  const p = e.ports[0];"
@@ -8851,7 +8851,7 @@
     async fn script_anchor_option_text_idl_faces() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .evaluate_for_cdp(
+            .evaluate_remote(
                 r#"(() => {
                     const s = document.createElement('script');
                     const empty = s.text;
@@ -8888,7 +8888,7 @@
     async fn broadcast_channel_delivers_cloned_tasks() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .evaluate_for_cdp(
+            .evaluate_remote(
                 r#"new Promise((resolve, reject) => {
                     const a1 = new BroadcastChannel('bus');
                     const a2 = new BroadcastChannel('bus');
@@ -8929,7 +8929,7 @@
     async fn shared_worker_replies_via_broadcast_channel() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .evaluate_for_cdp(
+            .evaluate_remote(
                 r#"new Promise((resolve, reject) => {
                     const bus = new BroadcastChannel('WebSocketChannel');
                     const body = "self.onconnect = function(e) {"
@@ -8971,7 +8971,7 @@
     async fn shared_worker_same_key_shares_one_instance() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .evaluate_for_cdp(
+            .evaluate_remote(
                 r#"new Promise((resolve, reject) => {
                     const body = "self.__n = 0;"
                         + "self.onconnect = function(e) {"
@@ -9008,7 +9008,7 @@
     async fn shared_worker_distinct_names_are_distinct_instances() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .evaluate_for_cdp(
+            .evaluate_remote(
                 r#"new Promise((resolve, reject) => {
                     const body = "self.__n = 0;"
                         + "self.onconnect = function(e) {"
@@ -9042,7 +9042,7 @@
     async fn message_port_buffers_until_start_and_supports_listeners() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .evaluate_for_cdp(
+            .evaluate_remote(
                 r#"new Promise((resolve) => {
                     const ch = new MessageChannel();
                     const got = [];
@@ -9075,7 +9075,7 @@
     async fn worker_scope_exposes_http_request_surface() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .evaluate_for_cdp(
+            .evaluate_remote(
                 r#"new Promise((resolve, reject) => {
                     const body = "onmessage = function(e) { postMessage(typeof fetch + '|' + typeof XMLHttpRequest + '|' + typeof Request); };";
                     const w = new Worker(URL.createObjectURL(new Blob([body])));
@@ -9103,7 +9103,7 @@
     async fn worker_top_level_runs_without_any_postmessage() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .evaluate_for_cdp(
+            .evaluate_remote(
                 r#"new Promise((resolve, reject) => {
                     const body = "postMessage('booted');";
                     const w = new Worker(URL.createObjectURL(new Blob([body])));
@@ -9337,7 +9337,7 @@
             }
         });
 
-        let result = rt.call_function_on_for_cdp(
+        let result = rt.call_function_on_remote(
             r#"async () => {
                 try {
                     await fetch("http://example.com/data.json");
@@ -9368,7 +9368,7 @@
 
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     try {
                         await fetch("http://127.0.0.1:9/secret");
@@ -9436,7 +9436,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url("https://example.com/page");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     try {
                         await fetch("http://127.0.0.1:PORT/api");
@@ -9506,7 +9506,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url("https://example.com/page");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     try {
                         const r = await fetch("http://127.0.0.1:PORT/api", {
@@ -9599,7 +9599,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url("https://example.com/page");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     try {
                         const r = await fetch("http://127.0.0.1:PORT/api", {
@@ -9674,7 +9674,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url("https://example.com/page");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     try {
                         const r = await fetch("http://127.0.0.1:PORT/hop", {
@@ -9774,7 +9774,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url("https://example.com/page");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     try {
                         const r = await fetch("http://127.0.0.1:PORTA/hop", {
@@ -9850,7 +9850,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url("https://example.com/page");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     try {
                         await fetch("http://127.0.0.1:PORT/hop");
@@ -9930,7 +9930,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url("https://example.com/page");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     try {
                         const r = await fetch("http://127.0.0.1:PORT/hop", {
@@ -10002,7 +10002,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{port}/page"));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const ok = navigator.sendBeacon("/beacon", "hello");
                     await new Promise(r => setTimeout(r, 800));
@@ -10062,7 +10062,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url("https://example.com/page");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const base = "http://127.0.0.1:PORT/beacon";
                     navigator.sendBeacon(base + "?k=urlsp", new URLSearchParams("a=1&b=2"));
@@ -10107,7 +10107,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url("https://example.com/page");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"() => {
                     return "bad:" + navigator.sendBeacon("http://[bad", "x");
                 }"#,
@@ -10146,7 +10146,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url("https://example.com/page");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     try {
                         await fetch("http://127.0.0.1:PORT/api", { method: "PUT" });
@@ -10195,7 +10195,7 @@
         )));
 
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     try {
                         await fetch("http://127.0.0.1:1/dead");
@@ -10237,7 +10237,7 @@
         )));
 
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     try {
                         await fetch("http://127.0.0.1:1/submit", { method: "POST", body: "k=v" });
@@ -10292,7 +10292,7 @@
 
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/test", port));
-        let result = rt.call_function_on_for_cdp(
+        let result = rt.call_function_on_remote(
             r#"async () => {
                 const response = await fetch(new URL("/pkg/app_bg.wasm", document.URL));
                 return {
@@ -10353,7 +10353,7 @@
 
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/test", port));
-        let result = rt.call_function_on_for_cdp(
+        let result = rt.call_function_on_remote(
             r#"async () => {
                 const asType = (type) => new Promise((resolve, reject) => {
                     const xhr = new XMLHttpRequest();
@@ -10422,7 +10422,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/test", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const send = (m) => new Promise((resolve, reject) => {
                         const xhr = new XMLHttpRequest();
@@ -10496,7 +10496,7 @@
 
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/r/0", port));
-        let result = rt.call_function_on_for_cdp(
+        let result = rt.call_function_on_remote(
                 r#"async () => {
                     const outcomes = {};
                     try {
@@ -10559,7 +10559,7 @@
             let mut rt = setup_runtime("<html><body></body></html>");
             rt.set_url(&format!("http://127.0.0.1:{}/huge", port));
             let result = rt
-                .call_function_on_for_cdp(
+                .call_function_on_remote(
                     r#"async () => {
                         try { await fetch(document.URL); return "resolved"; }
                         catch (e) { return "rejected"; }
@@ -10600,7 +10600,7 @@
             let mut rt = setup_runtime("<html><body></body></html>");
             rt.set_url(&format!("http://127.0.0.1:{}/stream", port));
             let result = rt
-                .call_function_on_for_cdp(
+                .call_function_on_remote(
                     r#"async () => {
                         try { await fetch(document.URL); return "resolved"; }
                         catch (e) { return "rejected"; }
@@ -10649,7 +10649,7 @@
             let mut rt = setup_runtime("<html><body></body></html>");
             rt.set_url(&format!("http://127.0.0.1:{}/", port));
             let result = rt
-                .call_function_on_for_cdp(
+                .call_function_on_remote(
                     r#"async () => {
                         try { await import(document.URL + "big.mjs"); return "resolved"; }
                         catch (e) { return "rejected: " + e.message; }
@@ -10693,7 +10693,7 @@
             let mut rt = setup_runtime("<html><body></body></html>");
             rt.set_url(&format!("http://127.0.0.1:{}/", port));
             let result = rt
-                .call_function_on_for_cdp(
+                .call_function_on_remote(
                     r#"async () => {
                         try { await import(document.URL + "stream.mjs"); return "resolved"; }
                         catch (e) { return "rejected: " + e.message; }
@@ -10750,7 +10750,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     await import(document.URL + "big.mjs");
                     return "resolved:" + (globalThis.__BIG_MODULE__ === true);
@@ -10783,7 +10783,7 @@
             r##"<html><body><a id="x" href="#">a</a><iframe id="f" sandbox="allow-scripts"></iframe><link id="l" rel="stylesheet" href="s.css"></body></html>"##,
         );
         let result = rt
-            .evaluate_for_cdp(
+            .evaluate_remote(
                 r#"(() => {
                     const out = {};
                     const link = document.getElementById("l");
@@ -10824,7 +10824,7 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url("http://example.invalid/page");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const out = {};
                     try { await import("file:///etc/hostname"); out.file = "resolved"; }
@@ -10872,7 +10872,7 @@
         });
         rt.set_url(&format!("http://127.0.0.1:{}/", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     await import(document.URL + "local.mjs");
                     return "resolved:" + (globalThis.__PRIVATE_OK__ === true);
@@ -10928,7 +10928,7 @@
 
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/submit", port));
-        let result = rt.call_function_on_for_cdp(
+        let result = rt.call_function_on_remote(
             r#"async () => {
                 const r = await fetch(new URL("/_serverFn/x", document.URL), {
                     method: "POST",
@@ -10997,7 +10997,7 @@
 
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/submit", port));
-        let result = rt.call_function_on_for_cdp(
+        let result = rt.call_function_on_remote(
             r#"async () => {
                 const r = await fetch(new URL("/api", document.URL), {
                     method: "POST",
@@ -11089,7 +11089,7 @@
         let port20 = chain_server(20);
         let mut rt = fetch_status(port20);
         let ok = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         assert_eq!(ok.value.unwrap(), serde_json::json!("status:200"));
@@ -11097,7 +11097,7 @@
         let port21 = chain_server(21);
         let mut rt = fetch_status(port21);
         let err = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         assert_eq!(err.value.unwrap(), serde_json::json!("error:net::ERR_FAILED"));
@@ -11154,7 +11154,7 @@
 
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/", port));
-        let result = rt.call_function_on_for_cdp(
+        let result = rt.call_function_on_remote(
             r#"async (port) => {
                 const out = [];
                 const run = async (tag, fn) => { try { out.push(tag + ":" + (await fn()).status); } catch (e) { out.push(tag + "!:" + (e && (e.message || e.name))); } };
@@ -11244,7 +11244,7 @@
 
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/", port));
-        let result = rt.call_function_on_for_cdp(
+        let result = rt.call_function_on_remote(
             r#"async (port) => {
                 const u8 = new Uint8Array([0, 128, 255, 16]);
                 await fetch("http://127.0.0.1:" + port + "/typed", { method: "POST", body: u8 });
@@ -11414,7 +11414,7 @@
 
         let (mut rt, jar) = setup_runtime_with_cookies("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/page", port_a));
-        let result = rt.call_function_on_for_cdp(
+        let result = rt.call_function_on_remote(
             r#"async (pa, pb, pc) => {
                 const A = "http://127.0.0.1:" + pa, B = "http://127.0.0.1:" + pb, C = "http://127.0.0.1:" + pc;
                 const out = [];
@@ -11501,7 +11501,7 @@
 
         let (mut rt, _jar) = setup_runtime_with_cookies("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/page", port_a));
-        let result = rt.call_function_on_for_cdp(
+        let result = rt.call_function_on_remote(
             r#"async (pa, pb) => {
                 await fetch("http://127.0.0.1:" + pa + "/seed");
                 return await new Promise(resolve => {
@@ -11615,7 +11615,7 @@
             return out.join("|");
         }"#;
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 script,
                 None,
                 &[
@@ -11715,7 +11715,7 @@
     #[tokio::test(flavor = "current_thread")]
     async fn test_response_array_buffer_preserves_typed_array_view() {
         let mut rt = setup_runtime("<html><body></body></html>");
-        let result = rt.call_function_on_for_cdp(
+        let result = rt.call_function_on_remote(
             r#"async () => {
                 const bytes = new Uint8Array([9, 0, 97, 115, 109, 1, 8]);
                 const response = new Response(bytes.subarray(1, 6));
@@ -11733,7 +11733,7 @@
     #[tokio::test(flavor = "current_thread")]
     async fn test_wasm_instantiate_streaming_uses_response_array_buffer() {
         let mut rt = setup_runtime("<html><body></body></html>");
-        let result = rt.call_function_on_for_cdp(
+        let result = rt.call_function_on_remote(
             r#"async () => {
                 const bytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
                 const result = await WebAssembly.instantiateStreaming(
@@ -13352,7 +13352,7 @@
             await new Promise(r => setTimeout(r, 20));
             return [window.__a, window.__g, window.__h, window.__i, window.__c, window.__d, loads];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
             serde_json::json!([1, "é", "é", 9, 3, 44, 6])
@@ -13379,7 +13379,7 @@
             await new Promise(r => setTimeout(r, 20));
             return [errors, window.__ok];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(result.value.unwrap(), serde_json::json!([2, 1]));
     }
 
@@ -13443,7 +13443,7 @@
             return [out.onerror, out.evt];
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         assert_eq!(
@@ -13469,7 +13469,7 @@
             return window.__calls;
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         assert_eq!(result.value.unwrap(), serde_json::json!(1));
@@ -13497,7 +13497,7 @@
             await imp('e', 'data:text/plain,export default 1;');
             return out;
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         let out = result.value.unwrap();
         assert_eq!(out["a"], "41:1");
         assert_eq!(out["b"], "42:2");
@@ -13534,7 +13534,7 @@
             catch (e) { out.mime = 'rejected'; }
             return out;
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         let out = result.value.unwrap();
         assert_eq!(out["ok"], "7:3");
         assert_eq!(out["after"], "rejected");
@@ -13565,7 +13565,7 @@
             await new Promise(r => setTimeout(r, 20));
             return [window.__bs, window.__dead === undefined, loads, errors];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(result.value.unwrap(), serde_json::json!([5, true, 1, 1]));
     }
 
@@ -13606,7 +13606,7 @@
             await new Promise(r => setTimeout(r, 50));
             return [errors, loads, window.__leak === undefined];
         }}"#);
-        let result = rt.call_function_on_for_cdp(&script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(&script, None, &[], true, true).await.unwrap();
         std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
 
         assert_eq!(result.value.unwrap(), serde_json::json!([1, 0, true]));
@@ -13665,7 +13665,7 @@
             await new Promise(r => setTimeout(r, 50));
             return tally;
         }}"#);
-        let result = rt.call_function_on_for_cdp(&script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(&script, None, &[], true, true).await.unwrap();
         std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
 
         // Exactly one fire per handler, per side — [2, 1] on either row is
@@ -13810,7 +13810,7 @@
             await new Promise(r => setTimeout(r, 300));
             return window.__dynEcho;
         }}"#);
-        let result = rt.call_function_on_for_cdp(&script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(&script, None, &[], true, true).await.unwrap();
         drop(guard);
 
         assert_eq!(result.value.unwrap(), serde_json::json!("COOKIE_SENT"));
@@ -14177,7 +14177,7 @@
             return [isEl, styleOk, styleSet, earlyComplete, img.complete,
                     img.naturalWidth, viaProp, viaListener, hijackSurvived, hijackW];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
             serde_json::json!([true, true, true, false, true, 1, 1, 1, true, 7])
@@ -14389,7 +14389,7 @@
             await new Promise(r => setTimeout(r, 10));
             return [offsets, events];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(result.value.unwrap(), serde_json::json!([[0, 0], 4]));
     }
 
@@ -14423,7 +14423,7 @@
             // document and one at the window, all drained by the await.
             return [isDocEl, afterTo, afterBy, afterOptions, afterClamp, viaWindow, win, doc, window.scrollY];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
             serde_json::json!([true, [0, 500], [0, 700], [10, 40], 0, 90, 5, 5, 490])
@@ -14454,7 +14454,7 @@
             await new Promise(r => setTimeout(r, 10));
             return [se, wse, dse];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(result.value.unwrap(), serde_json::json!([1, 1, 2]));
     }
 
@@ -14489,7 +14489,7 @@
             const afterRefocus = window.scrollY;
             return [nearestBottom, centered, atTop, atBottom, afterPrevent, afterRefocus > 0];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
             serde_json::json!([true, true, true, true, 0, true]),
@@ -14515,7 +14515,7 @@
             const g = id => { const r = document.getElementById(id).getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height)]; };
             return [g('pad'), Math.round(g('it')[1]), g('w')];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
             serde_json::json!([[80, 80], 90, [200, 0]]),
@@ -14559,7 +14559,7 @@
                 bginh: c('bginh').backgroundColor,
             };
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         let v = result.value.unwrap();
         assert_eq!(v["inh"], serde_json::json!("rgb(255, 0, 0)"), "inherit copies the parent");
         assert_eq!(v["ini"], serde_json::json!("rgb(0, 0, 0)"), "initial beats inheritance: black, not parent red");
@@ -14612,7 +14612,7 @@
                 ro_cefalse: m('cefalse', ':read-only'), rw_innerfalse: m('innerfalse', ':read-write'),
             };
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         let v = result.value.unwrap();
         // Whitespace-tolerant :nth-child arg (lightpanda #3722) — the
         // selectors crate parses `( 2n )` natively; pinned so a parser
@@ -14682,7 +14682,7 @@
             const attr = ['sh1','lh_top','lh_bot','sh4','lh2','sh42'].map(h);
             return [first, noop, cssom, attr];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         let v = result.value.unwrap();
         // Chrome oracle, content-box: basis 50 + main-axis (vertical) padding.
         assert_eq!(
@@ -14733,7 +14733,7 @@
                 document.documentElement.scrollTop,
             ];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(result.value.unwrap(), serde_json::json!([1000, 1000, 1000]));
         let (sx, sy) = rt.with_state(|st| st.scroll_offset);
         assert_eq!((sx, sy), (20.0, 1000.0));
@@ -14774,7 +14774,7 @@
                 Math.abs(back - inFlow) < 0.5,
             ];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
             serde_json::json!(["sticky", true, true, "head", true]),
@@ -14809,7 +14809,7 @@
             window.scrollTo(0, 0);
             return out;
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
             serde_json::json!(["head", "tall", ["head", "tall"]]),
@@ -14835,7 +14835,7 @@
             const stop = wrap.getBoundingClientRect().top + wrap.getBoundingClientRect().height - 40;
             return [Math.abs(stuck - stop) < 0.5, stuck];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         let value = result.value.unwrap();
         assert_eq!(
             value.as_array().unwrap().first().unwrap(),
@@ -14862,7 +14862,7 @@
           const el = document.elementFromPoint(50, 50);
           return el ? el.id : 'none';
         }"#;
-        let out = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let out = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(out.value.unwrap(), serde_json::json!("B"));
     }
 
@@ -14883,7 +14883,7 @@
           const el = document.elementFromPoint(50, 50);
           return el ? el.id : 'none';
         }"#;
-        let out = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let out = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(out.value.unwrap(), serde_json::json!("B"));
     }
 
@@ -14903,7 +14903,7 @@
           const el = document.elementFromPoint(50, 50);
           return el ? el.id : 'none';
         }"#;
-        let out = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let out = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(out.value.unwrap(), serde_json::json!("C"));
     }
 
@@ -14925,7 +14925,7 @@
           const el = document.elementFromPoint(50, 50);
           return el ? el.id : 'none';
         }"#;
-        let out = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let out = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(out.value.unwrap(), serde_json::json!("C"));
     }
     #[tokio::test(flavor = "current_thread")]
@@ -14948,7 +14948,7 @@
             const sh = box.scrollHeight;
             return [box.scrollTop, Math.round(before - after), sh >= 1000 && sh <= 1016];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
             serde_json::json!([800, 800, true]),
@@ -14988,7 +14988,7 @@
                 Math.abs(back - rest) < 0.5,
             ];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
             serde_json::json!([400, true, true, true]),
@@ -15029,7 +15029,7 @@
                 Math.round(back),
             ];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
             serde_json::json!(["sticky", 108, 0, 0, "hc", 108]),
@@ -15057,7 +15057,7 @@
                 (document.elementFromPoint(10, 5) || {}).id || 'null',
             ];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
             serde_json::json!([0, 0, "c1"]),
@@ -15086,7 +15086,7 @@
                 hit ? (hit.id || hit.tagName) : 'null',
             ];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
             serde_json::json!([0, "hc"]),
@@ -15116,7 +15116,7 @@
             const after = leaf.getBoundingClientRect().top;
             return [outer.scrollTop, inner.scrollTop, Math.round(before - after)];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
             serde_json::json!([100, 50, 150]),
@@ -15141,7 +15141,7 @@
         );
         // Any layout-driven read runs the layout pass that folds the extent.
         let script = r#"() => document.querySelector('.a').getBoundingClientRect().height"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert!(result.value.is_some(), "layout read succeeds");
         let extent = rt.with_state(|st| st.css_extent.get());
         assert!((extent - 2.0).abs() < 1e-6, "max(delay+duration) = 2.0, got {extent}");
@@ -15150,7 +15150,7 @@
         // The pump drives the clock through the same op the Page method uses.
         async fn set_time(rt: &mut JsRuntime, t: &str) {
             let script = format!(r#"() => __diting_domRaw('set_css_time', '{t}')"#);
-            rt.call_function_on_for_cdp(&script, None, &[], true, true).await.unwrap();
+            rt.call_function_on_remote(&script, None, &[], true, true).await.unwrap();
         }
         set_time(&mut rt, "0.75").await;
         assert_eq!(rt.with_state(|st| st.css_time), Some(0.75));
@@ -15167,7 +15167,7 @@
             __diting_domRaw('set_css_time', '1.5');
             return getComputedStyle(document.querySelector('.b')).opacity;
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         // .b: 2s linear... no easing token → default ease; at t=1.5/2 = .75
         // progress, eased well past 0.75 and below 1.
         let opacity = result.value.unwrap().as_str().unwrap().parse::<f64>().unwrap();
@@ -15185,29 +15185,29 @@
                <body><h1 id="h">heading</h1></body></html>"#,
         );
         let force = r#"() => document.getElementById('h').getBoundingClientRect().height"#;
-        rt.call_function_on_for_cdp(force, None, &[], true, true).await.unwrap();
+        rt.call_function_on_remote(force, None, &[], true, true).await.unwrap();
         let rev0 = rt.with_state(|st| st.layout_rev.get());
 
         // tabindex is layout-inert and no rule selects on it: no cache drop.
         let write = r#"() => { document.getElementById('h').setAttribute('tabindex', '0'); }"#;
-        rt.call_function_on_for_cdp(write, None, &[], true, true).await.unwrap();
+        rt.call_function_on_remote(write, None, &[], true, true).await.unwrap();
         assert_eq!(rt.with_state(|st| st.layout_rev.get()), rev0, "tabindex write keeps the cache");
-        rt.call_function_on_for_cdp(force, None, &[], true, true).await.unwrap();
+        rt.call_function_on_remote(force, None, &[], true, true).await.unwrap();
         assert_eq!(rt.with_state(|st| st.layout_rev.get()), rev0, "geometry read after inert write");
 
         // Same for data-* when NO rule references the name — but the
         // [data-x] rule in this document does, so that write must drop.
         let write = r#"() => { document.getElementById('h').setAttribute('data-y', '1'); }"#;
-        rt.call_function_on_for_cdp(write, None, &[], true, true).await.unwrap();
+        rt.call_function_on_remote(write, None, &[], true, true).await.unwrap();
         assert_eq!(rt.with_state(|st| st.layout_rev.get()), rev0, "unreferenced data-* write keeps the cache");
         let write = r#"() => { document.getElementById('h').setAttribute('data-x', '1'); }"#;
-        rt.call_function_on_for_cdp(write, None, &[], true, true).await.unwrap();
+        rt.call_function_on_remote(write, None, &[], true, true).await.unwrap();
         assert!(rt.with_state(|st| st.layout_rev.get()) > rev0, "selector-referenced attr invalidates");
 
         // class always invalidates (selector matching depends on it).
         let rev1 = rt.with_state(|st| st.layout_rev.get());
         let write = r#"() => { document.getElementById('h').setAttribute('class', 'c'); }"#;
-        rt.call_function_on_for_cdp(write, None, &[], true, true).await.unwrap();
+        rt.call_function_on_remote(write, None, &[], true, true).await.unwrap();
         assert!(rt.with_state(|st| st.layout_rev.get()) > rev1, "class write invalidates");
     }
 
@@ -15230,7 +15230,7 @@
                 iframe.src = 'http://127.0.0.1:1/';
             });
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
             serde_json::json!(["property", "listener"])
@@ -15283,7 +15283,7 @@
                 bodyText: doc && doc.body ? (doc.body.textContent || '').trim() : 'no-doc',
             }};
         }}"#);
-        let result = rt.call_function_on_for_cdp(&script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(&script, None, &[], true, true).await.unwrap();
         std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
 
         let v = result.value.unwrap();
@@ -15309,7 +15309,7 @@
             await new Promise(r => setTimeout(r, 10));
             return [window.__strRan, strVarDecl, scheduleThrew, window.__intervalCount, typeof iid];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(
             result.value.unwrap(),
             serde_json::json!(["ran", 7, false, 1, "number"])
@@ -15352,7 +15352,7 @@
             await new Promise(r => setTimeout(r, 200));
             return [order.join(','), wheel.join(','), mixed.join(','), nested.join(','), mass.join(',')];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         let v = result.value.unwrap();
         let expected_order: Vec<String> = (0..30).map(|i| i.to_string()).collect();
         let mut expected_mixed: Vec<String> = (0..20).step_by(2).map(|i| i.to_string()).collect();
@@ -15385,7 +15385,7 @@
             await new Promise(r => setTimeout(r, 30));
             return [window.__survivor, intervalTicks];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(result.value.unwrap(), serde_json::json!(["ran", 3]));
     }
 
@@ -15429,7 +15429,7 @@
             }
             return [loaded, String(window.__done || '')];
         }"#;
-        let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
         assert_eq!(result.value.unwrap(), serde_json::json!([30, "io:30"]));
     }
 
@@ -16487,7 +16487,7 @@
         // drops silently (iframe origin is frame.example; the caller
         // restricted delivery to trusted.example), matching origin delivers,
         // '*' wildcard delivers.
-        let result = rt.evaluate_for_cdp(
+        let result = rt.evaluate_remote(
             "(async function(){ \
                 window.__leak = []; \
                 window.addEventListener('message', function(e){ window.__leak.push(e.data) }); \
@@ -16532,7 +16532,7 @@
         )
         .unwrap();
 
-        let got = rt.evaluate_for_cdp(
+        let got = rt.evaluate_remote(
             "new Promise(r => setTimeout(() => r(window.__got), 50))",
             true,
             true,
@@ -16601,7 +16601,7 @@
             "document.querySelector('base').setAttribute('href', 'http://127.0.0.1:{}/assets/')", port
         ))
         .unwrap();
-        let _ = rt.evaluate_for_cdp(
+        let _ = rt.evaluate_remote(
             "(async function(){ try { await fetch('data.json'); } catch(e) {} })()",
             true,
             true,
@@ -16644,7 +16644,7 @@
         // sessionStorage stays out of the picture.
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .evaluate_for_cdp(
+            .evaluate_remote(
                 "(async () => { localStorage.setItem('token', 'abc'); localStorage.theme = 'dark'; \
                  sessionStorage.setItem('s', '1'); await new Promise(r => setTimeout(r, 250)); return 'ok'; })()",
                 true,
@@ -16684,7 +16684,7 @@
 
         // The deletion flushes too, not just additions.
         let result = rt2
-            .evaluate_for_cdp(
+            .evaluate_remote(
                 "(async () => { localStorage.removeItem('token'); await new Promise(r => setTimeout(r, 250)); return 'ok'; })()",
                 true,
                 true,
@@ -17213,7 +17213,7 @@ async fn test_css_animation_start_end_events() {
         await Promise.race([ended, new Promise(r => setTimeout(r, 3000))]);
         return seq;
     }"#;
-    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
     assert_eq!(
         result.value.unwrap(),
         serde_json::json!([["start", "fade", 0, true, "box"], ["end", "fade", 0.1]])
@@ -17248,7 +17248,7 @@ async fn test_css_animation_flood_epoch_cap_defers_not_starves() {
         await new Promise(r => setTimeout(r, 50));
         return { starts, ends };
     }"#;
-    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
     let v = result.value.unwrap();
     assert_eq!(v["starts"], serde_json::json!(600), "all starts landed: {v}");
     assert!(v["ends"].as_u64().unwrap() > 0, "ends flowing after cap: {v}");
@@ -17274,7 +17274,7 @@ async fn test_css_animation_cancel_on_class_removal() {
         await new Promise(r => setTimeout(r, 30));
         return seq;
     }"#;
-    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
     assert_eq!(result.value.unwrap(), serde_json::json!(["start", "cancel:fade"]));
 }
 
@@ -17292,7 +17292,7 @@ async fn test_css_transition_computed_values() {
         };
         return [cs('b'), cs('c'), cs('p')];
     }"#;
-    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
     assert_eq!(
         result.value.unwrap(),
         serde_json::json!([
@@ -17324,7 +17324,7 @@ async fn test_css_transition_events_and_registry() {
         await new Promise(r => setTimeout(r, 200));
         return seq;
     }"#;
-    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
     assert_eq!(
         result.value.unwrap(),
         serde_json::json!([
@@ -17379,7 +17379,7 @@ async fn test_css_transition_cancel_on_retrigger_and_detach() {
         e.remove();
         return [seq, eSeq];
     }"#;
-    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
     let (seq, e_seq) = match result.value.unwrap() {
         serde_json::Value::Array(a) => (a[0].clone(), a[1].clone()),
         _ => panic!("expected [seq, eSeq]"),
@@ -17422,7 +17422,7 @@ async fn test_element_animate_lifecycle_events() {
         await new Promise(r => setTimeout(r, 150));
         return [seq, anim.playState];
     }"#;
-    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
     assert_eq!(
         result.value.unwrap(),
         serde_json::json!([[["start", ""], ["end", "", 0.08]], "finished"])
@@ -17452,7 +17452,7 @@ async fn test_static_markup_animation_listener_scan() {
         await ended;
         return seq;
     }"#;
-    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
     assert_eq!(result.value.unwrap(), serde_json::json!([["start", "pulse"], ["end", "pulse"]]));
 }
 
@@ -17481,7 +17481,7 @@ async fn test_css_animation_iteration_event() {
         await Promise.race([ended, new Promise(r => setTimeout(r, 3000))]);
         return seq;
     }"#;
-    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
     assert_eq!(
         result.value.unwrap(),
         serde_json::json!([
@@ -17509,7 +17509,7 @@ async fn test_style_element_load_event_on_insert() {
         await Promise.race([fired, new Promise(r => setTimeout(r, 2000))]);
         return fired;
     }"#;
-    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
     assert_eq!(result.value.unwrap(), serde_json::json!(["load", true, true, false]));
 }
 
@@ -17574,7 +17574,7 @@ async fn initial_parse_stylesheets_fire_load_for_early_inline_scripts() {
     .unwrap();
 
     let result = rt
-        .call_function_on_for_cdp(
+        .call_function_on_remote(
             r#"async () => {
                 await new Promise(r => setTimeout(r, 1500));
                 const h = globalThis.__heard || [];
@@ -17617,7 +17617,7 @@ async fn inner_html_style_element_fires_load() {
         await Promise.race([fired, new Promise(r => setTimeout(r, 2000))]);
         return fired;
     }"#;
-    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
     assert_eq!(result.value.unwrap(), serde_json::json!(["load", true]));
 }
 
@@ -17639,7 +17639,7 @@ async fn test_transition_event_interface() {
             e2.propertyName, e2.elapsedTime, e2.pseudoElement, threw,
         ];
     }"#;
-    let result = rt.call_function_on_for_cdp(script, None, &[], true, true).await.unwrap();
+    let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
     assert_eq!(
         result.value.unwrap(),
         serde_json::json!([true, true, "opacity", 1.5, "::before", "", 0, "", "TypeError"])
@@ -17790,7 +17790,7 @@ async fn fetch_referrer_policy_reaches_the_wire() {
     let mut rt = setup_runtime("<html><body></body></html>");
     rt.set_url("http://example.com/page?a=1");
     let result = rt
-        .call_function_on_for_cdp(
+        .call_function_on_remote(
             r#"async () => {
                 const base = "http://127.0.0.1:PORT";
                 await fetch(base + "/default");
@@ -19541,7 +19541,7 @@ fn document_evaluate_xpath_subset() {
     async fn canvas_fill_style_parses_css_color_grammar() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const px = (fill) => {
                         // Fresh canvas per sample: the raster composites
@@ -19606,7 +19606,7 @@ fn document_evaluate_xpath_subset() {
     async fn canvas_path2d_fill_rasterizes_under_transform() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"() => {
                     const px = (g, x, y) => { const d = g.getImageData(x, y, 1, 1).data; return [d[0], d[1], d[2], d[3]]; };
                     const out = {};
@@ -19815,7 +19815,7 @@ fn document_evaluate_xpath_subset() {
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/page", port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     const ws = new WebSocket('ws://127.0.0.1:__PORT__/');
                     let sent = 'no-throw';
@@ -19871,7 +19871,7 @@ fn document_evaluate_xpath_subset() {
             ];
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         assert_eq!(
@@ -19911,7 +19911,7 @@ fn document_evaluate_xpath_subset() {
             ];
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         assert_eq!(
@@ -19939,7 +19939,7 @@ fn document_evaluate_xpath_subset() {
             ];
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         assert_eq!(
@@ -19974,7 +19974,7 @@ fn document_evaluate_xpath_subset() {
             return Promise.race([p, new Promise((r) => setTimeout(() => r(null), 5000))]);
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         let v = result.value.unwrap();
@@ -20014,7 +20014,7 @@ fn document_evaluate_xpath_subset() {
             CSS.supports(':bogus-pseudo'),
         ]"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         assert_eq!(
@@ -20044,7 +20044,7 @@ fn document_evaluate_xpath_subset() {
                     ts.startsWith(ds + ' 05:06:07 ')];
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         let v = result.value.unwrap();
@@ -20095,7 +20095,7 @@ fn document_evaluate_xpath_subset() {
             return out;
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         let v = result.value.unwrap();
@@ -20128,7 +20128,7 @@ fn document_evaluate_xpath_subset() {
             return Promise.race([p, new Promise((r) => setTimeout(() => r(null), 10000))]);
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         let v = result.value.unwrap();
@@ -20176,7 +20176,7 @@ fn document_evaluate_xpath_subset() {
             return Promise.resolve({ ok, ok2, ok3, ok4, ok5, afterEnd, afterRange, afterVeto, log });
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         let v = result.value.unwrap();
@@ -20234,7 +20234,7 @@ fn document_evaluate_xpath_subset() {
             });
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         let v = result.value.unwrap();
@@ -20267,7 +20267,7 @@ fn document_evaluate_xpath_subset() {
             });
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         let v = result.value.unwrap();
@@ -20310,7 +20310,7 @@ fn document_evaluate_xpath_subset() {
             });
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         let v = result.value.unwrap();
@@ -20347,7 +20347,7 @@ fn document_evaluate_xpath_subset() {
             });
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         let v = result.value.unwrap();
@@ -20383,7 +20383,7 @@ fn document_evaluate_xpath_subset() {
             });
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         let v = result.value.unwrap();
@@ -20425,7 +20425,7 @@ fn document_evaluate_xpath_subset() {
             });
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         let v = result.value.unwrap();
@@ -20475,7 +20475,7 @@ fn document_evaluate_xpath_subset() {
             });
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         let fired = rt.disarm_watchdog(wd);
@@ -20513,7 +20513,7 @@ fn document_evaluate_xpath_subset() {
             });
         }"#;
         let result = rt
-            .call_function_on_for_cdp(script, None, &[], true, true)
+            .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
         let v = result.value.unwrap();
@@ -20568,7 +20568,7 @@ fn document_evaluate_xpath_subset() {
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url(&format!("http://127.0.0.1:{}/doc", doc_port));
         let result = rt
-            .call_function_on_for_cdp(
+            .call_function_on_remote(
                 r#"async () => {
                     // Cross-origin without ACAO → the promise rejects after
                     // the request itself has gone out; the probe on the wire
