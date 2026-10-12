@@ -679,6 +679,19 @@ async fn status_handler() -> axum::response::Html<String> {
         mgr.evict_expired();
         (mgr.session_count(), STARTED.elapsed())
     };
+    let engine_rows = search_engine_rows().await;
+    let available_n = engine_rows
+        .iter()
+        .filter(|e| e.get("available").and_then(|v| v.as_bool()) == Some(true))
+        .count();
+    let total_n = engine_rows.len();
+    let available_list: String = engine_rows
+        .iter()
+        .filter(|e| e.get("available").and_then(|v| v.as_bool()) == Some(true))
+        .filter_map(|e| e.get("name").and_then(|v| v.as_str()))
+        .take(12)
+        .collect::<Vec<_>>()
+        .join(", ");
     let version = env!("CARGO_PKG_VERSION");
     let caps = [
         ("screenshot", cfg!(feature = "screenshot")),
@@ -737,6 +750,7 @@ async fn status_handler() -> axum::response::Html<String> {
     <dt>uptime</dt><dd>{}</dd>
     <dt>active sessions</dt><dd>{sessions}</dd>
     <dt>engine</dt><dd>diting</dd>
+    <dt>search engines</dt><dd>{available_n}/{total_n} available — {available_list}</dd>
   </dl>
 
   <p style="margin-bottom:.5rem">capabilities</p>
@@ -852,12 +866,24 @@ async fn doctor_handler(Query(params): Query<DoctorParams>) -> impl IntoResponse
         serde_json::Value::Null
     };
 
+    let available_engines: Vec<String> = search_engines
+        .iter()
+        .filter_map(|e| {
+            if e.get("available").and_then(|v| v.as_bool()) == Some(true) {
+                e.get("name").and_then(|v| v.as_str()).map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
     Json(serde_json::json!({
         "status": "ok",
         "engine": "diting",
         "version": env!("CARGO_PKG_VERSION"),
         "capabilities": capabilities,
         "search_engines": search_engines,
+        "available_engines": available_engines,
+        "search_obs": crate::search::search_obs_snapshot(),
         "endpoints": [
             "/health", "/doctor", "/engines", "/fetch", "/click", "/eval",
             "/search", "/download", "/v1/scrape", "/session/create",

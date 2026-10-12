@@ -360,6 +360,10 @@ If your network can't reach the rusty_v8 CDN (build hangs with zero progress aft
 | `AGINXBROWSER_MEILI_URL` | none | Meilisearch base URL; set to enable the private-index engine |
 | `AGINXBROWSER_MEILI_INDEX` | none | Meilisearch index uid to query |
 | `AGINXBROWSER_MEILI_KEY` | none | Optional Bearer key for the Meilisearch instance |
+| `AGINXBROWSER_CAPTCHA_BACKOFF_SECS` | `300,600,1800,3600` | CAPTCHA suspend ladder (seconds). Single value = flat duration for every hit |
+| `AGINXBROWSER_CAPTCHA_POLICY` | `suspend` | `suspend` = timed ladder; `demote`/`skip` = bench the engine for the process lifetime after a CAPTCHA |
+| `AGINXBROWSER_DISABLE_ENGINES` | none | Comma-separated engine names to leave unregistered (e.g. `bing_news`) |
+| `AGINXBROWSER_BING_NEWS` | on | `0`/`false`/`off` disables the bing_news leg (CN Object-moved dual-path noise) |
 
 ## API Documentation
 

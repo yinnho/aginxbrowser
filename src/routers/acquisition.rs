@@ -334,6 +334,7 @@ pub(crate) async fn search_engine_rows() -> Vec<serde_json::Value> {
                 "suspended": e.suspended,
                 "suspend_remaining_secs": if e.suspended { Some(e.suspend_remaining_secs) } else { None },
                 "captcha_count": e.captcha_count,
+                "available": e.available,
             })
         })
         .collect()
@@ -343,8 +344,27 @@ pub(crate) async fn search_engine_rows() -> Vec<serde_json::Value> {
 /// plus live health — so an agent discovers valid names AND who is currently
 /// benched by a CAPTCHA in one call (v0.3.1 Windows report P1-1: the
 /// alternative was guessing names and reading zero results as "no hits").
+///
+/// Also carries `available_engines` (names with `available: true`) and
+/// `search_obs` counters (CAPTCHA suspend share, bing_news dual-path fail
+/// rate) for the aginxos search-captcha-challenge REQ.
 pub(crate) async fn engines_handler() -> impl IntoResponse {
-    Json(serde_json::json!({ "engines": search_engine_rows().await }))
+    let engines = search_engine_rows().await;
+    let available_engines: Vec<String> = engines
+        .iter()
+        .filter_map(|e| {
+            if e.get("available").and_then(|v| v.as_bool()) == Some(true) {
+                e.get("name").and_then(|v| v.as_str()).map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    Json(serde_json::json!({
+        "engines": engines,
+        "available_engines": available_engines,
+        "search_obs": crate::search::search_obs_snapshot(),
+    }))
 }
 
 pub(crate) async fn fetch_handler(Json(req): Json<FetchRequest>) -> Result<impl IntoResponse, AppError> {

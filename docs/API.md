@@ -337,7 +337,9 @@ Native aggregated search with optional automatic content fetching. Agents go fro
 
 Engines are queried concurrently and results merged with deduplication: identical URLs (after normalization) merge into a single entry, `engines` lists the source engines, and `score` accumulates. `GET /engines` returns every engine's name, categories, and live suspension state — call it to discover valid names for the `engines` filter.
 
-**CAPTCHA progressive backoff**: when an engine triggers a CAPTCHA it pauses automatically, with the pause duration escalating on consecutive hits (5 min → 10 min → 30 min → 1 h) and resetting after a successful search. Set the `CAPTCHA_SOLVER_API_KEY` environment variable to enable automatic CAPTCHA solving.
+**CAPTCHA progressive backoff**: when an engine triggers a CAPTCHA it pauses automatically, with the pause duration escalating on consecutive hits (default 5 min → 10 min → 30 min → 1 h) and resetting after a successful search. Override the ladder with `AGINXBROWSER_CAPTCHA_BACKOFF_SECS` (comma-separated seconds; a single value is flat). Set `AGINXBROWSER_CAPTCHA_POLICY=demote` to bench the engine for the process lifetime instead of the timed ladder (research loops that would otherwise wait out 300s/3600s walls). Set the `CAPTCHA_SOLVER_API_KEY` environment variable to enable automatic CAPTCHA solving.
+
+**Disabling noisy legs**: `AGINXBROWSER_DISABLE_ENGINES=bing_news,sogou_wechat` (comma names) skips registration. `AGINXBROWSER_BING_NEWS=0` is an alias that drops only `bing_news` — useful on CN boxes where `infinitescrollajax` returns Object-moved on both direct and proxy paths.
 
 **Response fields:**
 
@@ -433,14 +435,27 @@ curl -sS http://127.0.0.1:8089/engines
 ```json
 {
   "engines": [
-    { "name": "baidu", "categories": ["general"], "suspended": false, "captcha_count": 0 },
+    { "name": "baidu", "categories": ["general"], "suspended": false, "captcha_count": 0, "available": true },
     { "name": "sogou_wechat", "categories": ["general", "news"], "suspended": true,
-      "suspend_remaining_secs": 184, "captcha_count": 1 }
-  ]
+      "suspend_remaining_secs": 184, "captcha_count": 1, "available": false }
+  ],
+  "available_engines": ["baidu", "bing", "sogou", "..."],
+  "search_obs": {
+    "engine_dispatch_total": 120,
+    "captcha_suspend_total": 3,
+    "captcha_suspend_share": 0.025,
+    "bing_news_attempt_total": 40,
+    "bing_news_dual_path_fail_total": 38,
+    "bing_news_dual_path_fail_rate": 0.95,
+    "captcha_policy": "suspend",
+    "captcha_backoff_secs": [300, 600, 1800, 3600]
+  }
 }
 ```
 
-`suspended: true` means the engine hit a CAPTCHA and is in progressive backoff — `/search` skips it (the response's `engine_errors` says so, with the resume countdown) until the suspension expires.
+`suspended: true` means the engine hit a CAPTCHA and is in progressive backoff — `/search` skips it (the response's `engine_errors` says so, with the resume countdown) until the suspension expires. `available` / `available_engines` are the usable set right now. `search_obs` counters track CAPTCHA-suspend share and bing_news dual-path challenge fail rate over the process lifetime (also on `/doctor`).
+
+Body-validation failures on the direct→proxy fetch path are classified as `geo-substitute` / `captcha` / `portal` / `other` in logs and `engine_errors` (no longer a single "body failed validation"). For challenge-class rejects — and for bing_news `infinitescrollajax` — the proxy retry uses a ≤2s budget; a dual-path challenge sentences the host so the next call fails immediately instead of re-paying both legs.
 
 ---
 

@@ -20,6 +20,7 @@ pub mod stackexchange;
 pub mod wikipedia;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -116,6 +117,258 @@ pub enum SearchEngineError {
 }
 
 // ---------------------------------------------------------------------------
+// CAPTCHA suspend policy + body-reject classification + search observability
+// (aginxos REQ: search-captcha-challenge, 2026-10-13)
+// ---------------------------------------------------------------------------
+
+/// How long to bench an engine after a CAPTCHA.
+///
+/// - `suspend` (default): progressive backoff ladder, overridable via
+///   `AGINXBROWSER_CAPTCHA_BACKOFF_SECS` (comma list; single value = flat).
+/// - `demote`: skip the engine for the rest of the process (≈1y bench) so a
+///   research loop does not wait out fixed 300s/3600s walls; success still
+///   clears the count when the engine is tried again after a restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptchaPolicy {
+    Suspend,
+    Demote,
+}
+
+fn captcha_policy() -> CaptchaPolicy {
+    match std::env::var("AGINXBROWSER_CAPTCHA_POLICY")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "demote" | "skip" | "session" => CaptchaPolicy::Demote,
+        _ => CaptchaPolicy::Suspend,
+    }
+}
+
+/// Default ladder: 5m → 10m → 30m → 1h (matches historical behaviour).
+fn default_captcha_ladder() -> [u64; 4] {
+    [300, 600, 1800, 3600]
+}
+
+fn captcha_ladder() -> [u64; 4] {
+    let Ok(raw) = std::env::var("AGINXBROWSER_CAPTCHA_BACKOFF_SECS") else {
+        return default_captcha_ladder();
+    };
+    let parts: Vec<u64> = raw
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .filter(|&n| n > 0)
+        .collect();
+    match parts.as_slice() {
+        [] => default_captcha_ladder(),
+        [one] => [*one, *one, *one, *one],
+        [a, b] => [*a, *b, *b, *b],
+        [a, b, c] => [*a, *b, *c, *c],
+        [a, b, c, d, ..] => [*a, *b, *c, *d],
+    }
+}
+
+fn captcha_backoff(count: u32) -> Duration {
+    let ladder = captcha_ladder();
+    let secs = match count {
+        0 | 1 => ladder[0],
+        2 => ladder[1],
+        3 => ladder[2],
+        _ => ladder[3],
+    };
+    Duration::from_secs(secs)
+}
+
+fn captcha_suspend_duration(count: u32, base_suspend: Duration) -> Duration {
+    match captcha_policy() {
+        // Session demote: long enough that research loops treat the engine as
+        // gone until restart; ignores per-engine base floors (sogou_wechat's
+        // 3600s) so operators who asked for demote are not still stuck.
+        CaptchaPolicy::Demote => Duration::from_secs(86_400 * 365),
+        CaptchaPolicy::Suspend => captcha_backoff(count).max(base_suspend),
+    }
+}
+
+/// Engines listed in `AGINXBROWSER_DISABLE_ENGINES` (comma-separated names)
+/// are not registered. Typical CN research deploy: `bing_news` (infinitescroll
+/// challenge on both paths) until a parseable Bing web leg lands.
+fn disabled_engines() -> std::collections::HashSet<String> {
+    std::env::var("AGINXBROWSER_DISABLE_ENGINES")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// `AGINXBROWSER_BING_NEWS=0|false|off` also disables the bing_news leg
+/// (alias for putting it in DISABLE_ENGINES). Default stays on; CN ops that
+/// hit Object-moved spam set this or DISABLE_ENGINES.
+fn bing_news_enabled() -> bool {
+    match std::env::var("AGINXBROWSER_BING_NEWS")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "0" | "false" | "off" | "no" | "disabled" => false,
+        _ => true,
+    }
+}
+
+/// Why a direct/proxy body failed `body_ok` — surfaced in logs and
+/// `engine_errors` so callers don't see one generic "body failed validation".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyRejectClass {
+    GeoSubstitute,
+    Captcha,
+    Portal,
+    Other,
+}
+
+impl BodyRejectClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GeoSubstitute => "geo-substitute",
+            Self::Captcha => "captcha",
+            Self::Portal => "portal",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Classify a rejected search body. Order matters: Object-moved geo pages
+/// also look like portals; CAPTCHA markers win when present.
+pub fn classify_rejected_body(body: &str) -> BodyRejectClass {
+    let lower = body.to_ascii_lowercase();
+    if lower.contains("captcha")
+        || lower.contains("recaptcha")
+        || lower.contains("hcaptcha")
+        || lower.contains("cf-challenge")
+        || lower.contains("challenge-platform")
+        || lower.contains("wappass")
+        || lower.contains("antispider")
+        || lower.contains("验证码")
+    {
+        return BodyRejectClass::Captcha;
+    }
+    if lower.contains("object moved")
+        || (lower.contains("document.location") && lower.contains("cn.bing.com"))
+        || lower.contains("the document has moved")
+    {
+        return BodyRejectClass::GeoSubstitute;
+    }
+    if lower.contains("access denied")
+        || lower.contains("attention required")
+        || lower.contains("just a moment")
+        || lower.contains("enable javascript and cookies")
+        || lower.contains("checking your browser")
+        || lower.contains("security check")
+        || (lower.contains("<title>") && lower.contains("bing") && !lower.contains("newsitem"))
+    {
+        return BodyRejectClass::Portal;
+    }
+    BodyRejectClass::Other
+}
+
+/// Hosts that recently failed *both* direct and proxy with a challenge-class
+/// body. Next fetch for that host fails fast (no dual-path spam).
+const CHALLENGE_SKIP_SECS: u64 = 600;
+/// Proxy budget when retrying a challenge/geo reject (REQ: ≤2s).
+const CHALLENGE_PROXY_TIMEOUT_SECS: u64 = 2;
+
+static CHALLENGE_SKIPS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, u64>>,
+> = std::sync::OnceLock::new();
+
+fn challenge_skips()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, u64>> {
+    CHALLENGE_SKIPS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn challenge_skip_remaining(host: &str, now: u64) -> u64 {
+    let map = challenge_skips().lock().unwrap_or_else(|e| e.into_inner());
+    match map.get(host) {
+        Some(&until) if until > now => until - now,
+        _ => 0,
+    }
+}
+
+fn note_dual_path_challenge(host: &str) {
+    let now = crate::now_secs();
+    let mut map = challenge_skips().lock().unwrap_or_else(|e| e.into_inner());
+    map.insert(host.to_string(), now.saturating_add(CHALLENGE_SKIP_SECS));
+    // Cap map size the same way direct_fails does.
+    if map.len() > 64 {
+        map.retain(|_, until| *until > now);
+    }
+}
+
+fn is_challenge_class(class: BodyRejectClass) -> bool {
+    matches!(
+        class,
+        BodyRejectClass::GeoSubstitute | BodyRejectClass::Captcha | BodyRejectClass::Portal
+    )
+}
+
+fn looks_like_bing_news_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.contains("infinitescrollajax") || lower.contains("/news/")
+}
+
+/// Process-global counters for CAPTCHA-suspend share and bing_news dual-path
+/// fail rate (REQ observability). Exposed on `/engines` and `/doctor`.
+#[derive(Default)]
+struct SearchObs {
+    /// Engines actually dispatched (not skipped for suspension up-front).
+    engine_dispatch_total: AtomicU64,
+    captcha_suspend_total: AtomicU64,
+    bing_news_attempt_total: AtomicU64,
+    bing_news_dual_path_fail_total: AtomicU64,
+}
+
+static SEARCH_OBS: SearchObs = SearchObs {
+    engine_dispatch_total: AtomicU64::new(0),
+    captcha_suspend_total: AtomicU64::new(0),
+    bing_news_attempt_total: AtomicU64::new(0),
+    bing_news_dual_path_fail_total: AtomicU64::new(0),
+};
+
+fn obs_inc(counter: &AtomicU64) {
+    counter.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Snapshot for `/engines` / `/doctor`. Rates are 0 when the denominator is 0.
+pub fn search_obs_snapshot() -> serde_json::Value {
+    let dispatch = SEARCH_OBS.engine_dispatch_total.load(Ordering::Relaxed);
+    let captcha = SEARCH_OBS.captcha_suspend_total.load(Ordering::Relaxed);
+    let bn_attempts = SEARCH_OBS.bing_news_attempt_total.load(Ordering::Relaxed);
+    let bn_dual = SEARCH_OBS.bing_news_dual_path_fail_total.load(Ordering::Relaxed);
+    let captcha_share = if dispatch == 0 {
+        0.0
+    } else {
+        captcha as f64 / dispatch as f64
+    };
+    let bn_dual_rate = if bn_attempts == 0 {
+        0.0
+    } else {
+        bn_dual as f64 / bn_attempts as f64
+    };
+    serde_json::json!({
+        "engine_dispatch_total": dispatch,
+        "captcha_suspend_total": captcha,
+        "captcha_suspend_share": captcha_share,
+        "bing_news_attempt_total": bn_attempts,
+        "bing_news_dual_path_fail_total": bn_dual,
+        "bing_news_dual_path_fail_rate": bn_dual_rate,
+        "captcha_policy": match captcha_policy() {
+            CaptchaPolicy::Suspend => "suspend",
+            CaptchaPolicy::Demote => "demote",
+        },
+        "captcha_backoff_secs": captcha_ladder(),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // SearchEngine trait
 // ---------------------------------------------------------------------------
 
@@ -155,16 +408,6 @@ pub struct SearchEngineRegistry {
     state: Arc<RwLock<HashMap<String, EngineSuspendState>>>,
 }
 
-/// Progressive backoff: 1st CAPTCHA → 5 min, 2nd → 10 min, 3rd → 30 min, 4th+ → 1 h.
-fn captcha_backoff(count: u32) -> Duration {
-    match count {
-        0 | 1 => Duration::from_secs(300),
-        2 => Duration::from_secs(600),
-        3 => Duration::from_secs(1800),
-        _ => Duration::from_secs(3600),
-    }
-}
-
 impl SearchEngineRegistry {
     pub fn new() -> Self {
         let mut registry = SearchEngineRegistry {
@@ -174,33 +417,50 @@ impl SearchEngineRegistry {
 
         // Register engines. Each engine internally decides whether to use
         // wreq (stealth) or reqwest (plain), and holds its own client.
-        registry.register(baidu::BaiduEngine::new());
-        registry.register(baidu_images::BaiduImagesEngine::new());
-        registry.register(bing::BingEngine::new());
-        registry.register(bing_images::BingImagesEngine::new());
-        registry.register(sogou::SogouEngine::new());
-        registry.register(sogou_wechat::SogouWechatEngine::new());
-        registry.register(duckduckgo::DuckDuckGoEngine::new());
-        registry.register(wikipedia::WikipediaEngine::new());
-        registry.register(stackexchange::StackExchangeEngine::new());
-        registry.register(mdn::MdnEngine::new());
-        registry.register(github_repos::GithubEngine::new());
-        registry.register(arxiv::ArxivEngine::new());
-        registry.register(bing_news::BingNewsEngine::new());
-        registry.register(huggingface::HuggingFaceEngine::new());
-        registry.register(hn::HnEngine::new());
-        registry.register(npm::NpmEngine::new());
-        registry.register(pypi::PypiEngine::new());
-        registry.register(rubygems::RubygemsEngine::new());
-        registry.register(openalex::OpenalexEngine::new());
+        // AGINXBROWSER_DISABLE_ENGINES / AGINXBROWSER_BING_NEWS=0 drop names
+        // before register — CN research ops use this to silence bing_news.
+        let disabled = disabled_engines();
+        let mut register = |engine: Arc<dyn SearchEngine>| {
+            let name = engine.name().to_string();
+            if disabled.contains(&name.to_ascii_lowercase()) {
+                tracing::info!("search: engine {name} disabled via AGINXBROWSER_DISABLE_ENGINES");
+                return;
+            }
+            tracing::info!("search: registered engine {name}");
+            registry.engines.push(engine);
+        };
+        register(Arc::new(baidu::BaiduEngine::new()));
+        register(Arc::new(baidu_images::BaiduImagesEngine::new()));
+        register(Arc::new(bing::BingEngine::new()));
+        register(Arc::new(bing_images::BingImagesEngine::new()));
+        register(Arc::new(sogou::SogouEngine::new()));
+        register(Arc::new(sogou_wechat::SogouWechatEngine::new()));
+        register(Arc::new(duckduckgo::DuckDuckGoEngine::new()));
+        register(Arc::new(wikipedia::WikipediaEngine::new()));
+        register(Arc::new(stackexchange::StackExchangeEngine::new()));
+        register(Arc::new(mdn::MdnEngine::new()));
+        register(Arc::new(github_repos::GithubEngine::new()));
+        register(Arc::new(arxiv::ArxivEngine::new()));
+        if bing_news_enabled() {
+            register(Arc::new(bing_news::BingNewsEngine::new()));
+        } else {
+            tracing::info!("search: engine bing_news disabled via AGINXBROWSER_BING_NEWS");
+        }
+        register(Arc::new(huggingface::HuggingFaceEngine::new()));
+        register(Arc::new(hn::HnEngine::new()));
+        register(Arc::new(npm::NpmEngine::new()));
+        register(Arc::new(pypi::PypiEngine::new()));
+        register(Arc::new(rubygems::RubygemsEngine::new()));
+        register(Arc::new(openalex::OpenalexEngine::new()));
         if let Some(meili) = meilisearch::MeilisearchEngine::from_env() {
             tracing::info!("search: registered engine meilisearch (private index)");
-            registry.register(meili);
+            register(Arc::new(meili));
         }
 
         registry
     }
 
+    #[allow(dead_code)]
     fn register(&mut self, engine: impl SearchEngine + 'static) {
         tracing::info!("search: registered engine {}", engine.name());
         self.engines.push(Arc::new(engine));
@@ -245,13 +505,17 @@ impl SearchEngineRegistry {
             captcha_count: 0,
         });
         s.captcha_count += 1;
-        let backoff = captcha_backoff(s.captcha_count);
-        let duration = backoff.max(base_suspend);
+        let duration = captcha_suspend_duration(s.captcha_count, base_suspend);
         let resume_at = std::time::Instant::now() + duration;
         s.resume_at = Some(resume_at);
+        obs_inc(&SEARCH_OBS.captcha_suspend_total);
+        let policy = match captcha_policy() {
+            CaptchaPolicy::Suspend => "suspend",
+            CaptchaPolicy::Demote => "demote",
+        };
         tracing::warn!(
-            "search: engine {} suspended for {:?} (CAPTCHA #{})",
-            name, duration, s.captcha_count
+            "search: engine {} suspended for {:?} (CAPTCHA #{}, policy={})",
+            name, duration, s.captcha_count, policy
         );
         s.captcha_count
     }
@@ -329,6 +593,7 @@ impl SearchEngineRegistry {
                     suspended,
                     suspend_remaining_secs: remaining,
                     captcha_count: count,
+                    available: !suspended,
                 }
             })
             .collect()
@@ -342,6 +607,8 @@ pub struct EngineHealth {
     pub suspended: bool,
     pub suspend_remaining_secs: u64,
     pub captcha_count: u32,
+    /// `!suspended` — the set callers can actually use right now.
+    pub available: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +695,10 @@ pub async fn native_search(
                 }
             }
 
+            obs_inc(&SEARCH_OBS.engine_dispatch_total);
+            if name == "bing_news" {
+                obs_inc(&SEARCH_OBS.bing_news_attempt_total);
+            }
             let result = engine.search(&query, params).await;
             (name, result)
         })));
@@ -832,9 +1103,16 @@ fn local_socks_proxy_up(addr: &str) -> bool {
 /// direct-first engine (bing_news, duckduckgo, wikipedia, huggingface,
 /// github, arxiv, …).
 pub(crate) fn proxied_plain_client() -> Option<reqwest::Client> {
+    proxied_plain_client_timeout(12)
+}
+
+/// Like [`proxied_plain_client`] with an explicit timeout — challenge/geo
+/// retries use a ≤2s budget so dual-path Object-moved spam does not eat the
+/// full 12s (aginxos REQ search-captcha-challenge).
+pub(crate) fn proxied_plain_client_timeout(timeout_secs: u64) -> Option<reqwest::Client> {
     search_proxy_url().map(|proxy_str| {
         let mut builder = diting::diting_net::client::reqwest_builder_no_env_proxy()
-            .timeout(Duration::from_secs(12))
+            .timeout(Duration::from_secs(timeout_secs))
             .redirect(reqwest::redirect::Policy::none());
         match reqwest::Proxy::all(&proxy_str) {
             Ok(p) => builder = builder.proxy(p),
@@ -1055,11 +1333,15 @@ fn err_chain(e: &reqwest::Error) -> String {
     out
 }
 
-/// Log the first `chars` of a rejected body so operators can see WHAT came
-/// back (challenge page? portal? empty?) from an instance far away.
-fn log_rejected_body(url: &str, path: &str, body: &str) {
+/// Log the first chars of a rejected body with a classified reason so
+/// operators can tell geo-substitute / captcha / portal apart (REQ).
+fn log_rejected_body(url: &str, path: &str, body: &str, class: BodyRejectClass) {
     let head: String = body.chars().take(200).collect();
-    tracing::warn!("search: {path} body failed validation for {url} (len={}): {head:?}", body.len());
+    tracing::warn!(
+        "search: {path} body failed validation ({}) for {url} (len={}): {head:?}",
+        class.as_str(),
+        body.len()
+    );
 }
 
 /// Speculative direct-leg budget (aginxos REQ #414). The direct attempt is a
@@ -1185,6 +1467,12 @@ where
 /// Same as [`get_direct_first`] with a body-validity predicate: when the
 /// direct response's body fails `body_ok`, the proxy retry runs even though
 /// the HTTP layer succeeded.
+///
+/// Challenge / geo-substitute / portal rejects are classified in the error
+/// string (not a single "body failed validation"). For those classes — and
+/// for bing_news infinitescroll URLs — the proxy retry uses a ≤2s budget; a
+/// dual-path challenge sentences the host so the next call fails immediately
+/// instead of re-paying both legs (aginxos REQ search-captcha-challenge).
 pub async fn get_direct_first_if<F>(
     url: &str,
     headers: &[(&str, &str)],
@@ -1197,6 +1485,17 @@ where
     let host = Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_string()));
+
+    // Recent dual-path challenge: fail fast (no probe, no 12s proxy).
+    if let Some(h) = host.as_deref() {
+        let rem = challenge_skip_remaining(h, crate::now_secs());
+        if rem > 0 {
+            return Err(SearchEngineError::Transient(format!(
+                "unavailable: recent dual-path challenge/portal on {h}; retry in {rem}s"
+            )));
+        }
+    }
+
     // Built up front: the skip decision below needs to know whether a proxy
     // exists at all — skipping the probe without a fallback would just fail.
     let proxied = build_proxied_client();
@@ -1217,6 +1516,7 @@ where
 
     let plain = build_plain_client(DIRECT_PROBE_TIMEOUT_SECS);
     let last_err;
+    let mut direct_reject_class: Option<BodyRejectClass> = None;
 
     if skip_direct {
         tracing::debug!(
@@ -1239,8 +1539,13 @@ where
                         }
                         return Ok(body);
                     }
-                    log_rejected_body(url, "direct", &body);
-                    last_err = "direct: body failed validation (geo-substituted?)".into();
+                    let class = classify_rejected_body(&body);
+                    direct_reject_class = Some(class);
+                    log_rejected_body(url, "direct", &body, class);
+                    last_err = format!(
+                        "direct: body failed validation ({})",
+                        class.as_str()
+                    );
                 }
                 Err(_) => {
                     last_err = "direct: read body failed".into();
@@ -1257,12 +1562,26 @@ where
 
     // Attempt 2: proxied retry, only when a proxy is configured.
     if let Some(proxied) = proxied {
-        tracing::info!(
-            "search: direct fetch of {} unusable ({}); retrying via proxy",
-            url,
-            last_err
-        );
-        let mut req = proxied.get(url);
+        // Challenge/geo/portal (or bing_news infinitescroll) → ≤2s proxy budget.
+        let challenge_fast = direct_reject_class.is_some_and(is_challenge_class)
+            || looks_like_bing_news_url(url);
+        let client = if challenge_fast {
+            tracing::info!(
+                "search: direct fetch of {} unusable ({}); retrying via proxy (≤{}s challenge budget)",
+                url,
+                last_err,
+                CHALLENGE_PROXY_TIMEOUT_SECS
+            );
+            proxied_plain_client_timeout(CHALLENGE_PROXY_TIMEOUT_SECS).unwrap_or(proxied)
+        } else {
+            tracing::info!(
+                "search: direct fetch of {} unusable ({}); retrying via proxy",
+                url,
+                last_err
+            );
+            proxied
+        };
+        let mut req = client.get(url);
         for (k, v) in headers {
             req = req.header(*k, *v);
         }
@@ -1270,19 +1589,41 @@ where
             Ok(resp) => match resp.text().await {
                 Ok(body) if body_ok(&body) => Ok(body),
                 Ok(body) => {
-                    log_rejected_body(url, "proxy", &body);
-                    Err(SearchEngineError::Transient(
-                        "proxy: body failed validation too (challenge/portal on both paths)".into(),
-                    ))
+                    let class = classify_rejected_body(&body);
+                    log_rejected_body(url, "proxy", &body, class);
+                    if is_challenge_class(class) {
+                        if let Some(h) = &host {
+                            note_dual_path_challenge(h);
+                        }
+                    }
+                    if looks_like_bing_news_url(url) {
+                        obs_inc(&SEARCH_OBS.bing_news_dual_path_fail_total);
+                    }
+                    Err(SearchEngineError::Transient(format!(
+                        "proxy: body failed validation too ({}; challenge/portal on both paths)",
+                        class.as_str()
+                    )))
                 }
                 Err(e) => Err(SearchEngineError::Transient(format!(
                     "proxy: read body failed: {e}"
                 ))),
             },
-            Err(e) => Err(SearchEngineError::Transient(format!(
-                "direct ({last_err}) + proxy: {}",
-                err_chain(&e)
-            ))),
+            Err(e) => {
+                // Timed-out challenge budget still counts as dual-path fail for
+                // bing_news so the next call can skip via challenge memory.
+                if challenge_fast {
+                    if let Some(h) = &host {
+                        note_dual_path_challenge(h);
+                    }
+                    if looks_like_bing_news_url(url) {
+                        obs_inc(&SEARCH_OBS.bing_news_dual_path_fail_total);
+                    }
+                }
+                Err(SearchEngineError::Transient(format!(
+                    "direct ({last_err}) + proxy: {}",
+                    err_chain(&e)
+                )))
+            }
         };
     }
 
@@ -1532,6 +1873,60 @@ mod tests {
         assert!(!is_cjk_noise_engine("baidu"));
         assert!(!is_cjk_noise_engine("sogou"));
         assert!(!is_cjk_noise_engine("duckduckgo"));
+    }
+
+    // ---- body reject classification / captcha policy (REQ captcha-challenge) ----
+
+    #[test]
+    fn classify_object_moved_as_geo_substitute() {
+        let body = r#"<html><head><title>Object moved</title></head>
+<body><h2>Object moved to <a href="https://cn.bing.com/">here</a>.</h2></body></html>"#;
+        assert_eq!(classify_rejected_body(body), BodyRejectClass::GeoSubstitute);
+    }
+
+    #[test]
+    fn classify_captcha_markers() {
+        assert_eq!(
+            classify_rejected_body("<div class='captcha-box'>验证码</div>"),
+            BodyRejectClass::Captcha
+        );
+        assert_eq!(
+            classify_rejected_body("cf-challenge-running"),
+            BodyRejectClass::Captcha
+        );
+    }
+
+    #[test]
+    fn classify_portal_attention_required() {
+        assert_eq!(
+            classify_rejected_body("<title>Attention Required! | Cloudflare</title>"),
+            BodyRejectClass::Portal
+        );
+    }
+
+    #[test]
+    fn captcha_ladder_defaults() {
+        // No env override in unit tests → historical ladder.
+        assert_eq!(captcha_backoff(1), Duration::from_secs(300));
+        assert_eq!(captcha_backoff(2), Duration::from_secs(600));
+        assert_eq!(captcha_backoff(3), Duration::from_secs(1800));
+        assert_eq!(captcha_backoff(4), Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn captcha_demote_ignores_base_floor() {
+        // Demote path is env-gated; without the env we only assert Suspend
+        // still respects the engine base floor (sogou_wechat 3600).
+        let d = captcha_suspend_duration(1, Duration::from_secs(3600));
+        assert_eq!(d, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn looks_like_bing_news_url_detects_infinitescroll() {
+        assert!(looks_like_bing_news_url(
+            "https://cn.bing.com/news/infinitescrollajax?q=x"
+        ));
+        assert!(!looks_like_bing_news_url("https://www.baidu.com/s?wd=x"));
     }
 
     #[test]
