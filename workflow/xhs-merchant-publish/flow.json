@@ -1,0 +1,71 @@
+{
+  "create": {
+    "width": 1440,
+    "height": 900
+  },
+  "vars": {
+    "publish_url": "https://ark.xiaohongshu.com/app-system/home",
+    "signer_timeout_ms": 60000,
+    "note": "STUB — fill publish_render / batch_create_item after _webmsxyw is green"
+  },
+  "steps": [
+    {
+      "op": "preload",
+      "args": {
+        "recipe": "xhs-sign"
+      },
+      "note": "document-start xhs-sign (passthrough when _webmsxyw missing). Must run before navigate."
+    },
+    {
+      "op": "navigate",
+      "args": {
+        "url": "{{publish_url}}"
+      },
+      "note": "Ark / 千帆 surface — AS signer often absent on bare home; publish page URL may need vars override."
+    },
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "typeof window._webmsxyw === 'function' || document.readyState === 'complete'",
+        "timeout_ms": "{{signer_timeout_ms}}"
+      },
+      "note": "soft wait — predicate stays true on readyState even without signer so the run reaches the branch"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "(function(){return JSON.stringify({has_signer: typeof window._webmsxyw==='function', xs_installed:!!window.__xs_installed, xs_passthrough:window.__xs_passthrough||0, xs_signed:window.__xs_signed||0, url:location.href});})()"
+      },
+      "save": "signer",
+      "note": "observability only — merchant create APIs must not run without has_signer"
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "signer",
+          "is": "contains",
+          "value": "\"has_signer\":true"
+        },
+        "goto": "ready"
+      },
+      "note": "no signer → takeover throw; with signer → stub ready marker (create APIs not wired yet)"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "throw new Error('xhs-merchant-publish: _webmsxyw missing — open /live?session=… or re-import_curl; do not call publish_render unsigned (406)')"
+      },
+      "note": "fail loud; human handoff"
+    },
+    {
+      "id": "ready",
+      "op": "eval",
+      "args": {
+        "script": "'STUB_OK — wire publish_render + batch_create_item here (see flow.md)'"
+      },
+      "save": "stub",
+      "note": "skeleton marker — replace with real merchant create steps when signer path is proven"
+    }
+  ]
+}

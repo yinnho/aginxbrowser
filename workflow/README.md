@@ -21,6 +21,21 @@ generic Web/compat; flows carry the business face.
 `workflow/xhs-login/` owns QR login end-to-end；`scripts/xhs-qr-login.py` is an optional thin `flow/run` CLI only.
 
 
+
+## Named preload recipes (`recipe.js`)
+
+Some directories under `workflow/` are **not** runnable flows — they hold
+document-start recipe bodies (`<name>/recipe.js` + README) that
+`src/session/preload_recipes.rs` `include_str!`s. Edit the JS here; rebuild
+to pick up. Discovery only lists dirs that contain `flow.json`, so these
+never appear in `flow/run{name=…}`.
+
+| Dir | Mount |
+|-----|--------|
+| `xhs-sign/` | `{"recipe":"xhs-sign"}` |
+| `taobao-block-everyhelp/` | `{"recipe":"taobao-block-everyhelp"}` |
+| `taobao-block-qn-header/` | `{"recipe":"taobao-block-qn-header"}` (or `recipes:[…]`) |
+
 ## The working mode (read this first, agent)
 
 You are a delegator, not a browser operator. The engine + this directory

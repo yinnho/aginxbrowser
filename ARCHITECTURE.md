@@ -77,7 +77,9 @@ P2 layering audit; its exception table is empty):
 - **Tests are colocated and massive**: 1453 passing (baseline, `--features screenshot`),
   contract suites live beside the code they pin (e.g. `diting_js/runtime/tests.rs`,
   13.6k lines / 260 tests).
-- **One crate, one binary** — currently `aginxbrowser` with no workspace.
+- **Workspace started.** `crates/diting` is the engine package; the product
+  binary remains `aginxbrowser` at the workspace root. Further splits
+  (`core` / `authoring` / thin bin) are still the §4 target — not done.
 
 ### 3.2 The four debts this program repays
 
@@ -90,6 +92,10 @@ P2 layering audit; its exception table is empty):
 
 ## 4. Target layout — Cargo workspace
 
+> **Progress (2026-10):** `crates/diting` exists and owns the engine.
+> Root `Cargo.toml` is already a workspace (`members = ["crates/diting"]`).
+> The diagram below is still the *end state* (core/authoring/bin split).
+
 ```
 aginxbrowser/                    # workspace root
 ├── ARCHITECTURE.md              # this file
@@ -100,7 +106,7 @@ aginxbrowser/                    # workspace root
 │   ├── authoring/               # aginxbrowser-authoring: mouth (feature-gated)
 │   └── aginxbrowser/            # the binary + faces (doors)
 ├── js/                          # bootstrap.js — part of diting, moves with it
-├── flows/ · web/ · docs/ · ...
+├── workflow/ · web/ · docs/ · ...
 ```
 
 ### Crate responsibilities (one line each)
