@@ -31,6 +31,7 @@ mod panel;
 #[cfg(all(feature = "screenshot", unix))]
 mod panel_drm;
 mod rate;
+mod risk_markers;
 // HTTP route handlers split by surface (ARCHITECTURE.md P2 batch 2):
 // acquisition (fetch/search/click/eval/download), sessions (the stateful
 // actor face + flows + accounts), outputs (screenshot/video/pdf). The

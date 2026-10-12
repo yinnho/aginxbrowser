@@ -67,15 +67,25 @@ pub struct UrlRule {
     pub verdict: Verdict,
 }
 
-/// The seed rule table: captcha.rs's hardcoded markers generalized, plus
-/// the login fronts of the sites the playbook flows drive. A needle
-/// appearing in two rules resolves by list order — keep challenge and
-/// captcha needles ahead of login ones.
+/// The seed rule table: Ali challenge needles from [`crate::risk_markers`],
+/// generic captcha interstitials, plus the login fronts of the sites the
+/// playbook flows drive. A needle appearing in two rules resolves by list
+/// order — keep challenge and captcha needles ahead of login ones.
 pub const DEFAULT_RULES: &[UrlRule] = &[
-    // Risk control (taobao/tmall TMD: punish landings and x5 tokens).
-    UrlRule { needle: "_____tmd_____/punish", verdict: Verdict::Challenge },
-    UrlRule { needle: "punish.taobao.com", verdict: Verdict::Challenge },
-    UrlRule { needle: "punish.tmall.com", verdict: Verdict::Challenge },
+    // Risk control (Ali TMD / punish hosts) — needles from risk_markers
+    // so har/captcha/verdict cannot drift. Login fronts stay below.
+    UrlRule {
+        needle: crate::risk_markers::ALI_TMD_PUNISH_PATH,
+        verdict: Verdict::Challenge,
+    },
+    UrlRule {
+        needle: crate::risk_markers::ALI_PUNISH_HOSTS[0],
+        verdict: Verdict::Challenge,
+    },
+    UrlRule {
+        needle: crate::risk_markers::ALI_PUNISH_HOSTS[1],
+        verdict: Verdict::Challenge,
+    },
     // CAPTCHA interstitials.
     UrlRule { needle: "sorry.google.com", verdict: Verdict::Captcha },
     UrlRule { needle: "/sorry/", verdict: Verdict::Captcha },

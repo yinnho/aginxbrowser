@@ -77,16 +77,9 @@ pub fn detect_captcha_type(url: &str, html: Option<&str>) -> Option<CaptchaType>
     if url.contains("/antispider") || url.contains("wappass.baidu.com") {
         return Some(CaptchaType::SliderCaptcha);
     }
-    // Ali/Taobao risk control: the punish page is a slider; x5sec is the
-    // token appended once risk control has engaged. 1688 lands the same
-    // wall on the store's own domain at `_____tmd_____/punish` — no
-    // punish.* host ever appears (the kongze field report). Same needle
-    // the session faces already know (har::challenge_kind, verdict.rs).
-    if url.contains("punish.taobao.com")
-        || url.contains("punish.tmall.com")
-        || url.contains("x5sec")
-        || url.contains("_____tmd_____/punish")
-    {
+    // Ali/Taobao risk control — shared with har/verdict
+    // (`risk_markers::ali_url_looks_walled`: punish hosts, TMD path, x5sec).
+    if crate::risk_markers::ali_url_looks_walled(url) {
         return Some(CaptchaType::SliderCaptcha);
     }
     if url.contains("challenge-platform") || url.contains("challenges.cloudflare.com") {
@@ -116,24 +109,10 @@ pub fn detect_captcha_type(url: &str, html: Option<&str>) -> Option<CaptchaType>
             // 用户频率限制
             return Some(CaptchaType::SliderCaptcha);
         }
-        // Ali/Taobao MTop risk-control JSON served with HTTP 200 — the outer
-        // response looks like success, only the `ret` array says otherwise.
-        if html.contains("FAIL_SYS_USER_VALIDATE")
-            || html.contains("RGV587")
-            || html.contains("x5secdata")
-        {
-            return Some(CaptchaType::SliderCaptcha);
-        }
-        // 1688 serves the punish page in place: the product URL answers
-        // HTTP 200 and only the body betrays it — `<title>验证码拦截</title>`
-        // plus the tmd endpoints in its scripts. That title is how the
-        // kongze operator detected the wall by hand; here it becomes a
-        // machine-readable event. Same needles as har::body_challenge.
-        if html.contains("punish.taobao.com")
-            || html.contains("punish.tmall.com")
-            || html.contains("_____tmd_____/punish")
-            || html.contains("\u{9a8c}\u{8bc1}\u{7801}\u{62e6}\u{622a}")
-        {
+        // Ali MTop JSON / in-place 1688 punish HTML — shared with har
+        // (`ali_body_looks_walled`: FAIL_SYS_*, x5secdata, TMD path,
+        // punish hosts, captcha-intercept title).
+        if crate::risk_markers::ali_body_looks_walled(html) {
             return Some(CaptchaType::SliderCaptcha);
         }
     }

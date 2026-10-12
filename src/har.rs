@@ -99,39 +99,17 @@ pub fn media_kind(url: &str, mime: Option<&str>) -> Option<&'static str> {
 /// (the tmall report: the API redirect into `_____tmd_____/punish` looked
 /// like a normal response row). Returns the short challenge tag.
 pub fn challenge_kind(url: &str) -> Option<&'static str> {
-    // TMD (taobao/tmall anti-bot): the punish path lands the challenge page.
-    // Path-shaped — query/fragment stripped first, same convention as
-    // media_kind — so a mere query param naming the marker never trips it.
-    let bare = url.split(['?', '#']).next().unwrap_or(url);
-    let lower = bare.to_ascii_lowercase();
-    if lower.contains("_____tmd_____/punish") {
-        return Some("punish");
-    }
-    // The dedicated punish hosts (where the x5sec slider lives) are host-shaped
-    // and unambiguous — a redirect that lands there IS the wall, no path
-    // convention needed.
-    if lower.contains("punish.taobao.com") || lower.contains("punish.tmall.com") {
-        return Some("punish");
-    }
-    None
+    // Ali TMD / punish hosts — shared table in risk_markers (query stripped
+    // for the path needle; see ali_url_challenge_kind).
+    crate::risk_markers::ali_url_challenge_kind(url)
 }
 
 /// Risk control that answers 200 with an ordinary-looking JSON body. The
 /// taobao x5 wall fronts MTop requests this way: the URL stays the plain
-/// API endpoint, only the `ret` array (`FAIL_SYS_USER_VALIDATE`,
-/// `RGV587_ERROR::SM`) or an `x5secdata` field says the response is a
-/// challenge. URL-shape detection can never see this — the body is the
-/// only signal.
+/// API endpoint, only the `ret` array / `x5secdata` field says the
+/// response is a challenge. Shared markers: [`crate::risk_markers`].
 pub fn body_challenge(body: &str) -> Option<&'static str> {
-    if body.contains("FAIL_SYS_USER_VALIDATE")
-        || body.contains("RGV587")
-        || body.contains("x5secdata")
-        || body.contains("_____tmd_____/punish")
-    {
-        Some("punish")
-    } else {
-        None
-    }
+    crate::risk_markers::ali_body_challenge_kind(body)
 }
 
 /// Every anti-bot challenge the session's traffic hit, as structured rows —
