@@ -970,7 +970,7 @@ Replace the session's document-start preload group (issue #96). Sources run befo
 | Field | Type | Required | Description |
 |------|------|------|------|
 | scripts | string[] | ✅ | Full JS sources, in order. `[]` clears the group |
-| recipe | string | ❌ | Builtin recipe name appended after `scripts` (e.g. `"xhs-sign"`) — the maintained document-start wrapper for that site (#84). Unknown names are an error, not a silent no-op |
+| recipe | string | ❌ | Builtin recipe name appended after `scripts` (e.g. `"xhs-sign"`) — opt-in document-start wrapper (#84). Unknown names are an error, not a silent no-op. **Not** auto-mounted by host; platform policy lives in `workflow/` |
 
 Set the group before the session's first navigate (create without `url` → preload → navigate) and it applies to every navigation from then on, `set_content` included.
 
@@ -984,17 +984,19 @@ curl -sS -X POST http://127.0.0.1:8089/session/s_42/preload \
 
 **Response:** `{"count": N}`
 
-#### Builtin recipes (auto-mounted, #84)
+#### Builtin recipes (opt-in only, #84)
 
-The engine ships maintained document-start recipes and **auto-mounts them on matching navigations** — no preload call needed. They ride before any user-set group; the `navigate` response names what applied in a `preloads` field (e.g. `"preloads": ["xhs-sign"]`, absent when none did):
+Platform signing / logout-fuse policy lives in **`workflow/`** (delivery unit = engine + flow), not in the engine's default navigation path. Host auto-mount on `*.xiaohongshu.com` / `*.xhslink.com` was removed 2026-10-12.
 
-| Recipe | Domain match | What it does |
+The engine still ships the maintained `xhs-sign` source for explicit callers:
+
+| Recipe | How to mount | What it does |
 |------|------|------|
-| `xhs-sign` (alias `xhs`) | `*.xiaohongshu.com`, `*.xhslink.com` | xhs signing wrapper: swallows the page's own `x-s`/`x-t` (computed in-engine, rejected 406 by the server) and re-signs both at send time via the page's own `_webmsxyw`; fuses `/sso/logout` (unsigned-API 406s misread as session death) with a synthetic 200; mounts itself as the fetch/XHR natives before the inline jsvmp can capture them |
+| `xhs-sign` (alias `xhs`) | `POST /session/{id}/preload` with `{"recipe":"xhs-sign"}`, or paste equivalent JS via flow `preload` / `eval` | xhs signing wrapper: swallows the page's own `x-s`/`x-t` (computed in-engine, rejected 406 by the server) and re-signs both at send time via the page's own `_webmsxyw`; fuses `/sso/logout` (unsigned-API 406s misread as session death) with a synthetic 200; mounts itself as the fetch/XHR natives before the inline jsvmp can capture them |
 
 Observability counters live on `window` for post-hoc checks via `eval`: `__xs_installed` (mounted), `__xs_swallowed` (page signatures swallowed), `__xs_signed` (fresh signatures issued), `__xs_fuse` (logout attempts defused).
 
-Off-domain use (or on an engine predating auto-mount): `{"recipe": "xhs-sign"}` mounts it explicitly. The kill switch for the whole auto-mount layer is `AGINXBROWSER_DISABLE_SITE_PRELOAD=1`.
+`navigate`'s `preloads` field remains on the wire but stays empty while no host auto-mounts apply (user / recipe= scripts are not listed there). Prefer create-without-`url` → preload → navigate so document-start beats the page's parse-time capture. The former kill switch `AGINXBROWSER_DISABLE_SITE_PRELOAD=1` is obsolete (nothing auto-mounts).
 
 ### POST /session/{id}/state
 

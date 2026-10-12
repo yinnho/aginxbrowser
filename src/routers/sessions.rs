@@ -410,7 +410,8 @@ pub(crate) struct SessionPreloadBody {
     #[serde(default)]
     scripts: Vec<String>,
     /// Builtin recipe name appended after `scripts` (e.g. "xhs-sign") —
-    /// the maintained document-start wrapper for that site (#84).
+    /// opt-in document-start wrapper (#84). Not auto-mounted by host;
+    /// platform flows own the default path.
     #[serde(default)]
     recipe: Option<String>,
 }

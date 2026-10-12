@@ -43,6 +43,9 @@ docs/**
 /api.js
 /index.web-*.js
 
+# agent/local scratch (Claude memory imports, etc.) — never committed
+.local/
+
 # working docs & credentials — never committed
 HANDOFF-*.md
 scripts/__pycache__/

@@ -104,6 +104,13 @@ set_files 的 `files` 数组无法从 vars 结构化喂入；单张可用（`{{i
 张数，与 Rust 面同语义。——这是引擎面一个真实缺口（数组 var 无法整叶
 进非 http step 的结构化参数），flow.md 记录在此，暂不改引擎。
 
+## 平台策略归属（2026-10-12）
+
+引擎**不再**按 `*.xiaohongshu.com` / `*.xhslink.com` 自动挂载 `xhs-sign`。
+签名补丁 + logout 保险丝由本 flow 的 `preload`（document-start）+ 后续 `eval`
+（`__xs_installed` 互斥兜底）自管。裸会话要同能力：先
+`POST /session/:id/preload` `{"recipe":"xhs-sign"}`，再 navigate。
+
 ## 登录配方（引擎侧续票 → 引擎内 QR → import_curl 兜底）
 
 个人号无 API、无账密登录（扫码）→ 登录态三级路线：

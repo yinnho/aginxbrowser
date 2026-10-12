@@ -1,33 +1,31 @@
-//! Builtin document-start recipes and per-host auto-mounting (#84).
+//! Named document-start recipes (opt-in) — no per-host auto-mount.
 //!
-//! session_preload (802c3d7) shipped the document-start hook but no
-//! content: the xhs resign wrapper lived only in workflow/xhs-post's
-//! flow.json, so plain session callers could not fix the stuck
-//! comments even on a release that carried the mechanism — the field
-//! report that reopened #84. Builtin recipes close the gap from both
-//! ends: the engine auto-mounts them on matching hosts (zero-config,
-//! the reporter's option 2), and session_preload takes a `recipe` name
-//! for explicit/off-domain use (option 1). Navigate responses list what
-//! was applied (option 3).
+//! Platform policy (signing wrappers, logout fuses, site quirks) lives in
+//! `workflow/<name>/`, not in the engine's default navigation path. The
+//! `xhs-sign` recipe remains callable via `POST /session/:id/preload`
+//! `{"recipe":"xhs-sign"}` (or alias `"xhs"`) when a caller or flow wants
+//! the maintained document-start wrapper without pasting the source —
+//! but matching `*.xiaohongshu.com` / `*.xhslink.com` no longer mounts it
+//! automatically (demoted 2026-10-12: delivery unit = engine + flow;
+//! earlier auto-mount was #84 / batch 286, reversed to match the
+//! BUILTIN_FLOWS revoke of 2026-10-02).
+//!
+//! Lineage of the script body: the eval-time mega patch from
+//! `workflow/xhs-post/flow.json`, reshaped for the www read path
+//! (swallow page x-s/x-t and re-sign — page VM signatures computed
+//! in-engine come out wrong; CDP bridge measured comment/page 461→200).
+//! Document-start is what makes it win before inline jsvmp captures
+//! fetch/XHR natives. `__xs_installed` keeps the publish flow's eval
+//! patch from double-wrapping. Logout fuse stays (unsigned-API 406s
+//! misread as session death trigger the page's own /sso/logout).
 
 /// Canonical recipe name for the xhs signing wrapper.
 pub const XHS_SIGN_NAME: &str = "xhs-sign";
 
 /// The xhs document-start signing wrapper (#84, batch 286).
 ///
-/// Lineage: the eval-time mega patch from workflow/xhs-post/flow.json
-/// (live-proven on the publish path), reshaped for the www read path.
-/// The page VM's own x-s is computed inside this engine and comes out
-/// wrong (comment/page 406), so where the mega patch signs only when
-/// missing, this variant swallows the page's x-s/x-t and re-issues both
-/// at send time — the semantics measured on the CDP bridge
-/// (comment/page 461→200). Document-start is what makes it win at all:
-/// the inline jsvmp captures window.fetch/XHR natives at parse time, so
-/// the natives it captures are these wrappers. The same
-/// `__xs_installed` flag means the publish flow's eval patch sees it
-/// and bails instead of double-wrapping. The logout fuse stays
-/// (2026-09-24: unsigned-API 406s misread as session death trigger the
-/// page's own /sso/logout; synthetic 200s defuse it).
+/// Opt-in only — see module docs. Observability on `window`:
+/// `__xs_installed` / `__xs_swallowed` / `__xs_signed` / `__xs_fuse`.
 pub const XHS_SIGN: &str = r#"(() => {
   if (window.__xs_installed) return 'already';
   window.__xs_installed = true;
@@ -133,31 +131,26 @@ pub fn resolve(name: &str) -> Option<&'static str> {
     }
 }
 
-/// Builtin recipe scripts that apply to this navigation URL, in mount
-/// order (before any user-set group).
-fn builtin_scripts(url: &str) -> Vec<&'static str> {
-    if site_preloads_disabled() {
-        return Vec::new();
-    }
-    if is_xhs_url(url) {
-        vec![XHS_SIGN]
-    } else {
-        Vec::new()
-    }
+/// Builtin recipe scripts that apply to this navigation URL.
+///
+/// Always empty: site recipes are not auto-mounted. Kept so navigate /
+/// create keep calling one function (`effective_scripts`) without a
+/// special case; a future opt-in host table would land here behind an
+/// explicit product decision, not by default.
+fn builtin_scripts(_url: &str) -> Vec<&'static str> {
+    Vec::new()
 }
 
 /// Report-only view of [`builtin_scripts`] — the names surfaces quote
-/// (navigate responses, docs) without the source body.
+/// (navigate responses) without the source body. Always empty while
+/// auto-mount is off.
 pub fn builtin_names(url: &str) -> Vec<&'static str> {
-    if builtin_scripts(url).is_empty() {
-        Vec::new()
-    } else {
-        vec![XHS_SIGN_NAME]
-    }
+    let _ = url;
+    Vec::new()
 }
 
-/// The document-start group for a navigation: builtin recipes first,
-/// then the user group unchanged.
+/// The document-start group for a navigation: any future builtin
+/// recipes would ride first; today this is just the user group.
 pub fn effective_scripts(url: &str, user: &[String]) -> Vec<String> {
     builtin_scripts(url)
         .into_iter()
@@ -166,71 +159,40 @@ pub fn effective_scripts(url: &str, user: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// xiaohongshu.com and its subdomains, plus xhslink.com (the short-link
-/// host — a requested xhslink.com URL redirects to a www document, and
-/// the wrapper no-ops until the landing page defines `_webmsxyw`, so
-/// mounting on the hop is what carries the recipe through the chain).
-fn is_xhs_url(url: &str) -> bool {
-    let Some(host) = url::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_string)) else {
-        return false;
-    };
-    host == "xiaohongshu.com"
-        || host.ends_with(".xiaohongshu.com")
-        || host == "xhslink.com"
-        || host.ends_with(".xhslink.com")
-}
-
-fn site_preloads_disabled() -> bool {
-    site_preloads_disabled_from(std::env::var("AGINXBROWSER_DISABLE_SITE_PRELOAD").ok().as_deref())
-}
-
-fn site_preloads_disabled_from(v: Option<&str>) -> bool {
-    v == Some("1")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn builtin_matches_xiaohongshu_hosts_only() {
+    fn no_host_auto_mount() {
         for url in [
             "https://www.xiaohongshu.com/explore?channel_id=homefeed_recommend",
             "https://xiaohongshu.com/",
             "http://edith.xiaohongshu.com/api/sns/web/v1/feed",
             "https://xhslink.com/aBc123",
-        ] {
-            assert_eq!(builtin_names(url), vec!["xhs-sign"], "should match: {url}");
-        }
-        // Look-alikes must not match: host suffix, not substring.
-        for url in [
-            "https://example.com/xiaohongshu.com/path",
-            "https://xiaohongshu.com.evil.io/",
-            "https://notxiaohongshu.com/",
-            "https://xhslink.com.evil.io/a",
+            "https://example.com/",
             "about:blank",
-            "not a url",
         ] {
-            assert!(builtin_names(url).is_empty(), "should not match: {url}");
+            assert!(
+                builtin_names(url).is_empty(),
+                "auto-mount must stay off: {url}"
+            );
+            assert_eq!(
+                effective_scripts(url, &[]),
+                Vec::<String>::new(),
+                "empty user group stays empty: {url}"
+            );
         }
     }
 
     #[test]
-    fn effective_puts_builtin_before_user_group() {
-        // Creation navigation (session_thread's initial goto) arrives here
-        // with an empty user group — builtin-only is the whole mount.
-        assert_eq!(
-            effective_scripts("https://www.xiaohongshu.com/explore", &[]),
-            vec![XHS_SIGN.to_string()]
-        );
+    fn effective_passes_user_group_unchanged() {
         let user = vec!["window.__mine = 1;".to_string()];
-        let eff = effective_scripts("https://www.xiaohongshu.com/explore", &user);
-        assert_eq!(eff.len(), 2);
-        assert!(eff[0].contains("__xs_installed"), "builtin rides first");
-        assert_eq!(eff[1], "window.__mine = 1;");
-        // Off-domain: user group only, untouched.
-        let off = effective_scripts("https://example.com/", &user);
-        assert_eq!(off, user);
+        assert_eq!(
+            effective_scripts("https://www.xiaohongshu.com/explore", &user),
+            user
+        );
+        assert_eq!(effective_scripts("https://example.com/", &user), user);
     }
 
     #[test]
@@ -254,13 +216,5 @@ mod tests {
         ] {
             assert!(XHS_SIGN.contains(needle), "script lost: {needle}");
         }
-    }
-
-    #[test]
-    fn kill_switch_is_exact_value() {
-        assert!(site_preloads_disabled_from(Some("1")));
-        assert!(!site_preloads_disabled_from(Some("0")));
-        assert!(!site_preloads_disabled_from(Some("true")));
-        assert!(!site_preloads_disabled_from(None));
     }
 }
