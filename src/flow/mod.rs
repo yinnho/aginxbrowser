@@ -738,9 +738,30 @@ async fn exec_step(
                     scripts.push(s.to_string());
                 }
             }
-            mgr.send(sid, |reply| C::SetPreload { scripts, reply })
+            let apply_now = a.get("apply_now").and_then(|v| v.as_bool()).unwrap_or(false);
+            let resp = mgr
+                .send(sid, |reply| C::SetPreload {
+                    scripts: scripts.clone(),
+                    reply,
+                })
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
+            // Document-start alone only arms the *next* navigation. When a
+            // flow attaches to an already-open page (x-reply / x-follow),
+            // `apply_now` also evaluates the same sources on the current
+            // document so install-only recipes (e.g. x-p256) take effect.
+            if apply_now {
+                for (i, src) in scripts.iter().enumerate() {
+                    mgr.send(sid, |reply| C::Eval {
+                        script: src.clone(),
+                        timeout_ms: None,
+                        reply,
+                    })
+                    .await
+                    .map_err(|e| format!("preload apply_now script[{i}]: {e}"))?;
+                }
+            }
+            Ok(resp)
         }
         "screenshot" => {
             let text = mgr

@@ -1,5 +1,7 @@
 # x-reply
 
+> 2026-10-12：P-256 收成 named recipe `x-p256`（`preload` + `apply_now`），本 flow 不再内联库正文。
+
 Post a tweet or a reply on X with the full write-op anti-automation header set
 (`x-client-transaction-id` + `x-twitter-session-signature` trio), generated
 in-page. Five steps, all `eval`:

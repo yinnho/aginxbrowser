@@ -115,13 +115,11 @@ publish 页 → `eval` 补丁（`__xs_installed` 互斥兜底）。先挂 docume
 
 个人号无 API、无账密登录（扫码）→ 登录态三级路线：
 
-0. **www 小号/重登首选：引擎内 QR**——`python3 scripts/xhs-qr-login.py
-   --account <名>`（09-25 手动链固化）：建带 account 会话 → preload
-   mega+QR 钩子 → 登录页自己的 `qrcode/create` → 本地渲染 `data.url`
-   → 手动签名 status 轮询（页面轮询在引擎不跑，visibility quirk，这步
-   是承重墙别"简化"掉）→ `code_status:2` 的 Set-Cookie 自动落 jar 并
-   写回账户位。**别重复 create**——09-22 风控触发面就是同会话多 QR+狂轮询。
-   `--render-only` 可干跑到出码。
+0. **www 小号/重登首选：`workflow/xhs-login`**——`POST /flow/run {"name":"xhs-login",
+   "session_id", "vars":{"mode":"qr"}}`（或 thin CLI `scripts/xhs-qr-login.py
+   --account <名>`）。create bare → preload `xhs-sign`+`xhs-qrcode`+QR 钩子 →
+   navigate → SVG `qr_data`/`qr_shot` → 签名 status 轮询。**别重复 create**——
+   09-22 风控触发面就是同会话多 QR+狂轮询。cookies 模式见该 flow 的 `mode=cookies`。
 1. **首选：引擎侧续票**（flow 步 1.6 已内置，手动配合同理）。前提=TGC
    （`customer-sso-sid`）还活着（它比 galaxy AT 长寿得多）：
    任意 xiaohongshu.com 页面上 `_webmsxyw('/api/cas/customer/web/service-ticket',

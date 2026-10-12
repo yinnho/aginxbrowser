@@ -27,6 +27,8 @@
 //! by taobao-* / tmall-* flows so the script is not pasted eight times.
 //! `taobao-block-qn-header` blocks qn_header / microapp-loader / workbench
 //! script injection on publish pages (four publish flows share one body).
+//! `xhs-qrcode` is the vendored QR lib for `xhs-login` (no inline in flow.json).
+//! `x-p256` is the shared X.com P-256 helper for write flows.
 
 /// Canonical recipe name for the xhs signing wrapper.
 pub const XHS_SIGN_NAME: &str = "xhs-sign";
@@ -58,12 +60,30 @@ pub const TAOBAO_BLOCK_QN_HEADER_NAME: &str = "taobao-block-qn-header";
 /// `{"recipe":"taobao-block-qn-header"}` (alias `"taobao-qn-header"`).
 pub const TAOBAO_BLOCK_QN_HEADER: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/workflow/taobao-block-qn-header/recipe.js"));
 
+/// Canonical recipe name for the xhs QR SVG library (qrcode-generator).
+pub const XHS_QRCODE_NAME: &str = "xhs-qrcode";
+
+/// Vendored qrcode-generator used by `workflow/xhs-login` to paint a scannable
+/// SVG without inlining ~20KB into `flow.json`.
+pub const XHS_QRCODE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/workflow/xhs-qrcode/recipe.js"));
+
+
+/// Canonical recipe name for the shared X.com in-page P-256 helper.
+pub const X_P256_NAME: &str = "x-p256";
+
+/// BigInt / Jacobian P-256 for X write flows (`x-reply` / `x-follow`).
+/// Installs `globalThis.P256`. Prefer flow `preload` with `apply_now` when
+/// attaching to an already-navigated session.
+pub const X_P256: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/workflow/x-p256/recipe.js"));
+
 /// Resolve a recipe name (aliases included) to its source. None for
 /// unknown names — callers surface the error rather than silently
 /// mounting nothing.
 pub fn resolve(name: &str) -> Option<&'static str> {
     match name {
         XHS_SIGN_NAME | "xhs" => Some(XHS_SIGN),
+        XHS_QRCODE_NAME => Some(XHS_QRCODE),
+        X_P256_NAME => Some(X_P256),
         TAOBAO_BLOCK_EVERYHELP_NAME | "taobao-everyhelp" => Some(TAOBAO_BLOCK_EVERYHELP),
         TAOBAO_BLOCK_QN_HEADER_NAME | "taobao-qn-header" => Some(TAOBAO_BLOCK_QN_HEADER),
         _ => None,
@@ -142,6 +162,8 @@ mod tests {
         assert!(resolve("taobao-everyhelp").is_some());
         assert!(resolve("taobao-block-qn-header").is_some());
         assert!(resolve("taobao-qn-header").is_some());
+        assert!(resolve("xhs-qrcode").is_some());
+        assert!(resolve("x-p256").is_some());
         assert!(resolve("nope").is_none());
     }
 
@@ -179,6 +201,20 @@ mod tests {
                 TAOBAO_BLOCK_QN_HEADER.contains(needle),
                 "script lost: {needle}"
             );
+        }
+    }
+
+    #[test]
+    fn xhs_qrcode_script_carries_the_contract() {
+        for needle in ["var qrcode", "createSvgTag", "globalThis.qrcode"] {
+            assert!(XHS_QRCODE.contains(needle), "script lost: {needle}");
+        }
+    }
+
+    #[test]
+    fn x_p256_script_carries_the_contract() {
+        for needle in ["globalThis.P256", "genKeyPair", "Jacobian", "0xffffffff00000001"] {
+            assert!(X_P256.contains(needle), "script lost: {needle}");
         }
     }
 }

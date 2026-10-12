@@ -995,6 +995,8 @@ The engine still ships the maintained `xhs-sign` source for explicit callers:
 | Recipe | How to mount | What it does |
 |------|------|------|
 | `xhs-sign` (alias `xhs`) | `POST /session/{id}/preload` `{"recipe":"xhs-sign"}`, or flow step `{"op":"preload","args":{"recipe":"xhs-sign"}}`, or paste JS via flow `preload`/`eval` | xhs signing wrapper: swallows the page's own `x-s`/`x-t` (computed in-engine, rejected 406 by the server) and re-signs both at send time via the page's own `_webmsxyw`; fuses `/sso/logout` (unsigned-API 406s misread as session death) with a synthetic 200; mounts itself as the fetch/XHR natives before the inline jsvmp can capture them |
+| `xhs-qrcode` | flow `preload` `{"recipes":["xhs-sign","xhs-qrcode"]}` (used by `xhs-login`) | vendored qrcode-generator for scannable SVG QR — keeps ~20KB out of `flow.json` |
+| `x-p256` | flow `preload` `{"recipe":"x-p256","apply_now":true}` (`x-reply` / `x-follow`) | shared in-page P-256 for X write headers; `apply_now` evals on the current document when attaching to a live session |
 
 Observability counters live on `window` for post-hoc checks via `eval`: `__xs_installed` (mounted), `__xs_swallowed` (page signatures swallowed), `__xs_signed` (fresh signatures issued), `__xs_fuse` (logout attempts defused).
 

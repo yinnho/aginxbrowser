@@ -2,7 +2,7 @@
 
 对齐 `doudian-login` / `taobao-login`：**出码 → 人扫 → 回执 `session_id`**。
 不依赖 `scripts/xhs-qr-login.py` 画码；SVG 二维码在 flow 内用 vendored
-`qrcode.min.js` 生成（`saved.qr_data` + `#__xhs_qr_panel` 截图 `qr_shot`）。
+`xhs-qrcode` recipe 生成（`saved.qr_data` + `#__xhs_qr_panel` 截图 `qr_shot`）。
 
 ## 人只需要做一件事
 
@@ -16,7 +16,7 @@
 ### A. `mode=qr`（默认）— 引擎内扫码
 
 ```
-preload xhs-sign + QR hook
+preload xhs-sign + xhs-qrcode + QR hook
   → navigate login
   → ensure_qr（优先页内 create）
   → render_qr → saved.qr_data（data:image/svg+xml;base64,…）
@@ -66,10 +66,10 @@ navigate `land_url` → 签名 `user/me` 验活。形态等同 `import_curl`，�
 
 | id | op | 作用 |
 |---|---|---|
-| preload | preload | `recipe=xhs-sign` + QR hook（两种 mode 都跑） |
+| preload | preload | `recipes=[xhs-sign,xhs-qrcode]` + QR hook（两种 mode 都跑） |
 | route | branch | `mode=cookies` → cookies_nav |
 | nav_login…poll | … | QR 出码 / 画码 / 轮询 |
-| render_qr | eval | vendored `qrcode.min.js` → SVG data URL + DOM 面板 |
+| render_qr | eval | vendored `xhs-qrcode` recipe → SVG data URL + DOM 面板 |
 | qr_shot | screenshot | `#__xhs_qr_panel`（同 doudian/taobao 的 `qr_shot`） |
 | cookies_* | … | 导入 jar 验活 |
 | end | eval | 收束 |
