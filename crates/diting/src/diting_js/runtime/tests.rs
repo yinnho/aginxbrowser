@@ -15334,6 +15334,62 @@
     }
 
     #[test]
+    fn test_performance_measure_resolves_timing_attribute_names() {
+        // User Timing L2: a start/end string that names a PerformanceTiming
+        // attribute resolves against the timing object, relative to
+        // navigationStart — PDD's perf SDK measures from 'navigationStart'
+        // on every boot and Chrome hands it 0 where we used to throw
+        // SyntaxError (poisoning the goods-list React mount, 2026-10-12).
+        // Unknown names still throw; a page's own mark with the same name
+        // wins over the timing fallback.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            const nav = performance.measure('from-nav', 'navigationStart');
+            performance.mark('custom');
+            const toCustom = performance.measure('to-custom', 'navigationStart', 'custom');
+            let threw = 'no-throw';
+            try { performance.measure('x', 'definitely-not-a-timing-field'); } catch (e) { threw = e.name; }
+            return [
+                nav.startTime === 0,
+                Number.isFinite(nav.duration),
+                toCustom.startTime === 0,
+                Number.isFinite(toCustom.duration),
+                threw,
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([true, true, true, true, "SyntaxError"])
+        );
+    }
+
+    #[test]
+    fn test_window_scalar_faces_exist_like_chrome() {
+        // window.name was absent entirely and PDD's SDK did window.name.split
+        // inside a windowName getter — the TypeError killed the goods-list
+        // React mount (2026-10-12). name/status are writable "" defaults;
+        // origin tracks location; closed is false.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt.evaluate(r#"
+            const before = window.name;
+            window.name = 'renamed';
+            return [
+                before, window.name, 'name' in window,
+                window.status, typeof window.origin, window.origin === location.origin,
+                window.closed === false,
+            ];
+        "#).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!([
+                "", "renamed", true,
+                "", "string", true,
+                true,
+            ])
+        );
+    }
+
+    #[test]
     fn test_performance_observer_supported_entry_types_is_honest() {
         // PerformanceObserver.supportedEntryTypes (exposed upstream in the
         // #840 batch) must list exactly the entry types the Performance

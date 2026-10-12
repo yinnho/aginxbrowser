@@ -5,6 +5,8 @@ fn main() {
     println!("cargo:rerun-if-changed=js/fetch.js");
     println!("cargo:rerun-if-changed=js/xhr.js");
     println!("cargo:rerun-if-changed=js/domparser.js");
+    println!("cargo:rerun-if-changed=js/performance.js");
+    println!("cargo:rerun-if-changed=js/window_faces.js");
     println!("cargo:rerun-if-changed=js/interface_sweep.js");
     println!("cargo:rerun-if-changed=js/message_port.js");
     println!("cargo:rerun-if-changed=js/fetch_probe.js");
@@ -64,6 +66,13 @@ fn main() {
     // bootstrap.js wholesale — the XML gates and node classes it names are
     // bootstrap bindings, touched only at parseFromString call time.
     let domparser_js = include_str!("js/domparser.js");
+    // Seventh script (#98 ratchet split): the Performance family moved out
+    // of bootstrap.js wholesale — bootstrap helpers are shared realm
+    // bindings, touched only at call time.
+    let performance_js = include_str!("js/performance.js");
+    // Window-level scalar faces (name/status/origin/closed) — defaults plus
+    // live getters, nothing call-time dependent on earlier scripts.
+    let window_faces_js = include_str!("js/window_faces.js");
     // LAST script (#236 absorption split): the snapshot-time interface sweeps
     // walk globalThis to finish every interface (native marks, non-enumerable
     // globals, enumerable members, WebIDL toStringTag brands) — running them
@@ -92,6 +101,12 @@ fn main() {
                 runtime
                     .execute_script("<diting:domparser>", domparser_js.to_string())
                     .expect("domparser.js should not fail during snapshot creation");
+                runtime
+                    .execute_script("<diting:performance>", performance_js.to_string())
+                    .expect("performance.js should not fail during snapshot creation");
+                runtime
+                    .execute_script("<diting:window_faces>", window_faces_js.to_string())
+                    .expect("window_faces.js should not fail during snapshot creation");
                 runtime
                     .execute_script("<diting:message_port>", message_port_js.to_string())
                     .expect("message_port.js should not fail during snapshot creation");
