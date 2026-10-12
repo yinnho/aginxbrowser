@@ -8670,6 +8670,42 @@
         assert_eq!(result.value.unwrap(), serde_json::json!("42|undefined"));
     }
 
+    // #98: importScripts replays through the page realm (so declarations
+    // persist), which exposed the page's MutationObserver to PDD's wheel —
+    // its bundled scheduler picked the DOM branch and died on
+    // document.createTextNode. The replay window must mask the
+    // main-thread-only family like a Chrome worker global, and restore the
+    // page faces afterwards.
+    #[tokio::test(flavor = "current_thread")]
+    async fn worker_import_scripts_see_no_dom_globals() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate_for_cdp(
+                r#"new Promise((resolve, reject) => {
+                    const imp = "var __domProbe = [typeof MutationObserver, typeof document, typeof window,"
+                        + " typeof localStorage, typeof Promise, typeof Math].join('|');";
+                    const url = 'data:text/javascript;base64,' + btoa(imp);
+                    const body = "importScripts(" + JSON.stringify(url) + ");"
+                        + "self.onmessage = function(e) { self.postMessage(__domProbe); };";
+                    const w = new Worker(URL.createObjectURL(new Blob([body])));
+                    w.onerror = e => reject(new Error('worker error: ' + e.message));
+                    w.onmessage = e => resolve([e.data,
+                        typeof MutationObserver, typeof document, typeof window].join('#'));
+                    w.postMessage('go');
+                    setTimeout(() => reject(new Error('no reply')), 2000);
+                })"#,
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!("undefined|undefined|undefined|undefined|function|object#function#object#object"),
+            "imports see Chrome-worker reality; the page global is fully restored after the replay"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn worker_import_scripts_failed_target_fires_error_event() {
         let mut rt = setup_runtime("<html><body></body></html>");
@@ -8765,6 +8801,165 @@
             .await
             .unwrap();
         assert_eq!(result.value.unwrap(), serde_json::json!(["sw|a", "sw|b"]));
+    }
+
+    // #98: the with(self) wrapper only shadows names the scope object
+    // carries — everything else fell through to the page realm, so PDD's
+    // sharedWorker polyfill saw the page's MutationObserver, picked its DOM
+    // scheduling branch (document.createTextNode on a text node) and died.
+    // Chrome workers have no DOM at all: those names must read undefined,
+    // while genuine worker globals keep resolving.
+    #[tokio::test(flavor = "current_thread")]
+    async fn shared_worker_scope_masks_main_thread_globals() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate_for_cdp(
+                r#"new Promise((resolve, reject) => {
+                    const body = "self.onconnect = function(e) {"
+                        + "  const p = e.ports[0];"
+                        + "  const probe = [typeof globalThis.MutationObserver, typeof globalThis.document,"
+                        + "    typeof globalThis.window].join('|');"
+                        + "  p.onmessage = function() {"
+                        + "    p.postMessage(probe + '|' + [typeof MutationObserver, typeof document, typeof window,"
+                        + "      typeof HTMLElement, typeof localStorage, typeof Promise, typeof Math].join('|'));"
+                        + "  };"
+                        + "  p.start();"
+                        + "};";
+                    const w = new SharedWorker(URL.createObjectURL(new Blob([body])), 'mask');
+                    w.port.onmessage = e => resolve(e.data);
+                    w.port.postMessage('x');
+                    setTimeout(() => reject(new Error('no reply')), 2000);
+                })"#,
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!("undefined|undefined|undefined|undefined|undefined|undefined|undefined|undefined|function|object"),
+            "DOM names read undefined in the worker scope — bare names and globalThis reads during the synchronous dispatch — while real globals still fall through"
+        );
+    }
+
+    // #98: script/anchor/option .text — Chrome's real IDL attributes. PDD's
+    // goods-list tracker scan reads el.text on every script without a src;
+    // external scripts have no children so Chrome answers "" where we
+    // answered undefined and its .indexOf threw inside the tracker
+    // inventory.
+    #[tokio::test(flavor = "current_thread")]
+    async fn script_anchor_option_text_idl_faces() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate_for_cdp(
+                r#"(() => {
+                    const s = document.createElement('script');
+                    const empty = s.text;
+                    s.text = 'var x = 1';
+                    const inline = s.text + '/' + s.textContent;
+                    const a = document.createElement('a');
+                    a.textContent = ' hi ';
+                    const o = document.createElement('option');
+                    o.textContent = 'opt';
+                    return [typeof empty + ':' + JSON.stringify(empty), inline, JSON.stringify(a.text),
+                            o.text,
+                            Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'text') !== undefined,
+                            Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, 'text') !== undefined,
+                            Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'text') !== undefined,
+                            Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'text') === undefined].join('#');
+                })()"#,
+                false,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!("string:\"\"#var x = 1/var x = 1#\" hi \"#opt#true#true#true#true"),
+            ".text lives on the three interface prototypes, mirrors textContent, defaults to \"\""
+        );
+    }
+
+    // #98: BroadcastChannel delivers as a task to every OTHER open channel
+    // of the same name, payload structured-cloned per receiver — the old
+    // postMessage(){} stub hung PDD's titan handshake (replyStatus over
+    // BroadcastChannel('WebSocketChannel')) and with it mms goods_list.
+    #[tokio::test(flavor = "current_thread")]
+    async fn broadcast_channel_delivers_cloned_tasks() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate_for_cdp(
+                r#"new Promise((resolve, reject) => {
+                    const a1 = new BroadcastChannel('bus');
+                    const a2 = new BroadcastChannel('bus');
+                    const a3 = new BroadcastChannel('bus');
+                    const b1 = new BroadcastChannel('other');
+                    const events = [];
+                    a2.onmessage = e => { events.push('a2:' + e.data.v + ':' + (e.target === a2)); e.data.v = 'mutated'; };
+                    a3.onmessage = e => events.push('a3:' + e.data.v);
+                    b1.onmessage = e => events.push('b1:' + e.data.v);
+                    a1.onmessage = e => events.push('self:' + e.data.v);
+                    a1.postMessage({ v: 'hello' });
+                    a1.postMessage({ v: 'second' });
+                    setTimeout(() => {
+                        a1.close();
+                        let threw = '';
+                        try { a1.postMessage({ v: 'x' }); } catch (err) { threw = err.name; }
+                        a2.close(); a3.close(); b1.close();
+                        resolve(events.join('|') + '#' + threw);
+                    }, 300);
+                    setTimeout(() => reject(new Error('no delivery: ' + JSON.stringify(events))), 2000);
+                })"#,
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!("a2:hello:true|a3:hello|a2:second:true|a3:second#InvalidStateError"),
+            "delivery reaches the same-named channel only, as a task, with per-receiver clones (a2's mutation never reaches a3); postMessage after close throws InvalidStateError"
+        );
+    }
+
+    // #98: the PDD topology — a SharedWorker replies through
+    // BroadcastChannel, not through the port. The page listens on the bus
+    // and only then posts createSocket on the port.
+    #[tokio::test(flavor = "current_thread")]
+    async fn shared_worker_replies_via_broadcast_channel() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate_for_cdp(
+                r#"new Promise((resolve, reject) => {
+                    const bus = new BroadcastChannel('WebSocketChannel');
+                    const body = "self.onconnect = function(e) {"
+                        + "  const p = e.ports[0];"
+                        + "  const bc = new BroadcastChannel('WebSocketChannel');"
+                        + "  p.onmessage = function(ev) {"
+                        + "    if (ev.data.type !== 'queryStatus') return;"
+                        + "    bc.postMessage({ type: 'replyStatus', data: { uniqueId: ev.data.data.uniqueId } });"
+                        + "  };"
+                        + "  p.start();"
+                        + "};";
+                    const w = new SharedWorker(URL.createObjectURL(new Blob([body])), 'bc');
+                    w.port.start();
+                    bus.onmessage = e => {
+                        bus.close();
+                        resolve(e.data.type + ':' + e.data.data.uniqueId);
+                    };
+                    w.port.postMessage({ type: 'queryStatus', data: { uniqueId: 'u1' } });
+                    setTimeout(() => reject(new Error('no bus reply')), 2000);
+                })"#,
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value.unwrap(),
+            serde_json::json!("replyStatus:u1"),
+            "the worker's BroadcastChannel post reaches the page-side listener — same name, cross-context"
+        );
     }
 
     // Same (url, name) is ONE shared script instance, not one copy per

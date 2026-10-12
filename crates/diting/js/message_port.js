@@ -99,9 +99,20 @@ class MessagePort {
   // #237: re-arm every undelivered payload. The oldest entry's wait time
   // gates the sweep; termination recovery passes force=true because
   // in-flight arms died with the interrupted JS stack. A handler mid-run
-  // will drain the rest itself — never re-enter it.
+  // will drain the rest itself — never re-enter it. A port with neither
+  // onmessage nor listeners can never consume its payload: re-arming it
+  // forever is pure scheduler churn (PDD's titan boot left dozens behind
+  // and the re-arm pump pinned the realm busy, starving the whole page —
+  // 2026-10-12), so drop the orphaned queue instead.
   _recoverStalled(force) {
     if (this._closed || !this._pending.length || this._inflight) return 0;
+    if (!this._onmessage && this._listeners.length === 0) {
+      // Same age gate as below: a worker still booting holds pending
+      // handler-less for a few seconds (fetch + importScripts), and those
+      // messages must survive for its late onconnect.
+      if (force || Date.now() - this._pending[0].since >= _STALL_MS) this._pending = [];
+      return 0;
+    }
     if (!force && Date.now() - this._pending[0].since < _STALL_MS) return 0;
     const n = this._pending.length;
     for (const entry of this._pending.slice()) this._armEntry(entry);

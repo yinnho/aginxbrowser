@@ -12167,6 +12167,20 @@ Object.defineProperty(Element.prototype, 'assignedSlots', {
   configurable: true,
 });
 globalThis.HTMLOptionElement = _htmlInterface('HTMLOptionElement', ['option']);
+// (#98) The .text IDL attributes Chrome exposes on script/anchor/option.
+// PDD's goods-list tracker scan reads `el.text` on every script element
+// without a src — external scripts have no children, so Chrome answers ""
+// where we answered undefined, and its `.indexOf` on that threw inside the
+// tracker inventory (2026-10-12). Getter/setter ride textContent, which is
+// the observable string for real markup (spec excludes script/style
+// descendants from option.text; those never occur inside options).
+for (const _if of [HTMLScriptElement, HTMLAnchorElement, HTMLOptionElement]) {
+  Object.defineProperty(_if.prototype, 'text', {
+    get() { return this.textContent; },
+    set(v) { this.textContent = v; },
+    configurable: true,
+  });
+}
 globalThis.HTMLDataListElement = _htmlInterface('HTMLDataListElement', ['datalist']);
 globalThis.HTMLFieldSetElement = _htmlInterface('HTMLFieldSetElement', ['fieldset']);
 globalThis.HTMLLegendElement = _htmlInterface('HTMLLegendElement', ['legend']);
@@ -15830,9 +15844,94 @@ function _workerSurfaceCommon(importScripts) {
         };
 }
 
+// (#98) Chrome's worker scopes have no DOM at all: document,
+// MutationObserver, the element classes are undefined there. The
+// `with (self)` wrappers below only shadow names the scope object carries
+// — everything else falls through to the page realm, so PDD's
+// sharedWorker polyfill saw the page's MutationObserver, picked its DOM
+// scheduling branch (observe a text node) and died on the undefined
+// `document` parameter. The proxy claims ownership of the main-thread-only
+// family so those lookups stop at the scope and read undefined, exactly
+// like Chrome; every other name keeps the fallthrough-to-page behavior.
+const _WORKER_MAIN_ONLY = new Set([
+  'document', 'window', 'top', 'parent', 'frames',
+  'MutationObserver', 'WebKitMutationObserver', 'ResizeObserver', 'IntersectionObserver',
+  'DOMParser', 'XMLSerializer', 'localStorage', 'sessionStorage',
+  'getComputedStyle', 'getSelection', 'requestAnimationFrame', 'cancelAnimationFrame',
+  'alert', 'confirm', 'prompt', 'print', 'history', 'screen', 'visualViewport',
+  'Image', 'Audio', 'Option', 'customElements', 'trustedTypes',
+  'Node', 'Element', 'HTMLElement', 'SVGElement', 'Document', 'DocumentFragment', 'ShadowRoot',
+]);
+function _workerScopeChain(scope) {
+    return new Proxy(scope, {
+      has(t, p) { return _WORKER_MAIN_ONLY.has(p) ? true : (p in t); },
+      get(t, p) { return _WORKER_MAIN_ONLY.has(p) ? undefined : t[p]; },
+      set(t, p, v) { t[p] = v; return true; },
+    });
+}
+
+// Mask the main-thread-only family on the page global for the duration of
+// one synchronous worker execution — Chrome runs worker code in its own
+// realm where no DOM exists; ours shares the page realm, so the wheel's
+// globalThis reads (webpack's global helper) must be masked here, where no
+// with-scope can reach. Configurable properties swap descriptors
+// (accessors included); writable-but-locked ones take a plain undefined
+// assignment; anything else stays visible (degraded, not broken). Nesting
+// is reference-counted by the outermost window: an inner mask while one is
+// live is a no-op.
+const _mainMaskSaved = { list: null };
+function _restoreMainMask(saved) {
+    for (const [name, d, v] of saved) {
+      try { if (d) Object.defineProperty(globalThis, name, d); else globalThis[name] = v; } catch (_) {}
+    }
+}
+function _applyMainMask(saved) {
+    for (const [name, d] of saved) {
+      try {
+        if (d) Object.defineProperty(globalThis, name, { value: undefined, writable: true, configurable: true, enumerable: false });
+        else globalThis[name] = undefined;
+      } catch (_) {}
+    }
+}
+function _maskMainThreadGlobals() {
+    if (_mainMaskSaved.list) return () => {};
+    const saved = [];
+    for (const name of _WORKER_MAIN_ONLY) {
+      const d = Object.getOwnPropertyDescriptor(globalThis, name);
+      if (!d) continue;
+      if (d.configurable) {
+        saved.push([name, d, undefined]);
+      } else if (d.writable) {
+        saved.push([name, null, d.value]);
+      } else {
+        continue;
+      }
+    }
+    _applyMainMask(saved);
+    _mainMaskSaved.list = saved;
+    return () => { _mainMaskSaved.list = null; _restoreMainMask(saved); };
+}
+// Page-code entry from inside a worker dispatch: the dedicated worker's
+// synchronous postMessage shim hands control straight to page handlers,
+// which must see the full page global. Returns a callback that reinstates
+// the worker mask once the page callbacks return.
+function _unmaskMainThreadGlobals() {
+    if (!_mainMaskSaved.list) return () => {};
+    const saved = _mainMaskSaved.list;
+    _mainMaskSaved.list = null;
+    _restoreMainMask(saved);
+    return () => { _applyMainMask(saved); _mainMaskSaved.list = saved; };
+}
+
 // The importScripts() body shared by both realms: replay preloaded sources
 // (see preloadWorkerImports) in order through indirect eval so top-level
-// declarations land in the global lexical scope.
+// declarations land in the global lexical scope. (#98) Chrome replays
+// imports in the worker's own global, where no DOM exists — ours replays
+// into the page realm, where PDD's wheel saw the page's MutationObserver,
+// picked its DOM scheduling branch and threw on document.createTextNode.
+// The mask above gives the payload Chrome's worker reality for the
+// synchronous eval window; declarations keep landing where the Function-
+// wrapped body can see them.
 function _workerImportScripts(importShim) {
   return (...urls) => {
     for (const raw of urls) {
@@ -15841,7 +15940,9 @@ function _workerImportScripts(importShim) {
       if (typeof text !== 'string') {
         throw new Error('importScripts: failed to load "' + raw + '"');
       }
-      (0, eval)(text);
+      const restore = _maskMainThreadGlobals();
+      try { (0, eval)(text); }
+      finally { restore(); }
     }
   };
 }
@@ -15857,10 +15958,15 @@ function bootWorker(worker) {
     workerSelf.onmessage = null;
     workerSelf.postMessage = (msg) => {
       const evt = { data: msg };
-      if (worker.onmessage) worker.onmessage(evt);
-      const wl = __evtStore.get(worker);
-      const handlers = (wl && wl['message']) || [];
-      for (const h of handlers) _invokeListener(h, worker, evt);
+      // Page handlers run with the page global fully intact even when the
+      // worker is mid-dispatch under the mask.
+      const reMask = _unmaskMainThreadGlobals();
+      try {
+        if (worker.onmessage) worker.onmessage(evt);
+        const wl = __evtStore.get(worker);
+        const handlers = (wl && wl['message']) || [];
+        for (const h of handlers) _invokeListener(h, worker, evt);
+      } finally { reMask(); }
     };
     workerSelf.addEventListener = (type, fn) => { workerSelf['on' + type] = fn; };
     workerSelf.removeEventListener = () => {};
@@ -15874,17 +15980,20 @@ function bootWorker(worker) {
         // never received anything (obscura#867 family).
         const fn = new Function('self', 'postMessage', 'addEventListener', 'removeEventListener', 'close', 'window', 'document', 'navigator', 'location', 'importScripts',
           'with (self) {\n' + worker._code + '\n}');
-        fn(workerSelf, workerSelf.postMessage, workerSelf.addEventListener, workerSelf.removeEventListener, workerSelf.close, undefined, undefined, workerSelf.navigator, workerSelf.location, workerSelf.importScripts);
+        const restore = _maskMainThreadGlobals();
+        try { fn(_workerScopeChain(workerSelf), workerSelf.postMessage, workerSelf.addEventListener, workerSelf.removeEventListener, workerSelf.close, undefined, undefined, workerSelf.navigator, workerSelf.location, workerSelf.importScripts); }
+        finally { restore(); }
 }
 
 function runWorkerMessage(worker, data) {
+  const restore = _maskMainThreadGlobals();
   try {
     bootWorker(worker);
     if (worker._workerSelf.onmessage) worker._workerSelf.onmessage({ data });
   } catch(e) {
     console.error('Worker error:', e.message);
     fireWorkerError(worker, e, __evtStore.get(worker));
-  }
+  } finally { restore(); }
 }
 
 // Module-level so both construction-time fetch failures and execution-time
@@ -17213,14 +17322,60 @@ if (typeof WebSocket === 'undefined') {
 }
 
 if (typeof BroadcastChannel === 'undefined') {
+  // Same-origin message bus. Chrome delivers each post as a task to every
+  // OTHER open channel with the same name — across tabs, dedicated workers,
+  // and SharedWorkers alike, with the payload structured-cloned per
+  // receiver. PDD's titan channel rides it both ways: the page posts
+  // queryStatus on the SharedWorker port and the worker's replyStatus →
+  // createSocket handshake comes back over BroadcastChannel('WebSocketChannel')
+  // (2026-10-12: the old postMessage(){} stub hung mms goods_list at
+  // loading forever — the SDK waits for a reply that never came). One realm
+  // here means one registry covers every "context". A channel with a live
+  // message handler stays reachable through the registry, matching the
+  // spec's liveness rule (the page SDK drops its own reference).
+  const _bcReg = new Map();
   globalThis.BroadcastChannel = class BroadcastChannel {
     constructor(name) {
-      this.name = name; this.onmessage = null; this.onmessageerror = null;
+      this.name = String(name);
+      this.onmessage = null;
+      this.onmessageerror = null;
       this._lbox = new Map();
+      this._closed = false;
+      let set = _bcReg.get(this.name);
+      if (!set) { set = new Set(); _bcReg.set(this.name, set); }
+      set.add(this);
       __hideOwn(this);
     }
-    postMessage(msg) {}
-    close() {}
+    postMessage(msg) {
+      if (this._closed) {
+        throw new DOMException("Failed to execute 'postMessage' on 'BroadcastChannel': the channel is closed.", 'InvalidStateError');
+      }
+      const set = _bcReg.get(this.name);
+      if (!set) return;
+      for (const ch of set) {
+        if (ch === this || ch._closed) continue;
+        _runAsMacrotask(() => {
+          if (ch._closed) return;
+          ch._fire(structuredClone(msg));
+        });
+      }
+    }
+    _fire(data) {
+      const evt = { type: 'message', data, target: this, currentTarget: this };
+      const h = this.onmessage;
+      if (typeof h === 'function') {
+        try { h.call(this, evt); } catch (e) { globalThis.__diting_reportUncaughtError(e); }
+      }
+      for (const fn of (this._lbox.get('message') || []).slice()) {
+        try { _invokeListener(fn, this, evt); } catch (e) { globalThis.__diting_reportUncaughtError(e); }
+      }
+    }
+    close() {
+      if (this._closed) return;
+      this._closed = true;
+      const set = _bcReg.get(this.name);
+      if (set) { set.delete(this); if (!set.size) _bcReg.delete(this.name); }
+    }
   };
   __acc(globalThis.BroadcastChannel, ['name', 'onmessage', 'onmessageerror']);
   __lboxProto(globalThis.BroadcastChannel);
@@ -17603,12 +17758,18 @@ if (typeof SharedWorker === 'undefined') {
     const scope = inst.scope;
     const fn = new Function('self', 'window', 'document', 'navigator', 'location', 'importScripts',
       'with (self) {\n' + inst.code + '\n}');
-    fn(scope, undefined, undefined, scope.navigator, scope.location, scope.importScripts);
+    const restore = _maskMainThreadGlobals();
+    try { fn(_workerScopeChain(scope), undefined, undefined, scope.navigator, scope.location, scope.importScripts); }
+    finally { restore(); }
   }
   function _connectSharedPort(inst, workerEnd) {
     const scope = inst.scope;
     if (!scope) return;
     const evt = { type: 'connect', ports: [workerEnd], target: scope, currentTarget: scope };
+    // Worker-code entry point: mask the page global for the synchronous
+    // dispatch (the wheel reads the DOM family off globalThis via
+    // webpack's global helper, which no with-scope can shadow).
+    const restore = _maskMainThreadGlobals();
     try {
       // A SharedWorker script may register onconnect (the spec path) or, in
       // the wild, a plain onmessage; either way the port is what carries the
@@ -17617,9 +17778,9 @@ if (typeof SharedWorker === 'undefined') {
       if (typeof scope.onconnect === 'function') scope.onconnect(evt);
       else if (typeof scope.onmessage === 'function') scope.onmessage(evt);
     } catch (e) {
-      console.error('SharedWorker error:', e && e.message);
+      console.error('SharedWorker error:', e && e.message, e && e.stack);
       if (typeof inst.onerror === 'function') { try { inst.onerror({ message: String((e && e.message) || e), error: e }); } catch (_) {} }
-    }
+    } finally { restore(); }
   }
   globalThis.SharedWorker = class SharedWorker {
     constructor(url, name) {
@@ -17642,7 +17803,7 @@ if (typeof SharedWorker === 'undefined') {
                 inst.scope = _sharedWorkerScope(inst.shim);
                 _runSharedScript(inst);
               } catch (e) {
-                console.error('SharedWorker error:', e && e.message);
+                console.error('SharedWorker error:', e && e.message, e && e.stack);
                 inst.error = e;
               }
             }
