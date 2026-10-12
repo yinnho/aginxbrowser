@@ -107,7 +107,13 @@ fn repo_workflow_samples_are_valid_named_documents() {
         if !is_workflow_name(&name) {
             continue;
         }
-        let text = std::fs::read_to_string(entry.path().join("flow.json"))
+        // Recipe-only packages ship recipe.js without flow.json (see
+        // ARCHITECTURE.md workflow delivery unit + preload_recipes).
+        let flow_path = entry.path().join("flow.json");
+        if !flow_path.is_file() {
+            continue;
+        }
+        let text = std::fs::read_to_string(&flow_path)
             .unwrap_or_else(|e| panic!("sample {name:?}: {e}"));
         let doc: Value = serde_json::from_str(&text)
             .unwrap_or_else(|e| panic!("sample {name:?} is not valid JSON: {e}"));

@@ -5,6 +5,8 @@
 > layer boundary updates this file first — in the same commit — or it does not land.
 >
 > Audit basis: 2026-09-19, v0.4.5, commit 5718f2b. Line counts in Appendix A.
+>
+> **Update (2026-10-13, v0.5.42 / HEAD):** MCP and CDP faces were removed in `439cbb7` — HTTP is the whole interface. Appendix A and §1–§3 narration that still name MCP/CDP are historical; refresh in a dedicated docs pass. God-file cap remains 1500 (`scripts/audit_layers.py`); search god-file split landed in `99eb67c`.
 
 ## 1. What AginxBrowser is
 
