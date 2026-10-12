@@ -59,37 +59,11 @@
     {
       "op": "eval",
       "args": {
-        "script": "(function(){window.__tf='pending';setTimeout(function(){window.__tf='fired'},100);return 'armed'})()"
-      },
-      "save": "timer_armed",
-      "note": "boot-storm gate: after the page's schema responses land, their processing (JSON parse + schema init + React render) is one long sync block that starves timers AND fetch callbacks for tens of seconds to minutes before self-healing (run lessons: setTimeout(100ms) still null at +120s on one load; a getSchema fetch fired into the storm never settled). The probe's callback stays queued and fires the moment the pump frees"
-    },
-    {
-      "op": "wait",
-      "args": {
-        "predicate": "window.__tf==='fired'",
-        "timeout_ms": 120000
-      },
-      "save": "timer_ok",
-      "note": "pump alive — async fetches are now reliable. If even this times out the page is hard-wedged: re-run the flow (fresh navigation), do NOT wait it out"
-    },
-    {
-      "op": "eval",
-      "args": {
         "script": "(async function(){function tl(){var rs=performance.getEntriesByType('resource'),tok='',lid='';for(var i=rs.length-1;i>=0;i--){var u=rs[i].name;if(/\\/product\\/tproduct\\//.test(u)){var mt=u.match(/__token=([a-f0-9]+)/),ml=u.match(/_lid=(\\d+)/);if(mt)tok=mt[1];if(ml)lid=ml[1];if(tok&&lid)break}}if(!tok)throw new Error('no __token in resource timing');return{tok:tok,lid:lid}}function qs(t){return 'appid=1&__token='+t.tok+'&_bid=ffa_goods&_lid='+t.lid+(t.mst?'&msToken='+encodeURIComponent(t.mst):'')}function afetch(path,body,t){return fetch(path+'?'+qs(t),{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.text()})}var CAT='{{args.category_leaf_id}}';var t=tl();var ctx={category_id:CAT,biz_identity:'xiaodian',business_code:'xiaodian',capability_codes:['standard_capability'],ability:[],operation_type:'create'};window.__TL=t;window.__CTX=ctx;window.__AF=afetch;window.__CLEAN=null;try{var x=await afetch('/product/tproduct/getSchema',{context:ctx,model:{},category_id:CAT,appid:1,__token:t.tok,_bid:'ffa_goods',_lid:t.lid},t);window.__CLEAN=x;}catch(e){window.__CLEAN='ERR:'+e.message;}if(String(window.__CLEAN).slice(0,4)==='ERR:'){throw new Error('gsClean '+window.__CLEAN);}return 'gsClean ok bytes='+window.__CLEAN.length;})()",
         "timeout_ms": "{{schema_ms}}"
       },
       "save": "clean_fired",
-      "note": "API call 1 — getSchema with EMPTY model (zero-risk shape-contract dry run). Async fetch (NOT sync XHR — the engine's sync path is broken: returns status 0 or blocks the eval forever). Response cached on window.__CLEAN"
-    },
-    {
-      "op": "wait",
-      "args": {
-        "predicate": "!!window.__CLEAN",
-        "timeout_ms": "{{schema_ms}}"
-      },
-      "save": "clean_answered",
-      "note": "the fetch settles (response or transport error both set __CLEAN)"
+      "note": "no timer/__tf gate (#240 face-3): create page qlen buries setTimeout sentinels; eval-await afetch is the readiness proof. tokens_ready (resource timing) still runs first so __token exists before dig. API call 1 — getSchema with EMPTY model (zero-risk shape-contract dry run). Async fetch (NOT sync XHR — the engine's sync path is broken: returns status 0 or blocks the eval forever). Response cached on window.__CLEAN"
     },
     {
       "op": "eval",
@@ -108,15 +82,6 @@
       },
       "save": "canon_fired",
       "note": "API call 2 — THE trick of this flow: send the business model with PLACEHOLDER spec_value ids (spec_id_0..spec_id_17) through getSchema and the server canonicalizes it: spec ids become spec_id+index (30000_10 -> 3000010), each sku row comes back as a full server-built skeleton, free-text property values get value_id:\"\" + diy_type:0 (legal: zod wants a string, empty string IS one), brand tags normalized to {}. NEVER hand-assemble these shapes — the two 10013 strikes (组件数据解析失败) were exactly a hand-assembled model: pic as bare string array instead of [{url}], invented spec/sku keys. getSchema is read-only: risks nothing, returns the submit-ready model"
-    },
-    {
-      "op": "wait",
-      "args": {
-        "predicate": "!!window.__CANON",
-        "timeout_ms": "{{schema_ms}}"
-      },
-      "save": "canon_answered",
-      "note": "canonicalized model back"
     },
     {
       "op": "eval",

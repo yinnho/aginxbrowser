@@ -69,7 +69,7 @@ flow 侧：`vars.check_status`（默认 1）模板进 query+body；args 校验�
 `brand_value_id` 时 2s 拦；body_built 回执带 `check_status` 和 `sig` 供核账。
 
 
-## 发货地址绑定 + 上架回读（steps 15-17，2026-10-10 #79）
+## 发货地址绑定 + 上架回读（收尾三步，2026-10-10 #79；2026-10-13 起为 flow 末三步）
 
 报告里的「创建→绑发货地→回读核验」三件事全部 API 化，接在提交步后面：
 
@@ -105,6 +105,20 @@ flow 侧：`vars.check_status`（默认 1）模板进 query+body；args 校验�
 - **绑地址**：`vars.ship_address_id` 给地址库 id（报告口径 12405687 南京）；
   不给=跳过绑定核验
 
+## 2026-10-13：拆掉 timer/`__tf` 哨兵（#240 face-3）
+
+create 页 boot 后 macrotask 堆到 qlen≈169k 时，`setTimeout(100)` 把 `window.__tf='fired'`
+的哨兵永远埋住——named `doudian-publish` 在 step4 吃满 120s 超时（`timer_armed` 回 `armed`
+但回调不跑）。同会话内联去哨兵变体 17s 草稿绿（product_id 3847907058221449439）。
+
+修法：从 flow 删掉 `timer_armed`/`timer_ok`，以及 eval-await 之后多余的
+`clean_answered`/`canon_answered` wait（eval 内 `await afetch` 已 settle 并写
+`window.__CLEAN`/`__CANON`）。保留 `tokens_ready`（resource timing 挖 `__token`，
+不靠页内 timer，实测 ~5s）。默认 `vars.check_status:1` 草稿不变，不上架。
+
+验证口径：`:8791` 0.5.35 的 `available` 工作流列表为空（实例 gap，见下）——用
+`POST /flow/run` 的 inline `flow` 文档跑同内容；`:8129` 0.5.41 可读盘 named flow。
+
 ## 引擎坑：fresh load 的 fxg 页任务泵必死（#39 已修，2026-10-05）
 
 协议步骤全对（第三枪手工同协议命中 3846431717594366336），但 flow 重放曾卡在
@@ -124,8 +138,9 @@ flow 侧：`vars.check_status`（默认 1）模板进 query+body；args 校验�
 泄漏 depth。回归测试 `test_terminated_payload_severed_chain_self_heals`
 真复现杀链（短 watchdog 终止自旋 payload）。
 
-修复后 flow 重放 14 步全绿：**product_id 3846444003306373208**（timer 门 20s
-过、getSchema 两发 1.8s/13.5s、提交 5.4s 回 st=0）。timer gate 步骤保留当哨兵。
+修复后 flow 重放曾 14 步全绿：**product_id 3846444003306373208**（当时 timer 门 20s
+过、getSchema 两发 1.8s/13.5s、提交 5.4s 回 st=0）。**2026-10-13 起 timer/`__tf` 哨兵已删**
+（qlen 高压下 setTimeout 永不回，见上节 face-3）；泵活改由 eval-await API 步自身证明。
 
 ## args 前置校验（step1 `args_valid`，2026-10-09 焊入）
 
@@ -146,9 +161,9 @@ flow 侧：`vars.check_status`（默认 1）模板进 query+body；args 校验�
 fresh 导航 boot 风暴把 clean getSchema 的 fire-and-forget 续体丢了（wait 泵 90s 空转，
 #240 face-2 残面第三次现身，这次咬的是 schema 步不是提交步）。step5/step8 改成
 `(async function(){ … var x = await afetch(...); window.__CLEAN=x; … })()`、
-`timeout_ms:{{schema_ms}}`，wait 步保留当瞬时通过的哨兵。改完首跑即绿，副作用是
-整链 190s → **57s**（wait 泵不再空转等回包）。净层 200 页内不落时，先查这两步
-是不是被改回了 fire-then-wait。
+`timeout_ms:{{schema_ms}}`。改完首跑即绿，副作用是整链 190s → **57s**。
+**2026-10-13**：连瞬时 wait 哨兵也删了（`clean_answered`/`canon_answered`）——eval-await
+已写旗；再叠 wait 泵无收益。净层 200 页内不落时，先查这两步是不是被改回了 fire-then-wait。
 
 fire-and-forget fetch + `wait` 泵等 `window.__SHOT` 的老形状，在一次
 带图跑里死透。#240 拆成了两具尸体：
@@ -231,6 +246,7 @@ POST /flow/run
 | 2026-10-10 | getSchema 双步 eval-await + spec_images | **3847441335397253316** | **首单规格图绿**：6019（all_spec_pic_required）18 值 18 图，canon_ok `spec_img:18` 全保��，57s 全链（此前 fire-then-wait 死在 step6 #240 face-2） |
 | 2026-10-10 | 原生签名 + check_status=2 | **3847441891603906978** | **首单直接上架绿**：request_extra `{_msToken:TUE9P2Q==}` 复刻默认生成器，无品牌 596120136 + 富详情，55.5s 全链 `st=0`；同日 edit 路径把 3847441335397253316 草稿也送上架（`audit_pass:false` 审核中） |
 | 2026-10-10 | + 地址绑定三步 | **3847445690687029295** | **绑定链验收**：cs=2 + `ship_address_id:12405687`，14+1 步绿（提交 st:0 + bind st:0），addr_verify 因商品仍在审核（check_status:2，派生列表不收）返回 pending——次日过审后同款查询三重回显全中（见上节实测）；-sale_verify 轮询内在途容忍为设计行为；本单审核慢（**截至 13:37 提交后 ~50 分钟仍 cs:2**） |
+| 2026-10-13 | 去 timer/`__tf` + 去 eval 后 wait 哨兵 | **3847907246931575657** / **3847908370065522769** | **草稿绿**：inline on `:8791` s_100 17.6s；named on `:8129` s_8（cookie 迁入）30s；`check_status:1`；`:8791` 0.5.35 `available` 空（实例 gap，inline `flow` 验证），`:8129` 0.5.41 named 可读盘 |
 
 ## 2026-10-09 附记
 
