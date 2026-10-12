@@ -63,7 +63,7 @@ impl DuckDuckGoEngine {
         match direct {
             Ok(Ok((body, _))) if has_results(&body) => return Ok(body),
             Ok(Ok((body, _))) => {
-                super::log_rejected_body(url, "stealth-direct", &body);
+                super::validate::log_rejected_body(url, "stealth-direct", &body, super::classify_rejected_body(&body));
                 rejected = Some(body);
             }
             Ok(Err(e)) => {
@@ -80,7 +80,7 @@ impl DuckDuckGoEngine {
             return match super::stealth_fetch(proxied.as_ref(), url).await {
                 Ok((body, _)) => {
                     if !has_results(&body) {
-                        super::log_rejected_body(url, "stealth-proxy", &body);
+                        super::validate::log_rejected_body(url, "stealth-proxy", &body, super::classify_rejected_body(&body));
                     }
                     Ok(body)
                 }
