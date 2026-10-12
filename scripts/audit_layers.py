@@ -17,11 +17,14 @@ Checks:
                         product cross-check pipeline (comment-stripped, so
                         doc mentions of upstream bugs are fine).
   R3   faces are thin — no `unsafe` anywhere in a face (comment-stripped).
-  G    god-file ratchet — non-test .rs files and the engine's baked-in JS
-                        (crates/diting/js/, snapshot sources) stay <= GOD_FILE_CAP
-                        lines; files over the cap at ratchet time are grandfathered
-                        at their exact line count and may not grow. Splitting a
-                        grandfathered file shrinks or retires its entry.
+  G    god-file ratchet — production line count only. For .rs files, lines inside
+                        #[cfg(test)]-gated items (and whole files named tests.rs)
+                        do not count; .js sources count every line. Cap is
+                        GOD_FILE_CAP; files over the cap at ratchet time are
+                        grandfathered at their production count and may not grow.
+                        Splitting or shedding tests that drop a file under the cap
+                        retires its grandfather entry. Intent: catch real prod
+                        bloat, not incentivize split-for-cap of colocated tests.
 """
 
 from __future__ import annotations
@@ -69,28 +72,23 @@ ENGINE_DENY_DEPS = (
 )
 
 GOD_FILE_CAP = 1500
-# Repo-relative path -> line count at ratchet time (2026-09-19, post P2 batch 3).
-# These are the acknowledged god files the split program is chewing through;
-# growth past the recorded count fails CI. Removing a file without removing its
-# entry also fails (stale ratchet).
+# Repo-relative path -> production line count at last rebase (2026-10-13).
+# Counts exclude #[cfg(test)]-gated items (see count_production_lines). These are
+# the acknowledged god files the split program is chewing through; growth past
+# the recorded production count fails CI. A file that falls to <= GOD_FILE_CAP
+# production lines must leave this table (retire). Removing a file without
+# removing its entry also fails (stale ratchet).
 GOD_FILE_GRANDFATHER = {
-    "crates/diting/js/bootstrap.js": 19561,  # #236: XMLHttpRequest split to js/xhr.js (new file, no cap); EventTarget base stays (AbortSignal extends it)
-    "crates/diting/src/diting_layout/mod.rs": 9642,
-    "crates/diting/src/diting_css/mod.rs": 8511,
-    "crates/diting/src/diting_js/ops/mod.rs": 6475,
-    "crates/diting/src/diting_layout/paint.rs": 4030,
+    "crates/diting/js/bootstrap.js": 19094,  # #236: XMLHttpRequest split to js/xhr.js; EventTarget base stays
+    "crates/diting/src/diting_layout/mod.rs": 9253,
+    "crates/diting/src/diting_css/mod.rs": 7402,
+    "crates/diting/src/diting_js/ops/mod.rs": 5846,
+    "crates/diting/src/diting_layout/paint.rs": 2720,
     "src/bridge_cross_check.rs": 3766,
-    "crates/diting/src/diting_js/runtime.rs": 1826,
-    "crates/diting/src/diting_layout/fork_deltas.rs": 2273,
-    "crates/diting/src/diting_net/client/mod.rs": 1282,
-    "src/server/mod.rs": 2128,
-    "crates/diting/src/diting_dom/tree.rs": 1446,
-    "crates/diting/src/diting_layout/text.rs": 1538,
-    "crates/diting/src/diting_layout/svg.rs": 1736,
-    "src/store/mod.rs": 1287,
-    "src/video.rs": 1672,
-    "src/docgen/workflow.rs": 1615,
-    "src/docgen/graph.rs": 1584,
+    "crates/diting/src/diting_layout/fork_deltas.rs": 2257,
+    "crates/diting/src/diting_js/runtime.rs": 1743,
+    "src/docgen/workflow.rs": 1592,
+    "src/server/mod.rs": 1561,
 }
 
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
@@ -197,8 +195,103 @@ def check_r3() -> list[str]:
     return out
 
 
+def is_attr_line(line: str) -> bool:
+    return bool(re.match(r"^\s*#\[", line))
+
+
+def is_test_only_cfg_attr(line: str) -> bool:
+    """True when this attribute gates the following item to test builds only.
+
+    Matches `#[cfg(test)]` and `#[cfg(all(..., test, ...))]`.
+    Does not match `#[cfg(not(test))]`, bare features, or `any(test, ...)`
+    (the latter can still compile into non-test binaries).
+    Multi-line cfg attributes are left alone (conservative: still counted).
+    """
+    s = line.strip()
+    m = re.match(r"#\[cfg\s*\((.*)\)\s*\]\s*$", s)
+    if not m:
+        return False
+    inner = m.group(1).strip()
+    if inner == "test":
+        return True
+    if re.search(r"\bnot\s*\(\s*test\s*\)", inner):
+        return False
+    if inner.startswith("all(") and re.search(r"(^|[\s,(])test([\s,)]|$)", inner):
+        return True
+    return False
+
+
+def _skip_rust_item(lines: list[str], i: int) -> int:
+    """Advance past an attribute stack (if any) and the following Rust item."""
+    n = len(lines)
+    while i < n and is_attr_line(lines[i]):
+        i += 1
+    while i < n and (not lines[i].strip() or lines[i].lstrip().startswith("//")):
+        i += 1
+    if i >= n:
+        return i
+    depth = 0
+    seen_brace = False
+    while i < n:
+        in_str = False
+        esc = False
+        for ch in lines[i]:
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+                continue
+            if ch == "{":
+                depth += 1
+                seen_brace = True
+            elif ch == "}":
+                depth = max(0, depth - 1)
+            elif ch == ";" and not seen_brace and depth == 0:
+                return i + 1
+        if seen_brace and depth == 0:
+            return i + 1
+        i += 1
+    return i
+
+
+def count_production_lines(path: Path) -> int:
+    """Line count that feeds the god-file ratchet.
+
+    .rs: drop #[cfg(test)]-gated items (attribute stack + item body). Colocated
+    `tests.rs` files are skipped entirely by check_god_files — same exemption
+    spirit as inline cfg(test) modules.
+    Non-.rs (engine js/): every line counts.
+    """
+    text = path.read_text()
+    if path.suffix != ".rs":
+        return len(text.splitlines())
+    lines = text.splitlines()
+    i = 0
+    n = 0
+    while i < len(lines):
+        if is_attr_line(lines[i]):
+            j = i
+            test_gated = False
+            while j < len(lines) and is_attr_line(lines[j]):
+                if is_test_only_cfg_attr(lines[j]):
+                    test_gated = True
+                j += 1
+            if test_gated:
+                i = _skip_rust_item(lines, i)
+                continue
+        n += 1
+        i += 1
+    return n
+
+
 def check_god_files() -> list[str]:
-    """Ratchet: cap for new files, no growth for grandfathered ones."""
+    """Ratchet: production-line cap for new files, no growth for grandfathered ones."""
     out = []
     seen = set()
     # The engine's baked-in realm JS (js/, executed into the V8 snapshot by
@@ -208,24 +301,32 @@ def check_god_files() -> list[str]:
     for f in files:
         if f.name == "tests.rs":  # colocated contract suites are a feature, not debt
             continue
-        lines = len(f.read_text().splitlines())
+        lines = count_production_lines(f)
         key = rel(f)
         if key in GOD_FILE_GRANDFATHER:
             seen.add(key)
             cap = GOD_FILE_GRANDFATHER[key]
             if lines > cap:
                 out.append(
-                    f"{key}: grew {cap} -> {lines} lines — grandfathered god "
-                    "files only shrink; split the file (ARCHITECTURE.md §6 P2)"
+                    f"{key}: grew {cap} -> {lines} production lines — grandfathered god "
+                    "files only shrink; split production code (ARCHITECTURE.md §6 P2). "
+                    "Inline #[cfg(test)] does not count toward this total."
+                )
+            elif lines <= GOD_FILE_CAP:
+                out.append(
+                    f"{key}: {lines} production lines is under the {GOD_FILE_CAP}-line "
+                    "cap — retire this grandfather entry"
                 )
         elif lines > GOD_FILE_CAP:
             out.append(
-                f"{key}: {lines} lines exceeds the {GOD_FILE_CAP}-line god-file "
-                "cap — split it, then grandfather entries shrink (ARCHITECTURE.md §6 P2)"
+                f"{key}: {lines} production lines exceeds the {GOD_FILE_CAP}-line god-file "
+                "cap — split production code (ARCHITECTURE.md §6 P2). "
+                "Inline #[cfg(test)] / tests.rs do not count; do not split for the cap alone."
             )
     for key in sorted(set(GOD_FILE_GRANDFATHER) - seen):
         out.append(f"{key}: grandfather entry is stale (file gone) — remove it from the ratchet")
     return out
+
 
 
 def main() -> int:
@@ -255,5 +356,43 @@ def main() -> int:
     return 1 if failed else 0
 
 
+def _self_test() -> None:
+    """Fixtures for count_production_lines; `python3 scripts/audit_layers.py --self-test`."""
+    import tempfile
+
+    sample = """fn prod() {}
+
+#[cfg(test)]
+mod tests {
+    fn t() {}
+}
+
+#[cfg(not(test))]
+fn only_prod() {}
+
+#[cfg(all(test, feature = "x"))]
+fn test_only() {}
+"""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "x.rs"
+        p.write_text(sample)
+        got = count_production_lines(p)
+        # Keep: fn prod, blank, blank-after-skip, not(test) attr, only_prod, blank.
+        # Drop: cfg(test) mod block and all(test) fn.
+        assert got == 6, f"expected 6 production lines, got {got}"
+
+    shot = ROOT / "src" / "screenshot.rs"
+    if shot.is_file():
+        total = len(shot.read_text().splitlines())
+        prod = count_production_lines(shot)
+        assert prod < GOD_FILE_CAP, (prod, GOD_FILE_CAP)
+        assert prod < total, (prod, total)
+        assert total - prod > 500, "screenshot.rs should still carry a large inline test suite"
+
+
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        _self_test()
+        print("audit_layers self-test: ok")
+        sys.exit(0)
     sys.exit(main())

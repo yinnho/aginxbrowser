@@ -6,7 +6,7 @@
 >
 > Audit basis: 2026-09-19, v0.4.5, commit 5718f2b. Line counts in Appendix A.
 >
-> **Update (2026-10-13, v0.5.42 / HEAD):** MCP and CDP faces were removed in `439cbb7` — HTTP is the whole interface. Appendix A and §1–§3 narration that still name MCP/CDP are historical; refresh in a dedicated docs pass. God-file cap remains 1500 (`scripts/audit_layers.py`); search god-file split landed in `99eb67c`.
+> **Update (2026-10-13, v0.5.42 / HEAD):** MCP and CDP faces were removed in `439cbb7` — HTTP is the whole interface. Appendix A and §1–§3 narration that still name MCP/CDP are historical; refresh in a dedicated docs pass. God-file cap remains 1500 **production** lines (`scripts/audit_layers.py`): `#[cfg(test)]` items and `tests.rs` do not count — do not split colocated tests just to dodge the cap. Search god-file split landed in `99eb67c`.
 
 ## 1. What AginxBrowser is
 
@@ -182,7 +182,7 @@ actor), the three wire protocols (HTTP REST schema, MCP tool schemas, CDP method
 |-------|-------------|-----------------|
 | **P0** | This document (legislation). | Reviewed and committed. |
 | **P1** | Workspace split into the four crates; behavior byte-identical. | Full suite 1453+ green; feature-combination check (`stealth`/`screenshot`/`blitz-reference`, no-feature) green; release binary builds on the CI matrix; six distribution channels unaffected. |
-| **P2** | Internal modularization inside crates: `session/` five-module split, `routers/`, `page.rs` decomposition; add the layering audit script (grep-level R1–R3 check in CI). | Same gates as P1 per batch; god files ≤ ~1,500 lines each. |
+| **P2** | Internal modularization inside crates: `session/` five-module split, `routers/`, `page.rs` decomposition; add the layering audit script (grep-level R1–R3 check in CI). | Same gates as P1 per batch; god files ≤ ~1,500 **production** lines each (`#[cfg(test)]` / `tests.rs` excluded). |
 | **P3** | Interaction contract (§5) lands as typed core API; closes #45/#46. | New contract tests; agent-visible failures carry reasons; no false successes. |
 
 Each phase ships as a series of small batches — every batch independently revertible,
