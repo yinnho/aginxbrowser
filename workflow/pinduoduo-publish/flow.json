@@ -1,0 +1,169 @@
+{
+  "vars": {
+    "mms_home": "https://mms.pinduoduo.com/home/",
+    "boot_ms": 90000,
+    "api_ms": 60000,
+    "submit": 0,
+    "dup_keyword": "",
+    "verify_tries": 3,
+    "verify_gap_ms": 4000,
+    "calm_ms": 3000,
+    "source_goods_id": "",
+    "source_goods_commit_id": ""
+  },
+  "args": [
+    "title",
+    "source_goods_id",
+    "source_goods_commit_id",
+    "goods_id",
+    "goods_commit_id",
+    "out_goods_sn",
+    "gallery",
+    "skus",
+    "cat_id",
+    "market_price",
+    "cost_template_id",
+    "goods_desc",
+    "share_desc",
+    "thumb_url",
+    "hd_thumb_url",
+    "goods_pattern",
+    "two_pieces_discount",
+    "shipment_limit_second",
+    "extra",
+    "submit_extra"
+  ],
+  "create": {
+    "width": 1440,
+    "height": 900
+  },
+  "steps": [
+    {
+      "id": "nav",
+      "op": "navigate",
+      "note": "MMS shell only — NOT goods/goods-list React UI. Logged-in session_id required",
+      "args": {
+        "url": "{{mms_home}}"
+      }
+    },
+    {
+      "id": "mms_ready",
+      "op": "wait",
+      "note": "platform SDK — use __mms.fetch.sync (async post hangs Ut/fbeZ). Never wrap window.fetch on PDD",
+      "args": {
+        "predicate": "!!(window.__mms && window.__mms.fetch && typeof window.__mms.fetch.sync==='function')",
+        "timeout_ms": "{{boot_ms}}"
+      },
+      "save": "mms_ready"
+    },
+    {
+      "id": "pump_arm",
+      "op": "eval",
+      "note": "boot-storm gate: arm 100ms timer; fires when macrotask pump is alive",
+      "args": {
+        "script": "(function(){window.__agxPump='pending';setTimeout(function(){window.__agxPump='fired'},100);return 'armed'})()"
+      },
+      "save": "pump_arm"
+    },
+    {
+      "id": "pump_ok",
+      "op": "wait",
+      "note": "if this times out the page is hard-wedged — re-run with fresh navigation",
+      "args": {
+        "predicate": "window.__agxPump==='fired'",
+        "timeout_ms": 120000
+      },
+      "save": "pump_ok"
+    },
+    {
+      "id": "calm",
+      "op": "eval",
+      "note": "brief settle after shell boot",
+      "args": {
+        "timeout_ms": 20000,
+        "script": "(async function(){var ms=Number('{{calm_ms}}'||'3000')||3000;await new Promise(function(res){setTimeout(res,ms)});return 'calm '+ms;})()"
+      },
+      "save": "calm"
+    },
+    {
+      "id": "args_check",
+      "op": "eval",
+      "note": "fail in seconds — copy path needs source_* + title; resume needs goods_id+goods_commit_id",
+      "args": {
+        "timeout_ms": 15000,
+        "script": "(function(){var D={{args}};var errs=[];var title=D.title;if(!title)errs.push('title: required');var srcG=D.source_goods_id||D.sourceGoodsId||'{{source_goods_id}}'||'';var srcC=D.source_goods_commit_id||D.sourceGoodsCommitId||D.source_commit_id||'{{source_goods_commit_id}}'||'';var gid=D.goods_id||D.goodsId||'';var cid=D.goods_commit_id||D.commit_id||D.id||'';var resume=!!(gid&&cid);var copy=!!(srcG&&srcC);if(!resume&&!copy)errs.push('need source_goods_id+source_goods_commit_id (copy path) OR goods_id+goods_commit_id (resume)');if(errs.length)throw new Error('args 校验失败: '+errs.join('; '));return JSON.stringify({validated:true,mode:resume?'resume':'copy',title:String(title).slice(0,48),source_goods_id:srcG||null,source_goods_commit_id:srcC||null,goods_id:gid||null,goods_commit_id:cid||null,submit:String({{submit}}),note:'gallery/skus optional — copyGoodsCommit clones from source; action/edit blocked on this engine'});})()"
+      },
+      "save": "args_valid"
+    },
+    {
+      "id": "login",
+      "op": "eval",
+      "note": "POST /janus/api/checkLogin via __mms.fetch.sync — proven 2026-10-12 (async post EVAL_TIMEOUT)",
+      "args": {
+        "timeout_ms": "{{api_ms}}",
+        "script": "(function(){if(!window.__mms||!window.__mms.fetch||typeof window.__mms.fetch.sync!=='function')throw new Error('no __mms.fetch.sync — navigate landed without MMS shell (login wall or wrong host)');window.__PDD={transport:'__mms.fetch.sync'};function sync(method,url,body){try{return window.__mms.fetch.sync(method,url,body||{});}catch(e){var msg=String((e&&(e.error_msg||e.errorMsg||e.message))||e).slice(0,200);var body2=(function(){try{return JSON.stringify(e).slice(0,400)}catch(x){return String(e)}})();throw new Error(method+' '+url+' failed: '+msg+' '+body2);}}var r=sync('POST','/janus/api/checkLogin',{});window.__PDD.login=r;window.__PDD.sync=sync;var ok=r&&(r.login===true||r.success===true||r.result===true||(r.data&&(r.data.login||r.data.mall_id))||r.mall_id||r.mallId);if(!ok&&!(r&&(r.mall||r.user)))throw new Error('checkLogin not logged in: '+JSON.stringify(r).slice(0,240));return JSON.stringify({ok:true,transport:'sync',head:JSON.stringify(r).slice(0,300)});})()"
+      },
+      "save": "login"
+    },
+    {
+      "id": "copy_or_reuse",
+      "op": "eval",
+      "note": "THE draft create — copyGoodsCommit from source (NOT create_new+action/edit). Resume if args already have ids",
+      "args": {
+        "timeout_ms": "{{api_ms}}",
+        "script": "(function(){var D={{args}};var sync=window.__PDD.sync;if(!sync)throw new Error('no sync helper — login step missing');var gid=String(D.goods_id||D.goodsId||'');var cid=String(D.goods_commit_id||D.commit_id||D.id||'');if(gid&&cid){window.__PDD.ids={goods_id:gid,goods_commit_id:cid,source:'args'};return JSON.stringify(window.__PDD.ids);}var srcG=String(D.source_goods_id||D.sourceGoodsId||'{{source_goods_id}}'||'');var srcC=String(D.source_goods_commit_id||D.sourceGoodsCommitId||D.source_commit_id||'{{source_goods_commit_id}}'||'');if(!srcG||!srcC)throw new Error('copy: need source_goods_id + source_goods_commit_id');var body={goods_id:Number(srcG)||srcG,goods_commit_id:Number(srcC)||srcC};var r=sync('POST','/glide/v2/mms/edit/commit/copyGoodsCommit',body);var d=r&&(r.result||r.data||r)||r;var g2=d&&(d.goods_id||d.goodsId);var c2=d&&(d.goods_commit_id||d.goodsCommitId||d.id);if(!g2||!c2)throw new Error('copyGoodsCommit no ids: '+JSON.stringify(r).slice(0,400));window.__PDD.ids={goods_id:String(g2),goods_commit_id:String(c2),source:'copyGoodsCommit',from:{goods_id:String(srcG),goods_commit_id:String(srcC)},raw:JSON.stringify(d).slice(0,240)};return JSON.stringify(window.__PDD.ids);})()"
+      },
+      "save": "ids"
+    },
+    {
+      "id": "dup_check",
+      "op": "eval",
+      "note": "optional vodka goodsList by vars.dup_keyword; empty skips",
+      "args": {
+        "timeout_ms": "{{api_ms}}",
+        "script": "(function(){var kw='{{dup_keyword}}';if(!kw)return 'skip: vars.dup_keyword empty';var sync=window.__PDD.sync;var r=sync('POST','/vodka/v2/mms/query/display/mall/goodsList',{page:1,size:10,order_by:'',goods_name:kw});window.__PDD.dup=r;var list=(r&&(r.list||r.goods_list||(r.result&&r.result.list)||(r.data&&(r.data.list||r.data.goods_list))))||[];var n=Array.isArray(list)?list.length:(r&&r.total)||0;return JSON.stringify({keyword:kw,hits:n,head:JSON.stringify(r).slice(0,240)});})()"
+      },
+      "save": "dup"
+    },
+    {
+      "id": "rename",
+      "op": "eval",
+      "note": "update_goods_commit_info — goods_name + cat_id from commit/detail; NEVER out_goods_sn (raw green 20261012). Does NOT publish",
+      "args": {
+        "timeout_ms": 120000,
+        "script": "(function(){var D={{args}};var sync=window.__PDD.sync;var ids=window.__PDD.ids||{};var gid=String(ids.goods_id||D.goods_id||'');var cid=String(ids.goods_commit_id||D.goods_commit_id||'');var title=String(D.title||'');if(!gid||!cid)throw new Error('rename: missing goods_id/goods_commit_id');if(!title)throw new Error('rename: missing title');var cat=D.cat_id||D.catId||null;try{var det=sync('POST','/glide/v2/mms/query/commit/detail',{goods_id:Number(gid)||gid,goods_commit_id:Number(cid)||cid});var dd=det&&(det.result||det.data||det)||{};if(dd&&(dd.cat_id||dd.catId)!=null&&(dd.cat_id||dd.catId)!==0&&(dd.cat_id||dd.catId)!=='0')cat=dd.cat_id||dd.catId;}catch(e){}if(cat==null||cat===''||cat===0||cat==='0')throw new Error('rename: cat_id empty — pass args.cat_id');var body={goods_id:Number(gid)||gid,goods_commit_id:Number(cid)||cid,id:Number(cid)||cid,goods_name:title,cat_id:Number(cat)||cat};var r=sync('POST','/glide/mms/goodsCommit/action/update_goods_commit_info',body);var ok=(r===true||r===1||r==='true'||(r&&r.success===true)||(r&&(Number(r.error_code||r.errorCode)===1000000||Number(r.error_code||r.errorCode)===0)));var ec=r&&(r.error_code||r.errorCode);var em=r&&(r.error_msg||r.errorMsg||r.message);window.__PDD.rename={goods_id:gid,goods_commit_id:cid,goods_name:title,cat_id:body.cat_id,ok:!!ok};if(!ok)throw new Error('update_goods_commit_info failed error_code='+ec+' '+String(em||JSON.stringify(r)).slice(0,160));return JSON.stringify({ok:true,goods_id:gid,goods_commit_id:cid,goods_name:title,cat_id:body.cat_id,res:r===true?true:(typeof r==='object'?{ec:ec}:r)});})()"
+      },
+      "save": "rename"
+    },
+    {
+      "id": "draft_read",
+      "op": "eval",
+      "note": "commit/detail independent readback BEFORE submit — title/sku_n/gallery_n/is_shop",
+      "args": {
+        "timeout_ms": "{{api_ms}}",
+        "script": "(function(){var sync=window.__PDD.sync;var ids=window.__PDD.ids||{};var body={goods_id:Number(ids.goods_id)||ids.goods_id,goods_commit_id:Number(ids.goods_commit_id)||ids.goods_commit_id};var r=sync('POST','/glide/v2/mms/query/commit/detail',body);window.__PDD.draft=r;var d=r&&(r.result||r.data||r)||{};return JSON.stringify({goods_id:d.goods_id||ids.goods_id,commit:d.id||d.goods_commit_id||ids.goods_commit_id,name:d.goods_name,sku_n:(d.sku||d.skus||[]).length,gallery_n:(d.gallery||d.galleries||[]).length,market_price:d.market_price,cat_id:d.cat_id,check_status:d.check_status,is_shop:d.is_shop,out_goods_sn:d.out_goods_sn,head:JSON.stringify(d).slice(0,300)});})()"
+      },
+      "save": "draft"
+    },
+    {
+      "id": "submit",
+      "op": "eval",
+      "note": "ONE SHOT public submit via sync. Default vars.submit=0. Unknown outcome => query first, never blind-retry [save=submit_out so vars.submit not shadowed]",
+      "args": {
+        "timeout_ms": "{{api_ms}}",
+        "script": "(function(){if(String({{submit}})!=='1')return 'skip: vars.submit!=1 (draft-only; set submit:1 for one-shot public commit)';var sync=window.__PDD.sync;var ids=window.__PDD.ids||{};var D={{args}};var body={goods_id:String(ids.goods_id||D.goods_id||''),goods_commit_id:String(ids.goods_commit_id||D.goods_commit_id||'')};if(!body.goods_commit_id)throw new Error('submit: missing goods_commit_id');if(D.submit_extra&&typeof D.submit_extra==='object'){for(var k in D.submit_extra){if(Object.prototype.hasOwnProperty.call(D.submit_extra,k))body[k]=D.submit_extra[k];}}window.__PDD.submitIntent={at:Date.now(),body:body};try{var r=sync('POST','/glide/v2/mms/edit/commit/submit',body);window.__PDD.submit=r;return JSON.stringify({ok:true,intent:body,head:JSON.stringify(r).slice(0,500)});}catch(e){var err={err:true,msg:String((e&&(e.error_msg||e.errorMsg||e.message))||e).slice(0,240)};window.__PDD.submit=err;throw new Error('commit/submit failed: '+err.msg+' — DO NOT blind-retry; query commit/detail + goodsList first');}})()"
+      },
+      "save": "submit_out"
+    },
+    {
+      "id": "verify",
+      "op": "eval",
+      "note": "vodka goodsListByGoodsId + on_shop/detail via sync",
+      "args": {
+        "timeout_ms": 120000,
+        "script": "(function(){var sync=window.__PDD.sync;var ids=window.__PDD.ids||{};var gid=String(ids.goods_id||'');var out={goods_id:gid,commit:ids.goods_commit_id,transport:'sync'};var tries=Number('{{verify_tries}}'||'3')||3;for(var i=0;i<tries;i++){if(i){var t0=Date.now();while(Date.now()-t0<(Number('{{verify_gap_ms}}'||'4000')||4000)){}}var listR=null,shopR=null;try{listR=sync('POST','/vodka/v2/mms/query/display/mall/goodsListByGoodsId',{goods_id:gid});}catch(e){listR={err:String((e&&(e.error_msg||e.message))||e).slice(0,120)};}try{shopR=sync('POST','/glide/v2/mms/query/commit/on_shop/detail',{goods_id:gid});}catch(e){shopR={err:String((e&&(e.error_msg||e.message))||e).slice(0,120)};}out.list=listR;out.on_shop=shopR;out.tries=i+1;var d=shopR&&(shopR.result||shopR.data||shopR);if(d&&!shopR.err){out.verified={status:d.status||d.is_onsale||d.check_status,sku_n:((d.sku||d.skus)||[]).length,name:d.goods_name||d.name,market_price:d.market_price};if(String({{submit}})!=='1'){out.note='draft path - on_shop may be empty until submit';}return JSON.stringify(out);}}out.pending=true;out.hint='submit may still be auditing - re-query; do NOT re-submit';return JSON.stringify(out);})()"
+      },
+      "save": "outcome"
+    }
+  ]
+}
