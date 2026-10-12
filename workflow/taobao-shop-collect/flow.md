@@ -1,3 +1,5 @@
+> 2026-10-12：`create` 去 url → `preload recipe: taobao-block-everyhelp` → 首次 `navigate {{shop_url}}`（其后 reboot 重导航仍保留）；everyhelp 改 named recipe。
+
 # taobao-shop-collect — 采集别人公开店铺在售商品（买家侧列表页）
 
 买家视角的店内搜索列表页（`shop<N>.taobao.com/search.htm?search=y`）整页

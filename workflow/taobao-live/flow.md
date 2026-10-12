@@ -1,3 +1,5 @@
+> 2026-10-12：`create` 去 url → `preload recipe: taobao-block-everyhelp` → `navigate {{front_url}}`；everyhelp 改 named recipe。
+
 # taobao-live — 淘宝直播首页流（verdict 门版）
 
 live.taobao.com 首页探测流：落地就抽房间链接，撞墙（punish/滑块/登录）

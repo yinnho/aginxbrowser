@@ -1,3 +1,5 @@
+> 2026-10-12：`create` 去 url → `preload recipe: taobao-block-everyhelp` → `navigate {{login_url}}`（消灭 create.url 首屏竞态；everyhelp 脚本收成 named recipe）。
+
 # taobao-login — 淘宝扫码登录流（login.jhtml 直连版）
 
 淘宝扫码登录出码流。同抖店一个病根：www.taobao.com 首页 9.79s + 点
@@ -8,8 +10,9 @@
 ## 结构（5 步，线性）
 
 ```
-preload everyhelp 拦截（fetch/XHR 层拒绝 everyhelp.(cdn.)taobao.com）
-  → create login.jhtml?redirectURL=www.taobao.com 1440×900（302 → havanaone）
+create bare 1440×900
+  → preload recipe taobao-block-everyhelp
+  → navigate login.jhtml?redirectURL=www.taobao.com（302 → havanaone）
   → wait .qrcode-img canvas（页面唯一 canvas，212×212）
   → screenshot .qrcode-img crop（qr_shot）
   → wait 落地判定：hostname 不含 login.taobao.com（{{login_timeout_ms}}）

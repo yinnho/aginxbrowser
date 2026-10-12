@@ -10,14 +10,18 @@
 //! earlier auto-mount was #84 / batch 286, reversed to match the
 //! BUILTIN_FLOWS revoke of 2026-10-02).
 //!
-//! Lineage of the script body: the eval-time mega patch from
+//! Lineage of the xhs script body: the former eval-time mega patch from
 //! `workflow/xhs-post/flow.json`, reshaped for the www read path
 //! (swallow page x-s/x-t and re-sign — page VM signatures computed
 //! in-engine come out wrong; CDP bridge measured comment/page 461→200).
-//! Document-start is what makes it win before inline jsvmp captures
-//! fetch/XHR natives. `__xs_installed` keeps the publish flow's eval
-//! patch from double-wrapping. Logout fuse stays (unsigned-API 406s
+//! Document-start wins before inline jsvmp captures fetch/XHR natives.
+//! Flows must `preload` `recipe: "xhs-sign"` (no host auto-mount, no
+//! duplicate eval mega-patch). Logout fuse stays (unsigned-API 406s
 //! misread as session death trigger the page's own /sso/logout).
+//!
+//! Also named here (opt-in only): `taobao-block-everyhelp` — fetch/XHR
+//! reject for `everyhelp.(cdn.)taobao.com` (2026-10-06/07 wall). Shared
+//! by taobao-* / tmall-* flows so the script is not pasted eight times.
 
 /// Canonical recipe name for the xhs signing wrapper.
 pub const XHS_SIGN_NAME: &str = "xhs-sign";
@@ -128,12 +132,25 @@ pub const XHS_SIGN: &str = r#"(() => {
   return 'patched';
 })()"#;
 
+
+/// Canonical recipe name for the taobao everyhelp fetch/XHR wall.
+pub const TAOBAO_BLOCK_EVERYHELP_NAME: &str = "taobao-block-everyhelp";
+
+/// Block `everyhelp.(cdn.)taobao.com` at fetch/XHR open (2026-10-06/07).
+///
+/// Opt-in via `preload` `{"recipe":"taobao-block-everyhelp"}` (alias
+/// `"taobao-everyhelp"`). The widget's getWidgetVersion against everyhelp
+/// was a hung-fetch wall; rejecting at the transport face keeps login /
+/// shop / publish pages moving.
+pub const TAOBAO_BLOCK_EVERYHELP: &str = r#"(function(){var BAD=/^https?:\/\/everyhelp\.(cdn\.)?taobao\.com\//;var of=window.fetch;if(typeof of==='function'){window.fetch=function(input,init){var u=typeof input==='string'?input:(input&&input.url)||'';try{u=String(u)}catch(e){}if(BAD.test(u)){try{console.error('[BLOCK] '+u)}catch(e){};return Promise.reject(new TypeError('Failed to fetch'))}return of.apply(this,arguments)}}var op=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){if(BAD.test(String(u))){try{console.error('[BLOCK] '+u)}catch(e){};this.__ehb=1;return}return op.apply(this,arguments)};var os=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.send=function(){if(this.__ehb){return}return os.apply(this,arguments)}})()"#;
+
 /// Resolve a recipe name (aliases included) to its source. None for
 /// unknown names — callers surface the error rather than silently
 /// mounting nothing.
 pub fn resolve(name: &str) -> Option<&'static str> {
     match name {
         XHS_SIGN_NAME | "xhs" => Some(XHS_SIGN),
+        TAOBAO_BLOCK_EVERYHELP_NAME | "taobao-everyhelp" => Some(TAOBAO_BLOCK_EVERYHELP),
         _ => None,
     }
 }
@@ -206,7 +223,19 @@ mod tests {
     fn resolve_known_names_and_rejects_unknown() {
         assert!(resolve("xhs-sign").is_some());
         assert!(resolve("xhs").is_some());
+        assert!(resolve("taobao-block-everyhelp").is_some());
+        assert!(resolve("taobao-everyhelp").is_some());
         assert!(resolve("nope").is_none());
+    }
+
+    #[test]
+    fn taobao_everyhelp_script_carries_the_contract() {
+        for needle in ["everyhelp", "XMLHttpRequest.prototype.open", "window.fetch", "__ehb"] {
+            assert!(
+                TAOBAO_BLOCK_EVERYHELP.contains(needle),
+                "script lost: {needle}"
+            );
+        }
     }
 
     #[test]
