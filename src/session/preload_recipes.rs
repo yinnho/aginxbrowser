@@ -25,7 +25,7 @@ pub const XHS_SIGN_NAME: &str = "xhs-sign";
 /// The xhs document-start signing wrapper (#84, batch 286).
 ///
 /// Opt-in only — see module docs. Observability on `window`:
-/// `__xs_installed` / `__xs_swallowed` / `__xs_signed` / `__xs_fuse`.
+/// `__xs_installed` / `__xs_swallowed` / `__xs_signed` / `__xs_passthrough` / `__xs_fuse`.
 pub const XHS_SIGN: &str = r#"(() => {
   if (window.__xs_installed) return 'already';
   window.__xs_installed = true;
@@ -51,10 +51,14 @@ pub const XHS_SIGN: &str = r#"(() => {
   XMLHttpRequest.prototype.setRequestHeader = function(k, v) {
     const lk = String(k).toLowerCase();
     if (lk === 'x-s' || lk === 'x-t') {
-      // #84: swallow the page's in-engine signature — send() re-issues both
-      // fresh. Forwarding it would combine into a two-value header.
-      window.__xs_swallowed = (window.__xs_swallowed || 0) + 1;
-      return;
+      // #84: swallow only when we can re-sign at send(). On Ark the AS
+      // signer never mounts (_webmsxyw undefined) — swallowing then leaves
+      // the request bare → guaranteed 406 (xs_swallowed>0, xs_signed=0).
+      if (typeof window._webmsxyw === 'function') {
+        window.__xs_swallowed = (window.__xs_swallowed || 0) + 1;
+        return;
+      }
+      window.__xs_passthrough = (window.__xs_passthrough || 0) + 1;
     }
     return S.apply(this, arguments);
   };
@@ -99,11 +103,14 @@ pub const XHS_SIGN: &str = r#"(() => {
     const plain = !(h instanceof Headers);
     const has = plain ? ('x-s' in h || 'X-s' in h) : (h.has('x-s') || h.has('X-s'));
     if (!has) return F.call(this, u, o);
-    // #84: same swallow-then-resign on the fetch face — the jsvmp wrapper
-    // posts half the boot burst through fetch with the page's own x-s.
+    // #84: swallow-then-resign only when _webmsxyw can re-sign. Otherwise
+    // pass the page headers through (Ark: signer never mounts → bare 406).
     const body = (o.body != null && typeof o.body !== 'string') ? undefined : o.body;
     const sg = sign(us, body);
-    if (!sg) return F.call(this, u, o);
+    if (!sg) {
+      window.__xs_passthrough = (window.__xs_passthrough || 0) + 1;
+      return F.call(this, u, o);
+    }
     let nh;
     if (plain) {
       nh = Object.assign({}, h);
@@ -213,6 +220,7 @@ mod tests {
             "XMLHttpRequest.prototype.send",
             "window.fetch",
             "__xs_swallowed",
+            "__xs_passthrough",
         ] {
             assert!(XHS_SIGN.contains(needle), "script lost: {needle}");
         }

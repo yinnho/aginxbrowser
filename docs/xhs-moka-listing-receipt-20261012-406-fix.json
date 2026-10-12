@@ -1,0 +1,20 @@
+{
+  "when": "2026-10-12T22:55:28+08:00",
+  "zone": "Asia/Shanghai",
+  "goal": "XHS Ark merchant publish 406 — stop amplifier; cookies dead mid-run",
+  "root_cause": {
+    "406": "Ark SPA never mounts window._webmsxyw (AS scripts fetch but do not install). xhs-sign swallowed page x-s/x-t and could not re-sign → xs_signed=0 → write APIs HTTP 406.",
+    "proven_bypass": "XYW_ signature from www _webmsxyw (signSvn 56, appId xhs-pc-web) against publish_render → HTTP 200 + code 300015 (env anomaly), not 406.",
+    "login_now": "Merchant curl cookies dead: seller/info raw urllib HTTP 401 code -13004. SSO service-ticket → 707 账号存在风险. Stopped further probe."
+  },
+  "fix": {
+    "xhs_sign": "Only swallow x-s/x-t when typeof _webmsxyw === 'function'; else pass through (__xs_passthrough). Local commit only.",
+    "not_done": [
+      "Ark AS boot still broken — _webmsxyw never appears on ark.xiaohongshu.com",
+      "300015 browser-env check not cleared (needs live login + likely stealth build)",
+      "No new listing created; existing 6acba9d67dbca20001c739ad left alone"
+    ]
+  },
+  "need_from_user": "Fresh Chrome DevTools Copy-as-cURL from logged-in ark.xiaohongshu.com (prior jar invalidated / risk-flagged).",
+  "existing_live_item": "6acba9d67dbca20001c739ad"
+}
