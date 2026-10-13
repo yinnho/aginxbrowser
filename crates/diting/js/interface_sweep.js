@@ -79,6 +79,7 @@
     globalThis.Option, globalThis.FormData, globalThis.Headers, globalThis.URL,
     globalThis.WebSocket, globalThis.EventSource, globalThis.BroadcastChannel,
     globalThis.ReadableStream, globalThis.WritableStream,
+    globalThis.FileList,
   ]) add(C);
   for (const n of Object.getOwnPropertyNames(globalThis)) {
     if (/^(HTML|SVG)[A-Za-z]*Element$/.test(n)) add(globalThis[n]);

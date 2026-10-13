@@ -4847,6 +4847,216 @@
         assert_eq!(v["sawLoad"], serde_json::json!("false"));
     }
 
+    /// #259: `<link rel=preload>` fires `load`/`error` like a stylesheet
+    /// link — it never applies a sheet, only warms the fetch and reports
+    /// settle. data: URLs settle as a 0ms task (no network); the warming
+    /// parks the body in the ext-sheet cache so the `<link rel=stylesheet>`
+    /// that follows the preload settles instantly off it.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn preload_link_fires_load_and_warms_the_sheet_cache() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let css = "#probe { color: rgb(1, 2, 3); }";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).unwrap();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/css\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                css.len(),
+                css
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        let result = rt
+            .call_function_on_remote(
+                r#"async () => {
+                    const dataLink = document.createElement('link');
+                    dataLink.rel = 'preload'; dataLink.as = 'style';
+                    dataLink.href = 'data:text/css,body{}';
+                    const dataDone = new Promise(r => { dataLink.onload = () => r('fired'); });
+                    document.head.appendChild(dataLink);
+                    const dataHow = await dataDone;
+
+                    const pre = document.createElement('link');
+                    pre.rel = 'preload'; pre.as = 'style';
+                    pre.href = '/sheet.css';
+                    let preSawError = false;
+                    pre.addEventListener('error', () => { preSawError = true; }, { once: true });
+                    const preDone = new Promise(r => { pre.onload = () => r('fired'); });
+                    document.head.appendChild(pre);
+                    const preHow = await preDone;
+
+                    // The warmed body settles the follow-up stylesheet link
+                    // through the cache (no second hit on the one-shot server).
+                    const sheet = document.createElement('link');
+                    sheet.rel = 'stylesheet';
+                    sheet.href = '/sheet.css';
+                    const sheetDone = new Promise(r => { sheet.onload = () => r('fired'); });
+                    document.head.appendChild(sheet);
+                    const sheetHow = await sheetDone;
+
+                    return { dataHow, preHow, preSawError: String(preSawError), sheetHow,
+                             sheetCount: String(document.styleSheets.length) };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let v = result.value.unwrap();
+        assert_eq!(v["dataHow"], serde_json::json!("fired"));
+        assert_eq!(v["preHow"], serde_json::json!("fired"));
+        assert_eq!(v["preSawError"], serde_json::json!("false"));
+        assert_eq!(v["sheetHow"], serde_json::json!("fired"));
+        // Preload alone never registers a sheet — the follow-up link does.
+        assert_eq!(v["sheetCount"], serde_json::json!("1"));
+    }
+
+    /// #259 failure side: a preload whose fetch fails fires `error`, never a
+    /// phantom `load` — the waiter's retry logic runs on the same signal a
+    /// browser gives it.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn preload_link_fires_error_on_failed_fetch() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        // Bind then drop: the port answers connection-refused.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let p = l.local_addr().unwrap().port();
+            drop(l);
+            p
+        };
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{}/page", port));
+        let result = rt
+            .call_function_on_remote(
+                r#"async () => {
+                    const pre = document.createElement('link');
+                    pre.rel = 'preload'; pre.as = 'style';
+                    pre.href = '/missing.css';
+                    let sawLoad = false;
+                    pre.addEventListener('load', () => { sawLoad = true; }, { once: true });
+                    const failed = new Promise(r => { pre.onerror = () => r('fired'); });
+                    document.head.appendChild(pre);
+                    const how = await failed;
+                    return { how, sawLoad: String(sawLoad) };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let v = result.value.unwrap();
+        assert_eq!(v["how"], serde_json::json!("fired"));
+        assert_eq!(v["sawLoad"], serde_json::json!("false"));
+    }
+
+    /// #257: `document.cloneNode(true)` returns a NEW working document —
+    /// Readability-style extractors start from exactly this call, and the
+    /// generic Node path answered null for nodeType 9. Shallow clones come
+    /// back as an empty shell (no element children), like Chrome.
+    #[tokio::test(flavor = "current_thread")]
+    async fn document_clone_node_deep_returns_working_document() {
+        let mut rt = setup_runtime(
+            "<html><head><title>src</title></head><body><p class=\"x\">x1</p><p>y</p></body></html>",
+        );
+        let result = rt
+            .call_function_on_remote(
+                r#"async () => {
+                    const deep = document.cloneNode(true);
+                    const shallow = document.cloneNode(false);
+                    const p = deep.querySelector('p.x');
+                    return {
+                        deepOk: String(deep != null),
+                        deepBody: String(deep.body != null),
+                        deepP: p ? p.textContent : 'none',
+                        deepPCount: String(deep.querySelectorAll('p').length),
+                        deepTitle: deep.title,
+                        deepDetached: String(deep.defaultView === null),
+                        shallowOk: String(shallow != null),
+                        shallowEmpty: String(shallow.documentElement == null
+                            || shallow.documentElement.children.length === 0),
+                    };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let v = result.value.unwrap();
+        assert_eq!(v["deepOk"], serde_json::json!("true"));
+        assert_eq!(v["deepBody"], serde_json::json!("true"));
+        assert_eq!(v["deepP"], serde_json::json!("x1"));
+        assert_eq!(v["deepPCount"], serde_json::json!("2"));
+        assert_eq!(v["deepTitle"], serde_json::json!("src"));
+        assert_eq!(v["deepDetached"], serde_json::json!("true"));
+        assert_eq!(v["shallowOk"], serde_json::json!("true"));
+        assert_eq!(v["shallowEmpty"], serde_json::json!("true"));
+    }
+
+    /// #258: `FileList` is a real global — boot-time feature detects and
+    /// `instanceof` guards ReferenceError without it (obscura #1232).
+    /// Constructing throws like Chrome's; `input.files` keeps its shape and
+    /// now carries the prototype, so instanceof holds.
+    #[tokio::test(flavor = "current_thread")]
+    async fn filelist_global_present_and_files_instanceof() {
+        let mut rt = setup_runtime("<html><body><input id=\"f\" type=\"file\"></body></html>");
+        let result = rt
+            .call_function_on_remote(
+                r#"async () => {
+                    const files = document.getElementById('f').files;
+                    let ctorThrew = 'no';
+                    try { new FileList(); } catch (e) { ctorThrew = e instanceof TypeError ? 'TypeError' : String(e).slice(0, 30); }
+                    return {
+                        typeofGlobal: typeof FileList,
+                        instanceof: String(files instanceof FileList),
+                        tag: Object.prototype.toString.call(files),
+                        length: String(files.length),
+                        item: String(files.item(0)),
+                        ctorThrew,
+                    };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let v = result.value.unwrap();
+        assert_eq!(v["typeofGlobal"], serde_json::json!("function"));
+        assert_eq!(v["instanceof"], serde_json::json!("true"));
+        assert_eq!(v["tag"], serde_json::json!("[object FileList]"));
+        assert_eq!(v["length"], serde_json::json!("0"));
+        assert_eq!(v["item"], serde_json::json!("null"));
+        assert_eq!(v["ctorThrew"], serde_json::json!("TypeError"));
+    }
+
     /// (#41) `new Image()` must gate `load` on a real fetch: a 2xx response
     /// fires `load` with complete=true; the old stub fired `load`
     /// unconditionally without any network attempt.

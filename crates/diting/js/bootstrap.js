@@ -492,8 +492,16 @@ const _formIndeterminate = globalThis._formIndeterminate;
 const _fileInputs = globalThis._fileInputs;
 // FileList-shaped face (length/item/indexed/iterator/toStringTag), shared by
 // the input.files getter (#408 lineage) and DataTransfer.files (#58).
+// #258: FileList is a real global constructor — boot-time feature detects
+// and `x instanceof FileList` guards ReferenceError without it (obscura
+// #1232). Constructing throws like Chrome's; the list objects below stay
+// the same shape but now carry its prototype, so instanceof holds.
+function _FileList() { throw new TypeError('Illegal constructor'); }
+if (typeof FileList === 'undefined') globalThis.FileList = _FileList;
 function _makeFileList(fs) {
-  const list = { length: fs.length, item: (i) => (i >= 0 && i < fs.length ? fs[i] : null) };
+  const list = Object.create(_FileList.prototype);
+  list.length = fs.length;
+  list.item = (i) => (i >= 0 && i < fs.length ? fs[i] : null);
   for (let i = 0; i < fs.length; i++) list[i] = fs[i];
   list[Symbol.iterator] = function* () { for (let i = 0; i < this.length; i++) yield this[i]; };
   Object.defineProperty(list, Symbol.toStringTag, { value: 'FileList' });
@@ -2592,10 +2600,6 @@ function __prepareInsertedStylesIn(root) {
 // chunk promise from the link's load event, so a missing event leaves the
 // promise pending forever and freezes every lazy route behind it (tmall
 // pc-shop-webapp renders a styled blank page exactly this way).
-function __linkIsStylesheet(el) {
-  if (!el || el.nodeType !== 1 || (el.tagName || '').toUpperCase() !== 'LINK') return false;
-  return (el.getAttribute('rel') || '').toLowerCase().split(/\s+/).indexOf('stylesheet') >= 0;
-}
 function __fireLinkLoadEvent(link, type) {
   // dispatchEvent alone routes the on* property handler too; a manual
   // property call ahead of it double-fires (same disease as the
@@ -2619,7 +2623,16 @@ function __prepareInsertedStylesheetLinksIn(root) {
   for (const link of links) { delete link._sheetLoadUrl; delete link._sheetObj; __prepareInsertedStylesheetLink(link); }
 }
 function __prepareInsertedStylesheetLink(link) {
-  if (!__linkIsStylesheet(link)) return;
+  if (!link || link.nodeType !== 1 || (link.tagName || '').toUpperCase() !== 'LINK') return;
+  const relTokens = (link.getAttribute('rel') || '').toLowerCase().split(/\s+/);
+  const isSheet = relTokens.indexOf('stylesheet') >= 0;
+  // <link rel=preload>/<link rel=modulepreload> never applies a sheet — it
+  // warms the fetch and reports settle. Loader-side waits on those events
+  // are load-bearing the same way (webfont/modulepreload orchestrators
+  // inject their dependency off onload); before #259 both settle paths
+  // fired nothing, so waiters hung forever on success AND failure.
+  const isPreload = relTokens.indexOf('preload') >= 0 || relTokens.indexOf('modulepreload') >= 0;
+  if (!isSheet && !isPreload) return;
   const raw = link.getAttribute('href');
   if (!raw) return;
   let abs;
@@ -2637,6 +2650,9 @@ function __prepareInsertedStylesheetLink(link) {
     setTimeout(fireLoad, 0);
     return;
   }
+  // data: URLs never hit the network — settle as a 0ms task like an
+  // already-cached fetch (Chrome fires load for data: preloads too).
+  if (abs.startsWith('data:')) { setTimeout(fireLoad, 0); return; }
   const pageOrigin = (function() { try { return new URL(globalThis.location?.href || 'about:blank').origin; } catch (e) { return ''; } })();
   (async () => {
     try {
@@ -2653,7 +2669,7 @@ function __prepareInsertedStylesheetLink(link) {
         const _rtT0 = globalThis.performance ? performance.now() : 0;
         const rawResp = await _OPS.op_fetch_url(abs, "GET", "{}", "", pageOrigin, "no-cors", "same-origin", "\u0000about:client");
         const parsed = JSON.parse(rawResp);
-        __recordFetchTiming(_rtT0, abs, 'link', parsed, { renderBlocking: true });
+        __recordFetchTiming(_rtT0, abs, 'link', parsed, { renderBlocking: isSheet });
         if (!(parsed.status >= 200 && parsed.status <= 299)) {
           const why = parsed.error || parsed.corsError;
           throw new Error('HTTP ' + (parsed.status || 0) + (why ? ': ' + why : ''));
@@ -2663,6 +2679,10 @@ function __prepareInsertedStylesheetLink(link) {
         _OPS.op_dyn_script_fetch_end();
       }
       if (body != null) {
+        // Sheets apply through the ext-sheet cache; a warmed preload parks
+        // its body there too, so the <link rel=stylesheet> that follows the
+        // preload hits the cache and settles instantly — the browser's
+        // preload-then-use shape.
         _domRaw("ext_sheet_put", abs, body);
         if (_extSheetsMap) _extSheetsMap[abs] = body;
       }
@@ -6164,6 +6184,19 @@ class Document extends Node {
   get childElementCount() { return this.documentElement ? 1 : 0; }
   get head() { return this.querySelector("head"); }
   get body() { return this.querySelector("body"); }
+  // #257: cloning a document makes a NEW document — doctype + element tree
+  // when deep, an empty shell when shallow. The tree is rebuilt from
+  // serialization through the DOMParser face: listeners and expandos never
+  // copy (spec), which is exactly what that path produces, and scripts stay
+  // inert in a detached tree. Readability-style extractors start from
+  // document.cloneNode(true); the generic Node path returned null for
+  // nodeType 9 (obscura #1230-shaped boot crash).
+  cloneNode(deep) {
+    try {
+      const src = deep && this.documentElement ? '<!DOCTYPE html>' + this.documentElement.outerHTML : '';
+      return new DOMParser().parseFromString(src, 'text/html');
+    } catch (e) { return null; }
+  }
   get doctype() {
     if (this._doctype !== undefined) return this._doctype;
     const info = _domParse("document_doctype");
