@@ -67,7 +67,7 @@
 3. **wait `input.upload-input`（硬门）** — 正向信号：真上传 input 渲染=已登录（登录页的装饰性 upload-content 骗不过它）；
    超时回执带 URL（redirectReason=401）+ wall 遥测=登录墙的完整形状。
    注：步 0 `preload recipe=xhs-sign` 已在 navigate 前挂上 document-start；
-   步 1.5 eval 补丁是 `__xs_installed` 兜底，步 1.6 续票仍插在 navigate 与本 wait 之间。
+   步 1.5 eval 补丁是 `__xsStats().installed` 兜底，步 1.6 续票仍插在 navigate 与本 wait 之间。
 4. **tab** — 摘浮层 + 点「上传图文」，expect `input[type=file]`；
    找不到 tab → throw（回执 `tabs` 字段=诊断入口）。
 5. **upload** — `const ARGS = {{args_json}}` 解包；逐张 data: URL fetch →
@@ -108,7 +108,7 @@ set_files 的 `files` 数组无法从 vars 结构化喂入；单张可用（`{{i
 
 引擎**不再**按 `*.xiaohongshu.com` / `*.xhslink.com` 自动挂载 `xhs-sign`。
 本 flow：`create` **不带 url** → `preload {"recipe":"xhs-sign"}` → `navigate`
-publish 页 → `eval` 补丁（`__xs_installed` 互斥兜底）。先挂 document-start
+publish 页 → `eval` 补丁（`__xsStats().installed` 互斥兜底）。先挂 document-start
 再进站，避免 create 首航无签的 boot 竞态。裸会话同序：preload recipe → navigate。
 
 ## 登录配方（引擎侧续票 → 引擎内 QR → import_curl 兜底）

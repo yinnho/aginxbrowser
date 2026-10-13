@@ -37,8 +37,12 @@ pub const XHS_SIGN_NAME: &str = "xhs-sign";
 
 /// The xhs document-start signing wrapper (#84, batch 286).
 ///
-/// Opt-in only — see module docs. Observability on `window`:
-/// `__xs_installed` / `__xs_swallowed` / `__xs_signed` / `__xs_passthrough` / `__xs_fuse`.
+/// Opt-in only — see module docs. Observability: ONE non-enumerable
+/// `window.__xsStats()` returning the counter snapshot (`installed` /
+/// `swallowed` / `signed` / `passthrough` / `fuse` / …). No enumerable
+/// `__xs_*` globals and no unmasked natives — wrappers go through the
+/// engine's `_markNative` registry so 300015-class env probes reading
+/// `Function.prototype.toString` / `Object.keys(window)` see Chrome.
 pub const XHS_SIGN: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/workflow/xhs-sign/recipe.js"));
 
 
@@ -207,7 +211,8 @@ mod tests {
         // Guards against silent truncation of the embedded source: every
         // face the wrapper must own is named.
         for needle in [
-            "__xs_installed",
+            "__xsStats",
+            "_markNative",
             "_webmsxyw",
             "resolveSigner",
             "window.proxy",
@@ -216,8 +221,8 @@ mod tests {
             "sso\\/logout",
             "XMLHttpRequest.prototype.send",
             "window.fetch",
-            "__xs_swallowed",
-            "__xs_passthrough",
+            "bump('swallowed')",
+            "stats.passthrough",
         ] {
             assert!(XHS_SIGN.contains(needle), "script lost: {needle}");
         }

@@ -34,7 +34,7 @@
     {
       "op": "eval",
       "args": {
-        "script": "(function(){return JSON.stringify({has_signer: typeof window._webmsxyw==='function', xs_installed:!!window.__xs_installed, xs_passthrough:window.__xs_passthrough||0, xs_signed:window.__xs_signed||0, url:location.href});})()"
+        "script": "(function(){var s=(typeof window.__xsStats==='function')?window.__xsStats():{};return JSON.stringify({has_signer: typeof window._webmsxyw==='function', xs_installed:!!s.installed, xs_passthrough:s.passthrough||0, xs_signed:s.signed||0, url:location.href});})()"
       },
       "save": "signer",
       "note": "observability only — merchant create APIs must not run without has_signer"
