@@ -14,6 +14,12 @@
     pr_held: 0, pr_blocked: 0, fuse: 0,
   };
   const bump = (k) => { stats[k] = (stats[k] || 0) + 1; };
+  // Last publish_render decision + wire outcome (closure-only, surfaced via
+  // __xsStats()). mode: passthrough|resign|blocked|unsigned-wire.
+  stats.pr_last = null;
+  const notePr = (mode, extra) => {
+    stats.pr_last = Object.assign({ ts: Date.now(), mode: mode }, extra || {});
+  };
   try {
     Object.defineProperty(window, '__xsStats', {
       value: function () { return JSON.parse(JSON.stringify(stats)); },
@@ -212,6 +218,7 @@
               return;
             } catch (e) { /* polyfill shape differs: fall through to the wire */ }
           }
+          if (self.__xs_pr) notePr('unsigned-wire', { body: b instanceof FormData ? 'FormData' : 'other' });
           if (self.__xs_u && !(b instanceof FormData) && (isXhsUrl(self.__xs_u) || self.__xs_pr)) {
             const page = self.__xs_page || {};
             const hasPageXs = !!page['x-s'];
@@ -222,6 +229,10 @@
               S.call(self, 'X-s', page['x-s']);
               if (page['x-t']) S.call(self, 'X-t', page['x-t']);
               if (hasPageCommon) S.call(self, 'X-s-common', page['x-s-common']);
+              notePr('passthrough', { pageCommon: hasPageCommon, pageXt: !!page['x-t'] });
+              self.addEventListener('loadend', function () {
+                try { if (stats.pr_last) { stats.pr_last.status = self.status; } } catch (e) {}
+              });
               bump('passthrough');
               if (hasPageCommon) bump('passthrough_coherent');
               return D.apply(self, args);
@@ -238,9 +249,14 @@
                 bump('common_stripped');
                 // intentionally omit page x-s-common — never pair stale common with new X-s/X-t
               }
+              notePr('resign', { signerCommon: !!cm, pageCommon: hasPageCommon });
+              self.addEventListener('loadend', function () {
+                try { if (stats.pr_last) { stats.pr_last.status = self.status; } } catch (e) {}
+              });
               bump('signed');
             } else if (self.__xs_pr && !allowUnsigned) {
               // Do not wire unsigned publish_render — synthetic soft fail (avoid 300015 poison).
+              notePr('blocked');
               bump('pr_blocked');
               try {
                 Object.defineProperty(self, 'readyState', { value: 4 });
@@ -306,12 +322,14 @@
         const signerReady = typeof (mirrorSigner() || resolveSigner()) === 'function';
         // PRIMARY (Oct-11): signer ready + page already set x-s (+ ideally x-s-common) → passthrough
         if (signerReady && hasXs) {
+          if (gated) notePr('passthrough', { via: 'fetch', pageCommon: hasCommon });
           bump('passthrough');
           if (hasCommon) bump('passthrough_coherent');
           return F.call(this, u, o);
         }
         if (!sg) {
           if (gated) {
+            notePr('blocked', { via: 'fetch' });
             bump('pr_blocked');
             return Promise.resolve(new Response(
               JSON.stringify({ code: -1, success: false, msg: 'xs-gate:signer-not-ready' }),
@@ -350,6 +368,7 @@
         }
         if (hasXs) bump('swallowed');
         bump('signed');
+        if (gated) notePr('resign', { via: 'fetch', signerCommon: !!commonFromSg(sg), pageCommon: hasCommon });
         return F.call(this, u, Object.assign({}, o, { headers: nh }));
       };
       if (!isXhsUrl(us) && !isPublishRender(us)) return F.call(this, u, o);
