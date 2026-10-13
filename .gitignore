@@ -31,8 +31,9 @@ cache.db-wal
 # Local vendored source trees pulled for reference (e.g. deno_core during musl port)
 vendor/
 
-# Reports/notes/receipts stay local — new files under docs/ are never committed
-# (user rule, 2026-09-22; tracked product docs keep updating, adding one needs -f)
+# Reports/notes/receipts stay local — nothing under docs/ is ever committed
+# (user rule 2026-09-22; extended 2026-10-13: updates to already-tracked docs
+# files stay uncommitted too — 300015 handover commits had to be rebase-dropped)
 docs/**
 
 # localStorage persistence test artifact (runtime state, must never rsync to hosted instance)
