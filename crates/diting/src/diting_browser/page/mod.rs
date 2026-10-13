@@ -871,14 +871,6 @@ impl Page {
         }
     }
 
-    #[allow(dead_code)] // manual hook; navigations run preloads themselves (init_js)
-    pub fn execute_preload_script(&mut self, source: &str) -> Result<(), String> {
-        if let Some(js) = &mut self.js {
-            js.execute_script("<preload>", source)
-        } else {
-            Err("No JS runtime".to_string())
-        }
-    }
 
     #[cfg_attr(not(test), allow(dead_code))] // storm control: park the realm between microtask bursts
     pub fn suspend_js(&mut self) {

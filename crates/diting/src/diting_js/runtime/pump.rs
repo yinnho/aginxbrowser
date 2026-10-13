@@ -90,17 +90,6 @@ impl super::JsRuntime {
         matches!(result, Ok(Ok(()))) && !fired
     }
 
-    #[allow(dead_code)] // generic promise settle; evaluate paths settle through their own bounded loops
-    pub async fn resolve_promises(&mut self) {
-        // Default settle: just pump until idle or 5s. #50: routed through
-        // Self::run_event_loop so each poll first clears a terminate flag
-        // the watchdog left on a parked isolate (deno_core's own
-        // run_event_loop does no such healing).
-        let _ = tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            self.run_event_loop(),
-        ).await;
-    }
 
     /// Pump the event loop until `done_check` returns true (e.g. an IIFE
     /// has written its result sentinel), or `max_total_ms` elapses.
