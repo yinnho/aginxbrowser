@@ -126,6 +126,7 @@ receipt is the function's return value (`status` / `saved` / `session_id`).
 | `x-follow` | x.com | runs green logged-in | friendships create/destroy; response `following` echoes pre-action state |
 | `x-notifs` | x.com | runs green logged-in | v2 URT notifications feed, read-only triage — the inbox half of the loop |
 | `xhs-login` | xiaohongshu.com | self-contained QR / cookies | preload `xhs-sign`+`xhs-qrcode` → SVG `qr_data`+`qr_shot` in-flow → signed status poll；人只扫码；`mode=cookies`+`import_cookies` 吃 Chrome jar；compose xhs-post — see flow.md |
+| `xhs-qianfan-login` | customer / ark.xiaohongshu.com | merchant 千帆 App QR | beer-login 右上角 `css-wemwzq` → CAS `/api/cas/customer/web/qr-code` → `loginconfirm`（拒 edith C 端）；compose xhs-merchant-publish — see flow.md |
 | `xhs-post` | xiaohongshu.com | login wall logged-out | creator-platform page automation (no API for personal accounts) — login via `import_curl` + `account`, see flow.md |
 
 Account state enters a flow one of three ways — each flow.md says which it
