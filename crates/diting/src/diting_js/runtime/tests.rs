@@ -3736,7 +3736,7 @@
         let mut round = 0usize;
         loop {
             let b = budgets[round % budgets.len()];
-            if round % 2 == 0 {
+            if round.is_multiple_of(2) {
                 let _ = rt.run_event_loop_bounded(b).await;
             } else {
                 let _ = rt.run_event_loop_bounded_throttled(50).await;

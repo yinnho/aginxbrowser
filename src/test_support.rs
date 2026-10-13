@@ -18,6 +18,9 @@ pub(crate) static PRIVATE_NET_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex:
 /// gate is off by default and the env half is read live, so the drop guard
 /// removing the var restores the closed posture even on panic (tests run
 /// without `--allow-file-access`, so the in-process flag half stays unset).
+/// Screenshot-feature-only: its callers are the file:// collector tests,
+/// which vanish with the module on a bare build.
+#[cfg(feature = "screenshot")]
 pub(crate) fn file_access_guard(enabled: bool) -> impl Drop {
     let guard = FILE_ACCESS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if enabled {
@@ -28,11 +31,14 @@ pub(crate) fn file_access_guard(enabled: bool) -> impl Drop {
     FileAccessGuard(Some(guard))
 }
 
+#[cfg(feature = "screenshot")]
 static FILE_ACCESS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Holds the env lock for the test's duration; dropping releases both.
+#[cfg(feature = "screenshot")]
 struct FileAccessGuard(Option<std::sync::MutexGuard<'static, ()>>);
 
+#[cfg(feature = "screenshot")]
 impl Drop for FileAccessGuard {
     fn drop(&mut self) {
         std::env::remove_var("AGINXBROWSER_ALLOW_FILE_ACCESS");

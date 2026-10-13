@@ -459,12 +459,10 @@ impl super::JsRuntime {
             .map(|v| v == serde_json::Value::Bool(true))
             .unwrap_or(false);
         if stalled {
-            if let Ok(dump) = self.evaluate(
-                "globalThis.__diting_mt_dump ? __diting_mt_dump() : null",
-            ) {
-                if let serde_json::Value::String(s) = dump {
-                    tracing::warn!("#240 stall post-mortem (mt/wheel/fetch ring): {}", s);
-                }
+            if let Ok(serde_json::Value::String(s)) =
+                self.evaluate("globalThis.__diting_mt_dump ? __diting_mt_dump() : null")
+            {
+                tracing::warn!("#240 stall post-mortem (mt/wheel/fetch ring): {}", s);
             }
             let _ = self.runtime.execute_script(
                 "<mt-force-recover>",

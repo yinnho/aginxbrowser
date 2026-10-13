@@ -87,12 +87,11 @@ pub(crate) fn disabled_engines() -> std::collections::HashSet<String> {
 /// (alias for putting it in DISABLE_ENGINES). Default stays on; CN ops that
 /// hit Object-moved spam set this or DISABLE_ENGINES.
 pub(crate) fn bing_news_enabled() -> bool {
-    match std::env::var("AGINXBROWSER_BING_NEWS")
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "0" | "false" | "off" | "no" | "disabled" => false,
-        _ => true,
-    }
+    !matches!(
+        std::env::var("AGINXBROWSER_BING_NEWS")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "0" | "false" | "off" | "no" | "disabled"
+    )
 }

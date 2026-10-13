@@ -1781,7 +1781,7 @@
         async fn shoot(mgr: &mut SessionManager, sid: &str) -> (usize, usize) {
             {
                 let shot = mgr
-                    .send(&sid, |reply| SessionCommand::Screenshot {
+                    .send(sid, |reply| SessionCommand::Screenshot {
                         width: Some(400),
                         height: Some(300),
                         full_page: false,
@@ -2083,7 +2083,9 @@
 
     /// A red instant page (/a.html) and a blue page (/b.html) whose
     /// response sleeps 2s — the navigate to B is provably still in flight
-    /// when a mid-load command arrives (#193).
+    /// when a mid-load command arrives (#193). Gated with its only caller
+    /// (the mid-frame test needs the layout engine).
+    #[cfg(feature = "screenshot")]
     fn spawn_slow_nav_server() -> u16 {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -3088,9 +3090,13 @@
     /// takes its snapshot with it — on access (send) and in the eviction
     /// sweep — so touching the id later is NotFound, not a zombie revival
     /// with stale login cookies.
-    
+    ///
     /// AGINXBROWSER_RESTORE_SESSIONS=0 skips eager restore_all; snapshots
-    /// stay on disk for lazy revive-on-touch (parallel dogfood ports).
+    /// stay on disk for lazy revive-on-first-touch (parallel dogfood ports).
+    // RESTORE_SESSIONS_ENV_LOCK is a std Mutex held across the awaits below —
+    // that is the point of the guard (env knobs are process-global, so the
+    // window must span the whole restore). Single test, no contention.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn restore_sessions_env_off_skips_eager_restore() {
         let _net = crate::server::test_util::net_env_guard();
@@ -4733,6 +4739,9 @@
     /// which 30+ session tests then fail with misleading assertions. One
     /// loud failure naming the fix beats 32 cryptic ones (batch246's
     /// "bare构建32挂" face).
+    // assert!(cfg!(feature)) is deliberate: this is the tripwire itself, not a
+    // constant-condition mistake — it must keep failing on a bare build.
+    #[allow(clippy::assertions_on_constants)]
     #[test]
     fn session_geometry_tests_require_the_layout_engine() {
         assert!(

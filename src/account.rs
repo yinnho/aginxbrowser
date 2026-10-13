@@ -107,13 +107,10 @@ fn seed_jar(jar: &CookieJar, cookies: &[String]) {
     }
 }
 
-/// Persist an account record (the login-state snapshot keyed by account
-/// name, not session id). Best-effort mirror of `save_session_snapshot`.
-pub fn save(owner: &str, name: &str, record: &str) -> Result<(), String> {
-    crate::store::save_account(owner, name, record)
-}
-
-/// The stored record, if any: `(record_json, updated_at_unix_secs)`.
+/// The stored record, if any: `(record_json, updated_at_unix_secs)`. Writers
+/// go through [`crate::store::mutate_account`] (field-scoped, atomic) — a
+/// bare save helper here would reintroduce the lost-update race this layer
+/// just closed (verify stomping cookie write-backs).
 pub fn load(owner: &str, name: &str) -> Option<(String, i64)> {
     crate::store::load_account(owner, name)
 }

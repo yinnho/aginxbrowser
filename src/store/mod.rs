@@ -705,10 +705,10 @@ pub fn list_session_snapshot_ids() -> Vec<String> {
 // Accounts (named login identities — see account.rs)
 // ---------------------------------------------------------------------------
 
-pub fn save_account(owner: &str, name: &str, record: &str) -> Result<(), String> {
-    with_store(|st| st.save_account(&norm_owner(owner), name, record))
-}
-
+/// Whole-record account loads for readers. Writers go through
+/// [`mutate_account`] — there is deliberately no public whole-record save:
+/// three writers doing load→mutate→save across separate lock holds was the
+/// lost-update race (verify stomping cookie write-backs) this API closed.
 pub fn load_account(owner: &str, name: &str) -> Option<(String, i64)> {
     with_store(|st| st.load_account(&norm_owner(owner), name))
         .ok()
