@@ -1,6 +1,6 @@
 (() => {
-  // v2: ark-origin gated publish_render (hold until signer ready; never unsigned wire)
-  const XS_VER = 3;
+  // v4: keep x-s / x-t / x-s-common coherent (prefer native passthrough; else strip common on resign)
+  const XS_VER = 4;
   if (window.__xs_ver >= XS_VER) return 'already';
   window.__xs_ver = XS_VER;
   window.__xs_installed = true;
@@ -74,6 +74,11 @@
       return sg && sg['X-s'] ? sg : null;
     } catch (e) { return null; }
   };
+  const commonFromSg = (sg) => {
+    if (!sg) return null;
+    const v = sg['X-s-common'] || sg['x-s-common'];
+    return v != null && v !== '' ? String(v) : null;
+  };
   // Ark itemark mounts the signer a beat after first publish_render — wait briefly.
   // Gated product APIs wait longer and require a short settle after first sighting.
   const SIGNER_WAIT_MS = 2500;
@@ -95,7 +100,8 @@
       if (needSettle) {
         if (Date.now() - signerSeenAt < SETTLE_MS) return null;
         // If nothing else has been signed yet, keep holding until settle*1.5 or a sign lands.
-        if (!(window.__xs_signed > 0) && Date.now() - signerSeenAt < SETTLE_MS * 1.5) return null;
+        if (!(window.__xs_signed > 0) && !(window.__xs_passthrough > 0)
+            && Date.now() - signerSeenAt < SETTLE_MS * 1.5) return null;
       }
       return fn;
     };
@@ -124,12 +130,24 @@
       this.__xs_pr = true;
     }
     this.__xs_u = uu; this.__xs_m = String(m || 'GET').toUpperCase();
+    this.__xs_page = {};
     return O.apply(this, arguments);
   };
   XMLHttpRequest.prototype.setRequestHeader = function(k, v) {
     const lk = String(k).toLowerCase();
+    const xhsish = this.__xs_pr || isPublishRender(this.__xs_u || '')
+      || isXhsUrl(this.__xs_u || '') || (this.__xs_u || '').charAt(0) === '/';
+    if (lk === 'x-s' || lk === 'x-t' || lk === 'x-s-common') {
+      this.__xs_page = this.__xs_page || {};
+      this.__xs_page[lk] = String(v);
+    }
+    // Defer x-s-common on xhs/API so resign can omit it (XHR cannot delete headers).
+    if (lk === 'x-s-common' && xhsish) {
+      this.__xs_common_deferred = true;
+      return;
+    }
     if (lk === 'x-s' || lk === 'x-t') {
-      // Never passthrough for gated publish_render — hold and re-sign at send().
+      // Swallow page x-s/x-t; decide passthrough vs resign at send() after gate.
       if (this.__xs_pr || isPublishRender(this.__xs_u || '')) {
         this.__xs_pending_sign = true;
         window.__xs_swallowed = (window.__xs_swallowed || 0) + 1;
@@ -143,7 +161,7 @@
       }
       // Signer may still be mounting — swallow all xhs x-s/x-t (not only /api/)
       // so early passthrough cannot race ahead of the gate.
-      if (isXhsUrl(this.__xs_u || '') || (this.__xs_u || '').charAt(0) === '/') {
+      if (xhsish) {
         this.__xs_pending_sign = true;
         window.__xs_swallowed = (window.__xs_swallowed || 0) + 1;
         return;
@@ -172,10 +190,33 @@
           } catch (e) { /* polyfill shape differs: fall through to the wire */ }
         }
         if (self.__xs_u && !(b instanceof FormData) && (isXhsUrl(self.__xs_u) || self.__xs_pr)) {
+          const page = self.__xs_page || {};
+          const hasPageXs = !!page['x-s'];
+          const hasPageCommon = !!page['x-s-common'];
+          const signerReady = typeof (mirrorSigner() || resolveSigner()) === 'function';
+          // PRIMARY (Oct-11): signer ready + page already set x-s (+ ideally x-s-common) → passthrough
+          if (signerReady && hasPageXs) {
+            S.call(self, 'X-s', page['x-s']);
+            if (page['x-t']) S.call(self, 'X-t', page['x-t']);
+            if (hasPageCommon) S.call(self, 'X-s-common', page['x-s-common']);
+            window.__xs_passthrough = (window.__xs_passthrough || 0) + 1;
+            if (hasPageCommon) {
+              window.__xs_passthrough_coherent = (window.__xs_passthrough_coherent || 0) + 1;
+            }
+            return D.apply(self, args);
+          }
+          // ELSE resign: set X-s/X-t; strip deferred x-s-common unless signer returns it
           const sg = sign(self.__xs_u, b);
           if (sg) {
             S.call(self, 'X-s', String(sg['X-s']));
             S.call(self, 'X-t', String(sg['X-t']));
+            const cm = commonFromSg(sg);
+            if (cm) {
+              S.call(self, 'X-s-common', cm);
+            } else if (self.__xs_common_deferred || hasPageCommon) {
+              window.__xs_common_stripped = (window.__xs_common_stripped || 0) + 1;
+              // intentionally omit page x-s-common — never pair stale common with new X-s/X-t
+            }
             window.__xs_signed = (window.__xs_signed || 0) + 1;
           } else if (self.__xs_pr && !allowUnsigned) {
             // Do not wire unsigned publish_render — synthetic soft fail (avoid 300015 poison).
@@ -213,6 +254,34 @@
     return finish(true);
   };
   const F = window.fetch;
+  const headerHas = (h, names) => {
+    if (!h || Array.isArray(h)) return false;
+    if (h instanceof Headers) {
+      for (let i = 0; i < names.length; i++) if (h.has(names[i])) return true;
+      return false;
+    }
+    for (let i = 0; i < names.length; i++) {
+      if (names[i] in h) return true;
+      const low = names[i].toLowerCase();
+      for (const k of Object.keys(h)) if (String(k).toLowerCase() === low) return true;
+    }
+    return false;
+  };
+  const headerGet = (h, names) => {
+    if (!h || Array.isArray(h)) return null;
+    if (h instanceof Headers) {
+      for (let i = 0; i < names.length; i++) {
+        if (h.has(names[i])) return h.get(names[i]);
+      }
+      return null;
+    }
+    for (let i = 0; i < names.length; i++) {
+      if (names[i] in h) return h[names[i]];
+      const low = names[i].toLowerCase();
+      for (const k of Object.keys(h)) if (String(k).toLowerCase() === low) return h[k];
+    }
+    return null;
+  };
   window.fetch = function(u, o) {
     o = o || {};
     let us = String(typeof u === 'object' && u ? u.url : u);
@@ -232,15 +301,19 @@
         { status: 200, headers: { 'content-type': 'application/json' } }));
     }
     const body = (o.body != null && typeof o.body !== 'string') ? undefined : o.body;
-    const headerHasXs = () => {
-      const h = o.headers;
-      if (!h || Array.isArray(h)) return false;
-      if (h instanceof Headers) return h.has('x-s') || h.has('X-s');
-      return ('x-s' in h || 'X-s' in h);
-    };
     const apply = (sg, gated) => {
       const h = o.headers;
-      const has = headerHasXs();
+      const hasXs = headerHas(h, ['x-s', 'X-s']);
+      const hasCommon = headerHas(h, ['x-s-common', 'X-s-common']);
+      const signerReady = typeof (mirrorSigner() || resolveSigner()) === 'function';
+      // PRIMARY (Oct-11): signer ready + page already set x-s (+ ideally x-s-common) → passthrough
+      if (signerReady && hasXs) {
+        window.__xs_passthrough = (window.__xs_passthrough || 0) + 1;
+        if (hasCommon) {
+          window.__xs_passthrough_coherent = (window.__xs_passthrough_coherent || 0) + 1;
+        }
+        return F.call(this, u, o);
+      }
       if (!sg) {
         if (gated) {
           window.__xs_pr_blocked = (window.__xs_pr_blocked || 0) + 1;
@@ -249,27 +322,42 @@
             { status: 200, headers: { 'content-type': 'application/json' } }
           ));
         }
-        if (has) window.__xs_passthrough = (window.__xs_passthrough || 0) + 1;
+        if (hasXs) window.__xs_passthrough = (window.__xs_passthrough || 0) + 1;
         return F.call(this, u, o);
       }
+      // ELSE resign: strip x-s-common unless signer returns it atomically
+      const cm = commonFromSg(sg);
       let nh;
       if (!h || Array.isArray(h)) {
         nh = { 'x-s': String(sg['X-s']), 'x-t': String(sg['X-t']) };
+        if (cm) nh['x-s-common'] = cm;
+        if (hasCommon && !cm) window.__xs_common_stripped = (window.__xs_common_stripped || 0) + 1;
       } else if (!(h instanceof Headers)) {
         nh = Object.assign({}, h);
         delete nh['x-s']; delete nh['X-s']; delete nh['x-t']; delete nh['X-t'];
+        delete nh['x-s-common']; delete nh['X-s-common'];
+        // also strip any mixed-case variant
+        for (const k of Object.keys(nh)) {
+          const lk = String(k).toLowerCase();
+          if (lk === 'x-s' || lk === 'x-t' || lk === 'x-s-common') delete nh[k];
+        }
         nh['x-s'] = String(sg['X-s']); nh['x-t'] = String(sg['X-t']);
+        if (cm) nh['x-s-common'] = cm;
+        else if (hasCommon) window.__xs_common_stripped = (window.__xs_common_stripped || 0) + 1;
       } else {
         nh = new Headers(h);
         nh.delete('x-s'); nh.delete('X-s'); nh.delete('x-t'); nh.delete('X-t');
+        nh.delete('x-s-common'); nh.delete('X-s-common');
         nh.set('x-s', String(sg['X-s'])); nh.set('x-t', String(sg['X-t']));
+        if (cm) nh.set('x-s-common', cm);
+        else if (hasCommon) window.__xs_common_stripped = (window.__xs_common_stripped || 0) + 1;
       }
-      if (has) window.__xs_swallowed = (window.__xs_swallowed || 0) + 1;
+      if (hasXs) window.__xs_swallowed = (window.__xs_swallowed || 0) + 1;
       window.__xs_signed = (window.__xs_signed || 0) + 1;
       return F.call(this, u, Object.assign({}, o, { headers: nh }));
     };
     if (!isXhsUrl(us) && !isPublishRender(us)) return F.call(this, u, o);
-    const has = headerHasXs();
+    const has = headerHas(o.headers, ['x-s', 'X-s']);
     const gated = isPublishRender(us);
     // Resign when page set x-s; also auto-sign /api/* (ark publish_render omits x-s
     // when window._webmsxyw is missing). Skip non-API without x-s (unless gated).
@@ -278,10 +366,14 @@
       window.__xs_pr_held = (window.__xs_pr_held || 0) + 1;
       return waitSigner(GATE_WAIT_MS, true).then(() => apply(sign(us, body), true));
     }
+    // If page already set x-s and signer ready — passthrough without waiting/resign
+    if (has && typeof (mirrorSigner() || resolveSigner()) === 'function') {
+      return apply(null, false); // apply() will take passthrough branch via hasXs
+    }
     let sg = sign(us, body);
     if (sg) return apply(sg, false);
     if (!has && !isApiUrl(us)) return apply(null, false);
     return waitSigner(SIGNER_WAIT_MS, false).then(() => apply(sign(us, body), false));
   };
-  return 'patched-v3-gate-pr';
+  return 'patched-v4-xs-common-coherent';
 })()
