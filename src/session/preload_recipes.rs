@@ -209,6 +209,10 @@ mod tests {
         for needle in [
             "__xs_installed",
             "_webmsxyw",
+            "resolveSigner",
+            "window.proxy",
+            "waitSigner",
+            "isXhsUrl",
             "sso\\/logout",
             "XMLHttpRequest.prototype.send",
             "window.fetch",
