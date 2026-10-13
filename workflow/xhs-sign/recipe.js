@@ -1,6 +1,6 @@
 (() => {
   // v2: ark-origin gated publish_render (hold until signer ready; never unsigned wire)
-  const XS_VER = 2;
+  const XS_VER = 3;
   if (window.__xs_ver >= XS_VER) return 'already';
   window.__xs_ver = XS_VER;
   window.__xs_installed = true;
@@ -77,20 +77,26 @@
   // Ark itemark mounts the signer a beat after first publish_render — wait briefly.
   // Gated product APIs wait longer and require a short settle after first sighting.
   const SIGNER_WAIT_MS = 2500;
-  const GATE_WAIT_MS = 10000;
-  const SETTLE_MS = 500;
+  const GATE_WAIT_MS = 12000;
+  const SETTLE_MS = 2000;
   let signerSeenAt = 0;
   const noteSigner = () => {
     const fn = mirrorSigner() || resolveSigner();
     if (fn && !signerSeenAt) signerSeenAt = Date.now();
     return fn;
   };
+  // Gated publish_render: signer + settle, and prefer at least one prior signed API
+  // so Itemark/AS has exercised the native path (Oct-11 wait contract).
   const waitSigner = (ms, settle) => new Promise((resolve) => {
     const needSettle = !!settle;
     const ready = () => {
       const fn = noteSigner();
       if (!fn) return null;
-      if (needSettle && Date.now() - signerSeenAt < SETTLE_MS) return null;
+      if (needSettle) {
+        if (Date.now() - signerSeenAt < SETTLE_MS) return null;
+        // If nothing else has been signed yet, keep holding until settle*1.5 or a sign lands.
+        if (!(window.__xs_signed > 0) && Date.now() - signerSeenAt < SETTLE_MS * 1.5) return null;
+      }
       return fn;
     };
     const fn0 = ready();
@@ -135,8 +141,9 @@
         window.__xs_swallowed = (window.__xs_swallowed || 0) + 1;
         return;
       }
-      // Signer may still be mounting — remember and swallow; send() waits then re-signs.
-      if (isXhsUrl(this.__xs_u || '') && isApiUrl(this.__xs_u || '')) {
+      // Signer may still be mounting — swallow all xhs x-s/x-t (not only /api/)
+      // so early passthrough cannot race ahead of the gate.
+      if (isXhsUrl(this.__xs_u || '') || (this.__xs_u || '').charAt(0) === '/') {
         this.__xs_pending_sign = true;
         window.__xs_swallowed = (window.__xs_swallowed || 0) + 1;
         return;
@@ -276,5 +283,5 @@
     if (!has && !isApiUrl(us)) return apply(null, false);
     return waitSigner(SIGNER_WAIT_MS, false).then(() => apply(sign(us, body), false));
   };
-  return 'patched-v2-gate-pr';
+  return 'patched-v3-gate-pr';
 })()
