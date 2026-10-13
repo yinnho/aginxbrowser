@@ -39,7 +39,7 @@ impl CookieStore {
     }
 
     /// Get cookies for a specific URL.
-    #[allow(dead_code)] // bin-dead; server.rs round-trip test reads cookies back
+    #[allow(dead_code)] // bin-dead; server round-trip test reads cookies back
     pub fn get_for_url(&self, url: &str) -> Result<Vec<Cookie>, crate::error::Error> {
         let parsed = url::Url::parse(url)
             .map_err(|e| crate::error::Error::Internal(e.into()))?;

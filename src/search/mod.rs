@@ -225,12 +225,6 @@ impl SearchEngineRegistry {
         registry
     }
 
-    #[allow(dead_code)]
-    fn register(&mut self, engine: impl SearchEngine + 'static) {
-        tracing::info!("search: registered engine {}", engine.name());
-        self.engines.push(Arc::new(engine));
-    }
-
     /// Registry from a caller-supplied engine list — the production set is
     /// fixed in `new()`, but the fallback/orchestration layer above (and
     /// its tests) needs to drive `native_search` against a controlled set
@@ -243,20 +237,6 @@ impl SearchEngineRegistry {
             engines,
             state: Arc::new(RwLock::new(HashMap::new())),
         }
-    }
-
-    /// Check if an engine is currently suspended.
-    #[allow(dead_code)]
-    async fn is_suspended(&self, name: &str) -> bool {
-        let state = self.state.read().await;
-        if let Some(s) = state.get(name) {
-            if let Some(resume_at) = s.resume_at {
-                if std::time::Instant::now() < resume_at {
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     /// Suspend an engine after CAPTCHA, using progressive backoff.

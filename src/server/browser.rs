@@ -131,7 +131,6 @@ pub fn build_browser_for_account(
 /// Test-only handle on the process-global jar — the multi-account isolation
 /// tests assert account jars never leak into it.
 #[cfg(test)]
-#[allow(dead_code)]
 pub(crate) fn shared_cookie_jar_for_tests() -> std::sync::Arc<CookieJar> {
     SHARED_COOKIE_JAR.clone()
 }

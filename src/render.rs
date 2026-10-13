@@ -4,7 +4,7 @@
 //! - Tier 1 (`http_fetch`): pure `HttpClient`, no V8. ~100ms. Works for
 //!   static HTML. Returns `None` when the content looks insufficient (SPA shell,
 //!   antispider redirect, non-200) so the caller upgrades to Tier 2.
-//! - Tier 2 (`do_fetch` in `server.rs`): full diting browser with V8/JS.
+//! - Tier 2 (`do_fetch` in `server/fetch.rs`): full diting browser with V8/JS.
 //!   ~1-2s. Handles SPAs, Cloudflare, JS-rendered content.
 
 use std::sync::Arc;
@@ -218,8 +218,8 @@ fn collect_media(html: &str) -> Vec<String> {
 /// falling through to the slower path.
 ///
 /// `proxy_url`: the `AGINXBROWSER_PROXY` value, applied when `use_proxy` is set or
-/// the domain is known-blocked (mirrors `build_browser` in server.rs).
-#[allow(clippy::too_many_arguments)] // mirrors build_browser in server.rs — a params struct would split the public API
+/// the domain is known-blocked (mirrors `build_browser` in `server/browser.rs`).
+#[allow(clippy::too_many_arguments)] // mirrors build_browser in server/browser.rs — a params struct would split the public API
 pub async fn http_fetch(
     url: &str,
     use_proxy: bool,
@@ -240,7 +240,7 @@ pub async fn http_fetch(
     let proxy = if use_proxy { proxy_url } else { None };
 
     let jar = Arc::new(CookieJar::new());
-    // Inject request cookies into the jar (same logic as server.rs::inject_cookies,
+    // Inject request cookies into the jar (same logic as server::inject_cookies,
     // but on the standalone jar rather than a Browser).
     for c in cookies {
         let (full, anchor) = crate::server::normalize_cookie_entry(c, url);

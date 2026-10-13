@@ -21,11 +21,11 @@ pub use browser::{
     build_browser, build_browser_for_account, build_browser_with_jar, persist_shared_cookies,
 };
 pub(crate) use browser::{
-    cookie_list_from_json, cookie_store_path, inject_cookies, normalize_cookie_entry,
-    run_on_local_runtime, v8_stack_size,
+    cookie_list_from_json, inject_cookies, normalize_cookie_entry, run_on_local_runtime,
+    v8_stack_size,
 };
 #[cfg(test)]
-pub(crate) use browser::shared_cookie_jar_for_tests;
+pub(crate) use browser::{cookie_store_path, shared_cookie_jar_for_tests};
 
 pub use fetch::{do_click, do_eval, do_fetch};
 pub(crate) use fetch::maybe_bypass_challenge;
