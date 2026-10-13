@@ -1,5 +1,15 @@
 # diting_browser 摸底报告 — 认领 Phase 0（Phase 1 已完成）
 
+> **Current layout (2026-10 / `ed21908`):** engine Page lives under
+> `crates/diting/src/diting_browser/page/{mod,navigate,eval,net,scripts,viewport}`
+> (+ colocated `tests.rs`). Product acquire façade is
+> `src/server/{browser,fetch,outputs,search}.rs`; sessions are `src/session/`.
+> HTTP is the only protocol face (MCP/CDP removed — do not reintroduce casually).
+> Rich-eval API is `evaluate_remote*` / `call_function_on_remote*` (CDP-era
+> `evaluate_for_cdp*` / `call_function_on_for_cdp*` retired). Sections below that
+> still say monolithic `page.rs (1568)` or claim-era `session.rs` / `mcp.rs`
+> describe the Phase 0–1 tree unless marked current — see `ARCHITECTURE.md`.
+
 > 2026-08-23。引擎认领第四个（最后一个）模块。前三：`diting_dom`（43 测试）、
 > `diting_net`（60 测试）、`diting_js`（307 测试，Phase 1 完成）。
 > 本报告为 Phase 0 摸底：先读懂现有 1828 行，再量化与上游的 6400 行差距，
@@ -12,8 +22,8 @@ diting_browser（认领前名 obscura_browser）是「没有渲染的浏览器�
 导航历史 + 网络事件）+ **BrowserContext**（配置聚合：cookie/代理/UA/stealth）+
 **lifecycle**（Load/DCL/NetworkIdle 等待语义）。真正的浏览器外壳——CDP 协议层、
 截图、PDF、多 frame——上游放在别的 crate（obscura-cdp / obscura-render）或
-page.rs 的渲染段落里，我们则放在自己的服务层（server.rs / session.rs /
-screenshot.rs / mcp.rs）。
+page.rs 的渲染段落里；我们则放在自己的产品层（`src/server/` acquire façade、
+`src/session/`、`src/screenshot.rs` 等）。MCP/CDP faces 已移除（见 ARCHITECTURE）。
 
 ## 1. 规模对比
 
@@ -67,26 +77,34 @@ playwright 双方拼写）。与上游逐行相同。
 
 ## 3. 服务层依赖点（认领时不能碰断的线）
 
-服务层**全部**通过包装层访问内核，无一文件直接 `use crate::diting_browser::Page`：
+产品层**全部**通过包装层访问内核，无一文件直接 `use diting::diting_browser::Page`
+（认领时写的是 `crate::diting_browser::Page`，引擎迁 crate 后路径变了）：
 
 ```
-src/browser.rs (107)  Browser = Arc<BrowserContext> 工厂；new_page() 发号 page-N
+src/browser.rs (~114) Browser = Arc<BrowserContext> 工厂；new_page() 发号 page-N
                        （进程级 AtomicU64）；cookies() 暴露 CookieStore
-src/page.rs   (233)   Page 包装：goto/url/evaluate(+async,+timeout)/content/
+src/page.rs   (~259)  Page 包装：goto/url/evaluate(+async,+timeout)/content/
                        query_selector/wait_for_selector/wait_for_cookie/
                        settle/settle_until_idle/pump_event_loop_slice/scroll_by
                        Element 句柄：text/attribute/click（scrollIntoView+click,
-                       全部走 evaluate_with_timeout，INTERACTION_EVAL_TIMEOUT=10s）
+                       全部走 evaluate_with_timeout，INTERACTION_EVAL_TIMEOUT=10s）；
+                       富求值走 evaluate_remote* / evaluate_async_checked
 ```
 
-实际调用方：
-- **session.rs**（唯一重度用户）：goto/settle_until_idle/evaluate_with_timeout/
-  evaluate_async/pump_event_loop_slice/process_pending_navigation——有状态
-  session 的命令循环靠 pump_event_loop_slice 维持"活页"语义
-- **render.rs / screenshot.rs / firecrawl_compat.rs / mcp.rs / server.rs**：经
-  Browser→Page 包装层或更上层抽象，不直接持有 InnerPage
+实际调用方（2026-10）：
+- **`src/session/`**（重度用户：`manager/actor` + `interact`）：goto /
+  settle_until_idle / evaluate_with_timeout / evaluate_async(_checked) /
+  pump_event_loop_slice / process_pending_navigation——有状态 session 的命令
+  循环靠 pump_event_loop_slice 维持"活页"语义
+- **`src/server/{fetch,outputs}.rs` + `src/render.rs` / `screenshot.rs` /
+  `firecrawl_compat.rs`**：经 Browser→Page 包装层或更上层抽象，不直接持有
+  InnerPage（无 MCP face）
 
-## 4. page.rs 解剖（1568 行）
+## 4. page.rs 解剖（认领时 1568 行；历史）
+
+> 下列解剖对应 Phase 0–1 的单体 `page.rs`。当前生产代码已拆到
+> `crates/diting/.../page/{mod,navigate,eval,net,scripts,viewport}`；行号与
+> 文件边界以源树为准，本节保留作认领对照。
 
 ### 4.1 顶层工具（1–151）
 - `decode_data_uri/percent_decode/hex_val` — data: URI 内联解码（脚本与文档
@@ -167,8 +185,8 @@ f61493f（拒绝非 2xx 脚本响应——wave 3 的动态脚本版；**fetch �
    ResponseCallback 注册表）+ enable_interception + sync_js_network_events
    （d0b6fc4：JS 发起的请求进 Network 事件）+ StoredResponseBody/
    get_response_body/take_response_body_raw/alias_response_body/
-   clear_response_bodies（1ca6047：大响应体流式取回）——服务层
-   `/network` 类接口与 MCP 网络可见性可直接受益。
+   clear_response_bodies（1ca6047：大响应体流式取回）——产品层
+   `GET /session/:id/network`（及 HAR）可直接受益。
 4. **导航超时组**：set_navigation_timeout/navigation_timeout（结构化字段 vs
    我们的环境变量——两者可并存）；evaluate_remote_with_timeout/
    call_function_on_remote_with_timeout；settle_for_duration；
@@ -222,7 +240,7 @@ AGINXBROWSER_* 产品化环境变量、`__obscura_css` 注入时点（先于脚�
    - **fork_virtual_url.rs**：整文件吸收（上游 fork commit d7dca7a，逐行同源）。
      调用点吸收上游同款：`process_pending_navigation` 的 else 分支——泵没有
      待处理导航时，页面自己 pushState 路由过也算导航（`sync_virtual_url()`
-     采纳 `__virtualUrl` 进 `self.url` + history）。session.rs 的命令循环
+     采纳 `__virtualUrl` 进 `self.url` + history）。`src/session/` 的命令循环
      泵自动获得 SPA URL 跟随。
    - **hop-1 referrer**：`navigate_with_wait_post` 拆出私有
      `_ref(…, initial_referrer)` 变体（对齐上游 inner 的第 5 参）。
@@ -246,7 +264,7 @@ AGINXBROWSER_* 产品化环境变量、`__obscura_css` 注入时点（先于脚�
      `call_function_on_remote_with_timeout` / `settle_for_duration` /
      `run_autonomous_event_loop_turn`——服务层无消费者，我们的
      settle/settle_until_idle/pump_event_loop_slice 家族已覆盖同职能；
-     CDP 层将来需要超时版 eval 时再回来拿。
+     若产品侧以后需要超时版 remote-eval，再回来拿（不借 CDP face 复活）。
    - 测试基建新坑记档：①`Page::evaluate`/`wrap_expression` 只包单表达式，
      多语句脚本会被包成 `return (a; b)` 语法错误、静默返回 Null——测试里
      拆开多次 evaluate；②`navigate()` 自带的 settle 窗口会追掉窗口内触发的
@@ -284,9 +302,10 @@ AGINXBROWSER_* 产品化环境变量、`__obscura_css` 注入时点（先于脚�
      octet-stream base64+字节精确回取/JS fetch→观察者+sync 后
      `fetch-{N}` 事件+体可解析+幂等 drain/clear 双侧清。测试基建新增
      `local_http_server_typed`（按路由 Content-Type，老 helper 委派它）。
-   - 记档：**服务层尚无 network_events 消费者**——本批把内核管道铺通，
-     `/network` 接口或 MCP 网络可见性是产品侧后续立项；届时消费点自行
-     调 `sync_js_network_events`（pump 里不预调，避免无读者时白攒事件）。
+   - 记档（认领时）：**服务层尚无 network_events 消费者**——本批把内核管道铺通；
+     消费方需自行调 `sync_js_network_events`（pump 里不预调，避免无读者时白攒事件）。
+     **现状（2026-10）：** `GET /session/:id/network` / `.../har` 已落地；MCP 网络
+     face 已移除，勿当作待办。
 4. **批次 3（读通 + 改名 + 摘 allow）✅ 2026-08-23**：344→343 测试（-1 是
    encoding.rs 重复 `#[test]` 合并，非删测）。四件事：
    - **摘 `#![allow(dead_code)]` 三处**（diting_browser/mod.rs、包装层

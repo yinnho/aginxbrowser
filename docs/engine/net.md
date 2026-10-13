@@ -1,5 +1,9 @@
 # diting_net(现 obscura_net)摸底报告 — 认领 Phase 0
 
+> **Current layout (2026-10):** `crates/diting/src/diting_net/` (not root `src/`).
+> Shared cookie jar for stateless acquire lives in `src/server/browser.rs`
+> (`SHARED_COOKIE_JAR`). Title’s 「现 obscura_net」is claim-era wording.
+
 > 2026-08-22 摸底盘点。**2026-08-22 Phase 1 已完成**:B 组修复全部吸收(见文末认领建议的 ✅),模块已改名 `diting_net`,测试 42→60 个全绿。
 
 ## 一句话职责

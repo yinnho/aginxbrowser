@@ -1,5 +1,11 @@
 # `/search` 设计：搜索 + 抓取一体化
 
+> **Current layout (2026-10 / `ed21908`):** search orchestration is
+> `src/search/` + acquire glue in `src/server/search.rs` (`do_search`); fetch
+> path for result bodies is `src/server/fetch.rs` (`do_fetch`). HTTP-only face
+> (no SearXNG MCP / no product MCP). Historical “call SearXNG” prose below is
+> the original design note — native engines later landed under `src/search/`.
+
 > AginxBrowser 的第四个端点。把"搜索"和"抓正文"合并成一个调用，
 > 让 Agent 一步完成"搜 → 读"。OpenCarrier 侧删除 SearXNG MCP，
 > 搜索能力下沉到 AginxBrowser，OpenCarrier 回归 Agent 本身。
@@ -134,7 +140,7 @@ LocalSet 里跑（和现有 `/fetch` 的 `run_on_local_runtime` 一致）。并�
 
 ### 3. 复用现有抓取能力
 
-抓正文直接复用 `server.rs` 的 `do_fetch` 逻辑（stealth browser + rendered_text），
+抓正文直接复用 `src/server/fetch.rs` 的 `do_fetch` 逻辑（stealth browser + rendered_text），
 不重写。把 `do_fetch` 的核心抽成可被 `/search` 调用的函数即可。
 
 ### 4. 超时与降级

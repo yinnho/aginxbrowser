@@ -1,5 +1,11 @@
 # obscura-render 摸底报告 — 渲染认领 Phase 0
 
+> **Current layout (2026-10 / `ed21908`):** diting engine modules live under
+> `crates/diting/src/diting_{css,layout,fonts,browser,…}/` (journal entries below
+> that say `src/diting_*` are claim-era paths). Product acquire façade is
+> `src/server/{browser,fetch,outputs,search}.rs`; shared cookie jar is
+> `src/server/browser.rs` (`SHARED_COOKIE_JAR`). See `ARCHITECTURE.md`.
+
 > 2026-09-07 补记：feature 已拆分。`screenshot` = diting 渲染栈（taffy/
 > parley/swash/vello_cpu 地基，零 blitz 代码，`cargo tree --features
 > screenshot` 全图零 blitz 命中）；Blitz 参照管线（blitz-* 四件套 + Stylo）
@@ -284,7 +290,7 @@ rect 匹配（blitz 保留节点），box 为 0x0——基线锁的是这个诚�
 
 ## 9. 批次 1 完成（2026-08-23）：diting_css cascade 只读复刻（最小竖切）
 
-新建 `src/diting_css/mod.rs`（~800 行含测试，14 测试），从上游 css.rs/style.rs
+新建 `src/diting_css/mod.rs`（现 `crates/diting/src/diting_css/mod.rs`）（~800 行含测试，14 测试），从上游 css.rs/style.rs
 切出 cascade 层最小可用竖切。**未接产品管线**——模块级
 `#![cfg_attr(not(test), allow(dead_code))]` 就是其只读状态的诚实声明（批次 3
 三档政策的第 2 档）。
@@ -382,7 +388,7 @@ vs 我们的 diting_css cascade_element——逐元素逐属性比对 computed s
 | 7 | grid item 固有尺寸遏制（per-axis `intrinsic_size_containment`） | grid_item.rs, style/ | **无** |
 | 8 | calc() resolver 注入：`set_calc_resolver(fn(*const (), f32) -> f32)`——taffy 视句柄为不透明，宿主注入求值（render.md §2.1 的「calc 经 resolver 注入」即此） | taffy_tree.rs | **无**（0.13.0 `resolve_calc_value` 仍是返回 0.0 的桩） |
 
-**运行时分类**（`src/diting_layout/mod.rs`，7 测试全绿，380 总数）：fork 自带
+**运行时分类**（`src/diting_layout/mod.rs`，现 `crates/diting/src/diting_layout/mod.rs`；7 测试全绿，380 总数）：fork 自带
 的回归场景移植到 stock 0.13.0 公开 API（measure 签名 0.12→0.13 从五参闭包
 变为 LayoutInput/LayoutOutput，已适配）。每条断言锁 stock 实际行为，fork 期望
 在注释里——**上游 taffy 哪天吸收了某个修复，对应断言即失败并精确命名变化**。
@@ -422,7 +428,7 @@ text-align block→flex-column 提升）的最小竖切 + 与 blitz rect 对照�
 ## 12. 批次 2b 完成（2026-08-23）：布局桥最小竖切 + blitz rect 对照
 
 上游 dom.rs 的 DOM→taffy 映射抽成最小竖切，落在
-`src/diting_layout/mod.rs`（fork_deltas 测试模块之外的正式代码）：
+`src/diting_layout/mod.rs`（现 `crates/diting/…/diting_layout/mod.rs`；fork_deltas 测试模块之外的正式代码）：
 
 **桥本体**（约 230 行，全部只读侧——不接产品管线）：
 
@@ -764,9 +770,9 @@ make_font_fixture.py 注释：宽度断言不充分，字形级验证靠 ink；c
 **bundle**：Noto Sans SC（OFL，notice 随行 diting_fonts/OFL.txt）变量字体
 instancer wght=400/700 → GB2312 全量（6763 字≈全部现代简体）+ASCII
 subset，2.43MB×2=+4.9MB（screenshot build 才编入，include_bytes 于
-src/diting_fonts/）。`scripts/make_font_bundle.py` 可复现。
+src/diting_fonts/，现 `crates/diting/src/diting_fonts/`）。`scripts/make_font_bundle.py` 可复现。
 
-**接线（src/diting_fonts.rs）**：
+**接线（认领时 `src/diting_fonts.rs`；现 `crates/diting/src/diting_fonts/`）**：
 - 家族名用真名 "Noto Sans SC"——中文页常显式 style 该名，直接命中捆入
   字节（诚实且实用）；
 - `set_fallbacks(FallbackKey::new(Script::Hani, None), ours.chain(existing))`
@@ -1746,11 +1752,11 @@ memory aginxbrowser-hosted-captcha-flicker）。付费修法（2captcha key）�
 - `BrowserConfig.shared_cookie_jar` + `BrowserBuilder::shared_cookie_jar` +
   `BrowserContext::with_shared_cookie_jar`（jar 注入先于 HttpClient 构造，
   导航/子资源/XHR 全走同一 jar）。
-- server.rs 进程级 `SHARED_COOKIE_JAR`（LazyLock），启动时从
+- `src/server/browser.rs` 进程级 `SHARED_COOKIE_JAR`（LazyLock），启动时从
   `AGINXBROWSER_COOKIE_STORE_DIR/cookie-store.json` 恢复；main 起一个 60s
   周期任务落盘（best-effort）。所有 stateless 处理器（fetch/click/eval/
-  screenshot/scrape）经 `build_browser` 自动共享。
-- 会话（session/*）不受影响——session 本来就有自己的持久 context。
+  screenshot/scrape）经 `build_browser` 自动共享（façade：`src/server/`）。
+- 会话（`src/session/`）不受影响——session 本来就有自己的持久 context。
 - 测试 `shared_cookie_jar_spans_browser_instances`：两个 Browser 实例经共
   享 jar 互见 cookie。E2E：httpbin response-headers set-cookie → jar 捕获 →
   60s tick 后落盘验证。

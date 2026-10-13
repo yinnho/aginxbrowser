@@ -1,5 +1,10 @@
 # diting_dom(现 obscura_dom)摸底报告 — 认领 Phase 0
 
+> **Current layout (2026-10):** module lives at `crates/diting/src/diting_dom/`
+> (not under root `src/`). Product callers reach DOM via `src/page.rs` /
+> `src/session/` / `src/server/` wrappers — see `ARCHITECTURE.md`. Title’s
+> 「现 obscura_dom」is claim-era wording; the shipped name is `diting_dom`.
+
 > 2026-08-22 摸底盘点。目标:改名 `diting_dom` 之前,把模块每一层讲清楚——它是什么、谁在用、有哪些坑、上游这两个月改了什么。
 
 ## 一句话职责
@@ -54,8 +59,8 @@ NodeData = Document | Doctype | Element{name,attrs,template_contents,...}
 |---|---|---|
 | `diting_js/ops.rs` | **最重** | DomTree/NodeId/query_selector/text_content/get_element_by_id/outer_html —— JS DOM API 的几乎全部地基 |
 | `diting_js/runtime.rs` | 重 | DomTree/parse_html/query_selector/get_element_by_id |
-| `obscura_browser/page.rs` | 中 | DomTree/parse_html/query_selector/text_content |
-| `src/page.rs`、`src/server.rs`、`src/screenshot.rs` | 薄 | query_selector/NodeId(经包装层) |
+| `diting_browser/page/`（认领时 `obscura_browser/page.rs`） | 中 | DomTree/parse_html/query_selector/text_content |
+| `src/page.rs`、`src/server/`、`src/screenshot.rs` | 薄 | query_selector/NodeId(经包装层) |
 | `src/render.rs`、`src/firecrawl_compat.rs` | 薄 | parse_html |
 | `src/main.rs` | 薄 | parse_html/DomTree |
 

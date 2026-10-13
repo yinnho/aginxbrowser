@@ -1,5 +1,7 @@
 # aginxbrowser 需求反馈 — 来自 AginxOS 手机上屏链路实测
 
+> **Path / face note (2026-10):** 本文是 CDP 时代手机上屏实测需求反馈。MCP/CDP faces 已移除；引擎现位于 `crates/diting/`；视口帧流需求现走 HTTP `screenshot` / session 路径，勿再按 `src/diting_cdp/...` 定位。见 `ARCHITECTURE.md`。
+
 来源：AginxOS 团队（手机 host OS，Pixel 5 / SM7250，musl 静态）。
 部署：aginxbrowser v0.2.8 + `screenshot` feature，aarch64-unknown-linux-musl 全静态，
 服务手机 DRM 面板（1080×2340）。链路：本机 HTTP 页面 → diting 渲染 → 帧上屏，
