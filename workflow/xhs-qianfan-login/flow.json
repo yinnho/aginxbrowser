@@ -13,7 +13,7 @@
       "op": "preload",
       "args": {
         "scripts": [
-          "(() => {\n  if (window.__qf_hook) return 'already';\n  window.__qf_hook = true;\n  window.__qf_log = [];\n  window.__qf_last = null;\n  const hit = (u) => /\\/api\\/cas\\/customer\\/web\\/qr-code/.test(String(u));\n  const stash = (u, txt) => {\n    window.__qf_log.push({ u: String(u).slice(0, 240), t: String(txt).slice(0, 1200) });\n    try { window.__qf_last = JSON.parse(txt); } catch (e) {}\n  };\n  const O = XMLHttpRequest.prototype.open, S = XMLHttpRequest.prototype.send;\n  XMLHttpRequest.prototype.open = function (m, u) {\n    this.__qf_u = String(u);\n    return O.apply(this, arguments);\n  };\n  XMLHttpRequest.prototype.send = function () {\n    if (hit(this.__qf_u)) this.addEventListener('loadend', () => stash(this.__qf_u, this.responseText));\n    return S.apply(this, arguments);\n  };\n  const F = window.fetch;\n  window.fetch = function (u) {\n    const us = String(typeof u === 'object' && u ? u.url : u);\n    const p = F.apply(this, arguments);\n    if (hit(us)) return p.then((r) => { r.clone().text().then((t) => stash(us, t)).catch(() => {}); return r; });\n    return p;\n  };\n  return 'hooked';\n})()"
+          "(() => {\n  if (window.__qf_hook) return 'already';\n  window.__qf_hook = true;\n  window.__qf_log = [];\n  window.__qf_last = null;\n  window.__qf_create = null;\n  const hit = (u) => /\\/api\\/cas\\/customer\\/web\\/qr-code/.test(String(u));\n  const stash = (u, txt) => {\n    window.__qf_log.push({ u: String(u).slice(0, 240), t: String(txt).slice(0, 1200) });\n    try {\n      const j = JSON.parse(txt);\n      const d = j && j.data;\n      if (d && d.url && /loginconfirm/.test(String(d.url))) {\n        window.__qf_create = j;\n        window.__qf_last = j;\n      } else if (d && d.id && d.status != null) {\n        window.__qf_status = j;\n      } else if (!window.__qf_last) {\n        window.__qf_last = j;\n      }\n    } catch (e) {}\n  };\n  const O = XMLHttpRequest.prototype.open, S = XMLHttpRequest.prototype.send;\n  XMLHttpRequest.prototype.open = function (m, u) {\n    this.__qf_u = String(u);\n    return O.apply(this, arguments);\n  };\n  XMLHttpRequest.prototype.send = function () {\n    if (hit(this.__qf_u)) this.addEventListener('loadend', () => stash(this.__qf_u, this.responseText));\n    return S.apply(this, arguments);\n  };\n  const F = window.fetch;\n  window.fetch = function (u) {\n    const us = String(typeof u === 'object' && u ? u.url : u);\n    const p = F.apply(this, arguments);\n    if (hit(us)) return p.then((r) => { r.clone().text().then((t) => stash(us, t)).catch(() => {}); return r; });\n    return p;\n  };\n  return 'hooked';\n})()"
         ]
       },
       "note": "Document-start hook for CAS /api/cas/customer/web/qr-code only. Do NOT call edith sns qrcode/create (that is C-end www mobile/login)."
@@ -50,7 +50,7 @@
       "id": "wait_scan_ui",
       "op": "wait",
       "args": {
-        "predicate": "/APP扫一扫登录/.test(document.body && document.body.innerText || '') && !!document.querySelector('img.css-1lhmg90')",
+        "predicate": "(function(){var t=(document.body&&document.body.innerText)||'';if(!/APP扫一扫登录/.test(t))return false;var imgs=[].slice.call(document.querySelectorAll('.beer-login-container img'));return imgs.some(function(i){return (i.src||'').indexOf('data:image')===0 && (i.src||'').length>2000;});})()",
         "timeout_ms": 20000
       },
       "save": "scan_ui",
@@ -60,7 +60,7 @@
       "id": "capture_meta",
       "op": "eval",
       "args": {
-        "script": "(function () {\n  var last = window.__qf_last;\n  var data = last && last.data;\n  var create = null;\n  if (!(data && data.url && /loginconfirm/.test(data.url))) {\n    var logs = window.__qf_log || [];\n    for (var i = logs.length - 1; i >= 0; i--) {\n      try {\n        var j = JSON.parse(logs[i].t);\n        if (j && j.data && j.data.url && /loginconfirm/.test(j.data.url)) { data = j.data; create = j; break; }\n      } catch (e) {}\n    }\n  } else {\n    create = last;\n  }\n  if (!(data && data.url)) throw new Error('CAS qr-code create missing — hook miss or icon click failed');\n  if (!/customer\\.xiaohongshu\\.com\\/loginconfirm/.test(data.url)) {\n    throw new Error('refusing non-loginconfirm QR url: ' + String(data.url).slice(0, 160));\n  }\n  if (/www\\.xiaohongshu\\.com\\/mobile\\/login/.test(data.url)) {\n    throw new Error('C-end mobile/login URL — wrong path (edith). Use beer-login CAS only.');\n  }\n  var channels = data.support_qr_code_channel_infos || data.supportQrCodeChannelInfos || [];\n  var names = channels.map(function (c) { return c && c.app_name; }).filter(Boolean);\n  if (names.indexOf('千帆') < 0) {\n    throw new Error('千帆 not in support channels: ' + JSON.stringify(names));\n  }\n  window.__qf_qr = { id: data.id, url: data.url, channels: names };\n  return JSON.stringify({ qr_id: data.id, url: data.url, channels: names, code: create && create.code });\n})()",
+        "script": "(function () {\n  var create = window.__qf_create || null;\n  var data = create && create.data;\n  if (!(data && data.url && /loginconfirm/.test(data.url))) {\n    var logs = window.__qf_log || [];\n    for (var i = logs.length - 1; i >= 0; i--) {\n      try {\n        var j = JSON.parse(logs[i].t);\n        if (j && j.data && j.data.url && /loginconfirm/.test(j.data.url)) {\n          create = j; data = j.data; break;\n        }\n      } catch (e) {}\n    }\n  }\n  if (!(data && data.url)) {\n    throw new Error('CAS qr-code create missing — log=' + JSON.stringify((window.__qf_log || []).slice(-3)).slice(0, 500));\n  }\n  if (!/customer\\.xiaohongshu\\.com\\/loginconfirm/.test(data.url)) {\n    throw new Error('refusing non-loginconfirm QR url: ' + String(data.url).slice(0, 160));\n  }\n  if (/www\\.xiaohongshu\\.com\\/mobile\\/login/.test(data.url)) {\n    throw new Error('C-end mobile/login URL — wrong path (edith). Use beer-login CAS only.');\n  }\n  var channels = data.support_qr_code_channel_infos || data.supportQrCodeChannelInfos || [];\n  var names = channels.map(function (c) { return c && c.app_name; }).filter(Boolean);\n  if (names.indexOf('千帆') < 0) {\n    throw new Error('千帆 not in support channels: ' + JSON.stringify(names));\n  }\n  window.__qf_qr = { id: data.id, url: data.url, channels: names };\n  return JSON.stringify({ qr_id: data.id, url: data.url, channels: names, code: create && create.code });\n})()",
         "timeout_ms": 15000
       },
       "save": "qr",
@@ -70,7 +70,7 @@
       "id": "qr_data",
       "op": "eval",
       "args": {
-        "script": "(function () {\n  var img = document.querySelector('img.css-1lhmg90');\n  if (!img || !(img.src || '').startsWith('data:image')) {\n    throw new Error('page QR img.css-1lhmg90 data URL missing');\n  }\n  return img.src;\n})()",
+        "script": "(function () {\n  var img = document.querySelector('img.css-1lhmg90');\n  if (!img || !(img.src || '').startsWith('data:image')) {\n    img = [].slice.call(document.querySelectorAll('.beer-login-container img')).find(function (i) {\n      return (i.src || '').indexOf('data:image') === 0 && (i.src || '').length > 2000;\n    });\n  }\n  if (!img) throw new Error('page QR data URL missing inside beer-login');\n  return img.src;\n})()",
         "timeout_ms": 10000
       },
       "save": "qr_data",
@@ -83,7 +83,7 @@
         "selector": "img.css-1lhmg90"
       },
       "save": "qr_shot",
-      "note": "Human crop of page QR. Layout paint may be wrong on full-page shots; qr_data / qr.url are source of truth."
+      "note": "Human crop. If css-1lhmg90 hash drifts, prefer saved.qr_data."
     },
     {
       "id": "wait_login",
