@@ -16,10 +16,13 @@ pub fn validate_fetch_url(url: &url::Url) -> Result<(), String> {
     // transports couldn't actually fetch it, but the inconsistency leaked an
     // "allowed" signal to probing scripts).
     if scheme != "http" && scheme != "https" {
-        return Err(format!(
-            "Forbidden URL scheme '{}' - only http and https are allowed",
-            scheme
-        ));
+        // Chrome parity for page-visible probes (xhs itemark fires many
+        // chrome-extension:// fetches before publish_render; 300015 text
+        // literally asks to uninstall 风险插件). JS already rejects as
+        // TypeError Failed to fetch; keep the network-log reason Chrome-
+        // shaped too — the old "Forbidden URL scheme '...'" string was an
+        // engine tell if anything inspects js_network_event.error.
+        return Err("net::ERR_FAILED".to_string());
     }
 
     if crate::diting_net::env_allows_private_network() {

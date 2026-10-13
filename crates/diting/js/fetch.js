@@ -235,9 +235,11 @@ const __ditingFetchImpl = async (input, init = {}) => {
       // status-0 Response. No __aborted marker — that marker once made
       // XHR classify client-blocked requests as user aborts and fire
       // onabort instead of onerror (#248).
-      const err = new TypeError('net::ERR_FAILED');
-      err.name = 'AbortError';
-      throw err;
+      // Chrome parity (300015 / 风险插件 probes + 批286 debt): blocked
+      // chrome-extension:// and other gate denials must be TypeError
+      // "Failed to fetch", not AbortError/"net::ERR_FAILED" (page scripts
+      // catch e.name/e.message; stack also used to say <diting:fetch>).
+      throw new TypeError('Failed to fetch');
     }
     if (parsed.corsBlocked) {
       throw new TypeError('Failed to fetch: ' + (parsed.corsError || 'CORS error'));

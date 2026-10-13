@@ -4158,7 +4158,7 @@
     /// test above cannot reach: with the private-network gate armed (no
     /// env allow), the transport never leaves the client layer and the op
     /// resolves status-0 + blocked, which the fetch shim rejects with an
-    /// AbortError-shaped TypeError. XHR must still fire 'error' (Chrome's
+    /// TypeError("Failed to fetch"). XHR must still fire 'error' (Chrome's
     /// face for a blocked request); the #234 absorption keyed the catch on
     /// err.__aborted and fired 'abort' instead, starving onerror on every
     /// client-blocked request. Live-verified on 8129 before the fix: rs4 +
@@ -9353,7 +9353,7 @@
         ).await.unwrap();
 
         let v = result.value.unwrap();
-        assert_eq!(v, serde_json::json!("blocked:net::ERR_FAILED"));
+        assert_eq!(v, serde_json::json!("blocked:Failed to fetch"));
     }
 
     /// The taobao shop-SPA report (0.3.0): a blocked or CORS-refused fetch
@@ -10842,8 +10842,9 @@
             .unwrap();
         let out = result.value.unwrap();
         assert!(
-            out["file"].as_str().unwrap().contains("Forbidden URL scheme 'file'"),
-            "file:// import must be rejected by scheme, got: {}",
+            out["file"].as_str().unwrap().contains("net::ERR_FAILED")
+                || out["file"].as_str().unwrap().contains("Failed to fetch"),
+            "file:// import must be rejected by scheme (Chrome-shaped), got: {}",
             out["file"]
         );
         assert!(
@@ -11100,7 +11101,7 @@
             .call_function_on_remote(script, None, &[], true, true)
             .await
             .unwrap();
-        assert_eq!(err.value.unwrap(), serde_json::json!("error:net::ERR_FAILED"));
+        assert_eq!(err.value.unwrap(), serde_json::json!("error:Failed to fetch"));
 
         std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
     }

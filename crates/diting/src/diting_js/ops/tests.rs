@@ -339,7 +339,7 @@ fn cors_safelisted_range_requires_valid_byte_range() {
 fn fetch_scheme_gate_rejects_file_up_front() {
     let file_url = url::Url::parse("file:///etc/passwd").unwrap();
     let err = validate_fetch_url(&file_url).unwrap_err();
-    assert!(err.contains("Forbidden URL scheme 'file'"), "got: {err}");
+    assert_eq!(err, "net::ERR_FAILED", "got: {err}");
 
     let ftp = url::Url::parse("ftp://example.com/x").unwrap();
     assert!(validate_fetch_url(&ftp).is_err());
