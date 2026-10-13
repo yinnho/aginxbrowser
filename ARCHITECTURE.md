@@ -4,7 +4,7 @@
 > A change that moves code across a layer boundary updates this file first — in
 > the same commit — or it does not land.
 >
-> Audit basis: 2026-10-13, v0.5.42, commit 5f3cbed (architecture refresh).
+> Audit basis: 2026-10-13, v0.5.42, commit ed21908 (server domain-split + evaluate_remote* rename).
 > Prior program note: the 2026-09 upgrade (P0–P3) is largely executed inside the
 > product crate; the four-crate end state in §4 remains aspirational and is
 > **soft-deferred** (see §6). God-file ratchet: 1500 **production** lines
@@ -247,7 +247,7 @@ reintroduce MCP/CDP; host auto-mount of recipes.
    silent growth; it is not a mandate to shatter a cohesive module that sits
    three lines under or over the number.
 
-## Appendix A — line-count snapshot (2026-10-13, 5f3cbed)
+## Appendix A — line-count snapshot (2026-10-13, ed21908)
 
 Counts are **production lines** from `scripts/audit_layers.py` unless noted
 (total = all lines including tests).

@@ -241,11 +241,14 @@ curl -sS -X POST http://127.0.0.1:8089/session/create \
 
 ```
 aginxbrowser/
-├── Cargo.toml
-├── build.rs              # V8 snapshot 生成
-├── js/
-│   └── bootstrap.js      # V8 启动脚本
-├── workflow/            # Flow 资产：<name>/flow.json 由 flow_run 复跑（丢目录进去即部署）
+├── ARCHITECTURE.md       # 分层立法（权威）
+├── Cargo.toml            # Workspace 根（members = crates/diting）
+├── crates/
+│   └── diting/           # 引擎 crate：DOM/CSS/layout/paint/JS/net/Page
+│       ├── build.rs      # V8 snapshot 生成
+│       ├── js/           # bootstrap.js 及配套脚本
+│       └── src/          # diting_{dom,css,net,js,layout,fonts,browser}
+├── workflow/             # Flow + recipe 资产（丢目录即部署，无需重编）
 ├── README.md
 ├── docs/
 │   └── API.md            # 完整 API 参考（HTTP）
@@ -254,58 +257,32 @@ aginxbrowser/
 │   ├── pages.txt         #   固定 20 页集合
 │   ├── run.py            #   跑测脚本
 │   ├── summarize.py      #   TSV → 结果表
-│   └── results/          #   原始数据
+│   └── results/          #   raw 数据
 └── src/
-    ├── main.rs              # HTTP 服务入口与路由
-    ├── server.rs            # 业务层（fetch/click/eval/search）
-    ├── session.rs           # 交互式浏览器会话
-    ├── docgen/              # 文档层：markdown → 确定性 HTML + 内联 SVG 图
-    ├── render.rs            # 分层渲染（HTTP 直取 → diting 浏览器引擎）
-    ├── store.rs             # 本地 fetch/搜索缓存（SQLite FTS5、漂移哈希）
-    ├── download.rs          # 流式文件下载（sha256、断点续传）
-    ├── robots.rs            # RFC 9309 robots.txt 解析器（opt-in 门）
+    ├── main.rs              # HTTP/CLI 装配（薄 face）
+    ├── routers/             # HTTP 处理器：acquisition/sessions/outputs/render
+    ├── server/              # 采集 façade（按职责）：browser/fetch/outputs/search
+    ├── session/             # 交互会话（manager/interact/state/…）
+    ├── flow/                # Flow 解释器 + install
+    ├── search/              # 元搜索编排 + 各引擎适配
+    ├── store/               # 本地 fetch/搜索缓存（SQLite FTS5）
+    ├── docgen/              # 文档层：markdown → HTML + SVG 图
+    ├── screenshot.rs        # 眼侧 HTML→PNG（保持单体）
+    ├── render.rs            # 分层渲染（HTTP 直取 → diting）
+    ├── download.rs          # 流式下载（sha256、断点续传）
+    ├── robots.rs            # RFC 9309 robots.txt（opt-in 门）
     ├── rate.rs              # 单域名 + 单 session 限额
     ├── captcha.rs           # CAPTCHA 识别与自动解算
-    ├── firecrawl_compat.rs  # Firecrawl 兼容 /v1/scrape 端点
-    ├── video.rs             # 时间线视频泵（__timelines seek → ffmpeg → MP4）
-    ├── pages.rs             # 页泵（打印/幻灯片分页 → PDF/PNG）
-    ├── ooxml.rs             # OOXML 容器（图基 PPTX/DOCX，stored-ZIP 手写打包器）
+    ├── firecrawl_compat.rs  # Firecrawl 兼容 /v1/scrape
+    ├── video.rs             # 时间线视频泵（__timelines → ffmpeg → MP4）
+    ├── pages.rs             # 页泵（打印/幻灯片 → PDF/PNG）
+    ├── ooxml.rs             # OOXML 容器（PPTX/DOCX）
     ├── doctor_cli.rs        # `aginxbrowser doctor` 自检
-    ├── browser.rs           # 顶层 API：Browser、BrowserBuilder
-    ├── page.rs              # 顶层 API：Page、Element
+    ├── browser.rs           # 产品层 Browser / BrowserBuilder
+    ├── page.rs              # 产品层 Page/Element（包装 diting）
     ├── config.rs            # BrowserConfig
-    ├── cookie.rs            # CookieStore
-    ├── error.rs             # Error 类型
-    ├── search/              # 20 个原生搜索引擎，7 个分类
-    │   ├── mod.rs           #   SearchEngine trait、Registry、合并去重、渐进退避
-    │   ├── baidu.rs         #   百度（JSON API，wreq stealth）
-    │   ├── baidu_images.rs  #   百度图片（acjson API，images 类）
-    │   ├── bing.rs          #   Bing（HTML 解析，plain reqwest）
-    │   ├── bing_images.rs   #   必应图片（images/async 端点，images 类）
-    │   ├── bing_news.rs     #   必应新闻滚动片段（news 类；直连优先/代理重试）
-    │   ├── sogou.rs         #   搜狗通用（HTML 解析，plain reqwest）
-    │   ├── sogou_wechat.rs  #   搜狗微信（HTML 解析 + /link 解析）
-    │   ├── duckduckgo.rs    #   DuckDuckGo（html.duckduckgo.com，general 类；直连优先）
-    │   ├── wikipedia.rs     #   维基百科（MediaWiki 搜索 API，general 类；直连优先/代理重试）
-    │   ├── hn.rs            #   Hacker News（Algolia API，general 类；time_range 映射 created_at）
-    │   ├── stackexchange.rs #   Stack Overflow（SE API v2.3，code 类）
-    │   ├── mdn.rs           #   MDN Web 文档（v1 搜索 API，仅 code 类）
-    │   ├── github_repos.rs  #   GitHub 仓库（api.github.com，code 类）
-    │   ├── arxiv.rs         #   arXiv（Atom API，academic 类）
-    │   ├── openalex.rs      #   OpenAlex 学术作品（academic 类；DOI 链接、倒排索引摘要）
-    │   ├── huggingface.rs   #   HF 模型/数据集/Spaces（ai 类）
-    │   ├── npm.rs           #   npm 包（npms.io API，packages 类）
-    │   ├── pypi.rs          #   PyPI 包名解析（JSON API，packages 类）
-    │   ├── rubygems.rs      #   RubyGems 包（packages 类；直连优先/代理重试）
-    │   └── meilisearch.rs   #   私有索引适配器（env 配置）
-    │
-    ├── diting_dom/          # HTML 解析、DOM 树、CSS 选择器
-    ├── diting_css/          # CSS 解析 + 级联
-    ├── diting_net/          # HTTP 客户端、Cookie、编码、代理
-    ├── diting_js/           # V8 运行时、JS ops、模块加载
-    ├── diting_layout/       # 基于 Taffy 的布局、浮动、命中测试
-    ├── diting_fonts/        # 内置 CJK 字体子集、回退
-    └── diting_browser/      # 页面导航、生命周期、浏览器上下文
+    ├── cookie.rs            # Cookie 辅助
+    └── error.rs             # Error 类型
 ```
 
 ## 构建

@@ -244,11 +244,14 @@ Every capability is one POST away — no SDK, no protocol adapter.
 
 ```
 aginxbrowser/
-├── Cargo.toml
-├── build.rs              # V8 snapshot generation
-├── js/
-│   └── bootstrap.js      # V8 bootstrap script
-├── workflow/            # Flow assets: <name>/flow.json replayed by flow_run (drop-in, no rebuild)
+├── ARCHITECTURE.md       # Layering legislation (authoritative)
+├── Cargo.toml            # Workspace root (members = crates/diting)
+├── crates/
+│   └── diting/           # Engine crate: DOM/CSS/layout/paint/JS/net/Page
+│       ├── build.rs      # V8 snapshot generation
+│       ├── js/           # bootstrap.js + companion scripts
+│       └── src/          # diting_{dom,css,net,js,layout,fonts,browser}
+├── workflow/             # Flow + recipe assets (drop-in, no rebuild)
 ├── README.md
 ├── docs/
 │   └── API.md            # Full API reference (HTTP)
@@ -259,56 +262,30 @@ aginxbrowser/
 │   ├── summarize.py      #   TSV → results table
 │   └── results/          #   raw run data
 └── src/
-    ├── main.rs              # HTTP service entry & routing
-    ├── server.rs            # Business layer (fetch/click/eval/search)
-    ├── session.rs           # Interactive browser sessions
-    ├── docgen/              # Document layer: markdown → deterministic HTML + inline-SVG diagrams
-    ├── render.rs            # Tiered rendering (HTTP direct → diting browser engine)
-    ├── store.rs             # Local fetch/search cache (SQLite FTS5, drift hashes)
+    ├── main.rs              # HTTP/CLI assembly (thin face)
+    ├── routers/             # HTTP handlers: acquisition/sessions/outputs/render
+    ├── server/              # Acquire façade by job: browser/fetch/outputs/search
+    ├── session/             # Interactive sessions (manager/interact/state/…)
+    ├── flow/                # Flow interpreter + install
+    ├── search/              # Metasearch orchestration + per-engine adapters
+    ├── store/               # Local fetch/search cache (SQLite FTS5)
+    ├── docgen/              # Document layer: markdown → HTML + SVG diagrams
+    ├── screenshot.rs        # Eye-side HTML→PNG (keep monolithic)
+    ├── render.rs            # Tiered rendering (HTTP direct → diting)
     ├── download.rs          # Streaming file download (sha256, resume)
     ├── robots.rs            # RFC 9309 robots.txt checker (opt-in gate)
     ├── rate.rs              # Per-domain + per-session budgets
     ├── captcha.rs           # CAPTCHA detection & auto-solve
     ├── firecrawl_compat.rs  # Firecrawl-compatible /v1/scrape endpoint
-    ├── video.rs             # Timeline video pump (__timelines seek → ffmpeg → MP4)
-    ├── pages.rs             # Page pump (print/slides pagination → PDF/PNG)
-    ├── ooxml.rs             # OOXML containers (image-based PPTX/DOCX, stored-ZIP writer)
+    ├── video.rs             # Timeline video pump (__timelines → ffmpeg → MP4)
+    ├── pages.rs             # Page pump (print/slides → PDF/PNG)
+    ├── ooxml.rs             # OOXML containers (PPTX/DOCX)
     ├── doctor_cli.rs        # `aginxbrowser doctor` self-check
-    ├── browser.rs           # Top-level API: Browser, BrowserBuilder
-    ├── page.rs              # Top-level API: Page, Element
+    ├── browser.rs           # Product Page adapter: Browser, BrowserBuilder
+    ├── page.rs              # Product Page/Element wrapper over diting
     ├── config.rs            # BrowserConfig
-    ├── cookie.rs            # CookieStore
-    ├── error.rs             # Error types
-    ├── search/              # 20 native search engines, 7 categories
-    │   ├── mod.rs           #   SearchEngine trait, Registry, merge/dedupe, progressive backoff
-    │   ├── baidu.rs         #   Baidu (JSON API, wreq stealth)
-    │   ├── baidu_images.rs  #   Baidu Images (acjson API, images category)
-    │   ├── bing.rs          #   Bing (HTML parsing, plain reqwest)
-    │   ├── bing_images.rs   #   Bing Images (images/async endpoint, images category)
-    │   ├── bing_news.rs     #   Bing News infinite-scroll fragment (news category; direct-first/proxy-retry)
-    │   ├── sogou.rs         #   Sogou web (HTML parsing, plain reqwest)
-    │   ├── sogou_wechat.rs  #   Sogou WeChat (HTML parsing + /link resolution)
-    │   ├── duckduckgo.rs    #   DuckDuckGo (html.duckduckgo.com, general; direct-first)
-    │   ├── wikipedia.rs     #   Wikipedia (MediaWiki search API, general; direct-first/proxy-retry)
-    │   ├── hn.rs            #   Hacker News (Algolia API, general; time_range filters created_at)
-    │   ├── stackexchange.rs #   Stack Overflow (SE API v2.3, code category)
-    │   ├── mdn.rs           #   MDN Web Docs (v1 search API, code category only)
-    │   ├── github_repos.rs  #   GitHub repos (api.github.com, code category)
-    │   ├── arxiv.rs         #   arXiv (Atom API, academic category)
-    │   ├── openalex.rs      #   OpenAlex works (academic; DOI links, inverted-index abstracts)
-    │   ├── huggingface.rs   #   HF Hub models/datasets/spaces (ai category)
-    │   ├── npm.rs           #   npm packages (npms.io API, packages category)
-    │   ├── pypi.rs          #   PyPI name resolution (JSON API, packages)
-    │   ├── rubygems.rs      #   RubyGems gems (packages; direct-first/proxy-retry)
-    │   └── meilisearch.rs   #   Private-index adapter (env-configured)
-    │
-    ├── diting_dom/          # HTML parsing, DOM tree, CSS selectors
-    ├── diting_css/          # CSS parsing + cascade
-    ├── diting_net/          # HTTP client, cookies, encoding, proxies
-    ├── diting_js/           # V8 runtime, JS ops, module loading
-    ├── diting_layout/       # Taffy-based layout, floats, hit-testing
-    ├── diting_fonts/        # Bundled CJK font subset, fallback
-    └── diting_browser/      # Page navigation, lifecycle, browser context
+    ├── cookie.rs            # Cookie helpers
+    └── error.rs             # Error types
 ```
 
 ## Build
