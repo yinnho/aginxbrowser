@@ -29,21 +29,22 @@ impl SessionManager {
     /// account sessions. The learned verify spec and drawn persona from the
     /// previous record survive the refresh (a state write-back must not
     /// erase what account_verify taught or re-draw the identity's device).
+    /// The preserve-merge runs inside the store's lock (mutate_account), so
+    /// a persona draw or verify teach landing mid-read cannot be clobbered
+    /// by this save — the plain load→merge→save it replaced had that gap.
     pub(super) async fn capture_account(&mut self, owner: &str, name: &str, session_id: &str) {
         let Some(mut record) = self.read_login_state(session_id).await else {
             return;
         };
-        if let Some((text, _)) = crate::account::load(owner, name) {
-            if let Ok(prev) = serde_json::from_str::<Value>(&text) {
-                if prev.get("verify").is_some_and(|v| v.is_object()) {
-                    record["verify"] = prev["verify"].clone();
-                }
-                if prev.get("persona").is_some_and(|v| v.is_object()) {
-                    record["persona"] = prev["persona"].clone();
-                }
+        if let Err(e) = crate::store::mutate_account(owner, name, |rec| {
+            if rec.get("verify").is_some_and(|v| v.is_object()) {
+                record["verify"] = rec["verify"].clone();
             }
-        }
-        if let Err(e) = crate::account::save(owner, name, &record.to_string()) {
+            if rec.get("persona").is_some_and(|v| v.is_object()) {
+                record["persona"] = rec["persona"].clone();
+            }
+            *rec = record;
+        }) {
             tracing::debug!("account save failed for {name}: {e}");
         }
     }

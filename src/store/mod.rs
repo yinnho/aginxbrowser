@@ -522,6 +522,30 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
+    /// Atomic read-modify-write on one account record. The closure sees the
+    /// stored record (a fresh `{"version":1}` skeleton when absent or
+    /// unparsable) and whatever it leaves behind is saved in the same lock
+    /// hold. This is the only sanctioned way to write a *field* of a record
+    /// that other writers also touch: a plain load→mutate→save across three
+    /// lock holds rolls back whatever a concurrent writer (the per-command
+    /// cookie write-back, a persona draw, a verify teach) persisted in
+    /// between. Must not call back into the store (non-reentrant lock).
+    fn mutate_account<T>(
+        &self,
+        owner: &str,
+        name: &str,
+        f: impl FnOnce(&mut serde_json::Value) -> T,
+    ) -> Result<T, String> {
+        let stored = self
+            .load_account(owner, name)?
+            .map(|(text, _)| text)
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+        let mut record = stored.unwrap_or_else(|| serde_json::json!({"version": 1}));
+        let out = f(&mut record);
+        self.save_account(owner, name, &record.to_string())?;
+        Ok(out)
+    }
+
     /// Metadata-only rows for the account listing — cookie values are
     /// credentials and never leave the store; name, domains and counts are
     /// enough to tell identities apart.
@@ -693,6 +717,17 @@ pub fn load_account(owner: &str, name: &str) -> Option<(String, i64)> {
 
 pub fn delete_account(owner: &str, name: &str) -> bool {
     with_store(|st| st.delete_account(&norm_owner(owner), name)).unwrap_or(false)
+}
+
+/// Atomic account-record mutation — see [`Store::mutate_account`]. Field
+/// writers (persona draw, verify teach) go through this so they cannot roll
+/// back cookies persisted by the per-command account write-back.
+pub fn mutate_account<T>(
+    owner: &str,
+    name: &str,
+    f: impl FnOnce(&mut serde_json::Value) -> T,
+) -> Result<T, String> {
+    with_store(|st| st.mutate_account(&norm_owner(owner), name, f))
 }
 
 pub fn list_accounts(owner: &str) -> Vec<crate::account::AccountSummary> {

@@ -183,6 +183,7 @@ pub fn delete(owner: &str, name: &str) -> bool {
 /// risk-control linkage: two logins sharing one fingerprint read as "one
 /// device with two accounts", which is exactly the correlation the layer
 /// exists to prevent.
+#[derive(Clone)]
 pub struct Persona {
     pub fp_seed: u64,
     pub user_agent: String,
@@ -338,6 +339,39 @@ fn read_persona(record: &serde_json::Value) -> Option<Persona> {
     })
 }
 
+/// Decide the record's persona in place, teach-once: a stored complete
+/// persona is returned as-is (coherent) or normalized onto the TLS-coherent
+/// UA (a stale Chrome major); an absent/partial persona inserts `drawn`.
+/// Pure so the persistence path (which cannot re-point the global store per
+/// test) stays out of the decision.
+fn teach_persona(record: &mut serde_json::Value, drawn: &Persona) -> Persona {
+    match read_persona(record) {
+        Some(p) => {
+            let fixed = coerce_ua_to_tls(&p.user_agent);
+            if fixed == p.user_agent {
+                return p;
+            }
+            // Normalize stored Chrome/154-class jars onto TLS chrome145 once.
+            let normalized = Persona {
+                fp_seed: p.fp_seed,
+                user_agent: fixed,
+            };
+            record["persona"] = serde_json::json!({
+                "fp_seed": normalized.fp_seed,
+                "user_agent": normalized.user_agent,
+            });
+            normalized
+        }
+        None => {
+            record["persona"] = serde_json::json!({
+                "fp_seed": drawn.fp_seed,
+                "user_agent": drawn.user_agent,
+            });
+            drawn.clone()
+        }
+    }
+}
+
 /// Get-or-draw the account's device persona, teach-once like verify: the
 /// first call draws (fp_seed random, UA = `ua_hint` when the caller has the
 /// human's real one — the import_curl path) and writes it into the stored
@@ -346,39 +380,27 @@ fn read_persona(record: &serde_json::Value) -> Option<Persona> {
 /// disabled the draw is best-effort per call (same semantics as jar seeding).
 pub fn persona_for(owner: &str, name: &str, ua_hint: Option<&str>) -> Persona {
     validate_name(name).expect("account name validated at the API boundary");
-    let mut record = match load(owner, name) {
-        Some((text, _)) => serde_json::from_str::<serde_json::Value>(&text)
-            .unwrap_or(serde_json::json!({"version": 1})),
-        None => serde_json::json!({"version": 1}),
-    };
-    if let Some(persona) = read_persona(&record) {
-        // Normalize stored Chrome/154-class jars onto TLS chrome145 once.
-        let fixed = coerce_ua_to_tls(&persona.user_agent);
-        if fixed != persona.user_agent {
-            let persona = Persona {
-                fp_seed: persona.fp_seed,
-                user_agent: fixed,
-            };
-            record["persona"] = serde_json::json!({
-                "fp_seed": persona.fp_seed,
-                "user_agent": persona.user_agent,
-            });
-            if let Err(e) = save(owner, name, &record.to_string()) {
-                tracing::debug!("persona TLS normalize save failed for {name}: {e}");
+    // Fast path: a stored coherent persona needs no write at all — every
+    // session create runs this, and an unconditional RMW would take the
+    // store lock each time for nothing.
+    if let Some((text, _)) = load(owner, name) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(p) = read_persona(&v) {
+                if coerce_ua_to_tls(&p.user_agent) == p.user_agent {
+                    return p;
+                }
             }
-            return persona;
         }
-        return persona;
     }
-    let persona = draw_persona(ua_hint);
-    record["persona"] = serde_json::json!({
-        "fp_seed": persona.fp_seed,
-        "user_agent": persona.user_agent,
-    });
-    if let Err(e) = save(owner, name, &record.to_string()) {
-        tracing::debug!("persona save failed for {name}: {e}");
-    }
-    persona
+    // Teach/normalize through the atomic field mutation: load→decide→save
+    // under one store lock, so the per-command cookie write-back
+    // (capture_account) can neither be rolled back by this save nor land a
+    // stale record copy on top of a persona this path just drew. Deciding
+    // inside the closure also makes concurrent first-draws converge on one
+    // device instead of each caller keeping its own random fp_seed.
+    let drawn = draw_persona(ua_hint);
+    crate::store::mutate_account(owner, name, |record| teach_persona(record, &drawn))
+        .unwrap_or(drawn)
 }
 
 /// One row per account for `GET /accounts`. Metadata
@@ -422,7 +444,7 @@ pub async fn verify(
     predicate: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     validate_name(name)?;
-    let mut record = match load(owner, name) {
+    let record = match load(owner, name) {
         Some((text, _)) => serde_json::from_str::<serde_json::Value>(&text)
             .unwrap_or(serde_json::json!({"version": 1})),
         None => serde_json::json!({"version": 1}),
@@ -448,7 +470,12 @@ pub async fn verify(
     };
     // Teach-first: a caller-supplied spec wins even when the eval below
     // fails, so a broken predicate can be corrected on the next call.
-    record["verify"] = serde_json::json!({ "url": vurl, "predicate": pred });
+    // Field-scoped atomic write — the scratch session's own per-command
+    // cookie write-backs must survive this save (they run while the probe
+    // below navigates; the loaded `record` copy is already stale by then).
+    let _ = crate::store::mutate_account(owner, name, |rec| {
+        rec["verify"] = serde_json::json!({ "url": vurl, "predicate": pred });
+    });
 
     let use_proxy = record["use_proxy"].as_bool().unwrap_or(false);
     let mut mgr = crate::session::SESSIONS.lock().await;
@@ -473,17 +500,21 @@ pub async fn verify(
         Ok(v) => v,
         Err(e) => {
             // Keep the learned spec, drop the stale last_result — the check
-            // itself failed, which is not a logout verdict.
-            let _ = save(owner, name, &record.to_string());
+            // itself failed, which is not a logout verdict. Field-scoped:
+            // the probe session's cookie refresh survives this save.
+            let _ = crate::store::mutate_account(owner, name, |rec| {
+                rec["verify"] = serde_json::json!({ "url": vurl, "predicate": pred });
+            });
             return Err(format!("verify probe failed: {e}"));
         }
     };
-    record["verify"] = serde_json::json!({
-        "url": vurl,
-        "predicate": pred,
-        "last_result": verdict,
-    });
-    save(owner, name, &record.to_string())?;
+    crate::store::mutate_account(owner, name, |rec| {
+        rec["verify"] = serde_json::json!({
+            "url": vurl,
+            "predicate": pred,
+            "last_result": verdict,
+        });
+    })?;
     Ok(serde_json::json!({
         "name": name,
         "logged_in": verdict["logged_in"],
@@ -1131,5 +1162,36 @@ mod tests {
             read_persona(&serde_json::json!({"persona": {"fp_seed": 7, "user_agent": ""}}))
                 .is_none()
         );
+    }
+
+    // teach_persona is the in-lock half of persona_for: whatever it decides
+    // is what lands in the store under one lock hold. These cover the three
+    // outcomes without the global store (OnceLock-pinned, see above).
+    #[test]
+    fn teach_persona_inserts_normalizes_and_keeps() {
+        let drawn = draw_persona(Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/145.0.0.0"));
+        // Absent → insert drawn.
+        let mut rec = serde_json::json!({"version": 1});
+        assert_eq!(teach_persona(&mut rec, &drawn).fp_seed, drawn.fp_seed);
+        assert_eq!(rec["persona"]["fp_seed"], drawn.fp_seed);
+        // Present + coherent → returned as-is, record untouched.
+        let again = teach_persona(&mut rec, &drawn);
+        assert_eq!(again.fp_seed, drawn.fp_seed);
+        assert_eq!(rec["persona"]["fp_seed"], drawn.fp_seed);
+        // Present + stale Chrome major → normalized onto the TLS-coherent
+        // UA, keeping the fp_seed (the device identity survives the UA fix).
+        let mut stale = serde_json::json!({
+            "persona": {"fp_seed": 42, "user_agent":
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/154.0.0.0 Safari/537.36"}
+        });
+        let normalized = teach_persona(&mut stale, &drawn);
+        assert_eq!(normalized.fp_seed, 42);
+        assert!(normalized.user_agent.contains("Chrome/145.0.0.0"), "got {}", normalized.user_agent);
+        assert_eq!(stale["persona"]["fp_seed"], 42);
+        // Partial persona → drawn (a half persona is "no persona yet").
+        let mut partial = serde_json::json!({"persona": {"fp_seed": 9}});
+        let p = teach_persona(&mut partial, &drawn);
+        assert_eq!(p.fp_seed, drawn.fp_seed);
+        assert_eq!(partial["persona"]["user_agent"], drawn.user_agent);
     }
 }

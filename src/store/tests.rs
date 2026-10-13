@@ -200,6 +200,37 @@ fn accounts_roundtrip_owner_isolation_and_listing() {
 }
 
 #[test]
+fn account_mutate_is_field_scoped_and_creates_rows() {
+    let s = test_store();
+    // Absent record: the mutation creates the row and the closure sees the
+    // version-1 skeleton (same tolerance persona_for had with absent rows).
+    let seen_version = s
+        .mutate_account("o", "acct", |rec| {
+            rec["persona"] = serde_json::json!({"fp_seed": 7, "user_agent": "UA"});
+            rec["version"].as_u64().unwrap_or(0)
+        })
+        .unwrap();
+    assert_eq!(seen_version, 1);
+    // A second mutation only touches its field — the persona survives it.
+    s.mutate_account("o", "acct", |rec| {
+        rec["verify"] = serde_json::json!({"url": "https://x/", "predicate": "p"});
+    })
+    .unwrap();
+    let (text, _) = s.load_account("o", "acct").unwrap().unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["persona"]["fp_seed"], 7);
+    assert_eq!(v["verify"]["url"], "https://x/");
+    // An unparsable stored record degrades to a fresh skeleton instead of
+    // failing the whole mutation (a corrupt row must not wedge field writes).
+    s.save_account("o", "broken", "not json").unwrap();
+    assert!(s
+        .mutate_account("o", "broken", |rec| rec["k"] = serde_json::json!(1))
+        .is_ok());
+    let (text, _) = s.load_account("o", "broken").unwrap().unwrap();
+    assert!(text.contains("\"k\":1"), "got {text}");
+}
+
+#[test]
 fn split_cjk_produces_per_char_tokens() {
     assert_eq!(split_cjk("浏览器go"), "浏 览 器 go");
     assert_eq!(split_cjk("plain"), "plain");
