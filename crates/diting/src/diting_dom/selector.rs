@@ -986,12 +986,4 @@ pub enum PseudoKind {
     After,
 }
 
-impl PseudoKind {
-    pub fn css_name(self) -> &'static str {
-        match self {
-            PseudoKind::Before => "::before",
-            PseudoKind::After => "::after",
-        }
-    }
-}
 

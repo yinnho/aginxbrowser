@@ -84,17 +84,6 @@ impl CallbackRegistry {
         }
     }
 
-    /// Detach a response callback; see `remove_request`.
-    pub fn remove_response(&self, id: u64) -> bool {
-        match self.on_response.try_write() {
-            Ok(mut v) => {
-                let before = v.len();
-                v.retain(|(cid, _)| *cid != id);
-                v.len() != before
-            }
-            Err(_) => false,
-        }
-    }
 
     /// True when at least one request callback is registered. Lets fire sites
     /// skip building a `RequestInfo` when nobody listens.
