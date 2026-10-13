@@ -9,7 +9,7 @@
 - Ark 页经常 **不起** `_webmsxyw`；旧 xhs-sign 吞 `x-s` 会导致必 406 —— 已在 recipe
   里改成 signer 缺失时 passthrough（`__xs_passthrough`）。
 - `batch_create_item` 还可能回 `300015`（浏览器运行环境异常）或店 `deactivated`。
-- 登录：用 `workflow/xhs-login` 或 `import_curl`；cookie 过期会 `-13004`。
+- 登录：用 `workflow/xhs-qianfan-login`（千帆 App / beer-login CAS）。`xhs-login` 是 C 端，不要混用。cookie 过期会 `-13004`。
 
 ## 下一步（真正上架）
 

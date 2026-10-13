@@ -1,0 +1,109 @@
+{
+  "vars": {
+    "login_url": "https://customer.xiaohongshu.com/login?service=https://ark.xiaohongshu.com/ark",
+    "login_timeout_ms": 180000
+  },
+  "create": {
+    "width": 1440,
+    "height": 900
+  },
+  "steps": [
+    {
+      "id": "hook",
+      "op": "preload",
+      "args": {
+        "scripts": [
+          "(() => {\n  if (window.__qf_hook) return 'already';\n  window.__qf_hook = true;\n  window.__qf_log = [];\n  window.__qf_last = null;\n  const hit = (u) => /\\/api\\/cas\\/customer\\/web\\/qr-code/.test(String(u));\n  const stash = (u, txt) => {\n    window.__qf_log.push({ u: String(u).slice(0, 240), t: String(txt).slice(0, 1200) });\n    try { window.__qf_last = JSON.parse(txt); } catch (e) {}\n  };\n  const O = XMLHttpRequest.prototype.open, S = XMLHttpRequest.prototype.send;\n  XMLHttpRequest.prototype.open = function (m, u) {\n    this.__qf_u = String(u);\n    return O.apply(this, arguments);\n  };\n  XMLHttpRequest.prototype.send = function () {\n    if (hit(this.__qf_u)) this.addEventListener('loadend', () => stash(this.__qf_u, this.responseText));\n    return S.apply(this, arguments);\n  };\n  const F = window.fetch;\n  window.fetch = function (u) {\n    const us = String(typeof u === 'object' && u ? u.url : u);\n    const p = F.apply(this, arguments);\n    if (hit(us)) return p.then((r) => { r.clone().text().then((t) => stash(us, t)).catch(() => {}); return r; });\n    return p;\n  };\n  return 'hooked';\n})()"
+        ]
+      },
+      "note": "Document-start hook for CAS /api/cas/customer/web/qr-code only. Do NOT call edith sns qrcode/create (that is C-end www mobile/login)."
+    },
+    {
+      "id": "nav_login",
+      "op": "navigate",
+      "args": {
+        "url": "{{login_url}}"
+      },
+      "note": "B-end unified login (sellercustomer / beer-login). Prefer a clean account jar: POST /session/create {account} then pass session_id."
+    },
+    {
+      "id": "wait_beer",
+      "op": "wait",
+      "args": {
+        "predicate": "!!document.querySelector('.beer-login-container img.css-wemwzq')",
+        "timeout_ms": 30000
+      },
+      "save": "beer_ready",
+      "note": "SMS/account face first; QR mode is behind the top-right mode icon (css-wemwzq = qrCodeIcon)."
+    },
+    {
+      "id": "click_qr_icon",
+      "op": "eval",
+      "args": {
+        "script": "(function () {\n  var icon = document.querySelector('.beer-login-container img.css-wemwzq');\n  if (!icon) throw new Error('beer-login QR icon .css-wemwzq missing');\n  icon.click();\n  return 'clicked-qr-icon';\n})()",
+        "timeout_ms": 10000
+      },
+      "save": "switched",
+      "note": "DOM click on top-right icon. Engine CSS often mis-places the icon (getBoundingClientRect→0,0) so click_xy is unreliable; .click() is the proven path 2026-10-13."
+    },
+    {
+      "id": "wait_scan_ui",
+      "op": "wait",
+      "args": {
+        "predicate": "/APP扫一扫登录/.test(document.body && document.body.innerText || '') && !!document.querySelector('img.css-1lhmg90')",
+        "timeout_ms": 20000
+      },
+      "save": "scan_ui",
+      "note": "ScanLogin face: title APP扫一扫登录 + page QR <img class=css-1lhmg90>. Channels include 千帆."
+    },
+    {
+      "id": "capture_meta",
+      "op": "eval",
+      "args": {
+        "script": "(function () {\n  var last = window.__qf_last;\n  var data = last && last.data;\n  var create = null;\n  if (!(data && data.url && /loginconfirm/.test(data.url))) {\n    var logs = window.__qf_log || [];\n    for (var i = logs.length - 1; i >= 0; i--) {\n      try {\n        var j = JSON.parse(logs[i].t);\n        if (j && j.data && j.data.url && /loginconfirm/.test(j.data.url)) { data = j.data; create = j; break; }\n      } catch (e) {}\n    }\n  } else {\n    create = last;\n  }\n  if (!(data && data.url)) throw new Error('CAS qr-code create missing — hook miss or icon click failed');\n  if (!/customer\\.xiaohongshu\\.com\\/loginconfirm/.test(data.url)) {\n    throw new Error('refusing non-loginconfirm QR url: ' + String(data.url).slice(0, 160));\n  }\n  if (/www\\.xiaohongshu\\.com\\/mobile\\/login/.test(data.url)) {\n    throw new Error('C-end mobile/login URL — wrong path (edith). Use beer-login CAS only.');\n  }\n  var channels = data.support_qr_code_channel_infos || data.supportQrCodeChannelInfos || [];\n  var names = channels.map(function (c) { return c && c.app_name; }).filter(Boolean);\n  if (names.indexOf('千帆') < 0) {\n    throw new Error('千帆 not in support channels: ' + JSON.stringify(names));\n  }\n  window.__qf_qr = { id: data.id, url: data.url, channels: names };\n  return JSON.stringify({ qr_id: data.id, url: data.url, channels: names, code: create && create.code });\n})()",
+        "timeout_ms": 15000
+      },
+      "save": "qr",
+      "note": "Gate: must be customer.xiaohongshu.com/loginconfirm + 千帆 channel. Never accept www C-end mobile/login."
+    },
+    {
+      "id": "qr_data",
+      "op": "eval",
+      "args": {
+        "script": "(function () {\n  var img = document.querySelector('img.css-1lhmg90');\n  if (!img || !(img.src || '').startsWith('data:image')) {\n    throw new Error('page QR img.css-1lhmg90 data URL missing');\n  }\n  return img.src;\n})()",
+        "timeout_ms": 10000
+      },
+      "save": "qr_data",
+      "note": "Exact page bitmap (data:image/png;base64,…). Prefer this over regenerating from URL when handing to humans; if engine raster is blank, re-encode loginconfirm URL locally from saved.qr.url."
+    },
+    {
+      "id": "qr_shot",
+      "op": "screenshot",
+      "args": {
+        "selector": "img.css-1lhmg90"
+      },
+      "save": "qr_shot",
+      "note": "Human crop of page QR. Layout paint may be wrong on full-page shots; qr_data / qr.url are source of truth."
+    },
+    {
+      "id": "wait_login",
+      "op": "wait",
+      "args": {
+        "predicate": "(function () {\n  var host = location.hostname || '';\n  var href = location.href || '';\n  var text = (document.body && document.body.innerText) || '';\n  if (host.indexOf('ark.xiaohongshu.com') < 0) return false;\n  if (/\\/login/.test(location.pathname)) return false;\n  if (/customer\\.xiaohongshu\\.com\\/login/.test(href)) return false;\n  if (/登录凭证已过期|请重新登录|登录加载中/.test(text)) return false;\n  if (/[?&]ticket=/.test(href)) return false;\n  return true;\n})()",
+        "timeout_ms": "{{login_timeout_ms}}"
+      },
+      "save": "login_done",
+      "note": "HUMAN: 千帆 App 扫一扫 saved.qr_data / qr_shot / /live?session= then confirm. Page polls CAS (CREATE=2 WAIT_CONFIRM=3 LOGIN_SUCCESS=1 EXPIRED=4). Wait until ark workspace WITHOUT ticket= query and WITHOUT 凭证已过期 modal — ticket still in URL means SSO not finished."
+    },
+    {
+      "id": "landing",
+      "op": "eval",
+      "args": {
+        "script": "(async function () {\n  var seller = null;\n  try {\n    var r = await fetch('/api/edith/seller/info/v2', { credentials: 'include', headers: { 'content-type': 'application/json' } });\n    var t = await r.text();\n    var j = null; try { j = JSON.parse(t); } catch (e) {}\n    seller = { http: r.status, code: j && j.code, success: j && j.success, msg: j && j.msg, deactivated: j && j.data && j.data.deactivated, company: j && j.data && j.data.company_name };\n  } catch (e) { seller = { err: String(e) }; }\n  if (!(seller && seller.success)) {\n    throw new Error('ark landed but seller/info not ok: ' + JSON.stringify(seller));\n  }\n  return JSON.stringify({ url: location.href, title: document.title, seller: seller });\n})()",
+        "timeout_ms": 30000
+      },
+      "save": "landing",
+      "note": "Witness: seller/info/v2 success. Receipt session_id is the merchant jar for xhs-merchant-publish."
+    }
+  ]
+}

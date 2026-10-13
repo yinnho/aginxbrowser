@@ -1,3 +1,5 @@
+> **商家 / 千帆请用 [`xhs-qianfan-login`](../xhs-qianfan-login/)**（beer-login → CAS `loginconfirm`）。本 flow 是 **C 端** www / edith 扫码。
+
 # xhs-login — 小红书登录（全在 flow 里）
 
 对齐 `doudian-login` / `taobao-login`：**出码 → 人扫 → 回执 `session_id`**。

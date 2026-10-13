@@ -18,7 +18,7 @@ compat belong in `workflow/<name>/` (or an explicit `preload` / HTTP
 (e.g. `xhs-sign` on `*.xiaohongshu.com` was demoted 2026-10-12). Core stays
 generic Web/compat; flows carry the business face.
 
-`workflow/xhs-login/` owns QR login end-to-end；`scripts/xhs-qr-login.py` is an optional thin `flow/run` CLI only.
+`workflow/xhs-login/` owns **C-end** QR login；`workflow/xhs-qianfan-login/` owns **千帆商家** beer-login / CAS `loginconfirm`；`scripts/xhs-qr-login.py` is an optional thin `flow/run` CLI only.
 
 ## Named preload recipes (`recipe.js`)
 
