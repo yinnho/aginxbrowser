@@ -1,10 +1,10 @@
 (() => {
-  // v5: fingerprint-clean — wrappers take native shape ([native code] toString
-  // via _markNative, no own .prototype, non-constructible), counters live in a
-  // closure behind one non-enumerable __xsStats(), XHR instance props hidden.
+  // v6: same fingerprint shape as v5 + functional fixes (CORS auto-sign
+  // guard, gate snapshot vs XHR reuse, FormData PR block, page-x-s replay,
+  // array-header rebuild, deferred-common restore, fail-closed waitSigner).
   // 300015 "risk plugin" probes enumerate window keys and diff
   // Function.prototype.toString — v4 leaked the whole recipe source there.
-  const XS_VER = 5;
+  const XS_VER = 6;
   let prev = null;
   try { if (typeof window.__xsStats === 'function') prev = window.__xsStats(); } catch (e) {}
   if (prev && prev.ver >= XS_VER) return 'already';
