@@ -11,7 +11,7 @@
   const stats = {
     ver: XS_VER, installed: 1, mirrored: 0, arkified: 0, swallowed: 0,
     passthrough: 0, passthrough_coherent: 0, common_stripped: 0, signed: 0,
-    pr_held: 0, pr_blocked: 0, fuse: 0,
+    pr_held: 0, pr_blocked: 0, fuse: 0, replayed: 0, dropped: 0,
   };
   const bump = (k) => { stats[k] = (stats[k] || 0) + 1; };
   // Last publish_render decision + wire outcome (closure-only, surfaced via
@@ -69,6 +69,15 @@
   };
   // Auto-attach signatures for API calls; resign whenever page already set x-s.
   const isApiUrl = (u) => /\/api\//.test(String(u || ''));
+  // Relative URLs are same-origin; absolute ones compare host (incl. port).
+  // Auto-signing a CROSS-origin URL the page never signed adds x-s → triggers
+  // a preflight the server may not allow ("CORS preflight did not allow
+  // request header 'x-s'", observed live on the www error page hop).
+  const sameOrigin = (u) => {
+    const m = String(u || '').match(/^(?:https?:)?\/\/([^/?#]+)/i);
+    if (!m) return true;
+    try { return m[1].toLowerCase() === location.host.toLowerCase(); } catch (e) { return true; }
+  };
   // Itemark create SPA races publish_render before AS signer is healthy; gate it.
   const isPublishRender = (u) => /\/api\/edith\/product\/publish_render\b/i.test(String(u || ''));
   // Keep merchant product APIs on ark (SPA sometimes hops to www after env reject).
@@ -139,7 +148,9 @@
       const fn = ready();
       if (fn || Date.now() - start >= ms) {
         clearInterval(t);
-        resolve(fn || noteSigner() || null);
+        // Timeout resolves null (fail closed): a signer that never satisfied
+        // the settle contract must not sign publish_render late-and-raw.
+        resolve(fn || null);
       }
     }, 50);
   });
@@ -151,6 +162,7 @@
   const XM = {
     open(m, u) {
       let uu = String(u);
+      let pr = false;
       if (isPublishRender(uu)) {
         const a = arkify(uu);
         if (a !== uu) {
@@ -158,8 +170,12 @@
           bump('arkified');
           arguments[1] = uu;
         }
-        def(this, '__xs_pr', true);
+        pr = true;
       }
+      // Reused XHR objects start each open() fresh (a publish_render open
+      // must not stick PR treatment onto the next unrelated request).
+      def(this, '__xs_pr', pr);
+      def(this, '__xs_common_deferred', false);
       def(this, '__xs_u', uu); def(this, '__xs_m', String(m || 'GET').toUpperCase());
       def(this, '__xs_page', {});
       return O.apply(this, arguments);
@@ -202,14 +218,31 @@
     send(b) {
       const self = this;
       const args = arguments;
+      // Snapshot at send() time: a gate-held request must decide on the state
+      // the page presented when send() was called. If the page reuses the XHR
+      // (abort+open again) while the gate holds, live flags now describe the
+      // NEW request — acting on them sends stale PR bodies to wrong URLs.
+      const snap = {
+        u: this.__xs_u || '',
+        pr: !!this.__xs_pr,
+        page: Object.assign({}, this.__xs_page || {}),
+        deferred: !!this.__xs_common_deferred,
+      };
       const finish = (allowUnsigned) => {
         try {
-          if (FUSE.test(self.__xs_u || '')) {
+          // Reuse between send() and gate release: both wiring the stale body
+          // and synthetically completing would corrupt the live second
+          // request on the same object. Drop the ghost request entirely.
+          if ((self.__xs_u || '') !== snap.u || !!self.__xs_pr !== snap.pr) {
+            bump('dropped');
+            return;
+          }
+          if (FUSE.test(snap.u)) {
             bump('fuse');
             try {
-              Object.defineProperty(self, 'readyState', { value: 4 });
-              Object.defineProperty(self, 'status', { value: 200 });
-              Object.defineProperty(self, 'responseText', { value: '{"code":0,"success":true}' });
+              Object.defineProperty(self, 'readyState', { value: 4, configurable: true });
+              Object.defineProperty(self, 'status', { value: 200, configurable: true });
+              Object.defineProperty(self, 'responseText', { value: '{"code":0,"success":true}', configurable: true });
               setTimeout(() => { try {
                 self.dispatchEvent(new Event('readystatechange'));
                 self.dispatchEvent(new Event('load'));
@@ -218,14 +251,17 @@
               return;
             } catch (e) { /* polyfill shape differs: fall through to the wire */ }
           }
-          if (self.__xs_pr) notePr('unsigned-wire', { body: b instanceof FormData ? 'FormData' : 'other' });
-          if (self.__xs_u && !(b instanceof FormData) && (isXhsUrl(self.__xs_u) || self.__xs_pr)) {
-            const page = self.__xs_page || {};
+          if (snap.pr) notePr('unsigned-wire', { body: b instanceof FormData ? 'FormData' : 'other' });
+          if (snap.u && (isXhsUrl(snap.u) || snap.pr)) {
+            const page = snap.page;
             const hasPageXs = !!page['x-s'];
             const hasPageCommon = !!page['x-s-common'];
             const signerReady = typeof (mirrorSigner() || resolveSigner()) === 'function';
+            const formBody = b instanceof FormData;
+            const cross = !sameOrigin(snap.u);
+            const sg = formBody ? null : sign(snap.u, b);
             // PRIMARY (Oct-11): signer ready + page already set x-s (+ ideally x-s-common) → passthrough
-            if (signerReady && hasPageXs) {
+            if (signerReady && hasPageXs && !formBody) {
               S.call(self, 'X-s', page['x-s']);
               if (page['x-t']) S.call(self, 'X-t', page['x-t']);
               if (hasPageCommon) S.call(self, 'X-s-common', page['x-s-common']);
@@ -237,9 +273,9 @@
               if (hasPageCommon) bump('passthrough_coherent');
               return D.apply(self, args);
             }
-            // ELSE resign: set X-s/X-t; strip deferred x-s-common unless signer returns it
-            const sg = sign(self.__xs_u, b);
-            if (sg) {
+            // ELSE resign (same-origin unsigned APIs, or anything the page signed;
+            // cross-origin unsigned must stay untouched — extra x-s = preflight break).
+            if (sg && (!cross || hasPageXs)) {
               S.call(self, 'X-s', String(sg['X-s']));
               S.call(self, 'X-t', String(sg['X-t']));
               const cm = commonFromSg(sg);
@@ -254,15 +290,17 @@
                 try { if (stats.pr_last) { stats.pr_last.status = self.status; } } catch (e) {}
               });
               bump('signed');
-            } else if (self.__xs_pr && !allowUnsigned) {
+            } else if (snap.pr && !allowUnsigned) {
               // Do not wire unsigned publish_render — synthetic soft fail (avoid 300015 poison).
-              notePr('blocked');
+              // Covers FormData bodies too: the gate must hold regardless of body type.
+              notePr('blocked', { body: formBody ? 'FormData' : 'other' });
               bump('pr_blocked');
               try {
-                Object.defineProperty(self, 'readyState', { value: 4 });
-                Object.defineProperty(self, 'status', { value: 200 });
+                Object.defineProperty(self, 'readyState', { value: 4, configurable: true });
+                Object.defineProperty(self, 'status', { value: 200, configurable: true });
                 Object.defineProperty(self, 'responseText', {
-                  value: JSON.stringify({ code: -1, success: false, msg: 'xs-gate:signer-not-ready' })
+                  value: JSON.stringify({ code: -1, success: false, msg: 'xs-gate:signer-not-ready' }),
+                  configurable: true
                 });
                 setTimeout(() => { try {
                   self.dispatchEvent(new Event('readystatechange'));
@@ -271,14 +309,30 @@
                 } catch (e) {} }, 0);
                 return;
               } catch (e) { return; }
+            } else if (hasPageXs && !formBody) {
+              // Resign failed (no signer) but we swallowed the page's own x-s at
+              // setRequestHeader — restore it instead of sending bare (a page-
+              // signed request would otherwise leave unsigned = 406).
+              S.call(self, 'X-s', page['x-s']);
+              if (page['x-t']) S.call(self, 'X-t', page['x-t']);
+              if (hasPageCommon) S.call(self, 'X-s-common', page['x-s-common']);
+              if (snap.pr) notePr('replayed');
+              bump('replayed');
+              return D.apply(self, args);
+            } else if (snap.deferred && hasPageCommon && !cross) {
+              // Unsigned same-origin request whose only page header was the
+              // deferred x-s-common — put it back; we neither signed nor
+              // passthrough'd, the page's original intent stands.
+              S.call(self, 'X-s-common', page['x-s-common']);
+              return D.apply(self, args);
             }
           }
         } catch (e) {}
         return D.apply(self, args);
       };
       try {
-        const u = this.__xs_u || '';
-        if (this.__xs_pr || isPublishRender(u)) {
+        const u = snap.u;
+        if (snap.pr || isPublishRender(u)) {
           bump('pr_held');
           waitSigner(GATE_WAIT_MS, true).then(() => finish(false));
           return;
@@ -343,8 +397,19 @@
         const cm = commonFromSg(sg);
         let nh;
         if (!h || Array.isArray(h)) {
-          nh = { 'x-s': String(sg['X-s']), 'x-t': String(sg['X-t']) };
-          if (cm) nh['x-s-common'] = cm;
+          // Array-of-pairs form: rebuild via Headers so page headers survive
+          // (dropping content-type etc. turned JSON POSTs into bare 4xx).
+          nh = new Headers();
+          if (Array.isArray(h)) {
+            for (const pair of h) {
+              if (pair && pair.length >= 2) {
+                const k = String(pair[0]);
+                if (!/^x-(s|t|s-common)$/i.test(k.trim())) nh.append(k, String(pair[1]));
+              }
+            }
+          }
+          nh.set('x-s', String(sg['X-s'])); nh.set('x-t', String(sg['X-t']));
+          if (cm) nh.set('x-s-common', cm);
           if (hasCommon && !cm) bump('common_stripped');
         } else if (!(h instanceof Headers)) {
           nh = Object.assign({}, h);
@@ -375,8 +440,10 @@
       const has = headerHas(o.headers, ['x-s', 'X-s']);
       const gated = isPublishRender(us);
       // Resign when page set x-s; also auto-sign /api/* (ark publish_render omits x-s
-      // when window._webmsxyw is missing). Skip non-API without x-s (unless gated).
-      if (!gated && !has && !isApiUrl(us)) return F.call(this, u, o);
+      // when window._webmsxyw is missing) — but never auto-sign a CROSS-origin URL
+      // the page left unsigned (extra x-s forces a preflight the server rejects).
+      // Skip non-API without x-s (unless gated).
+      if (!gated && !has && (!isApiUrl(us) || !sameOrigin(us))) return F.call(this, u, o);
       if (gated) {
         bump('pr_held');
         return waitSigner(GATE_WAIT_MS, true).then(() => apply(sign(us, body), true));
@@ -387,7 +454,7 @@
       }
       let sg = sign(us, body);
       if (sg) return apply(sg, false);
-      if (!has && !isApiUrl(us)) return apply(null, false);
+      if (!has && (!isApiUrl(us) || !sameOrigin(us))) return apply(null, false);
       return waitSigner(SIGNER_WAIT_MS, false).then(() => apply(sign(us, body), false));
     },
   };
