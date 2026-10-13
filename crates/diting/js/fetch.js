@@ -238,7 +238,7 @@ const __ditingFetchImpl = async (input, init = {}) => {
       // Chrome parity (300015 / 风险插件 probes + 批286 debt): blocked
       // chrome-extension:// and other gate denials must be TypeError
       // "Failed to fetch", not AbortError/"net::ERR_FAILED" (page scripts
-      // catch e.name/e.message; stack also used to say <diting:fetch>).
+      // catch e.name/e.message; script name is <anonymous> so stacks do not say diting).
       throw new TypeError('Failed to fetch');
     }
     if (parsed.corsBlocked) {

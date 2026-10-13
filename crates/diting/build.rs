@@ -89,32 +89,37 @@ fn main() {
             extensions: vec![],
             extension_transpiler: None,
             with_runtime_cb: Some(Box::new(move |runtime| {
+                // Stack frames from these scripts are visible to page JS
+                // (Error.stack / catch). Do NOT use "<diting:…>" names —
+                // they leak the engine brand (300015 env probes). Chrome
+                // shows "<anonymous>" for eval-like builtins; match that.
+
                 runtime
-                    .execute_script("<diting:bootstrap>", bootstrap_js.to_string())
+                    .execute_script("<anonymous>", bootstrap_js.to_string())
                     .expect("bootstrap.js should not fail during snapshot creation");
                 runtime
-                    .execute_script("<diting:fetch>", fetch_js.to_string())
+                    .execute_script("<anonymous>", fetch_js.to_string())
                     .expect("fetch.js should not fail during snapshot creation");
                 runtime
-                    .execute_script("<diting:xhr>", xhr_js.to_string())
+                    .execute_script("<anonymous>", xhr_js.to_string())
                     .expect("xhr.js should not fail during snapshot creation");
                 runtime
-                    .execute_script("<diting:domparser>", domparser_js.to_string())
+                    .execute_script("<anonymous>", domparser_js.to_string())
                     .expect("domparser.js should not fail during snapshot creation");
                 runtime
-                    .execute_script("<diting:performance>", performance_js.to_string())
+                    .execute_script("<anonymous>", performance_js.to_string())
                     .expect("performance.js should not fail during snapshot creation");
                 runtime
-                    .execute_script("<diting:window_faces>", window_faces_js.to_string())
+                    .execute_script("<anonymous>", window_faces_js.to_string())
                     .expect("window_faces.js should not fail during snapshot creation");
                 runtime
-                    .execute_script("<diting:message_port>", message_port_js.to_string())
+                    .execute_script("<anonymous>", message_port_js.to_string())
                     .expect("message_port.js should not fail during snapshot creation");
                 runtime
-                    .execute_script("<diting:fetch_probe>", fetch_probe_js.to_string())
+                    .execute_script("<anonymous>", fetch_probe_js.to_string())
                     .expect("fetch_probe.js should not fail during snapshot creation");
                 runtime
-                    .execute_script("<diting:interface_sweep>", interface_sweep_js.to_string())
+                    .execute_script("<anonymous>", interface_sweep_js.to_string())
                     .expect("interface_sweep.js should not fail during snapshot creation");
             })),
         },

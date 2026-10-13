@@ -274,7 +274,7 @@ impl JsRuntime {
 
         runtime
             .execute_script(
-                "<diting:init>",
+                "<anonymous>"  /* was diting:init; page-visible Error.stack */,
                 "globalThis.__diting_objects = {}; globalThis.__diting_oid = 0; globalThis.__diting_init();".to_string(),
             )
             .expect("init should not fail");
