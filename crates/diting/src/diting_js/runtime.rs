@@ -635,7 +635,7 @@ impl JsRuntime {
         })
     }
 
-    #[allow(dead_code)] // callFunctionOn parity; Page-level wrapper carries the allow note
+    #[cfg_attr(not(test), allow(dead_code))] // production uses evaluate_remote*; tests exercise callFunctionOn
     pub async fn call_function_on_remote(
         &mut self,
         function_declaration: &str,
@@ -982,50 +982,7 @@ impl JsRuntime {
     ) -> Result<RemoteObjectInfo, String> {
         self.call_function_on_remote(function_declaration, object_id, arguments, return_by_value, false).await
     }
-    #[allow(dead_code)] // CDP Runtime.evaluate-by-object-id half of the object store
-    pub fn store_object(&mut self, js_expression: &str) -> Result<String, String> {
-        self.object_counter += 1;
-        let oid = self.make_oid(self.object_counter);
-        let code = format!("{} = ({});", Self::object_slot(&oid), js_expression);
-        self.runtime
-            .execute_script("<store>", code)
-            .map_err(|e| format!("Store error: {}", e))?;
-        self.object_store.insert(oid.clone(), Self::object_slot(&oid));
-        Ok(oid)
-    }
-
-    #[allow(dead_code)] // ditto — store plus RemoteObject metadata extraction
-    pub fn store_object_with_meta(
-        &mut self,
-        js_expression: &str,
-    ) -> Result<RemoteObjectInfo, String> {
-        self.object_counter += 1;
-        let oid = self.make_oid(self.object_counter);
-        let code = format!(
-            "(function() {{\n\
-                var __result = (\n{expr}\n);\n\
-                {slot} = __result;\n\
-                return {meta_fn};\n\
-            }})()",
-            expr = js_expression,
-            slot = Self::object_slot(&oid),
-            meta_fn = Self::meta_extract_js("__result"),
-        );
-        let result = self
-            .runtime
-            .execute_script("<store-meta>", code)
-            .map_err(|e| format!("Store error: {}", e))?;
-        let meta_str = self.v8_to_json(result)?;
-        let meta_json = if let serde_json::Value::String(s) = &meta_str {
-            serde_json::from_str(s).unwrap_or(meta_str.clone())
-        } else {
-            meta_str
-        };
-        self.object_store.insert(oid.clone(), Self::object_slot(&oid));
-        Ok(Self::info_from_meta(&meta_json, Some(oid)))
-    }
-
-    #[allow(dead_code)] // CDP Runtime.releaseObject parity
+    #[cfg_attr(not(test), allow(dead_code))] // tests: release_object_with_adversarial_id_is_inert
     pub fn release_object(&mut self, object_id: &str) {
         if self.object_store.remove(object_id).is_some() {
             let code = format!("delete {};", Self::object_slot(object_id));
@@ -1033,14 +990,6 @@ impl JsRuntime {
         }
     }
 
-    #[allow(dead_code)] // CDP Runtime.releaseObjectGroup parity
-    pub fn release_object_group(&mut self) {
-        let _ = self.runtime.execute_script(
-            "<releaseGroup>",
-            "globalThis.__diting_objects = {};".to_string(),
-        );
-        self.object_store.clear();
-    }
     pub async fn load_module(&mut self, url: &str, budget_ms: u64) -> Result<(), String> {
         let budget = tokio::time::Duration::from_millis(budget_ms);
         let specifier = deno_core::ModuleSpecifier::parse(url)
@@ -1392,22 +1341,6 @@ impl JsRuntime {
         result.map_err(|e| format!("Event loop error: {}", e))
     }
 
-    /// This runtime's V8 isolate handle (captured at construction, stable for
-    /// the isolate's life). Lets the CDP dispatcher arm a per-command watchdog
-    /// from `&self`.
-    #[allow(dead_code)] // CDP per-command watchdog plumbing — the CDP server itself is not absorbed
-    pub fn isolate_handle(&self) -> IsolateHandle {
-        self.isolate_handle.clone()
-    }
-
-    /// Clear V8's termination flag after a watchdog armed externally (via the
-    /// isolate handle) fired, so the isolate is usable for the next command.
-    /// No-op when the isolate is not terminating.
-    #[allow(dead_code)] // ditto — the watchdog-clearing half
-    pub fn cancel_termination(&mut self) {
-        self.runtime.v8_isolate().cancel_terminate_execution();
-    }
-
     /// Like [`Self::evaluate`] but bounded by a V8 watchdog, so a `--eval`
     /// expression that loops forever (or awaits a promise that never settles in
     /// synchronous form) cannot hang the process.
@@ -1466,15 +1399,6 @@ impl JsRuntime {
         f(&mut state)
     }
 
-    #[allow(dead_code)] // borrow-preserving DOM read; with_dom covers current callers
-    pub fn dom_ref(&self) -> Option<std::cell::Ref<'_, Option<DomTree>>> {
-        let r = self.state.borrow();
-        if r.dom.is_some() {
-            Some(std::cell::Ref::map(r, |s| &s.dom))
-        } else {
-            None
-        }
-    }
     fn make_oid(&self, counter: u64) -> String {
         format!("{{\"injectedScriptId\":1,\"id\":{}}}", counter)
     }

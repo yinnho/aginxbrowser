@@ -933,14 +933,6 @@ impl Page {
         }
     }
 
-    #[allow(dead_code)] // CDP Runtime.addBinding parity — drained as bindingCalled events
-    pub fn take_pending_binding_calls(&self) -> Vec<(String, String)> {
-        if let Some(js) = &self.js {
-            js.take_pending_binding_calls()
-        } else {
-            Vec::new()
-        }
-    }
 
     /// Drain queued console calls (level, message, page URL at log time)
     /// for CDP `Runtime.consoleAPICalled` and the session console ring.

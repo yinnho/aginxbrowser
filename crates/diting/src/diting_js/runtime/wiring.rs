@@ -99,7 +99,6 @@ impl JsRuntime {
         self.state.borrow_mut().referrer_policy_header = policy.to_string();
     }
 
-    #[allow(dead_code)] // CDP Network.setBlockedURLs parity — no CDP client yet
     pub fn set_blocked_urls(&self, patterns: Vec<String>) {
         self.state.borrow_mut().blocked_urls = patterns;
     }
@@ -143,10 +142,6 @@ impl JsRuntime {
         self.state.borrow().dynamic_script_fetches.get() > 0
     }
 
-    #[allow(dead_code)] // CDP Runtime.addBinding drain — emitted as bindingCalled events
-    pub fn take_pending_binding_calls(&self) -> Vec<(String, String)> {
-        std::mem::take(&mut self.state.borrow_mut().pending_binding_calls)
-    }
 
     /// Drain queued console calls (level, message, page URL at log time)
     /// captured by `op_console_msg`. The CDP layer turns each into a

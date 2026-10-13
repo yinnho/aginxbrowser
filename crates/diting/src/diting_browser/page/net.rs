@@ -235,8 +235,8 @@ impl Page {
 
     /// Register a passive callback fired with every response this page
     /// receives, including its body. Non-blocking. The main path for crawlers
-    /// that need to capture API response payloads. Returns a stable id for
-    /// `off_response`. Page-scoped like `on_request`.
+    /// that need to capture API response payloads. Returns a stable id.
+    /// Page-scoped like `on_request`.
     #[cfg_attr(not(test), allow(dead_code))] // batch-2 kernel; wire at session init when /network lands
     pub fn on_response(&mut self, cb: crate::diting_net::ResponseCallback) -> u64 {
         self.callbacks.add_response(cb)
@@ -249,11 +249,6 @@ impl Page {
         self.callbacks.remove_request(id)
     }
 
-    /// Detach a response observer registered with `on_response`.
-    #[allow(dead_code)] // pair-unregister for on_response (tests unregister requests, not responses)
-    pub fn off_response(&mut self, id: u64) -> bool {
-        self.callbacks.remove_response(id)
-    }
 
     /// Fan `Network.setExtraHTTPHeaders` out to every transport this page
     /// can issue requests from. A stealth page fetches its main document
