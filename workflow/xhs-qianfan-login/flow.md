@@ -28,15 +28,17 @@ CAS 状态枚举（beer ScanLogin）：`CREATE=2` → `WAIT_CONFIRM=3` → `LOGI
 ## 用法
 
 ```bash
+# Reuse ONE stable account name (never xhs-qf-$HHMMSS) so persona fp_seed stays one device.
+MAC_UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36'
 SID=$(curl -sS -X POST "$ENGINE/session/create" -H 'content-type: application/json' \
-  -d '{"account":"xhs-qf-1","width":1440,"height":900}' | jq -r .session_id)
+  -d "{\"account\":\"xhs-qf-stable\",\"width\":1440,\"height\":900,\"persona_ua\":\"$MAC_UA\"}" | jq -r .session_id)
 
 curl -sS -X POST "$ENGINE/flow/run" -H 'content-type: application/json' \
   -d "{\"name\":\"xhs-qianfan-login\",\"session_id\":\"$SID\",\"vars\":{\"login_timeout_ms\":180000}}"
 # 回执 saved.qr_data / saved.qr / saved.qr_shot — 千帆 App 扫；或打开 /live?session=$SID
 ```
 
-干净 `account` jar：旧 cookie 会静默把你送进半登录态。
+干净 `account` jar：旧 cookie 会静默把你送进半登录态。**同一店只复用 `xhs-qf-stable`（或 `xhs-merchant-ark`）**，不要每次扫码换 `xhs-qf-HHMMSS`（会烧新 fp_seed，易 300015）。Darwin 上即使不传 `persona_ua` 也会默认 Mac Chrome/145。
 
 ## 闸门（flow 内 throw）
 

@@ -120,7 +120,8 @@ pub(super) fn session_thread(
                 // per identity, not one shared fingerprint with two logins.
                 let (browser, persona) = match &account {
                     Some((owner, name)) => {
-                        let persona = crate::account::persona_for(owner, name, None);
+                        let hint = crate::account::resolve_ua_hint(None);
+                        let persona = crate::account::persona_for(owner, name, hint.as_deref());
                         (
                             crate::server::build_browser_for_account(
                                 use_proxy,

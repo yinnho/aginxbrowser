@@ -1270,6 +1270,29 @@ async fn run_flow_inner(
                 )),
                 _ => None,
             };
+            let account = match c.get("account").and_then(|v| v.as_str()) {
+                Some(name) => match crate::account::validate_name(name) {
+                    Ok(()) => Some((crate::store::REST_OWNER.to_string(), name.to_string())),
+                    Err(e) => {
+                        return json!({
+                            "status": "failed",
+                            "session_id": Value::Null,
+                            "failed_step": 0,
+                            "reason": format!("create.account: {e}"),
+                            "steps_done": 0,
+                            "saved": {},
+                            "hint": "use 1-64 chars of [a-zA-Z0-9_-] for create.account",
+                        })
+                    }
+                },
+                None => None,
+            };
+            if let Some((owner, name)) = &account {
+                let hint = crate::account::resolve_ua_hint(
+                    c.get("persona_ua").and_then(|v| v.as_str()),
+                );
+                let _ = crate::account::persona_for(owner, name, hint.as_deref());
+            }
             mgr.create(
                 c.get("url").and_then(|v| v.as_str()),
                 c.get("use_proxy")
@@ -1281,7 +1304,7 @@ async fn run_flow_inner(
                 pin,
                 false,
                 false,
-                None,
+                account,
             )
             .await
         }

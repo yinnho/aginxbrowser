@@ -5,7 +5,9 @@
   },
   "create": {
     "width": 1440,
-    "height": 900
+    "height": 900,
+    "account": "xhs-qf-stable",
+    "persona_ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
   },
   "steps": [
     {
@@ -24,7 +26,7 @@
       "args": {
         "url": "{{login_url}}"
       },
-      "note": "B-end unified login (sellercustomer / beer-login). Prefer a clean account jar: POST /session/create {account} then pass session_id."
+      "note": "B-end unified login (sellercustomer / beer-login). Prefer a clean stable account jar (xhs-qf-stable + Mac Chrome/145 persona_ua): POST /session/create then pass session_id — never mint xhs-qf-HHMMSS."
     },
     {
       "id": "wait_beer",

@@ -62,6 +62,13 @@ pub struct SessionCreateRequest {
     /// wins). 1-64 chars of [a-zA-Z0-9_-].
     #[serde(default)]
     pub account: Option<String>,
+    /// Optional User-Agent to teach as the account's device persona on first
+    /// create (teach-once). Prefer Mac/Win Chrome/145 to match the default
+    /// chrome145 TLS handshake; mismatched majors are rewritten. Ignored when
+    /// the account already has a stored persona. When omitted on Darwin (or
+    /// with `AGINXBROWSER_PERSONA_OS=mac`), the engine pins Mac Chrome/145.
+    #[serde(default)]
+    pub persona_ua: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -214,6 +221,12 @@ pub(crate) async fn session_create_handler(
             Some((crate::store::REST_OWNER.to_string(), name.to_string()))
         }
     };
+    // Teach persona before the session thread reads it (same shape as
+    // import/curl): explicit persona_ua, else AGINXBROWSER_UA / Darwin Mac pin.
+    if let Some((owner, name)) = &account {
+        let hint = account::resolve_ua_hint(req.persona_ua.as_deref());
+        let _ = account::persona_for(owner, name, hint.as_deref());
+    }
     let mut mgr = session::SESSIONS.lock().await;
     mgr.evict_expired();
     let pin = match (req.width, req.height) {
