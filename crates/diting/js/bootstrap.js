@@ -7525,22 +7525,29 @@ function _ditingOffsetParent(el) {
 // mimeTypes[0].enabledPlugin === navigator.plugins[0]. enabledPlugin=null is
 // a shape Chrome never produces on the PDF persona.
 globalThis.Plugin = class Plugin {
+  // (#125 lineage) Chrome's Plugin instance owns ONLY the member indices
+  // (enumerable) plus the mime-type names as non-enumerable named props —
+  // `Object.getOwnPropertyNames(plugins[0])` is `0|1|application/pdf|text/pdf`.
+  // name/filename/description/length live in a WeakMap behind prototype
+  // getters; own `__plugin*` fields (fp-diff-1014 #4) were an instant
+  // enumeration tell.
   constructor(name, filename, description, mimes) {
-    Object.defineProperty(this, "__pluginName", { value: name });
-    Object.defineProperty(this, "__pluginFilename", { value: filename });
-    Object.defineProperty(this, "__pluginDescription", { value: description });
+    __pluginStore.set(this, { name, filename, description, length: 0 });
     let n = 0;
     if (mimes) {
       for (const m of mimes) {
-        Object.defineProperty(this, String(n++), { value: m, enumerable: true });
+        Object.defineProperty(this, String(n++), { value: m, writable: true, configurable: true, enumerable: true });
+        if (m && m.type) {
+          Object.defineProperty(this, m.type, { value: m, writable: true, configurable: true, enumerable: false });
+        }
       }
     }
-    Object.defineProperty(this, "__pluginLength", { value: n });
+    __pluginStore.get(this).length = n;
   }
-  get name() { return this.__pluginName; }
-  get filename() { return this.__pluginFilename; }
-  get description() { return this.__pluginDescription; }
-  get length() { return this.__pluginLength; }
+  get name() { return __pluginStore.get(this).name; }
+  get filename() { return __pluginStore.get(this).filename; }
+  get description() { return __pluginStore.get(this).description; }
+  get length() { return __pluginStore.get(this).length; }
   item(i) { return this[i] || null; }
   namedItem(type) {
     for (let i = 0; i < this.length; i++) {
@@ -7549,18 +7556,56 @@ globalThis.Plugin = class Plugin {
     return null;
   }
 };
+globalThis.Plugin.prototype[Symbol.toStringTag] = 'Plugin';
+const __pluginStore = new WeakMap();
 globalThis.MimeType = class MimeType {
-  constructor(type, description, suffixes, enabledPlugin) { this.type = type; this.description = description; this.suffixes = suffixes; this.enabledPlugin = enabledPlugin; }
+  // WebIDL attributes are prototype accessors; the instance owns nothing
+  // (fp-diff-1014 #4 family — own type/description/suffixes/enabledPlugin
+  // fields were visible to every enumeration pass).
+  constructor(type, description, suffixes, enabledPlugin) {
+    __mimeStore.set(this, { type, description, suffixes, enabledPlugin });
+  }
+  get type() { return __mimeStore.get(this).type; }
+  get description() { return __mimeStore.get(this).description; }
+  get suffixes() { return __mimeStore.get(this).suffixes; }
+  get enabledPlugin() { return __mimeStore.get(this).enabledPlugin; }
 };
-globalThis.PluginArray = class PluginArray extends Array {
+globalThis.MimeType.prototype[Symbol.toStringTag] = 'MimeType';
+const __mimeStore = new WeakMap();
+// NOT `extends Array`: Chrome's PluginArray/MimeTypeArray are platform
+// array-likes, so `Array.isArray(navigator.plugins)` is false there and true
+// here — a one-liner detector. Same shape for MimeTypeArray below.
+globalThis.PluginArray = class PluginArray {
+  constructor(...items) {
+    __pluginArrStore.set(this, items);
+    items.forEach((p, i) => Object.defineProperty(this, String(i), { value: p, writable: true, configurable: true, enumerable: true }));
+  }
+  get length() { return __pluginArrStore.get(this).length; }
   item(i) { return this[i] || null; }
-  namedItem(name) { return this.find(p => p.name === name) || null; }
+  namedItem(name) {
+    const a = __pluginArrStore.get(this);
+    for (let i = 0; i < a.length; i++) if (a[i].name === name) return a[i];
+    return null;
+  }
   refresh() {}
 };
-globalThis.MimeTypeArray = class MimeTypeArray extends Array {
+globalThis.PluginArray.prototype[Symbol.toStringTag] = 'PluginArray';
+const __pluginArrStore = new WeakMap();
+globalThis.MimeTypeArray = class MimeTypeArray {
+  constructor(...items) {
+    __mimeArrStore.set(this, items);
+    items.forEach((m, i) => Object.defineProperty(this, String(i), { value: m, writable: true, configurable: true, enumerable: true }));
+  }
+  get length() { return __mimeArrStore.get(this).length; }
   item(i) { return this[i] || null; }
-  namedItem(name) { return this.find(m => m.type === name) || null; }
+  namedItem(name) {
+    const a = __mimeArrStore.get(this);
+    for (let i = 0; i < a.length; i++) if (a[i].type === name) return a[i];
+    return null;
+  }
 };
+globalThis.MimeTypeArray.prototype[Symbol.toStringTag] = 'MimeTypeArray';
+const __mimeArrStore = new WeakMap();
 // Cached singletons: real browsers return the same instance on every access
 // (`navigator.plugins === navigator.plugins`); fresh instances would be a
 // fingerprint anomaly. The plugin↔mime graph is built once so the member
@@ -7580,8 +7625,8 @@ function __ditingBuildPdfPersona() {
     new Plugin("Microsoft Edge PDF Viewer", "internal-pdf-viewer", "Portable Document Format", members),
     new Plugin("WebKit built-in PDF", "internal-pdf-viewer", "Portable Document Format", members),
   );
-  mtApp.enabledPlugin = _pluginsInst[0];
-  mtText.enabledPlugin = _pluginsInst[0];
+  __mimeStore.get(mtApp).enabledPlugin = _pluginsInst[0];
+  __mimeStore.get(mtText).enabledPlugin = _pluginsInst[0];
 }
 
 // navigator.connection must be an EventTarget-shaped object: analytics and
@@ -7901,6 +7946,32 @@ globalThis.IIRFilterNode = class IIRFilterNode {
 // attributes. Values that were previously instance getters stay store
 // getters — the hoist calls them against the store, so UA-dependent answers
 // keep refreshing without re-hoisting.
+// fp-diff-1014 #11: Chrome's navigator.userAgentData has NavigatorUAData on
+// its prototype chain — a plain object literal reads as constructor "Object"
+// to the cheapest proto walk.
+class NavigatorUAData {
+  constructor(brands, mobile) {
+    this.brands = brands;
+    this.mobile = mobile;
+  }
+  get platform() { return __ditingUADataPlatformFromUA(); }
+  getHighEntropyValues(hints) {
+    const plat = __ditingUADataPlatformFromUA();
+    return Promise.resolve({
+      architecture: "x86",
+      bitness: "64",
+      brands: [{brand:"Google Chrome",version:"145"},{brand:"Chromium",version:"145"},{brand:"Not=A?Brand",version:"24"}],
+      fullVersionList: [{brand:"Google Chrome",version:"145.0.0.0"},{brand:"Chromium",version:"145.0.0.0"},{brand:"Not=A?Brand",version:"24.0.0.0"}],
+      mobile: false,
+      model: "",
+      platform: plat,
+      platformVersion: "15.2.0",
+      uaFullVersion: "145.0.0.0",
+      wow64: false,
+    });
+  }
+  toJSON() { return {brands:this.brands,mobile:this.mobile,platform:this.platform}; }
+}
 const __navStore = {
   vendorSub: "",
   productSub: "20030107",
@@ -8064,30 +8135,11 @@ const __navStore = {
   },
   wakeLock: { request() { return Promise.reject(new DOMException("Permission denied.", "NotAllowedError")); } },
   deviceMemory: 8,
-  userAgentData: {
-    brands: [
+  userAgentData: new NavigatorUAData([
       {brand: "Google Chrome", version: "145"},
       {brand: "Chromium", version: "145"},
       {brand: "Not=A?Brand", version: "24"},
-    ],
-    mobile: false,
-    get platform() { return __ditingUADataPlatformFromUA(); },
-    getHighEntropyValues(hints) {
-      const plat = __ditingUADataPlatformFromUA();
-      return Promise.resolve({
-        architecture: "x86",
-        bitness: "64",
-        brands: [{brand:"Google Chrome",version:"145"},{brand:"Chromium",version:"145"},{brand:"Not=A?Brand",version:"24"}],
-        fullVersionList: [{brand:"Google Chrome",version:"145.0.0.0"},{brand:"Chromium",version:"145.0.0.0"},{brand:"Not=A?Brand",version:"24.0.0.0"}],
-        mobile: false,
-        model: "",
-        platform: plat,
-        platformVersion: "15.2.0",
-        uaFullVersion: "145.0.0.0",
-      });
-    },
-    toJSON() { return {brands:this.brands,mobile:this.mobile,platform:this.platform}; },
-  },
+    ], false),
   locks: { request() { return Promise.resolve(); }, query() { return Promise.resolve([]); } },
   storage: {
     estimate() { return Promise.resolve({ quota: 5000000000, usage: Math.floor(_fpRand(640) * 100000000) }); },
@@ -8121,7 +8173,7 @@ const __navStore = {
   xr: { isSessionSupported() { return Promise.resolve(false); }, ondevicechange: null, addEventListener(){}, removeEventListener(){} },
   storageBuckets: { keys() { return Promise.resolve([]); }, open() { return Promise.resolve(null); }, delete() { return Promise.resolve(false); }, persist() { return Promise.resolve(false); } },
   adAuctionComponents() { return Promise.resolve([]); },
-  runAuction() { return Promise.resolve(null); },
+  runAdAuction() { return Promise.resolve(null); },
   canLoadAdAuctionFencedFrame() { return false; },
   canShare() { return false; },
   share() { return Promise.reject(new DOMException("Permission denied.", "NotAllowedError")); },
@@ -8193,8 +8245,11 @@ globalThis.__diting_navSet = function(k, v) {
   Object.defineProperty(__navStore, k, { value: v, writable: true, configurable: true, enumerable: true });
 };
 
-// Key order matches real Chrome's Object.keys(chrome) = ["loadTimes","csi","app","runtime"]
-// (DataDome-class fingerprints read key order, not just membership).
+// Key order matches real Chrome's Object.keys(chrome) = ["loadTimes","csi","app"]
+// (DataDome-class fingerprints read key order, not just membership). No
+// `runtime` key: fp-diff-1014 #2 caught us exposing chrome.runtime as an
+// object — on a normal Chrome page it is absent entirely (it only exists in
+// extension content-script contexts), so its presence reads as automation.
 globalThis.chrome = {
   loadTimes() {
     const t = Date.now() / 1000;
@@ -8219,12 +8274,22 @@ globalThis.chrome = {
     const t = Date.now();
     return { onloadT: t, startE: t - Math.floor(100 + _fpRand(610) * 200), pageT: 0, tran: 5, flashVersion: "" };
   },
-  app: { isInstalled: false, InstallState: { DISABLED: "disabled", INSTALLED: "installed", NOT_INSTALLED: "not_installed" }, RunningState: { CANNOT_RUN: "cannot_run", READY_TO_RUN: "ready_to_run", RUNNING: "running" } },
-  runtime: { OnInstalledReason: {}, OnRestartRequiredReason: {}, PlatformArch: {}, PlatformNaclArch: {}, PlatformOs: {}, RequestUpdateCheckStatus: {}, connect() { return {}; }, sendMessage() {} },
+  // Key set AND order captured from a real Chrome 155 (fp probe 10-14):
+  // isInstalled|getDetails|getIsInstalled|installState|runningState|InstallState|RunningState
+  app: {
+    isInstalled: false,
+    getDetails() { return null; },
+    getIsInstalled() { return false; },
+    installState() { return "disabled"; },
+    runningState() { return "cannot_run"; },
+    InstallState: { DISABLED: "disabled", INSTALLED: "installed", NOT_INSTALLED: "not_installed" },
+    RunningState: { CANNOT_RUN: "cannot_run", READY_TO_RUN: "ready_to_run", RUNNING: "running" },
+  },
 };
 
 globalThis.Notification = class Notification {
   static permission = "default";
+  static maxActions = 2;
   static requestPermission() { return Promise.resolve(Notification.permission); }
   constructor() {}
   get image() { return null; }
@@ -8251,8 +8316,8 @@ function _glParam(pname, isGL2) {
     case 0x1F01: return 'WebKit WebGL';
     case 0x1F02: return isGL2 ? 'WebGL 2.0 (OpenGL ES 3.0 Chromium)' : 'WebGL 1.0 (OpenGL ES 2.0 Chromium)';
     case 0x8B8C: return isGL2 ? 'WebGL GLSL ES 3.00 (OpenGL ES 3.0 Chromium)' : 'WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)';
-    case 0x0D3A: return new Int32Array([32767, 32767]);   // MAX_VIEWPORT_DIMS
-    case 0x846E: return new Float32Array([1, 10]);        // ALIASED_LINE_WIDTH_RANGE
+    case 0x0D3A: return new Int32Array([16384, 16384]);   // MAX_VIEWPORT_DIMS (Apple GPU; 32767 is the llvmpipe softpipe tell, fp-diff-1014 #5)
+    case 0x846E: return new Float32Array([1, 1]);        // ALIASED_LINE_WIDTH_RANGE (Metal ANGLE: no wide aliased lines)
     case 0x846D: return new Float32Array([1, 1024]);      // ALIASED_POINT_SIZE_RANGE
     case 0x0B70: return new Float32Array([0, 1]);         // DEPTH_RANGE
     case 0x0C22: return new Float32Array([0, 0, 0, 0]);   // COLOR_CLEAR_VALUE
@@ -13076,6 +13141,25 @@ class _IframeWindow {
     } catch(e) {
       this.location = { href: url, origin: '', protocol: '', host: '', hostname: '', port: '', pathname: '/', search: '', hash: '', toString() { return url; }, assign(){}, reload(){}, replace(){} };
     }
+    // fp-diff-1014 #3: a real about:blank iframe window carries the FULL
+    // global set (~1235 own keys); ours exposed ~25, so one
+    // getOwnPropertyNames(contentWindow) told any jsvmp this is not a real
+    // browsing context. Copy the main realm's standard globals (snapshot
+    // precomputed once at bootstrap end). The `in` guard covers the whole
+    // prototype chain: anything _IframeWindow.prototype already implements
+    // (postMessage gates on the IFRAME's origin — copying main's would gate
+    // on the caller's) keeps its per-window behavior, just stays off the
+    // own-key census. Identity-bearing state assigned above is covered by
+    // the same guard plus the explicit skip set in the snapshot.
+    const __fg = globalThis.__diting_frame_globals;
+    if (__fg) {
+      for (let i = 0; i < __fg.length; i++) {
+        const e = __fg[i];
+        if (!(e[0] in this)) {
+          Object.defineProperty(this, e[0], e[1]);
+        }
+      }
+    }
     __hideOwn(this);
   }
 
@@ -13676,8 +13760,15 @@ HTMLCanvasElement.prototype.getContext = function getContext(type) {
       delete this[dim];
     }
   }
+  // (#117 + fp-diff-1014 #5) One context type per canvas, Chrome semantics:
+  // after a 2d context, webgl/webgl2 return null (and vice versa). 'webgl'
+  // and 'experimental-webgl' alias each other. The old code happily served
+  // 2d, webgl AND webgl2 off the same element — Chrome never does.
+  const _ctxNorm = (type === 'experimental-webgl') ? 'webgl' : type;
+  if (this._ctxType && this._ctxType !== _ctxNorm) return null;
   if (type === '2d') {
     if (!this._ctx) {
+      __def(this, '_ctxType', _ctxNorm);
       __def(this, '_ctx', new _Canvas2D(this));
     }
     return this._ctx;
@@ -13737,6 +13828,7 @@ HTMLCanvasElement.prototype.getContext = function getContext(type) {
         return numNoop;
       },
     });
+    __def(this, '_ctxType', _ctxNorm);
     __def(this, '_glCtx', gl);
     return gl;
   }
@@ -18264,7 +18356,9 @@ globalThis.__diting_init = function() {
     totalJSHeapSize: 15000000 + Math.floor(_fpRand(620) * 85000000),
     usedJSHeapSize: 8000000 + Math.floor(_fpRand(621) * 42000000),
   };
-  globalThis.Notification.permission = _fpRand(630) > 0.5 ? "granted" : "default";
+  // Notification.permission stays "default" — the class default. A random
+  // granted/default coin flip (old line) read as automation: fresh Chrome
+  // profiles are always "default" until the OS prompt answers (fp-diff-1014 #8).
 
   // Hide internals (_*, obscura, Obscura). The set of keys is static at
   // snapshot-build time, so we precompute it ONCE below (after this
@@ -19125,3 +19219,105 @@ globalThis.dispatchEvent = function(event) {
   }
   return _windowDispatch.call(this, event);
 };
+
+/* ===== fp-diff-1014 P0 sweep (runs once at snapshot build) ===== */
+// #1 Name every anonymous function-valued global after its property: WebIDL
+// operations all report their own name, and table-driven installs (computed
+// keys / object literals) produce anonymous functions — `fetch.toString()`
+// answering "function () { [native code] }" was a one-line automation tell.
+// Retained as a global and re-invoked from interface_sweep.js (the LAST
+// snapshot module) — fetch.js/xhr.js/window_faces.js install more globals
+// after this file, and a bootstrap-time-only sweep never sees them
+// (`globalThis.fetch` was still nameless for exactly that reason).
+globalThis.__diting_name_sweep = function () {
+  const sweep = (obj) => {
+    const names = Object.getOwnPropertyNames(obj);
+    for (let i = 0; i < names.length; i++) {
+      const k = names[i];
+      if (k === 'constructor' || k.startsWith('_') || k.includes('diting')) continue;
+      const d = Object.getOwnPropertyDescriptor(obj, k);
+      if (d && typeof d.value === 'function' && d.value.name === '') {
+        try { Object.defineProperty(d.value, 'name', { value: k, configurable: true }); } catch (e) {}
+      }
+    }
+  };
+  sweep(globalThis);
+  if (globalThis.Window && Window.prototype) sweep(Window.prototype);
+};
+globalThis.__diting_name_sweep();
+
+// #3 support: snapshot the frame-copyable globals. Value props only —
+// accessors would alias main-window state into frames. Builder retained as
+// a global and re-run from interface_sweep.js (the LAST snapshot module)
+// so globals installed by fetch.js/xhr.js/... after bootstrap.js land in
+// the copy set too.
+globalThis.__diting_frame_globals_build = function () {
+  const skip = new Set(['document','location','window','self','top','parent','frames','frameElement','length','name','closed','event','origin',
+    // Event-target face must stay frame-local: copying the main window's
+    // (addEventListener|removeEventListener|dispatchEvent) as own props
+    // hijacks iframe listener registration into the main window's boxes and
+    // postMessage delivery into frames goes dead.
+    'addEventListener','removeEventListener','dispatchEvent']);
+  const out = [];
+  const names = Object.getOwnPropertyNames(globalThis);
+  for (let i = 0; i < names.length; i++) {
+    const k = names[i];
+    if (skip.has(k) || k.startsWith('_') || k.includes('diting')) continue;
+    const d = Object.getOwnPropertyDescriptor(globalThis, k);
+    if (!d || !('value' in d)) continue;
+    out.push([k, d]);
+  }
+  return out;
+};
+globalThis.__diting_frame_globals = globalThis.__diting_frame_globals_build();
+globalThis.__diting_hide_list.push('__diting_frame_globals', '__diting_frame_globals_build', '__diting_name_sweep');
+
+// Frames inherit Window.prototype (on* handlers, window methods) while
+// keeping _IframeWindow.prototype's own surface (postMessage, ...).
+try { Object.setPrototypeOf(_IframeWindow.prototype, globalThis.Window.prototype); } catch (e) {}
+
+// fp-diff-1014: prototype key ORDER. Chrome installs WebIDL attributes
+// first and `constructor` late; ours had constructor first (and Screen
+// lacked `onchange` entirely). Orders captured from a real Chrome 155 on
+// macOS (tmp-agent/fp-chrome.json, 2026-10-14). Non-configurable props
+// survive untouched — every step is guarded so a pinned descriptor can
+// never take the whole bootstrap down.
+function __ditingReorderProto(proto, order) {
+  const names = Object.getOwnPropertyNames(proto);
+  const descs = new Map();
+  for (const n of names) descs.set(n, Object.getOwnPropertyDescriptor(proto, n));
+  for (const n of names) { try { delete proto[n]; } catch (e) {} }
+  const done = new Set();
+  for (const n of order) {
+    if (descs.has(n) && !done.has(n)) {
+      try { Object.defineProperty(proto, n, descs.get(n)); done.add(n); } catch (e) {}
+    }
+  }
+  for (const n of names) {
+    if (!done.has(n)) { try { Object.defineProperty(proto, n, descs.get(n)); } catch (e) {} }
+  }
+}
+try {
+  if (globalThis.Screen && !Object.getOwnPropertyDescriptor(Screen.prototype, 'onchange')) {
+    Object.defineProperty(Screen.prototype, 'onchange', {
+      get() { return null; }, set() {}, configurable: true, enumerable: true,
+    });
+  }
+  __ditingReorderProto(Screen.prototype, ['availWidth','availHeight','width','height','colorDepth','pixelDepth','availLeft','availTop','orientation','constructor','onchange','isExtended']);
+} catch (e) {}
+try {
+  __ditingReorderProto(Navigator.prototype, [
+    'vendorSub','productSub','vendor','maxTouchPoints','scheduling','userActivation','geolocation','doNotTrack',
+    'webkitTemporaryStorage','webkitPersistentStorage','windowControlsOverlay','hardwareConcurrency','cookieEnabled',
+    'appCodeName','appName','appVersion','platform','product','userAgent','language','languages','onLine','webdriver',
+    'plugins','mimeTypes','pdfViewerEnabled','connection','getGamepads','javaEnabled','sendBeacon','vibrate','constructor',
+    'cpuPerformance','deprecatedRunAdAuctionEnforcesKAnonymity','protectedAudience','bluetooth','clipboard','credentials',
+    'keyboard','managed','mediaDevices','serviceWorker','virtualKeyboard','wakeLock','deviceMemory','userAgentData',
+    'locks','storage','gpu','login','ink','mediaCapabilities','permissions','devicePosture','hid','mediaSession',
+    'presentation','serial','usb','xr','storageBuckets','adAuctionComponents','runAdAuction','canLoadAdAuctionFencedFrame',
+    'canShare','share','clearAppBadge','getBattery','getUserMedia','requestMIDIAccess','requestMediaKeySystemAccess',
+    'setAppBadge','webkitGetUserMedia','clearOriginJoinedAdInterestGroups','createAuctionNonce','joinAdInterestGroup',
+    'leaveAdInterestGroup','updateAdInterestGroups','deprecatedReplaceInURN','deprecatedURNToURL','getInstalledRelatedApps',
+    'getInterestGroupAdAuctionData','registerProtocolHandler','unregisterProtocolHandler',
+  ]);
+} catch (e) {}

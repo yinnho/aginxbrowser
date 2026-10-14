@@ -140,3 +140,16 @@ if (k === "constructor" || k.charCodeAt(0) === 95) continue; // #30: engine-inte
     try { Object.defineProperty(obj, Symbol.toStringTag, { value: tag, enumerable: false, writable: false, configurable: true }); } catch (e) {}
   }
 })();
+
+// fp-diff-1014 tail pass: this file is the LAST module in the snapshot
+// build, so by the time it runs, fetch.js/xhr.js/domparser.js/performance.js/
+// window_faces.js/message_port.js have all installed their globals. The
+// name sweep and the iframe frame-copy snapshot were first computed at the
+// end of bootstrap.js and would otherwise stay blind to those installs
+// (`globalThis.fetch` stayed nameless; iframe windows missed late globals).
+try { globalThis.__diting_name_sweep && globalThis.__diting_name_sweep(); } catch (e) {}
+try {
+  if (globalThis.__diting_frame_globals_build) {
+    globalThis.__diting_frame_globals = globalThis.__diting_frame_globals_build();
+  }
+} catch (e) {}
