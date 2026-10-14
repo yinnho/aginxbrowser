@@ -407,7 +407,7 @@ impl StealthHttpClient {
             ),
             accept_language: RwLock::new(
                 std::env::var("AGINXBROWSER_ACCEPT_LANGUAGE")
-                    .unwrap_or_else(|_| "zh-CN,zh;q=0.9,en;q=0.8".to_string()),
+                    .unwrap_or_else(|_| "zh-CN,zh;q=0.9".to_string()),
             ),
             allow_private_network: allow_flag,
             block_trackers: crate::diting_net::blocklist::block_trackers_from_env(),

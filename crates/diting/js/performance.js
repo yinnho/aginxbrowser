@@ -133,6 +133,11 @@ globalThis.EventCounts = class EventCounts {
   values() { return (function* () {})(); }
 };
 _markNativeProto(globalThis.EventCounts.prototype);
+// fp-diff-1014 P1: Chrome coarsens performance.now() to 100µs steps and adds
+// one per-context random offset inside the bucket (printed as an ~11-decimal
+// double — NOT an integral or full-precision value). Draw the offset once
+// per context so the whole timeline stays monotonic after quantization.
+var _perfNoise = Math.random() * 0.1;
 class _Performance {
   constructor() {
     this._marks = []; this._measures = [];
@@ -150,14 +155,21 @@ class _Performance {
     __hideOwn(this);
   }
   now() {
-    // (#78) Chrome reports sub-ms floats (100µs coarsening); an integral
-    // Date.now() delta is a timing-entropy tell on the jsvmp scan path.
-    // The monotonic contract in the comment above still holds — _perfLast
-    // floors any regression.
+    // (#78) monotonic: _perfLast floors any regression, THEN the 100µs
+    // bucket + fixed noise shape lands (quantizing first would let rounding
+    // move the value backwards a hair).
     var ms = _OPS.op_clock_ms() - (this.timeOrigin || 0);
-    if (ms < _perfLast) return _perfLast;
+    if (ms < _perfLast) ms = _perfLast;
     _perfLast = ms;
-    return _perfLast;
+    var noise = this._noise !== undefined ? this._noise : _perfNoise;
+    // floor, not round: the coarsened read must never run AHEAD of the raw
+    // clock (rounding up + noise could push performance.now() past real
+    // elapsed by ~0.05ms — enough to break the not-ahead-of-wallclock bound).
+    // Negative values stay negative: timeOrigin's ±50ms persona jitter can
+    // start the timeline below zero, and clamping to 0 broke the
+    // now()−(Date.now()−timeOrigin) wallclock cancellation (lead jumped to
+    // +24ms while now() read 0).
+    return Math.floor((ms - noise) * 10) / 10 + noise;
   }
   // User-timing marks/measures are recorded for real — analytics bundles
   // (Sentry, web-vitals wrappers) read them back and an always-empty buffer

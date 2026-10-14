@@ -397,6 +397,15 @@ function _getFp() {
         'ANGLE (AMD, AMD Radeon RX 5700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)',
         'ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Direct3D11 vs_5_0 ps_5_0, D3D11)',
       ],
+      // Device coherence (fp-diff-1014 P1): [arch, cores] per GPU entry, so
+      // ANGLE Apple M3 can never report architecture x86 or 12 cores — a
+      // detector cross-checking UNMASKED_RENDERER vs getHighEntropyValues
+      // vs hardwareConcurrency saw three different machines before.
+      hw: [
+        ['x86', 12], ['x86', 12], ['x86', 16], ['x86', 8], ['x86', 8],
+        ['x86', 16], ['x86', 12], ['x86', 16], ['x86', 16], ['x86', 12],
+        ['x86', 16], ['x86', 16],
+      ],
       vendor: [
         'Google Inc. (NVIDIA)','Google Inc. (NVIDIA)','Google Inc. (NVIDIA)',
         'Google Inc. (Intel)','Google Inc. (Intel)',
@@ -404,6 +413,9 @@ function _getFp() {
         'Google Inc. (NVIDIA)','Google Inc. (NVIDIA)',
         'Google Inc. (Intel)','Google Inc. (AMD)','Google Inc. (NVIDIA)',
       ],
+      // UA-CH platformVersion per OS family (mac = Sequoia 15.2, win = 11 23H2,
+      // linux = Ubuntu 24.04 kernel line).
+      platformVersion: '15.0.0',
       screens: [[1920,1080],[2560,1440],[1366,768],[1536,864],[1440,900],[1680,1050],[1280,720],[3840,2160]],
       dprs: [1,1,1,1.25,1,1,1,1],
     },
@@ -417,11 +429,18 @@ function _getFp() {
         'ANGLE (Apple, ANGLE Metal Renderer: Apple M4, Unspecified Version)',
         'ANGLE (Intel, Intel(R) Iris(TM) Plus Graphics 645, OpenGL 4.1)',
       ],
+      // M1/M2/M3 = 4P+4E, M2 Pro = 6P+4E, M3 Pro = 6P+6E, M4 = 4P+6E,
+      // Iris 645 = 2018 MacBook Air (i5-8210Y, 2c/4t → 4).
+      hw: [
+        ['arm', 8], ['arm', 8], ['arm', 10], ['arm', 8], ['arm', 12],
+        ['arm', 10], ['x86', 4],
+      ],
       vendor: [
         'Google Inc. (Apple)','Google Inc. (Apple)','Google Inc. (Apple)',
         'Google Inc. (Apple)','Google Inc. (Apple)','Google Inc. (Apple)',
         'Google Inc. (Intel)',
       ],
+      platformVersion: '15.2.0',
       screens: [[1512,982],[1728,1117],[1440,900],[1920,1080],[2560,1440],[1170,2532]],
       // Built-in retina panels run at 2x; the two external sizes run at 1x.
       dprs: [2,2,2,1,1,3],
@@ -433,9 +452,11 @@ function _getFp() {
         'ANGLE (AMD, AMD Radeon RX 6700 XT (navi22, LLVM 15.0.7, DRM 3.54, LLVM 15.0.7), OpenGL 4.6 (Core Profile) Mesa 23.2.1)',
         'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060/PCIe/SSE2, OpenGL 4.6.0 NVIDIA 535.183.01)',
       ],
+      hw: [['x86', 12], ['x86', 8], ['x86', 16], ['x86', 12]],
       vendor: [
         'Google Inc. (Intel)','Google Inc. (Intel)','Google Inc. (AMD)','Google Inc. (NVIDIA)',
       ],
+      platformVersion: '6.8.0',
       screens: [[1920,1080],[2560,1440],[1366,768],[3840,2160],[1680,1050]],
       dprs: [1,1,1,1,1],
     },
@@ -450,6 +471,8 @@ function _getFp() {
   _fpCache = {
     platform: plat,
     gpu: pool.gpu[idx], gpuVendor: pool.vendor[idx],
+    arch: pool.hw[idx][0], hw: pool.hw[idx][1], bitness: '64',
+    platformVersion: pool.platformVersion,
     screen: pool.screens[sIdx], dpr: pool.dprs[sIdx],
     audioBaseLatency: 0.002 + _fpRand(100) * 0.008,
     audioSampleRate: [44100, 48000][Math.floor(_fpRand(101) * 2)],
@@ -7276,6 +7299,18 @@ function __ditingUADataPlatformFromUA() {
   if (ua.indexOf("Android") !== -1) return "Android";
   return "Linux";
 }
+// Chrome major from the UA. The profile pool ships 143–146, and UA-CH brands
+// hardcoding 145 made brand majors disagree with the UA on three of four
+// profiles — a one-line cross-check. Also feeds the fullVersionList build
+// numbers (real Chrome reports four-part builds there, never x.0.0.0).
+function __ditingChromeMajorFromUA() {
+  const m = String(globalThis.__diting_ua || "").match(/Chrome\/(\d+)/);
+  return m ? m[1] : "145";
+}
+// Plausible stable-build numbers per shipped major, extrapolated from the
+// ~155/milestone build cadence (155 → 8059 measured). Used ONLY by
+// fullVersionList/uaFullVersion — the reduced UA itself stays x.0.0.0.
+const __DITING_FULL_BUILD = { "143": "6200", "144": "6355", "145": "6509", "146": "6664" };
 
 // ---- Font-presence metrics -------------------------------------------------
 // Font-probe fingerprinters (Castle's fonts collector, fingerprintjs,
@@ -7293,14 +7328,47 @@ const _DITING_FONT_PLATFORM = () => {
   return "linux";
 };
 const _INSTALLED_FONTS = {
-  mac: ["Arial", "Verdana", "Helvetica", "Tahoma", "Trebuchet MS", "Georgia",
-    "Courier New", "Brush Script MT", "Comic Sans MS", "Impact", "Menlo", "Monaco"],
-  win: ["Arial", "Verdana", "Tahoma", "Trebuchet MS", "Georgia", "Garamond",
-    "Courier New", "Brush Script MT", "Palatino Linotype", "Lucida Console",
-    "Comic Sans MS", "Impact", "Lucida Sans Unicode", "Century Gothic",
-    "Segoe UI", "Cambria", "Calibri", "Consolas"],
-  linux: ["Arial", "Courier New", "DejaVu Sans", "Ubuntu", "Verdana",
-    "Trebuchet MS", "Times New Roman", "Georgia", "Cantarell"],
+  // fp-diff-1014 P1: a macOS-zh persona answered fonts.check false for
+  // PingFang SC / Hiragino / STHeiti — fonts every Mac ships. These lists are
+  // the single source for BOTH faces (span-measure widths above and
+  // document.fonts below), so they can't drift apart. Mac includes the
+  // Office/aftermarket CJK faces (YaHei/SimSun) common on zh machines —
+  // missing system fonts is a hard tell, extra installable ones a soft none.
+  mac: ["American Typewriter", "Andale Mono", "Apple Braille", "Apple SD Gothic Neo",
+    "AppleGothic", "Apple Symbols", "Arial", "Arial Black", "Arial Narrow",
+    "Arial Unicode MS", "Avenir", "Avenir Next", "Baskerville", "Big Caslon",
+    "Brush Script MT", "Chalkboard", "Chalkduster", "Cochin", "Comic Sans MS",
+    "Copperplate", "Courier New", "Futura", "Geneva", "Georgia", "Gill Sans",
+    "Helvetica", "Helvetica Neue", "Hiragino Maru Gothic ProN", "Hiragino Sans",
+    "Hiragino Sans CNS", "Hiragino Sans GB", "Hoefler Text", "Impact",
+    "Kaiti SC", "Kaiti SC Black", "Lucida Grande", "Marker Felt", "Menlo",
+    "Microsoft YaHei", "Monaco", "Noto Color Emoji", "Optima", "Palatino",
+    "Papyrus", "PingFang HK", "PingFang SC", "PingFang TC", "SimSun",
+    "Snell Roundhand", "Songti SC", "STHeiti", "STHeiti Light", "STKaiti",
+    "STSong", "Tahoma", "Times New Roman", "Trebuchet MS", "Verdana",
+    "Yuanti SC", "Zapfino"],
+  win: ["Arial", "Arial Black", "Arial Narrow", "Bahnschrift", "Calibri",
+    "Calibri Light", "Cambria", "Cambria Math", "Candara", "Comic Sans MS",
+    "Consolas", "Constantia", "Corbel", "Courier New", "Century Gothic",
+    "DengXian", "Ebrima",
+    "FangSong", "Franklin Gothic Medium", "Gabriola", "Gadugi", "Garamond",
+    "Georgia", "Impact", "Ink Free", "Javanese Text", "KaiTi", "Leelawadee UI",
+    "Lucida Console", "Lucida Sans Unicode", "Malgun Gothic", "Marlett",
+    "Microsoft Himalaya", "Microsoft JhengHei", "Microsoft New Tai Lue",
+    "Microsoft Sans Serif", "Microsoft YaHei", "Microsoft Yi Baiti",
+    "MingLiU-ExtB", "Mongolian Baiti", "MS Gothic", "MS PGothic", "MS PMincho",
+    "MV Boli", "Myanmar Text", "Nirmala UI", "NSimSun", "Palatino Linotype",
+    "Segoe Print", "Segoe Script", "Segoe UI", "Segoe UI Emoji",
+    "Segoe UI Historic", "Segoe UI Symbol", "SimHei", "SimSun", "Sitka",
+    "Sylfaen", "Symbol", "Tahoma", "Times New Roman", "Trebuchet MS",
+    "Verdana", "Webdings", "Wingdings", "Yu Gothic"],
+  linux: ["Arial", "C059", "Cantarell", "Courier New", "DejaVu Sans",
+    "DejaVu Sans Mono", "DejaVu Serif", "Droid Sans Fallback", "FreeSans",
+    "FreeSerif", "Georgia", "Liberation Mono", "Liberation Sans",
+    "Liberation Serif", "Noto Color Emoji", "Noto Mono", "Noto Sans",
+    "Noto Sans CJK JP", "Noto Sans CJK SC", "Noto Serif", "Noto Serif CJK SC",
+    "P052", "Times New Roman", "Trebuchet MS", "Ubuntu", "Ubuntu Mono",
+    "Verdana", "WenQuanYi Micro Hei", "WenQuanYi Zen Hei"],
 };
 // Stable per-name width factor for an installed font, or null when the OS
 // persona doesn't have it. Always ≥1% off the generic baseline (0.92–1.14,
@@ -7951,22 +8019,41 @@ globalThis.IIRFilterNode = class IIRFilterNode {
 // to the cheapest proto walk.
 class NavigatorUAData {
   constructor(brands, mobile) {
-    this.brands = brands;
     this.mobile = mobile;
+    void brands;
+    // Chrome's userAgentData instance has ZERO own enumerable properties
+    // (Object.keys → []); brands/mobile/platform are all prototype accessors.
+    __hideOwn(this);
   }
   get platform() { return __ditingUADataPlatformFromUA(); }
+  // brands follows the UA major (the profile pool ships 143–146) and the
+  // current GREASE generation, same as getHighEntropyValues below — static
+  // "145 / Not=A?Brand" disagreed with both the UA and the header hints.
+  get brands() {
+    const maj = __ditingChromeMajorFromUA();
+    return [
+      {brand:"Google Chrome",version:maj},
+      {brand:"Chromium",version:maj},
+      {brand:"Not(A:Brand",version:"24"},
+    ];
+  }
   getHighEntropyValues(hints) {
     const plat = __ditingUADataPlatformFromUA();
+    // Device faces come from the same persona draw as the WebGL renderer —
+    // Apple M3 + architecture "x86" was a three-machines-in-one tell.
+    const dev = _getFp();
+    const maj = __ditingChromeMajorFromUA();
+    const build = __DITING_FULL_BUILD[maj] || String(6509 + (Number(maj) - 145) * 155);
     return Promise.resolve({
-      architecture: "x86",
-      bitness: "64",
-      brands: [{brand:"Google Chrome",version:"145"},{brand:"Chromium",version:"145"},{brand:"Not=A?Brand",version:"24"}],
-      fullVersionList: [{brand:"Google Chrome",version:"145.0.0.0"},{brand:"Chromium",version:"145.0.0.0"},{brand:"Not=A?Brand",version:"24.0.0.0"}],
+      architecture: dev.arch,
+      bitness: dev.bitness,
+      brands: [{brand:"Google Chrome",version:maj},{brand:"Chromium",version:maj},{brand:"Not(A:Brand",version:"24"}],
+      fullVersionList: [{brand:"Google Chrome",version:maj+".0."+build+".41"},{brand:"Chromium",version:maj+".0."+build+".41"},{brand:"Not(A:Brand",version:"24.0.0.0"}],
       mobile: false,
       model: "",
       platform: plat,
-      platformVersion: "15.2.0",
-      uaFullVersion: "145.0.0.0",
+      platformVersion: dev.platformVersion,
+      uaFullVersion: maj+".0."+build+".41",
       wow64: false,
     });
   }
@@ -8135,11 +8222,7 @@ const __navStore = {
   },
   wakeLock: { request() { return Promise.reject(new DOMException("Permission denied.", "NotAllowedError")); } },
   deviceMemory: 8,
-  userAgentData: new NavigatorUAData([
-      {brand: "Google Chrome", version: "145"},
-      {brand: "Chromium", version: "145"},
-      {brand: "Not=A?Brand", version: "24"},
-    ], false),
+  userAgentData: new NavigatorUAData(null, false),
   locks: { request() { return Promise.resolve(); }, query() { return Promise.resolve([]); } },
   storage: {
     estimate() { return Promise.resolve({ quota: 5000000000, usage: Math.floor(_fpRand(640) * 100000000) }); },
@@ -11324,25 +11407,13 @@ globalThis.XMLSerializer = class XMLSerializer {
   }
 };
 
-var _commonFonts = [
-  'Arial', 'Arial Black', 'Arial Narrow',
-  'Baskerville', 'Book Antiqua',
-  'Calibri', 'Cambria', 'Candara', 'Consolas', 'Courier New',
-  'DejaVu Sans', 'DejaVu Sans Mono', 'DejaVu Serif',
-  'Futura',
-  'Garamond', 'Georgia', 'Gill Sans',
-  'Helvetica',
-  'Impact',
-  'Liberation Sans', 'Liberation Sans Mono', 'Liberation Serif',
-  'Lucida Console', 'Lucida Handwriting',
-  'Microsoft Sans Serif', 'Monaco',
-  'Noto Sans', 'Noto Serif',
-  'Palatino Linotype',
-  'Segoe UI',
-  'Tahoma', 'Times New Roman', 'Trebuchet MS',
-  'Verdana',
-  'Webdings', 'Wingdings',
-];
+// document.fonts enumerates the same per-platform installed set the span-
+// measure layer uses (_INSTALLED_FONTS above) — resolved at ACCESS time, not
+// snapshot time, so a late set_user_agent re-platforms both faces together
+// and they can never report different font universes.
+function _commonFonts() {
+  return _INSTALLED_FONTS[_DITING_FONT_PLATFORM()] || _INSTALLED_FONTS.mac;
+}
 // FontFace constructor. document.fonts below returns FontFace-tagged objects,
 // but the WorkOS/font-loader code path calls `new FontFace(...)` directly and
 // a missing global throws a ReferenceError that aborts the script bundle —
@@ -11402,6 +11473,21 @@ _markNativeProto(FontFace.prototype);
 globalThis.FontFace = FontFace;
 _markNative(FontFace);
 
+// fp-diff-1014 P1: Chrome desktop exposes SharedArrayBuffer ONLY inside
+// cross-origin-isolated contexts (since 92) — a plain page reads
+// typeof SharedArrayBuffer === "undefined". The deno host global leaked the
+// constructor on every realm. The delete can't live here at snapshot time —
+// V8's context deserializer rebuilds the intrinsic function table wholesale,
+// so a snapshot-time delete silently un-deletes on every restore (live
+// probe: typeof came back "function" while the runtime delete works). It
+// runs per-realm from __diting_init instead; only the isolation FLAG is
+// defined here (adds persist in the snapshot, intrinsic deletes don't).
+// The structured-clone path above guards with typeof, and no page can
+// construct one to clone.
+if (!('crossOriginIsolated' in globalThis)) {
+  Object.defineProperty(globalThis, 'crossOriginIsolated', { value: false, configurable: true });
+}
+
 Object.defineProperty(Document.prototype, 'fonts', {
   get() {
     // Identity: Chrome hands back the same FontFaceSet object every access
@@ -11409,7 +11495,8 @@ Object.defineProperty(Document.prototype, 'fonts', {
     // through one access are visible on the next. The getter used to build a
     // fresh array per read (#208 追溯).
     if (this.__diting_fonts) return this.__diting_fonts;
-    const _set = _commonFonts.map((name, i) => ({
+    const _names = _commonFonts();
+    const _set = _names.map((name, i) => ({
       family: name, style: 'normal', weight: '400', stretch: 'normal',
       status: 'loaded', loaded: Promise.resolve(this),
       [Symbol.toStringTag]: 'FontFace',
@@ -11421,7 +11508,7 @@ Object.defineProperty(Document.prototype, 'fonts', {
       for (let i = 0; i < _set.length; i++) fn.call(thisArg, _set[i], _set[i], _set);
     };
     _set.has = (f) => typeof f === 'string'
-      ? _commonFonts.some(n => n.toLowerCase() === f.toLowerCase())
+      ? _names.some(n => n.toLowerCase() === f.toLowerCase())
       : _set.some(ff => ff.family === f?.family);
     _set.delete = (f) => false;
     _set.clear = () => {};
@@ -11429,7 +11516,7 @@ Object.defineProperty(Document.prototype, 'fonts', {
     _set.load = () => Promise.resolve(_set);
     _set.check = (font) => {
       const m = typeof font === 'string' ? font.match(/["']([^"']+)["']/) : null;
-      return m ? _commonFonts.some(n => n.toLowerCase() === m[1].toLowerCase()) : true;
+      return m ? _names.some(n => n.toLowerCase() === m[1].toLowerCase()) : true;
     };
     _set.ready = Promise.resolve(_set);
     _set.status = 'loaded';
@@ -14609,7 +14696,31 @@ _markNativeProto(globalThis.OfflineAudioContext.prototype);
 
 globalThis.speechSynthesis = {
   speaking: false, pending: false, paused: false,
+  _loaded: false,
   getVoices() {
+    // fp-diff-1014 P1: Chrome populates the voice list asynchronously — the
+    // first synchronous call returns [] and the list appears only after the
+    // voiceschanged event. Answering 78 voices on the first call is a
+    // no-real-audio-subsystem tell. First call arms the populate timer;
+    // Chrome's pages re-query inside onvoiceschanged.
+    if (!this._loaded) {
+      if (!this._armTimer) {
+        this._armTimer = true;
+        setTimeout(() => {
+          this._loaded = true;
+          try {
+            const ev = { type: 'voiceschanged', target: this };
+            if (typeof this.onvoiceschanged === 'function') this.onvoiceschanged(ev);
+            if (this._vcListeners) {
+              for (const fn of this._vcListeners) {
+                try { fn(ev); } catch (e) {}
+              }
+            }
+          } catch (e) {}
+        }, 40);
+      }
+      return [];
+    }
     // Real macOS Chrome exposes ~50 local system voices plus ~25 Google
     // network voices across dozens of languages. A single synthetic voice
     // is a fingerprint outlier (Castle voices collector).
@@ -14651,7 +14762,14 @@ globalThis.speechSynthesis = {
     return this._voices;
   },
   speak() {}, cancel() {}, pause() {}, resume() {},
-  addEventListener() {}, removeEventListener() {},
+  addEventListener(t, fn) {
+    if (t === 'voiceschanged' && typeof fn === 'function') {
+      (this._vcListeners = this._vcListeners || []).push(fn);
+    }
+  },
+  removeEventListener(t, fn) {
+    if (this._vcListeners) this._vcListeners = this._vcListeners.filter((f) => f !== fn);
+  },
   onvoiceschanged: null,
 };
 globalThis.SpeechSynthesisUtterance = class SpeechSynthesisUtterance { constructor(t){this.text=t;this.lang='en-US';this.rate=1;this.pitch=1;this.volume=1;} };
@@ -15471,7 +15589,12 @@ function __ditingFormatZoned(date, kind) {
   });
   const bag = {};
   for (const p of dtf.formatToParts(date)) if (p.type !== 'literal') bag[p.type] = p.value;
-  const long = new _OrigDateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'long' })
+  // Zone NAME is the one locale-dependent piece of Date.prototype.toString:
+  // zh-Chrome prints "…GMT+0800 (中国标准时间)" while weekday/month stay the
+  // spec's English abbreviations. Chrome resolves it from the UI locale; we
+  // take the persona's first language tag (same source as navigator.language).
+  const uiLang = (typeof __ditingLangList === 'function' ? __ditingLangList()[0] : 'en-US');
+  const long = new _OrigDateTimeFormat(uiLang, { timeZone: tz, timeZoneName: 'long' })
     .formatToParts(date).find((p) => p.type === 'timeZoneName');
   let off = bag.timeZoneName || 'GMT';
   off = off.replace(/GMT([+-])(\d{1,2}):(\d{2})/, (_, s, h, m) => 'GMT' + s + h.padStart(2, '0') + m);
@@ -18187,15 +18310,14 @@ globalThis.__diting_setPersona = function() {
 
   // Stable for the life of the process (drawn once), not per navigation —
   // hardwareConcurrency flipping between pages of one visit is its own
-  // automation tell. Values are platform-plausible pairs: Chrome caps
-  // deviceMemory at 8, and 16-thread machines never report 2 GB.
+  // automation tell. Cores come from the persona device table (_fp('hw')) so
+  // they stay coherent with the GPU/UAData architecture face; memory stays a
+  // small draw — Chrome caps deviceMemory at 8, and 16-thread machines never
+  // report 2 GB.
   const plat = _fpPlatform();
   if (globalThis.__diting_hw === undefined || globalThis.__diting_hw_plat !== plat) {
-    let hws, mems;
-    if (plat === 'mac') { hws = [8, 10, 12]; mems = [8]; }
-    else if (plat === 'win') { hws = [4, 6, 8, 12, 16, 20, 24]; mems = [4, 8]; }
-    else { hws = [4, 6, 8, 12, 16]; mems = [4, 8]; }
-    globalThis.__diting_hw = hws[Math.floor(_fpRand(400) * hws.length)];
+    const mems = plat === 'mac' ? [8] : [4, 8];
+    globalThis.__diting_hw = _fp('hw');
     globalThis.__diting_mem = mems[Math.floor(_fpRand(401) * mems.length)];
     globalThis.__diting_hw_plat = plat;
   }
@@ -18329,6 +18451,24 @@ globalThis.__diting_init = function() {
   globalThis.__diting_installViewportAccessors();
 
   globalThis.__diting_setPersona();
+
+  // Per-realm performance.now() coarsening offset (see performance.js): the
+  // module-level draw happens once at snapshot build, which would freeze one
+  // bucket offset onto EVERY context the process ever serves — cross-session
+  // aggregatable. Re-draw per realm onto the performance object's hidden _
+  // slot family (_marks/_measures), not a new window global.
+  try {
+    Object.defineProperty(globalThis.performance, '_noise', {
+      value: Math.random() * 0.1, writable: true, configurable: true,
+    });
+  } catch (e) {}
+
+  // SharedArrayBuffer delete lives HERE, not at snapshot top level: V8's
+  // context deserializer rebuilds the intrinsic table on every restore, so
+  // the snapshot-time delete never survived (see the FontFace block above
+  // for the full story). __diting_init runs per realm post-restore, where
+  // the delete actually sticks.
+  try { delete globalThis.SharedArrayBuffer; } catch (e) {}
 
   const t0 = Date.now() + Math.floor(_fpRand(641) * 100) - 50;
   // NavigationTiming offsets: DCL 60–600ms after navigationStart, load

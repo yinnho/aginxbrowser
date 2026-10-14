@@ -259,7 +259,7 @@ impl HttpClient {
             ),
             accept_language: RwLock::new(
                 std::env::var("AGINXBROWSER_ACCEPT_LANGUAGE")
-                    .unwrap_or_else(|_| "zh-CN,zh;q=0.9,en;q=0.8".to_string()),
+                    .unwrap_or_else(|_| "zh-CN,zh;q=0.9".to_string()),
             ),
             extra_headers: RwLock::new(HashMap::new()),
             in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -878,7 +878,7 @@ impl HttpClient {
             headers.insert(
                 reqwest::header::ACCEPT_LANGUAGE,
                 HeaderValue::from_str(&self.accept_language.read().await.clone())
-                    .unwrap_or_else(|_| HeaderValue::from_static("zh-CN,zh;q=0.9,en;q=0.8")),
+                    .unwrap_or_else(|_| HeaderValue::from_static("zh-CN,zh;q=0.9")),
             );
             headers.insert(
                 HeaderName::from_static("sec-ch-ua"),
@@ -1198,7 +1198,11 @@ pub fn derive_client_hints(ua: &str) -> (String, String) {
     };
 
     let sec_ch_ua = format!(
-        "\"Chromium\";v=\"{}\", \"Not;A=Brand\";v=\"24\", \"Google Chrome\";v=\"{}\"",
+        // fp-diff-1014 P1: the grease brand must match the JS face
+        // (NavigatorUAData) — Chrome 155's generation is "Not(A:Brand" v24;
+        // the header previously said "Not;A=Brand" while JS said
+        // "Not=A?Brand", three-way incoherent with the same UA.
+        "\"Chromium\";v=\"{}\", \"Not(A:Brand\";v=\"24\", \"Google Chrome\";v=\"{}\"",
         version, version
     );
     (sec_ch_ua, platform.to_string())

@@ -981,6 +981,11 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         "padding-block", "padding-block-start", "padding-block-end",
         "padding-inline", "padding-inline-start", "padding-inline-end",
         "transform-origin",
+        // fp-diff-1014 P1: Chrome-114+ feature-detection staples — answering
+        // false while the UA claims 145 is a version-lag tell. Paint support
+        // is degraded (values fall back at apply time); the supports() truth
+        // is what fingerprinters read.
+        "text-wrap", "accent-color",
     ];
     let name_l = name.to_ascii_lowercase();
     // Custom-property declarations always probe true when the value parses
@@ -1011,7 +1016,14 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
             "block" | "inline" | "flex" | "grid" | "none" | "inline-block" | "inline-flex"
                 | "inline-grid" | "table" | "inline-table" | "table-row" | "table-cell"
         ),
-        "color" | "background-color" => parse_color(value).is_some() || value.starts_with("rgb") || value.starts_with("hsl"),
+        "color" | "background-color" => parse_color(value).is_some() || value.starts_with("rgb") || value.starts_with("hsl")
+            // CSS Color 4 functions: supported since Chrome 111; a 145 UA
+            // probing lab() must hear yes (paint falls back if unparseable).
+            || value.starts_with("lab(") || value.starts_with("oklab(")
+            || value.starts_with("lch(") || value.starts_with("oklch(")
+            || value.starts_with("color("),
+        "text-wrap" => matches!(value, "wrap" | "balance" | "pretty" | "stable" | "nowrap"),
+        "accent-color" => value == "auto" || parse_color(value).is_some(),
         "background" => parse_color(value.split_whitespace().next().unwrap_or("")).is_some()
             || value.starts_with("url(")
             || value.contains("gradient"),

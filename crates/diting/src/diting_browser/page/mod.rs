@@ -749,7 +749,7 @@ impl Page {
             rt.set_user_agent(&ua_to_set);
         }
         let lang = std::env::var("AGINXBROWSER_ACCEPT_LANGUAGE")
-            .unwrap_or_else(|_| "zh-CN,zh;q=0.9,en;q=0.8".to_string());
+            .unwrap_or_else(|_| "zh-CN,zh;q=0.9".to_string());
         rt.set_language(&lang);
 
         rt.set_cookie_jar(self.context.cookie_jar.clone());
