@@ -326,4 +326,14 @@ pub struct SessionListEntry {
     /// True when the login state is snapshotted and the session revives by
     /// the same id after eviction or restart.
     pub persistent: bool,
+    /// Present only for dormant shells (boot-registered snapshots): the
+    /// last URL from the snapshot itself. Live entries probe their thread
+    /// for the current URL instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// True when this entry is a dormant shell — registered at boot without
+    /// running page JS (hosted-incident 10-14); a working command revives
+    /// it, read-only probes report [`SessionError::Dormant`].
+    #[serde(default)]
+    pub dormant: bool,
 }

@@ -19,7 +19,7 @@ use super::interact::{
 };
 use super::record::{RecordedAction, inject_storage_js};
 use super::state::{
-    BrowserSession, NavFrameShared, SessionError, SnapshotStore, SESSION_COUNTER,
+    BrowserSession, DormantSession, NavFrameShared, SessionError, SnapshotStore, SESSION_COUNTER,
     PER_SESSION_FLUSH_BUDGET, SESSION_TIMEOUT, SHUTDOWN_FLUSH_BUDGET, SNAPSHOT_MAX_AGE_SECS,
     drain_console,
 };
@@ -30,6 +30,9 @@ use super::state::{
 pub struct SessionManager {
     pub(super) sessions: HashMap<String, BrowserSession>,
     pub(super) snapshots: SnapshotStore,
+    /// Boot-time snapshot registrations that did NOT spawn a page
+    /// (hosted-incident 10-14) — see [`DormantSession`].
+    pub(super) dormant: HashMap<String, DormantSession>,
 }
 
 mod actor;
@@ -65,7 +68,7 @@ where
 {
     let cmd_tx = {
         let mut mgr = SESSIONS.lock().await;
-        mgr.prepare_send(session_id)?
+        mgr.prepare_send(session_id, true)?
     };
     let (reply_tx, reply_rx) = oneshot::channel();
     cmd_tx
@@ -109,7 +112,7 @@ pub(crate) async fn send_screenshot(
             return answer;
         }
     }
-    send_command(session_id, |reply| SessionCommand::Screenshot {
+    send_command_readonly(session_id, |reply| SessionCommand::Screenshot {
         width,
         height,
         full_page,
@@ -121,11 +124,41 @@ pub(crate) async fn send_screenshot(
     .await
 }
 
+/// [`send_command`] for read-only probes (screenshot/state/url): no idle-TTL
+/// renewal, no dormant promotion — a preview must not keep a session alive
+/// nor wake a boot-registered shell (hosted-incident 10-14, P0).
+pub(crate) async fn send_command_readonly<T, E, F>(
+    session_id: &str,
+    make_cmd: F,
+) -> Result<T, SessionError>
+where
+    T: Send + 'static,
+    E: Into<SessionError> + Send + 'static,
+    F: FnOnce(oneshot::Sender<Result<T, E>>) -> SessionCommand,
+{
+    let cmd_tx = {
+        let mut mgr = SESSIONS.lock().await;
+        mgr.prepare_send(session_id, false)?
+    };
+    let (reply_tx, reply_rx) = oneshot::channel();
+    cmd_tx
+        .send(make_cmd(reply_tx))
+        .map_err(|_| SessionError::ThreadDied("session thread died".to_string()))?;
+    let result: Result<T, SessionError> = reply_rx
+        .await
+        .map_err(|_| SessionError::ThreadDied("session thread died".to_string()))?
+        .map_err(Into::into);
+    // A read-only probe never refreshes login state either — the snapshot
+    // already reflects the last working command.
+    result
+}
+
 impl SessionManager {
     pub fn new() -> Self {
         SessionManager {
             sessions: HashMap::new(),
             snapshots: SnapshotStore::Global,
+            dormant: HashMap::new(),
         }
     }
 
@@ -157,7 +190,10 @@ impl SessionManager {
         // a fresh session must never squat on a revivable id.
         let session_id = loop {
             let id = format!("s_{}", SESSION_COUNTER.fetch_add(1, Ordering::Relaxed));
-            if !self.sessions.contains_key(&id) && self.snapshots.load(&id).is_none() {
+            if !self.sessions.contains_key(&id)
+                && !self.dormant.contains_key(&id)
+                && self.snapshots.load(&id).is_none()
+            {
                 break id;
             }
         };
@@ -262,11 +298,24 @@ impl SessionManager {
     /// the remaining lifetime instead of discovering an expired session
     /// mid-workflow.
     pub fn expires_in_secs(&self, session_id: &str) -> Option<u64> {
+        if let Some(d) = self.dormant.get(session_id) {
+            if d.keepalive {
+                return None;
+            }
+            return Some(d.timeout.saturating_sub(d.last_active.elapsed()).as_secs());
+        }
         let s = self.sessions.get(session_id)?;
         if s.keepalive {
             return None;
         }
         Some(s.timeout.saturating_sub(s.last_active.elapsed()).as_secs())
+    }
+
+    /// The boot-registered shell's last URL, for listings and the state
+    /// route's dormant branch — there is no thread to ask. Outer Option =
+    /// the id is dormant; inner = the snapshot had a url.
+    pub fn dormant_url(&self, session_id: &str) -> Option<Option<String>> {
+        self.dormant.get(session_id).map(|d| d.url.clone())
     }
 
     /// #195: the sender side of the channel-layer old-frame answer. A
@@ -452,47 +501,73 @@ impl SessionManager {
         session_id: &str,
         make_cmd: impl FnOnce(oneshot::Sender<Result<T, E>>) -> SessionCommand,
     ) -> Result<T, SessionError> {
-        if let Some(session) = self.sessions.get_mut(session_id) {
-            if !session.is_expired() {
-                session.last_active = Instant::now();
-                return self.dispatch(session_id, make_cmd).await;
-            }
-            // Idle-expired on access. A persistent session falls through to
-            // snapshot revival below instead of erroring; the eviction must
-            // keep the snapshot that revival reads. A non-persistent one
-            // only carries a snapshot as a #88 restart bridge — expiry ends
-            // the bridge too, so a later touch can't zombie-revive stale
-            // login cookies.
-            let revive = session.persistent;
-            self.close_inner(session_id, !revive);
-            if !revive {
+        self.prepare_send(session_id, true)?;
+        self.dispatch(session_id, make_cmd).await
+    }
+
+    /// [`Self::send`] without the idle-TTL renewal and without dormant
+    /// promotion — the manager-side face for read-only probes (the /sessions
+    /// listing's url identity probe): a listing must not keep sessions
+    /// alive, and a dormant shell must not be woken by being looked at.
+    pub async fn send_readonly<T: Send + 'static, E: Into<SessionError> + Send + 'static>(
+        &mut self,
+        session_id: &str,
+        make_cmd: impl FnOnce(oneshot::Sender<Result<T, E>>) -> SessionCommand,
+    ) -> Result<T, SessionError> {
+        self.prepare_send(session_id, false)?;
+        self.dispatch(session_id, make_cmd).await
+    }
+
+    /// Phase 1 of the lock-free round trip ([`send_command`]): the prologue
+    /// of [`Self::send`] — dormancy policy, liveness check, idle-expiry
+    /// policy, snapshot revival — ending in the session's command channel
+    /// instead of a dispatch, so the caller can await the reply without
+    /// holding the manager lock.
+    ///
+    /// `renew` is the idle-TTL face of the command: working commands
+    /// (navigate/eval/click/...) refresh `last_active`, read-only probes
+    /// (screenshot/state/url) do not — a live.html preview left polling
+    /// overnight must not immortalize a session it never drives
+    /// (hosted-incident 10-14, P0). A dormant shell answers probes with
+    /// [`SessionError::Dormant`] and promotes on working commands only.
+    fn prepare_send(
+        &mut self,
+        session_id: &str,
+        renew: bool,
+    ) -> Result<mpsc::UnboundedSender<SessionCommand>, SessionError> {
+        if let Some(d) = self.dormant.get(session_id) {
+            // On-access expiry mirrors evict_expired: a persistent shell
+            // keeps its snapshot (promote straight to revival), anything
+            // else takes its #88 bridge with it — no zombie revival.
+            if d.is_expired() && !d.persistent {
+                self.close_inner(session_id, true);
                 return Err(SessionError::Expired(format!(
                     "session expired: {}",
                     session_id
                 )));
             }
+            if !renew {
+                return Err(SessionError::Dormant(format!(
+                    "session {} is dormant (registered at boot, page JS not running) — \
+                     a working command (navigate/eval/click/...) revives it",
+                    session_id
+                )));
+            }
+            // Promote: the snapshot is still on disk (registering a shell
+            // never consumes it). A stale/absent one drops the shell.
+            self.dormant.remove(session_id);
+            if !self.revive_session(session_id) {
+                return Err(SessionError::NotFound(format!(
+                    "session not found: {}",
+                    session_id
+                )));
+            }
         }
-        if self.revive_session(session_id) {
-            return self.dispatch(session_id, make_cmd).await;
-        }
-        Err(SessionError::NotFound(format!(
-            "session not found: {}",
-            session_id
-        )))
-    }
-
-    /// Phase 1 of the lock-free round trip ([`send_command`]): the prologue
-    /// of [`Self::send`] — liveness check, idle-expiry policy, snapshot
-    /// revival — ending in the session's command channel instead of a
-    /// dispatch, so the caller can await the reply without holding the
-    /// manager lock.
-    fn prepare_send(
-        &mut self,
-        session_id: &str,
-    ) -> Result<mpsc::UnboundedSender<SessionCommand>, SessionError> {
         if let Some(session) = self.sessions.get_mut(session_id) {
             if !session.is_expired() {
-                session.last_active = Instant::now();
+                if renew {
+                    session.last_active = Instant::now();
+                }
                 return Ok(session.cmd_tx.clone());
             }
             // Idle-expired on access — same policy as send(): a persistent
@@ -591,6 +666,7 @@ impl SessionManager {
     }
 
     pub(super) fn close_inner(&mut self, session_id: &str, drop_snapshot: bool) {
+        self.dormant.remove(session_id);
         if let Some(session) = self.sessions.remove(session_id) {
             let (tx, _rx) = oneshot::channel();
             let _ = session.cmd_tx.send(SessionCommand::Close { reply: tx });
@@ -620,6 +696,11 @@ impl SessionManager {
                 Ok(Err(_)) => true, // dropped sender = thread exiting
                 Err(_) => false,
             }
+        } else if self.dormant.remove(session_id).is_some() {
+            // A shell has no thread to wait on; close means done — the
+            // snapshot goes with it, same as a live close.
+            self.snapshots.delete(session_id);
+            true
         } else {
             false
         }
@@ -640,14 +721,25 @@ impl SessionManager {
         for (id, persistent) in expired {
             self.close_inner(&id, !persistent);
         }
+        // Dormant shells idle out with the same policy as live ones — a
+        // persistent shell keeps its snapshot (revive-on-touch), a
+        // non-persistent one takes its #88 bridge with it.
+        let expired_dormant: Vec<(String, bool)> = self
+            .dormant
+            .iter()
+            .filter(|(_, d)| d.is_expired())
+            .map(|(id, d)| (id.clone(), d.persistent))
+            .collect();
+        for (id, persistent) in expired_dormant {
+            self.close_inner(&id, !persistent);
+        }
         self.snapshots.purge(SNAPSHOT_MAX_AGE_SECS);
     }
 
-    /// Snapshot of live sessions — id + idle age only, most recently active
-    /// first. The page URL lives inside the session thread; fetching it per
-    /// entry would round-trip a State command per session, too heavy for a
-    /// listing. Call [`Self::evict_expired`] first if the list must not
-    /// include idle-but-not-yet-evicted sessions.
+    /// Live + dormant session listing, most recently active first. A live
+    /// entry's URL lives inside the session thread (the route probes it with
+    /// a cheap Url command); a dormant entry carries its snapshot URL
+    /// directly — probing a shell would either wake it or lie.
     pub fn list(&self) -> Vec<SessionListEntry> {
         let mut out: Vec<SessionListEntry> = self
             .sessions
@@ -663,8 +755,24 @@ impl SessionManager {
                 keepalive: s.keepalive,
                 account: s.account.as_ref().map(|(_, name)| name.clone()),
                 persistent: s.persistent,
+                url: None,
+                dormant: false,
             })
             .collect();
+        out.extend(self.dormant.iter().map(|(id, d)| SessionListEntry {
+            session_id: id.clone(),
+            idle_secs: d.last_active.elapsed().as_secs(),
+            expires_in_secs: if d.keepalive {
+                None
+            } else {
+                Some(d.timeout.saturating_sub(d.last_active.elapsed()).as_secs())
+            },
+            keepalive: d.keepalive,
+            account: None,
+            persistent: d.persistent,
+            url: d.url.clone(),
+            dormant: true,
+        }));
         out.sort_by_key(|e| e.idle_secs);
         out
     }

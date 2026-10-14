@@ -2805,6 +2805,7 @@
         SessionManager {
             sessions: HashMap::new(),
             snapshots: SnapshotStore::Memory(shared),
+            dormant: HashMap::new(),
         }
     }
 
@@ -3049,6 +3050,9 @@
         assert_eq!(snap["persistent"], serde_json::json!(false));
 
         // "Restart": brand-new manager, eager restore before first use.
+        // hosted-incident 10-14: restore registers dormant shells, not live
+        // threads — flags round-trip through the shell and the ids list
+        // under their old names, but no page JS runs at boot.
         let mut mgr2 = manager_on(shared.clone());
         assert_eq!(mgr2.restore_all(), 2);
         let listed: Vec<SessionListEntry> = mgr2.list();
@@ -3059,11 +3063,14 @@
             );
         }
         {
-            let s = mgr2.sessions.get(&hold).expect("restored");
-            assert!(s.keepalive && !s.persistent, "restored flags round-trip");
+            let d = mgr2.dormant.get(&hold).expect("dormant shell");
+            assert!(d.keepalive && !d.persistent, "restored flags round-trip");
+            assert!(mgr2.sessions.is_empty(), "boot must not run page JS");
         }
 
-        // Login state survived the restart for the keepalive session.
+        // Login state survived the restart for the keepalive session — the
+        // Cookies command is a working touch: it promotes the shell through
+        // the normal revive path first.
         let cookies = mgr2
             .send(&hold, |reply| SessionCommand::Cookies { reply })
             .await
@@ -3076,6 +3083,10 @@
                 .iter()
                 .any(|c| c.as_str().is_some_and(|s| s.starts_with("hold=1;"))),
             "cookie must survive the restart: {cookies}"
+        );
+        assert!(
+            mgr2.sessions.contains_key(&hold) && !mgr2.dormant.contains_key(&hold),
+            "the working command promoted the shell"
         );
 
         // Session threads are real OS threads — both managers' copies close.
@@ -3143,6 +3154,132 @@
         assert!(mgr.close_and_wait(&sid).await);
     }
 
+    /// hosted-incident 10-14: boot restore registers DORMANT shells — no
+    /// page JS at startup, a read-only probe answers Dormant without waking
+    /// the shell, and the first working command promotes it through the
+    /// normal revive path with login state intact.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn boot_restore_registers_dormant_shells_until_first_working_command() {
+        let _net = crate::server::test_util::net_env_guard();
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /app",
+            "<html><body><p>app</p></body></html>",
+        )]);
+        let url = format!("http://127.0.0.1:{port}/app");
+        let shared: SharedSnapshots = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        let mut mgr = manager_on(shared.clone());
+        let sid = mgr.create(
+            Some(&url),
+            false,
+            // Anonymous sessions share one process-wide jar (the
+            // single-profile model) — pick a name no other test uses, or
+            // the meta-face test's own `sess` row lookup finds this one.
+            vec!["dormant_probe=42".to_string()],
+            None,
+            None,
+            None,
+            /* keepalive */ true,
+            /* persistent */ true,
+            None,
+        );
+        mgr.send(&sid, |reply| SessionCommand::Eval {
+            script: "1".to_string(),
+            timeout_ms: None,
+            reply,
+        })
+        .await
+        .unwrap();
+
+        // "Restart": the snapshot registers a shell, not a live thread.
+        let mut mgr2 = manager_on(shared.clone());
+        assert_eq!(mgr2.restore_all(), 1);
+        assert!(mgr2.sessions.is_empty(), "boot spawns no page JS");
+        let listed = mgr2.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].session_id, sid);
+        assert!(listed[0].dormant, "listing marks the shell dormant");
+        assert_eq!(
+            listed[0].url.as_deref(),
+            Some(url.as_str()),
+            "shell carries its snapshot URL"
+        );
+
+        // Read-only probe: Dormant, and the shell survives being looked at.
+        assert!(matches!(
+            mgr2.send_readonly(&sid, |reply| SessionCommand::Url { reply }).await,
+            Err(SessionError::Dormant(_))
+        ));
+        assert!(mgr2.dormant.contains_key(&sid), "probe must not wake it");
+
+        // One working command promotes; login state came through.
+        let cookies = mgr2
+            .send(&sid, |reply| SessionCommand::Cookies { reply })
+            .await
+            .unwrap();
+        let cookies: Value = serde_json::from_str(&cookies).unwrap();
+        assert!(
+            cookies["cookies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c.as_str().is_some_and(|s| s.starts_with("dormant_probe=42;"))),
+            "cookie must survive dormancy: {cookies}"
+        );
+        assert!(mgr2.dormant.is_empty(), "shell promoted");
+        assert!(mgr2.sessions.contains_key(&sid));
+
+        assert!(mgr2.close_and_wait(&sid).await);
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
+    /// hosted-incident 10-14, P0: read-only probes (screenshot/state/url)
+    /// must not renew the idle TTL — a live preview left polling overnight
+    /// must not immortalize a session it never drives.
+    #[tokio::test]
+    async fn readonly_probes_do_not_renew_the_idle_clock() {
+        let _net = crate::server::test_util::net_env_guard();
+        let shared: SharedSnapshots = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let mut mgr = manager_on(shared.clone());
+        let sid = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            /* ttl_secs */ Some(60),
+            None,
+            false,
+            false,
+            None,
+        );
+        // Burn 50s of the 60s TTL without sleeping.
+        mgr.sessions.get_mut(&sid).unwrap().last_active =
+            Instant::now() - Duration::from_secs(50);
+        assert!(mgr.expires_in_secs(&sid).unwrap() <= 11);
+
+        mgr.send_readonly(&sid, |reply| SessionCommand::Url { reply })
+            .await
+            .unwrap();
+        assert!(
+            mgr.expires_in_secs(&sid).unwrap() <= 11,
+            "read-only probe must not reset the idle clock"
+        );
+
+        mgr.send(&sid, |reply| SessionCommand::Eval {
+            script: "1".to_string(),
+            timeout_ms: None,
+            reply,
+        })
+        .await
+        .unwrap();
+        assert!(
+            mgr.expires_in_secs(&sid).unwrap() >= 59,
+            "working commands still renew"
+        );
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
 #[tokio::test]
     async fn restored_non_persistent_sessions_do_not_zombie_revive() {
         let _net = crate::server::test_util::net_env_guard();
@@ -3184,9 +3321,10 @@
 
         let mut mgr2 = manager_on(shared.clone());
         assert_eq!(mgr2.restore_all(), 2);
-        // Both restored sessions idle-expire (ttl family, no keepalive).
+        // Both restored shells idle-expire (ttl family, no keepalive). Since
+        // the dormant-shell rework they live in `dormant`, not `sessions`.
         for sid in [&a, &b] {
-            let s = mgr2.sessions.get_mut(sid).expect("restored");
+            let s = mgr2.dormant.get_mut(sid).expect("restored");
             s.last_active = Instant::now() - Duration::from_secs(481);
         }
 

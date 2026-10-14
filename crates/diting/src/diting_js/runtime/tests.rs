@@ -20827,3 +20827,38 @@ fn document_evaluate_xpath_subset() {
         );
         let _ = doc_rx;
     }
+
+    /// hosted-incident 10-14: each heap-guard TERMINATION (the second-trip
+    /// arm of recover_heap_limit — the pressure-GC rescue is not one) is a
+    /// strike on the realm. The session actor drops the realm at three; a
+    /// page that keeps climbing after two full rescues is unmanageable and
+    /// its isolate must go back to the process instead of riding
+    /// terminate→GC→climb forever (the public zhipin/yupao loop climbed to
+    /// 7GB this way). Flags driven by hand — the callback needs a real heap
+    /// climb; recover_heap_limit is the safe point it hands control to.
+    #[test]
+    fn heap_guard_strikes_count_terminations_per_realm() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        assert_eq!(rt.heap_guard_strikes(), 0);
+
+        for _ in 0..2 {
+            rt.heap_limit_state
+                .tripped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            rt.heap_limit_state
+                .restore_limit
+                .store(256 * 1024 * 1024, std::sync::atomic::Ordering::SeqCst);
+            assert!(rt.recover_heap_limit());
+        }
+        assert_eq!(rt.heap_guard_strikes(), 2);
+
+        // A pressure-only cycle (first-trip GC rescue) is not a strike.
+        rt.heap_limit_state
+            .pressured
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        rt.heap_limit_state
+            .restore_limit
+            .store(256 * 1024 * 1024, std::sync::atomic::Ordering::SeqCst);
+        assert!(rt.recover_heap_limit());
+        assert_eq!(rt.heap_guard_strikes(), 2);
+    }

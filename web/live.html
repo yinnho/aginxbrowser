@@ -67,6 +67,7 @@
   }
   .badge.keep { color: var(--accent); border-color: #2ea043; }
   .badge.persist { color: var(--warn); border-color: var(--warn); }
+  .badge.dorm { color: var(--dim); border-color: var(--dim); }
   /* --- live view --- */
   #stagewrap {
     height: 100%; overflow: auto; display: none;
@@ -99,8 +100,9 @@
   <input id="urlbar" type="text" placeholder="https:// — navigate the session here" spellcheck="false">
   <button class="primary" id="go">Go</button>
   <select id="ms" title="Frame poll interval">
+    <option value="5000" selected>0.2 fps</option>
     <option value="2000">0.5 fps</option>
-    <option value="1000" selected>1 fps</option>
+    <option value="1000">1 fps</option>
     <option value="400">2.5 fps</option>
     <option value="250">4 fps</option>
   </select>
@@ -159,8 +161,13 @@ const $ = (id) => document.getElementById(id);
 
 const state = {
   session: qs.get("session") || "",
-  ms: Number(qs.get("ms")) || Number($("ms").value) || 1000,
-  paused: false,
+  // hosted-incident 10-14: 1 fps default + a viewer who walks away is a
+  // screenshot firehose nobody looks at. Default 0.2 fps; a hidden tab
+  // stops polling entirely; 2 min without interaction drops to a 10 s
+  // heartbeat (any click/key/wheel restores full rate instantly).
+  ms: Number(qs.get("ms")) || Number($("ms").value) || 5000,
+  SLOW_MS: 10000, IDLE_SLOW_AFTER_MS: 120000,
+  paused: false, hidden: document.hidden, slow: false, lastInteract: Date.now(),
   img: $("shot"),
   lastFrameAt: 0, frameMs: null, frames: 0, errStreak: 0,
   natW: 0, natH: 0,
@@ -169,6 +176,13 @@ const state = {
   suppressClick: false,  // set by a finished drag; the click handler eats it
   pollTimer: 0, stateTimer: 0,
 };
+for (const ev of ["pointerdown", "wheel", "keydown"]) {
+  document.addEventListener(ev, () => { state.lastInteract = Date.now(); }, { passive: true });
+}
+document.addEventListener("visibilitychange", () => {
+  state.hidden = document.hidden;
+  if (!state.hidden && state.session && !state.paused) grabFrame();
+});
 
 function api(path, opts) {
   const headers = Object.assign(
@@ -230,6 +244,7 @@ async function refreshList() {
         `<span class="id">${s.session_id.slice(0, 10)}…</span>` +
         (s.keepalive ? '<span class="badge keep">keepalive</span>' : "") +
         (s.persistent ? '<span class="badge persist">persistent</span>' : "") +
+        (s.dormant ? '<span class="badge dorm">dormant</span>' : "") +
         `<span class="meta">idle ${s.idle_secs}s · ${ttl}</span>`;
       card.onclick = () => showLive(s.session_id);
       box.appendChild(card);
@@ -251,14 +266,18 @@ $("newform").onsubmit = async (ev) => {
 };
 
 // --- live loops ------------------------------------------------------------
+function pollMs() {
+  return state.slow ? state.SLOW_MS : state.ms;
+}
 function startLoops() {
   stopLoops();
   const tick = async () => {
-    if (!state.paused && state.session) await grabFrame();
-    state.pollTimer = setTimeout(tick, state.ms);
+    state.slow = Date.now() - state.lastInteract > state.IDLE_SLOW_AFTER_MS;
+    if (!state.paused && state.session && !document.hidden) await grabFrame();
+    state.pollTimer = setTimeout(tick, pollMs());
   };
   const stick = async () => {
-    if (state.session && !state.paused) await grabState();
+    if (state.session && !state.paused && !document.hidden) await grabState();
     state.stateTimer = setTimeout(stick, 3000);
   };
   tick(); stick();
@@ -289,7 +308,17 @@ async function grabFrame() {
     state.errStreak++;
     $("dot").className = "dot err";
     updateStats();
-    if (state.errStreak >= 3) banner("frame fetch failed: " + e.message, true);
+    if (state.errStreak >= 3) {
+      const msg = String(e.message || "");
+      if (msg.includes("dormant")) {
+        // Boot-registered shell, page JS not running — stop hammering it;
+        // a working command (navigate / the urlbar Go) wakes the page.
+        banner("session is dormant (registered at boot, page JS not running) — press Go or send a navigate to wake it", false);
+        state.paused = true; syncPauseBtn();
+      } else {
+        banner("frame fetch failed: " + e.message, true);
+      }
+    }
   }
 }
 
@@ -312,9 +341,10 @@ async function grabState() {
 }
 
 function updateStats() {
-  const fps = state.frameMs ? (1000 / state.ms).toFixed(1) : "—";
+  const fps = state.frameMs ? (1000 / pollMs()).toFixed(1) : "—";
   $("stats").textContent =
     `${state.frameMs != null ? state.frameMs + "ms/frame" : "…"} · poll ${fps}/s · ${state.frames}f` +
+    (state.slow ? " · idle-slow" : "") +
     (state.errStreak ? ` · ${state.errStreak} err` : "");
 }
 
@@ -447,15 +477,21 @@ $("go").onclick = async () => {
   let url = $("urlbar").value.trim();
   if (!url) return;
   if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) url = "https://" + url;
-  if (await act("navigate", { url })) { grabFrame(); grabState(); }
+  if (await act("navigate", { url })) {
+    // navigate is a working command: it wakes a dormant shell — resume
+    // polling if the dormant handler had paused us.
+    state.errStreak = 0;
+    if (state.paused) { state.paused = false; syncPauseBtn(); }
+    grabFrame(); grabState();
+  }
 };
 $("urlbar").addEventListener("keydown", (ev) => { if (ev.key === "Enter") $("go").click(); });
 $("ms").onchange = () => { state.ms = Number($("ms").value); updateStats(); };
-$("pause").onclick = () => {
-  state.paused = !state.paused;
+function syncPauseBtn() {
   $("pause").textContent = state.paused ? "Resume" : "Pause";
   $("dot").className = state.paused ? "dot" : "dot live";
-};
+}
+$("pause").onclick = () => { state.paused = !state.paused; syncPauseBtn(); };
 $("openPng").onclick = () => { if (state.img.src) window.open(state.img.src, "_blank"); };
 $("back").onclick = showPicker;
 

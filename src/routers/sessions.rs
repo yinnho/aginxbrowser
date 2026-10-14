@@ -510,8 +510,9 @@ pub(crate) async fn session_navigate_handler(
     Ok((StatusCode::OK, Json(resp)))
 }
 
-/// Session-command errors → HTTP semantics: a dead session is 404, a crashed
-/// thread 503, the stance gate 429, everything else 500.
+/// Session-command errors → HTTP semantics: a dead session is 404, a
+/// dormant shell 409 (the id exists — wake it with a working command), a
+/// crashed thread 503, the stance gate 429, everything else 500.
 fn session_err(e: session::SessionError) -> AppError {
     if let session::SessionError::Command(msg) = &e {
         if msg.starts_with("rate limit:") {
@@ -532,6 +533,7 @@ fn session_err(e: session::SessionError) -> AppError {
         }
         session::SessionError::Eval(msg) => AppError::BadRequest(msg),
         session::SessionError::ThreadDied(msg) => AppError::ServiceUnavailable(msg),
+        session::SessionError::Dormant(msg) => AppError::Conflict(msg),
         session::SessionError::Command(msg) => AppError::Internal(msg),
     }
 }
@@ -539,9 +541,29 @@ fn session_err(e: session::SessionError) -> AppError {
 pub(crate) async fn session_state_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let compact_text = session::send_command(&id, |reply| session::SessionCommand::State { reply })
-        .await
-        .map_err(session_err)?;
+    // Read-only probe (hosted-incident 10-14): state must not renew the
+    // idle TTL, and a dormant shell answers from its snapshot instead of
+    // waking the page.
+    {
+        let mgr = session::SESSIONS.lock().await;
+        if let Some(url) = mgr.dormant_url(&id) {
+            let body = serde_json::json!({
+                "session_id": id,
+                "url": url,
+                "dormant": true,
+                "hint": "registered at boot without page JS — navigate/eval/click revives it",
+            });
+            return Ok((
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                body.to_string(),
+            ));
+        }
+    }
+    let compact_text =
+        session::send_command_readonly(&id, |reply| session::SessionCommand::State { reply })
+            .await
+            .map_err(session_err)?;
     // Return as plain text for token efficiency.
     Ok((
         StatusCode::OK,
@@ -1099,18 +1121,27 @@ pub(crate) async fn sessions_handler() -> Result<impl IntoResponse, AppError> {
     let entries = mgr.list();
     let mut out = Vec::with_capacity(entries.len());
     for e in &entries {
-        let url = match tokio::time::timeout(
-            std::time::Duration::from_millis(250),
-            mgr.send(&e.session_id, |reply| session::SessionCommand::Url {
-                reply,
-            }),
-        )
-        .await
-        {
-            Ok(Ok(u)) => Some(u),
-            // Busy (mid-eval), expired, or gone — identity probe is best
-            // effort; the listing must never block on one session.
-            _ => None,
+        // Dormant shells carry their snapshot URL — probing them would
+        // either wake the page or time out on a thread that doesn't exist.
+        // Live entries ride the cheap Url probe, read-only: a listing must
+        // not renew idle TTLs (hosted-incident 10-14).
+        let (url, dormant) = if e.dormant {
+            (e.url.clone(), true)
+        } else {
+            let url = match tokio::time::timeout(
+                std::time::Duration::from_millis(250),
+                mgr.send_readonly(&e.session_id, |reply| session::SessionCommand::Url {
+                    reply,
+                }),
+            )
+            .await
+            {
+                Ok(Ok(u)) => Some(u),
+                // Busy (mid-eval), expired, or gone — identity probe is best
+                // effort; the listing must never block on one session.
+                _ => None,
+            };
+            (url, false)
         };
         out.push(serde_json::json!({
             "session_id": e.session_id,
@@ -1119,6 +1150,7 @@ pub(crate) async fn sessions_handler() -> Result<impl IntoResponse, AppError> {
             "expires_in_secs": e.expires_in_secs,
             "keepalive": e.keepalive,
             "persistent": e.persistent,
+            "dormant": dormant,
         }));
     }
     Ok((

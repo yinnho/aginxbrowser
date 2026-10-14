@@ -57,6 +57,12 @@ pub enum SessionError {
     /// wrong" from "the tool refused"; the message carries the error name,
     /// message, throw position and first stack frame.
     Eval(String),
+    /// The id exists but is a dormant shell — a snapshot the process
+    /// registered at boot without running its page JS (hosted-incident
+    /// 10-14: eager revive re-ran every leftover SPA on every restart).
+    /// A read-only probe (screenshot/state) reports this instead of waking
+    /// the page; any working command (navigate/eval/click/...) revives it.
+    Dormant(String),
 }
 
 impl SessionError {
@@ -67,6 +73,7 @@ impl SessionError {
             SessionError::ThreadDied(_) => "SESSION_CRASHED",
             SessionError::Command(_) => "COMMAND_FAILED",
             SessionError::Eval(_) => "EVAL_ERROR",
+            SessionError::Dormant(_) => "SESSION_DORMANT",
         }
     }
 
@@ -89,7 +96,8 @@ impl std::fmt::Display for SessionError {
             | SessionError::Expired(m)
             | SessionError::ThreadDied(m)
             | SessionError::Command(m)
-            | SessionError::Eval(m) => f.write_str(m),
+            | SessionError::Eval(m)
+            | SessionError::Dormant(m) => f.write_str(m),
         }
     }
 }
@@ -266,6 +274,28 @@ pub(super) struct BrowserSession {
 }
 
 impl BrowserSession {
+    pub(super) fn is_expired(&self) -> bool {
+        !self.keepalive && self.last_active.elapsed() > self.timeout
+    }
+}
+
+/// A snapshot registered at boot WITHOUT running its page JS
+/// (hosted-incident 10-14): the old eager revive re-navigated every
+/// leftover keepalive/persistent SPA on every restart, and one heavy page
+/// per boot was enough to wedge the fresh process (8129 / #224 class). A
+/// dormant shell lists the session under its old id and keeps the idle
+/// clock honest, but holds no thread — the first working command
+/// (navigate/eval/click/...) promotes it via the normal snapshot revive;
+/// read-only probes (screenshot/state) get [`SessionError::Dormant`].
+pub(super) struct DormantSession {
+    pub(super) url: Option<String>,
+    pub(super) keepalive: bool,
+    pub(super) persistent: bool,
+    pub(super) timeout: Duration,
+    pub(super) last_active: Instant,
+}
+
+impl DormantSession {
     pub(super) fn is_expired(&self) -> bool {
         !self.keepalive && self.last_active.elapsed() > self.timeout
     }

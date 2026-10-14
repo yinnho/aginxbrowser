@@ -305,6 +305,22 @@ pub(super) fn session_thread(
                 let mut pending_replay: std::collections::VecDeque<SessionCommand> =
                     std::collections::VecDeque::new();
                 loop {
+                    // hosted-incident 10-14: a realm the heap guard has
+                    // terminated three times is unmanageable — each trip
+                    // already lent 512MB, pressure-GC'd, terminated and
+                    // re-armed, and the page climbed right back. Chrome
+                    // kills a renderer in that state; we drop the realm:
+                    // breaking here ends the thread, the isolate and its
+                    // heap go back to the process, and the manager reports
+                    // ThreadDied on the next touch (the snapshot survives
+                    // for a clean revive if the operator wants one).
+                    if page.inner.heap_guard_strikes() >= 3 {
+                        tracing::warn!(
+                            url = %page.url(),
+                            "realm dropped: heap guard struck 3 times — isolate released, session thread exiting"
+                        );
+                        break;
+                    }
                     let cmd = if let Some(replay) = pending_replay.pop_front() {
                         replay
                     } else {

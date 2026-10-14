@@ -25,6 +25,6 @@ mod tests;
 
 pub use commands::{ScrollDirection, SessionCommand};
 pub use manager::{SessionManager, SESSIONS};
-pub(crate) use manager::{send_command, send_screenshot};
+pub(crate) use manager::{send_command, send_command_readonly, send_screenshot};
 pub use record::replay_bash;
 pub use state::{ConsoleFilter, SessionError};

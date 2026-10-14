@@ -248,18 +248,27 @@ impl SessionManager {
     }
 
     /// #88, startup half: the fleet the previous process flushed at shutdown
-    /// revives eagerly under its own ids, before the listener opens — the
-    /// first session_list after a binary swap shows the sessions the
-    /// operator left running, login state intact. Stale snapshots age out
-    /// inside revival instead of coming back. Returns how many sessions
-    /// were restored.
+    /// comes back under its own ids — the first session_list after a binary
+    /// swap shows the sessions the operator left running, login state
+    /// intact. Stale snapshots age out inside revival instead of coming
+    /// back. Returns how many sessions were registered.
+    ///
+    /// Since hosted-incident 10-14 the registration is a DORMANT SHELL, not
+    /// a live revive: the old eager restore re-navigated every leftover
+    /// keepalive/persistent SPA on every boot, and one heavy page per boot
+    /// was enough to wedge the fresh process (8129 / #224 class — a public
+    /// host OOM-looped on it). The shell lists the id with its snapshot URL
+    /// and keeps the idle clock; no thread, no page JS. The first working
+    /// command (navigate/eval/click/...) promotes it through the normal
+    /// [`Self::revive_session`] path — which is exactly what the old boot
+    /// path did, just deferred from "always at boot" to "when asked".
     ///
     /// Gated by [`eager_restore_mode`] (`AGINXBROWSER_RESTORE_SESSIONS`):
     /// parallel dogfood ports sharing `~/.aginxbrowser/cache.db` otherwise
-    /// revive every leftover keepalive SPA and wedge the fresh process
-    /// (8129 / #224 class). Prefer per-instance `AGINXBROWSER_STORE_PATH`
-    /// or `AGINXBROWSER_COOKIE_STORE_DIR` isolation; use the env when the
-    /// store must stay shared. Lazy revive-on-first-touch is unchanged.
+    /// register every leftover shell in the fresh process. Prefer
+    /// per-instance `AGINXBROWSER_STORE_PATH` or
+    /// `AGINXBROWSER_COOKIE_STORE_DIR` isolation; use the env when the store
+    /// must stay shared. Lazy revive-on-first-touch is unchanged.
     pub(crate) fn restore_all(&mut self) -> usize {
         match eager_restore_mode() {
             EagerRestoreMode::Off => {
@@ -289,7 +298,7 @@ impl SessionManager {
                             continue;
                         }
                     }
-                    if self.revive_session(&id) {
+                    if self.register_dormant(&id) {
                         restored += 1;
                     }
                 }
@@ -303,6 +312,50 @@ impl SessionManager {
                 restored
             }
         }
+    }
+
+    /// Register one snapshot as a dormant shell (no thread, no page JS).
+    /// False — with the snapshot dropped — for stale or unreadable entries,
+    /// same hygiene as [`Self::revive_session`].
+    fn register_dormant(&mut self, session_id: &str) -> bool {
+        let Some((text, saved_at)) = self.snapshots.load(session_id) else {
+            return false;
+        };
+        let age = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+            - saved_at;
+        if age > SNAPSHOT_MAX_AGE_SECS {
+            self.snapshots.delete(session_id);
+            return false;
+        }
+        let Ok(snap) = serde_json::from_str::<Value>(&text) else {
+            self.snapshots.delete(session_id);
+            return false;
+        };
+        if snap["version"].as_u64() != Some(1) {
+            self.snapshots.delete(session_id);
+            return false;
+        }
+        let ttl = snap["ttl_secs"].as_u64();
+        self.dormant.insert(
+            session_id.to_string(),
+            DormantSession {
+                url: snap["url"].as_str().map(str::to_string),
+                keepalive: snap["keepalive"].as_bool().unwrap_or(false),
+                persistent: snap["persistent"].as_bool().unwrap_or(true),
+                timeout: Duration::from_secs(
+                    ttl.unwrap_or(SESSION_TIMEOUT.as_secs()).clamp(60, 3600),
+                ),
+                last_active: std::time::Instant::now(),
+            },
+        );
+        tracing::info!(
+            session = session_id,
+            "dormant shell registered from snapshot (no page JS until a working command)"
+        );
+        true
     }
 }
 

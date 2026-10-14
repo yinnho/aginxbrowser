@@ -554,6 +554,14 @@ impl Page {
         }
     }
 
+    /// Heap-guard terminations this realm has survived
+    /// (hosted-incident 10-14) — see [`JsRuntime::heap_guard_strikes`].
+    /// The session actor drops the realm once this crosses its strike
+    /// limit. Zero when no runtime is mounted yet.
+    pub fn heap_guard_strikes(&self) -> usize {
+        self.js.as_ref().map_or(0, JsRuntime::heap_guard_strikes)
+    }
+
     /// Pin the hardware persona seed (screen/dpr/GPU/canvas all draw from
     /// it). Must run before the first navigation — init_js bakes the seed
     /// into the JS runtime on every navigation, so a pre-goto pin holds for

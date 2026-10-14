@@ -13,11 +13,18 @@ pub(super) const HEAP_PRESSURE_HEADROOM_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Default)]
 pub(super) struct HeapLimitState {
-    tripped: std::sync::atomic::AtomicBool,
-    restore_limit: std::sync::atomic::AtomicUsize,
+    // pub(super): the runtime tests drive the strike counter by hand.
+    pub(super) tripped: std::sync::atomic::AtomicBool,
+    pub(super) restore_limit: std::sync::atomic::AtomicUsize,
     /// Set by the first near-limit trip, cleared by the safe-point recovery
     /// in `recover_heap_limit`. While set, the next trip terminates.
-    pressured: std::sync::atomic::AtomicBool,
+    pub(super) pressured: std::sync::atomic::AtomicBool,
+    /// Terminations this realm has survived (hosted-incident 10-14): the
+    /// pre-teardown guard terminated the current task, canceled, and let
+    /// the session climb the wall again — one heavy SPA per realm rode that
+    /// loop for hours and 7GB of RSS. The session actor polls
+    /// [`JsRuntime::heap_guard_strikes`] and drops the realm on the third.
+    strikes: std::sync::atomic::AtomicUsize,
 }
 
 /// V8's default response to hitting the heap limit is to abort the whole
@@ -71,6 +78,17 @@ pub(super) fn install_heap_limit_guard(
 
 
 impl JsRuntime {
+    /// How many times the heap guard terminated a task in this realm's
+    /// lifetime (hosted-incident 10-14). The session actor drops the realm
+    /// — freeing the isolate and its heap — once this crosses its strike
+    /// limit, instead of letting an allocation-looping page ride
+    /// terminate→GC→climb forever.
+    pub fn heap_guard_strikes(&self) -> usize {
+        self.heap_limit_state
+            .strikes
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Safe-point recovery, run at evaluate / run_event_loop entry (same
     /// thread as the isolate). If the guard only flagged pressure, run the
     /// full low-memory GC and re-arm the guard at the real limit — the page
@@ -96,6 +114,9 @@ impl JsRuntime {
             .restore_limit
             .swap(0, std::sync::atomic::Ordering::SeqCst);
         if tripped {
+            self.heap_limit_state
+                .strikes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.runtime.v8_isolate().cancel_terminate_execution();
             // #227: the guard's terminate_execution carries no stale flag,
             // so the #39/#50 heals are blind to it — a dispatch window
