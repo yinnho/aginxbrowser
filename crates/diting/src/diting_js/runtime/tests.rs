@@ -8395,7 +8395,14 @@
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.set_url("https://www.xiaohongshu.com/explore");
         rt.evaluate(
-            "globalThis.__out = {};
+            // (P7) register follows the script fetch now — stub it ok+JS so
+            // this test keeps pinning the RESOLVE face (scope math + shape).
+            "globalThis.__fetch = globalThis.fetch;
+             globalThis.fetch = function () {
+               return Promise.resolve({ ok: true, status: 200,
+                 headers: { get: function () { return 'application/javascript'; } } });
+             };
+             globalThis.__out = {};
              navigator.serviceWorker.register('/sw.js').then(function (reg) {
                __out.scope = reg.scope;
                __out.viaCache = reg.updateViaCache;
@@ -8430,6 +8437,79 @@
                 "getReg": true,
             }),
             "register/ready resolve registration-shaped objects; getRegistration stays undefined"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sw_register_reject_faces_p7() {
+        // (300015 P7) ark registers a service worker whose script 404s on the
+        // CDN; real Chrome REJECTS the register() promise and the app swallows
+        // it. Our unconditional resolve was a one-line bot check. Chrome truth
+        // (CDP 155, 10-15): !ok -> TypeError "A bad HTTP response code…",
+        // non-JS MIME -> SecurityError "unsupported MIME type", cross-origin
+        // script -> SecurityError origin mismatch before any fetch. ok+JS
+        // keeps resolving the stub registration.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url("https://ark.xiaohongshu.com/ark");
+        rt.evaluate(
+            "globalThis.__out = {};
+             function stubFetch(status, ct) {
+               globalThis.fetch = function () {
+                 return Promise.resolve({ ok: status >= 200 && status < 300, status: status,
+                   headers: { get: function () { return ct; } } });
+               };
+             }
+             // 404 + application/xml (the live ark SW URL shape)
+             stubFetch(404, 'application/xml');
+             navigator.serviceWorker.register('/service-worker?hash=1792046827315').then(
+               function () { __out.a = 'RESOLVED'; },
+               function (e) { __out.a = e.name + '|' + e.message; });
+             // 200 + text/html (customer-origin SPA fallback shape)
+             stubFetch(200, 'text/html');
+             navigator.serviceWorker.register('/sw.js').then(
+               function () { __out.b = 'RESOLVED'; },
+               function (e) { __out.b = e.name + '|' + e.message; });
+             // cross-origin script: rejects before fetch (stub stays armed,
+             // proving no fetch happened)
+             var fetched = false;
+             globalThis.fetch = function () { fetched = true; return Promise.resolve({ ok: true }); };
+             navigator.serviceWorker.register('https://other.example/sw.js').then(
+               function () { __out.c = 'RESOLVED'; },
+               function (e) { __out.c = e.name + '|' + e.message; });
+             __out.noFetch = String(!fetched);
+             // ok + JS MIME -> resolves with scope
+             stubFetch(200, 'application/javascript');
+             navigator.serviceWorker.register('/real-sw.js').then(
+               function (reg) { __out.d = 'RESOLVED|' + reg.scope; },
+               function (e) { __out.d = e.name + '|' + e.message; });",
+        )
+        .unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), rt.run_event_loop()).await;
+        let out = rt.evaluate("globalThis.__out").unwrap();
+        let m = out.as_object().unwrap();
+        let get = |k: &str| m.get(k).unwrap().as_str().unwrap().to_string();
+        assert_eq!(
+            get("a"),
+            "TypeError|Failed to register a ServiceWorker for scope ('https://ark.xiaohongshu.com/') \
+             with script ('https://ark.xiaohongshu.com/service-worker?hash=1792046827315'): \
+             A bad HTTP response code (404) was received when fetching the script."
+        );
+        assert_eq!(
+            get("b"),
+            "SecurityError|Failed to register a ServiceWorker for scope ('https://ark.xiaohongshu.com/') \
+             with script ('https://ark.xiaohongshu.com/sw.js'): \
+             The script has an unsupported MIME type ('text/html')."
+        );
+        assert_eq!(
+            get("c"),
+            "SecurityError|Failed to register a ServiceWorker: The origin of the provided scriptURL \
+             ('https://other.example') does not match the current origin ('https://ark.xiaohongshu.com')."
+        );
+        assert_eq!(get("noFetch"), "true", "cross-origin rejects before fetching");
+        assert_eq!(
+            get("d"),
+            "RESOLVED|https://ark.xiaohongshu.com/",
+            "ok+JS MIME keeps resolving the stub registration"
         );
     }
 

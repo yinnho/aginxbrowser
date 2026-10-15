@@ -8140,6 +8140,23 @@ const __navStore = {
     // carries the same shape. No worker ever runs; controller stays null,
     // getRegistration keeps resolving undefined so "is one registered?"
     // checks still take the no-SW branch.
+    // (300015 P7) register must FOLLOW the script fetch: Chrome only
+    // resolves when the worker script answers ok with a JavaScript MIME
+    // type. ark registers a script that 404s on the CDN, so real Chrome
+    // REJECTS and the app swallows it in .catch() — an unconditional
+    // resolve is a one-line bot check (.then() on a dead script = fake
+    // browser). Chrome truth (CDP 155, 10-15):
+    //   cross-origin -> SecurityError "Failed to register a ServiceWorker:
+    //     The origin of the provided scriptURL ('{origin}') does not match
+    //     the current origin ('{origin}')." (checked before any fetch)
+    //   !ok status  -> TypeError "Failed to register a ServiceWorker for
+    //     scope ('{scope}') with script ('{url}'): A bad HTTP response code
+    //     ({status}) was received when fetching the script."
+    //   non-JS MIME -> SecurityError, same prefix, "The script has an
+    //     unsupported MIME type ('{mime}')."
+    // Net-failure tail uncaptured (a same-origin dead host can't be staged);
+    // Chromium-string best effort. The ok path keeps the stub registration —
+    // no worker runs either way.
     function registration(scope) {
       return {
         scope: scope,
@@ -8154,17 +8171,48 @@ const __navStore = {
     function dirScope(url) {
       return url.slice(0, url.lastIndexOf('/') + 1);
     }
+    function swFail(ctor, tail, name) {
+      return name ? new ctor(tail, name) : new ctor(tail);
+    }
+    var JS_MIME = /^(application|text)\/(x-)?(javascript|ecmascript)$/;
     return {
       get ready() { return Promise.resolve(registration(dirScope(location.href))); },
       register: function (scriptUrl, options) {
-        var scope;
+        var su, scope, suHref;
         try {
-          var su = new URL(scriptUrl, location.href);
+          su = new URL(scriptUrl, location.href);
+        } catch (e) {
+          return Promise.reject(new TypeError("Failed to register a ServiceWorker: The URL is not valid."));
+        }
+        suHref = su.href;
+        try {
           scope = (options && options.scope)
             ? new URL(options.scope, location.href).href
-            : dirScope(su.href);
+            : dirScope(suHref);
         } catch (e) { scope = dirScope(location.href); }
-        return Promise.resolve(registration(scope));
+        if (su.origin !== location.origin) {
+          return Promise.reject(swFail(DOMException,
+            "Failed to register a ServiceWorker: The origin of the provided scriptURL ('" +
+            su.origin + "') does not match the current origin ('" + location.origin + "').", "SecurityError"));
+        }
+        return fetch(suHref).then(function (r) {
+          if (!r.ok) {
+            throw swFail(TypeError,
+              "Failed to register a ServiceWorker for scope ('" + scope + "') with script ('" +
+              suHref + "'): A bad HTTP response code (" + r.status + ") was received when fetching the script.");
+          }
+          var ct = (r.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+          if (!JS_MIME.test(ct)) {
+            throw swFail(DOMException,
+              "Failed to register a ServiceWorker for scope ('" + scope + "') with script ('" +
+              suHref + "'): The script has an unsupported MIME type ('" + ct + "').", "SecurityError");
+          }
+          return registration(scope);
+        }, function () {
+          throw swFail(TypeError,
+            "Failed to register a ServiceWorker for scope ('" + scope + "') with script ('" +
+            suHref + "'): Registration failed - the worker script fetch failed.");
+        });
       },
       getRegistrations(){ return Promise.resolve([]); },
       getRegistration(){ return Promise.resolve(undefined); },
