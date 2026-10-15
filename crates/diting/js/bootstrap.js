@@ -12660,11 +12660,36 @@ for (const _proto of [Document.prototype, DocumentFragment.prototype]) {
 }
 // (#27) EventTarget used to be a bare `= Node` alias, which made the chain
 // Node → Object — `el instanceof EventTarget` was false. Real chain: Node's
-// prototype inherits from EventTarget.prototype. The level is EMPTY by
-// design: every method lives on Node.prototype and below, so patches on
-// EventTarget.prototype still reach all nodes through inheritance, exactly
-// like Chrome.
+// prototype inherits from EventTarget.prototype. Node-level methods live on
+// Node.prototype and below (they shadow, so node behavior is unchanged),
+// while the four EventTarget-level members Chrome exposes —
+// addEventListener/removeEventListener/dispatchEvent/when (300015 P4) — sit
+// here for every class that extends EventTarget without overriding them
+// (the audio contexts; Chrome truth: tmp-agent/chrome-audio-truth.json).
 const _EventTarget = { EventTarget: class EventTarget {} }.EventTarget;
+const _etBag = new WeakMap();
+function _etLs(t) { let b = _etBag.get(t); if (!b) { b = {}; _etBag.set(t, b); } return b; }
+_EventTarget.prototype.addEventListener = function addEventListener(type, cb) {
+  __listenerGate(cb);
+  const l = _etLs(this); (l[type] || (l[type] = [])).push(cb);
+};
+// Chrome's own order: addEventListener, dispatchEvent, removeEventListener, when.
+_EventTarget.prototype.dispatchEvent = function dispatchEvent(ev) {
+  const l = (_etLs(this)[ev.type]) || [];
+  for (const f of l.slice()) { try { _invokeListener(f, this, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } }
+  return true;
+};
+_EventTarget.prototype.removeEventListener = function removeEventListener(type, cb) {
+  const l = _etLs(this)[type]; if (l) { const i = l.indexOf(cb); if (i >= 0) l.splice(i, 1); }
+};
+// Chrome's promise-returning one-shot listener (EventTarget.when).
+_EventTarget.prototype.when = function when(type) {
+  const self = this;
+  return new Promise(function (resolve) {
+    const h = function (ev) { self.removeEventListener(type, h); resolve(ev); };
+    self.addEventListener(type, h);
+  });
+};
 Object.setPrototypeOf(Node.prototype, _EventTarget.prototype);
 globalThis.EventTarget = _EventTarget;
 globalThis.HTMLCollection = class HTMLCollection extends Array {
@@ -13896,9 +13921,29 @@ HTMLCanvasElement.prototype.getContext = function getContext(type) {
   }
   return null;
 };
-HTMLCanvasElement.prototype.toDataURL = function(type) {
+HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
   const ctx = this._ctx;
-  if (ctx && ctx._buf && _OPS.op_canvas_png) {
+  // (300015 P4) Type dispatch: 'image/jpeg' on a DRAWN canvas returns real
+  // baseline JPEG bytes. The XHS create page fingerprints a drawn canvas
+  // via toDataURL('image/jpeg') and checks the bytes — PNG bytes under a
+  // png data: prefix here were a one-line in-page detect. Out-of-range /
+  // non-number quality is IGNORED per spec (default 0.92), not clamped.
+  var jt = String(type == null ? '' : type).split(';')[0].trim().toLowerCase();
+  var isJpeg = jt === 'image/jpeg' || jt === 'image/jpg' || jt === 'jpeg' || jt === 'jpg';
+  var q = (typeof quality === 'number' && isFinite(quality) && quality >= 0 && quality <= 1)
+    ? quality : 0.92;
+  if (ctx && ctx._buf && (isJpeg ? _OPS.op_canvas_jpeg : _OPS.op_canvas_png)) {
+    if (isJpeg) {
+      try {
+        const px = new Uint8Array(ctx._buf.buffer, ctx._buf.byteOffset, ctx._buf.byteLength);
+        const jpg = new Uint8Array(_OPS.op_canvas_jpeg(ctx._w, ctx._h, px, q));
+        let s = '';
+        for (let i = 0; i < jpg.length; i += 0x8000) {
+          s += String.fromCharCode.apply(null, jpg.subarray(i, i + 0x8000));
+        }
+        return 'data:image/jpeg;base64,' + btoa(s);
+      } catch (e) { /* fall through to the png path */ }
+    }
     try {
       // (#117) A REAL PNG of the 2D buffer — decodable and dimension-correct
       // server-side. The old fixed-shape fake base64 failed any PNG decode.
@@ -13936,9 +13981,21 @@ HTMLCanvasElement.prototype.toDataURL = function(type) {
   } catch (e) {}
   return _fp('canvasFingerprint');
 };
-HTMLCanvasElement.prototype.toBlob = function(cb, type, q) {
+HTMLCanvasElement.prototype.toBlob = function(cb, type, quality) {
   const ctx = this._ctx;
-  if (ctx && ctx._buf && _OPS.op_canvas_png) {
+  // (300015 P4) Same type dispatch as toDataURL above.
+  var jt = String(type == null ? '' : type).split(';')[0].trim().toLowerCase();
+  var isJpeg = jt === 'image/jpeg' || jt === 'image/jpg' || jt === 'jpeg' || jt === 'jpg';
+  var q = (typeof quality === 'number' && isFinite(quality) && quality >= 0 && quality <= 1)
+    ? quality : 0.92;
+  if (ctx && ctx._buf && (isJpeg ? _OPS.op_canvas_jpeg : _OPS.op_canvas_png)) {
+    if (isJpeg) {
+      try {
+        const px = new Uint8Array(ctx._buf.buffer, ctx._buf.byteOffset, ctx._buf.byteLength);
+        cb(new Blob([new Uint8Array(_OPS.op_canvas_jpeg(ctx._w, ctx._h, px, q))], { type: 'image/jpeg' }));
+        return;
+      } catch (e) { /* fall through to the png path */ }
+    }
     try {
       const px = new Uint8Array(ctx._buf.buffer, ctx._buf.byteOffset, ctx._buf.byteLength);
       cb(new Blob([new Uint8Array(_OPS.op_canvas_png(ctx._w, ctx._h, px))], { type: 'image/png' }));
@@ -14590,26 +14647,26 @@ function _audioNode(ctx, extra) { return Object.assign({ context: ctx }, _audioN
 // Real AudioBuffer: detectors check `"copyFromChannel" in AudioBuffer.prototype`
 // (ReferenceError if the global is missing) and verify copyFromChannel copies
 // what getChannelData exposes — one backing Float32Array per channel.
+// (300015 P4) Members in Chrome's exact order, state in a WeakMap bag so
+// instances enumerate with ZERO own properties like Chrome's.
+const _abBag = new WeakMap();
 globalThis.AudioBuffer = class AudioBuffer {
   constructor(options) {
     const o = options || {};
     const nc = Math.max(1, o.numberOfChannels || 1);
     const len = Math.max(0, (o.length | 0) || 0);
-    this._channels = [];
+    const chs = [];
     for (let i = 0; i < nc; i++) {
-      this._channels.push(o.channelData && o.channelData[i]
+      chs.push(o.channelData && o.channelData[i]
         ? Float32Array.from(o.channelData[i])
         : new Float32Array(len));
     }
-    this._length = len;
-    this._sr = o.sampleRate || 44100;
-    __hideOwn(this);
+    _abBag.set(this, { ch: chs, len: len, sr: o.sampleRate || 44100 });
   }
-  get numberOfChannels() { return this._channels.length; }
-  get length() { return this._length; }
-  get sampleRate() { return this._sr; }
-  get duration() { return this._length / this._sr; }
-  getChannelData(c) { return this._channels[c] || (this._channels[c] = new Float32Array(this._length)); }
+  get length() { return _abBag.get(this).len; }
+  get duration() { const b = _abBag.get(this); return b.len / b.sr; }
+  get sampleRate() { return _abBag.get(this).sr; }
+  get numberOfChannels() { return _abBag.get(this).ch.length; }
   copyFromChannel(dest, channel, bufferOffset) {
     const src = this.getChannelData(channel);
     const off = bufferOffset || 0;
@@ -14622,6 +14679,7 @@ globalThis.AudioBuffer = class AudioBuffer {
     const n = Math.min(src.length, dst.length - off);
     for (let i = 0; i < n; i++) dst[off + i] = src[i];
   }
+  getChannelData(c) { const b = _abBag.get(this); return b.ch[c] || (b.ch[c] = new Float32Array(b.len)); }
 };
 Object.defineProperty(AudioBuffer.prototype, Symbol.toStringTag, { value: 'AudioBuffer', configurable: true });
 _markNative(AudioBuffer);
@@ -14629,17 +14687,49 @@ _markNativeProto(AudioBuffer.prototype);
 // The context classes are (re)defined below — sweep their prototypes only
 // after the definitions exist, otherwise snapshot creation crashes on
 // `undefined.prototype`.
-globalThis.BaseAudioContext = class BaseAudioContext {
-  constructor() { this.sampleRate=_fp('audioSampleRate'); this.state='running'; this.currentTime=0; this.baseLatency=_fp('audioBaseLatency'); this.outputLatency=0;
-    this.destination=_audioNode(this, {maxChannelCount:2,numberOfInputs:1,numberOfOutputs:0,channelCount:2});
-    this.listener={positionX:_audioParam(0),positionY:_audioParam(0),positionZ:_audioParam(0),forwardX:_audioParam(0),forwardY:_audioParam(0),forwardZ:_audioParam(-1),upX:_audioParam(0),upY:_audioParam(1),upZ:_audioParam(0),setPosition(){},setOrientation(){}}; }
-  // BaseAudioContext is an EventTarget (detectors addEventListener("complete")
-  // on OfflineAudioContext).
-  addEventListener(t, f) { __listenerGate(f); const l = this._ls || (this._ls = {}); (l[t] || (l[t] = [])).push(f); }
-  removeEventListener(t, f) { const l = this._ls && this._ls[t]; if (l) { const i = l.indexOf(f); if (i >= 0) l.splice(i, 1); } }
-  dispatchEvent(ev) { const l = (this._ls && this._ls[ev.type]) || []; for (const f of l.slice()) { try { _invokeListener(f, this, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } } return true; }
-  createOscillator() { return _audioNode(this, {type:'sine',frequency:_audioParam(440),detune:_audioParam(0),start(){},stop(){},onended:null}); }
-  createDynamicsCompressor() { return _audioNode(this, {threshold:_audioParam(_fp('compThreshold'),-100,0),knee:_audioParam(_fp('compKnee'),0,40),ratio:_audioParam(_fp('compRatio'),1,20),attack:_audioParam(0.003,0,1),release:_audioParam(0.25,0,1),reduction:0}); }
+//
+// (300015 P4) Chrome 155 audio surface (tmp-agent/chrome-audio-truth.json):
+// every attribute is a prototype accessor in Chrome's own order, instances
+// carry ZERO own properties (state/sampleRate/destination live in a WeakMap
+// bag), the event methods are INHERITED from EventTarget (chain:
+// EventTarget → BaseAudioContext → AudioContext/OfflineAudioContext),
+// resume/suspend live on AudioContext + OfflineAudioContext — NOT Base —
+// and contexts are born 'suspended' (autoplay policy), with OAC flipping to
+// 'closed' when startRendering settles.
+const _ctxBagMap = new WeakMap();
+function _ctxBag(ctx) {
+  let b = _ctxBagMap.get(ctx);
+  if (!b) { b = {}; _ctxBagMap.set(ctx, b); }
+  return b;
+}
+function _ctxSetState(ctx, s) {
+  const b = _ctxBag(ctx);
+  if (b.state === s) return;
+  b.state = s;
+  Promise.resolve().then(() => {
+    const ev = { type: 'statechange', target: ctx };
+    try { if (typeof b.onstatechange === 'function') b.onstatechange(ev); } catch (e) {}
+    try { ctx.dispatchEvent(ev); } catch (e) {}
+  });
+}
+globalThis.BaseAudioContext = class BaseAudioContext extends EventTarget {
+  constructor() {
+    super();
+    const b = _ctxBag(this);
+    b.sampleRate = _fp('audioSampleRate');
+    b.currentTime = 0;
+    b.state = 'suspended';
+    b.onstatechange = null;
+    b.destination = _audioNode(this, {maxChannelCount:2,numberOfInputs:1,numberOfOutputs:0,channelCount:2});
+    b.listener = {positionX:_audioParam(0),positionY:_audioParam(0),positionZ:_audioParam(0),forwardX:_audioParam(0),forwardY:_audioParam(0),forwardZ:_audioParam(-1),upX:_audioParam(0),upY:_audioParam(1),upZ:_audioParam(0),setPosition(){},setOrientation(){}};
+  }
+  get destination() { return _ctxBag(this).destination; }
+  get sampleRate() { return _ctxBag(this).sampleRate; }
+  get currentTime() { return _ctxBag(this).currentTime; }
+  get listener() { return _ctxBag(this).listener; }
+  get state() { return _ctxBag(this).state; }
+  get onstatechange() { return _ctxBag(this).onstatechange; }
+  set onstatechange(v) { _ctxBag(this).onstatechange = v; }
   createAnalyser() {
     return _audioNode(this, {fftSize:2048,frequencyBinCount:1024,minDecibels:-100,maxDecibels:-30,smoothingTimeConstant:0.8,
       getByteFrequencyData(a){for(let i=0;i<a.length;i++)a[i]=Math.floor(_fpRand(600+i)*10);},
@@ -14648,30 +14738,76 @@ globalThis.BaseAudioContext = class BaseAudioContext {
       getFloatTimeDomainData(a){for(let i=0;i<a.length;i++)a[i]=0;}
     });
   }
-  createGain() { return _audioNode(this, {gain:_audioParam(1)}); }
   createBiquadFilter() { return _audioNode(this, {type:'lowpass',frequency:_audioParam(350,0,24000),Q:_audioParam(1),detune:_audioParam(0),gain:_audioParam(0,-40,40),
     getFrequencyResponse(){}}); }
-  createBufferSource() { return _audioNode(this, {buffer:null,playbackRate:_audioParam(1),detune:_audioParam(0),loop:false,loopStart:0,loopEnd:0,start(){},stop(){},onended:null}); }
   createBuffer(ch,len,rate) { return new AudioBuffer({numberOfChannels:ch,length:len,sampleRate:rate||this.sampleRate}); }
-  createScriptProcessor() { return _audioNode(this, {onaudioprocess:null,bufferSize:4096}); }
+  createBufferSource() { return _audioNode(this, {buffer:null,playbackRate:_audioParam(1),detune:_audioParam(0),loop:false,loopStart:0,loopEnd:0,start(){},stop(){},onended:null}); }
   createChannelMerger(n) { return _audioNode(this, {numberOfInputs:n||6,numberOfOutputs:1}); }
   createChannelSplitter(n) { return _audioNode(this, {numberOfInputs:1,numberOfOutputs:n||6}); }
+  createConstantSource() { return _audioNode(this, {offset:_audioParam(0),start(){},stop(){},onended:null}); }
+  createConvolver() { return _audioNode(this, {buffer:null,normalize:true}); }
   createDelay() { return _audioNode(this, {delayTime:_audioParam(0,0,1)}); }
+  createDynamicsCompressor() { return _audioNode(this, {threshold:_audioParam(_fp('compThreshold'),-100,0),knee:_audioParam(_fp('compKnee'),0,40),ratio:_audioParam(_fp('compRatio'),1,20),attack:_audioParam(0.003,0,1),release:_audioParam(0.25,0,1),reduction:0}); }
+  createGain() { return _audioNode(this, {gain:_audioParam(1)}); }
+  createIIRFilter(feedforward, feedback) { return _audioNode(this, {feedforward:feedforward||null,feedback:feedback||null,getFrequencyResponse(){}}); }
+  createOscillator() { return _audioNode(this, {type:'sine',frequency:_audioParam(440),detune:_audioParam(0),start(){},stop(){},onended:null}); }
+  createPanner() { return _audioNode(this, {panningModel:'equalpower',distanceModel:'inverse',refDistance:1,maxDistance:10000,rolloffFactor:1,coneInnerAngle:360,coneOuterAngle:360,coneOuterGain:0,setPosition(){},setOrientation(){}}); }
+  createPeriodicWave(real, imag) {
+    const w = {};
+    Object.defineProperty(w, Symbol.toStringTag, { value: 'PeriodicWave', configurable: true });
+    return w;
+  }
+  createScriptProcessor() { return _audioNode(this, {onaudioprocess:null,bufferSize:4096}); }
+  createStereoPanner() { return _audioNode(this, {pan:_audioParam(0,-1,1)}); }
   createWaveShaper() { return _audioNode(this, {curve:null,oversample:'none'}); }
   decodeAudioData(buf) { return Promise.resolve(this.createBuffer(2,44100,44100)); }
-  resume() { this.state='running'; return Promise.resolve(); }
-  suspend() { this.state='suspended'; return Promise.resolve(); }
+  get renderQuantumSize() { return 128; }
 };
 globalThis.AudioContext = class AudioContext extends BaseAudioContext {
-  close() { this.state='closed'; return Promise.resolve(); }
-  createMediaStreamDestination() { return _audioNode(this, {stream:{getTracks(){return [];},getAudioTracks(){return [];}}}); }
+  constructor(options) {
+    super();
+    const b = _ctxBag(this);
+    if (options && options.sampleRate) b.sampleRate = options.sampleRate;
+    b.baseLatency = _fp('audioBaseLatency');
+    b.outputLatency = 0;
+    b.onerror = null;
+  }
+  get baseLatency() { return _ctxBag(this).baseLatency; }
+  get outputLatency() { return _ctxBag(this).outputLatency; }
+  get onerror() { return _ctxBag(this).onerror; }
+  set onerror(v) { _ctxBag(this).onerror = v; }
+  close() { _ctxSetState(this, 'closed'); return Promise.resolve(); }
   createMediaElementSource(el) { return _audioNode(this, {mediaElement:el||null}); }
+  createMediaStreamDestination() { return _audioNode(this, {stream:{getTracks(){return [];},getAudioTracks(){return [];}}}); }
+  createMediaStreamSource(stream) { return _audioNode(this, {mediaStream:stream||null}); }
   getOutputTimestamp() { return {contextTime:this.currentTime,performanceTime:0}; }
+  resume() { _ctxSetState(this, 'running'); return Promise.resolve(); }
+  suspend() { _ctxSetState(this, 'suspended'); return Promise.resolve(); }
+  get playbackStats() { return {}; }
 };
 globalThis.OfflineAudioContext = class OfflineAudioContext extends BaseAudioContext {
-  constructor(ch,len,rate) { super(); this.sampleRate=rate||44100; this.length=len||44100; this.numberOfChannels=ch||1; }
+  constructor(ch, len, rate) {
+    super();
+    if (ch == null && len == null && rate == null) {
+      throw new TypeError("Failed to construct 'OfflineAudioContext': 3 arguments required, or use OfflineAudioContext(options).");
+    }
+    if (ch && typeof ch === 'object') {
+      const o = ch;
+      ch = o.numberOfChannels; len = o.length; rate = o.sampleRate;
+    }
+    const b = _ctxBag(this);
+    b.numberOfChannels = Math.max(1, ch | 0 || 1);
+    b.length = Math.max(0, len | 0 || 0);
+    b.sampleRate = rate || 44100;
+    b.oncomplete = null;
+  }
+  get oncomplete() { return _ctxBag(this).oncomplete; }
+  set oncomplete(v) { _ctxBag(this).oncomplete = v; }
+  get length() { return _ctxBag(this).length; }
+  resume() { _ctxSetState(this, 'running'); return Promise.resolve(); }
   startRendering() {
-    const buf = this.createBuffer(this.numberOfChannels,this.length,this.sampleRate);
+    const b = _ctxBag(this);
+    const buf = this.createBuffer(b.numberOfChannels, b.length, b.sampleRate);
     // Deterministic, identity-seeded pseudo-signal: an all-zero render reads as
     // "audio is fake" to detectors; real Chrome yields a compressor-shaped
     // waveform. Stable per fingerprint seed, nonzero, consistent between
@@ -14680,19 +14816,48 @@ globalThis.OfflineAudioContext = class OfflineAudioContext extends BaseAudioCont
     for (let i = 0; i < d.length; i++) {
       d[i] = (_fpRand(8100 + i) * 2 - 1) * 0.1 * Math.exp(-i / (d.length * 0.7));
     }
-    const p = Promise.resolve(buf);
-    // Real implementations fire 'complete' with the rendered buffer.
-    p.then(() => {
-      const ev = { type: 'complete', renderedBuffer: buf, target: this };
-      if (typeof this.oncomplete === 'function') { try { this.oncomplete(ev); } catch (e) {} }
-      this.dispatchEvent(ev);
+    const self = this;
+    return Promise.resolve().then(() => {
+      _ctxSetState(self, 'closed');
+      const ev = { type: 'complete', renderedBuffer: buf, target: self };
+      try { if (typeof b.oncomplete === 'function') b.oncomplete(ev); } catch (e) {}
+      self.dispatchEvent(ev);
+      return buf;
     });
-    return p;
+  }
+  suspend(time) {
+    if (time === undefined) {
+      throw new TypeError("Failed to execute 'suspend' on 'OfflineAudioContext': 1 argument required, but only 0 present.");
+    }
+    time = Number(time);
+    if (!isFinite(time)) {
+      throw new TypeError("Failed to execute 'suspend' on 'OfflineAudioContext': The provided double value is non-finite.");
+    }
+    return Promise.resolve();
   }
 };
 _markNativeProto(globalThis.BaseAudioContext.prototype);
 _markNativeProto(globalThis.AudioContext.prototype);
 _markNativeProto(globalThis.OfflineAudioContext.prototype);
+// (300015 P4) V8 class syntax puts `constructor` FIRST in the prototype's
+// own-names order; Chrome's IDL prototypes list it LAST (audio truth
+// capture). Class prototype members are configurable, so delete +
+// re-define moves it to the end without touching behavior. Audio family
+// only — the wider ordering gap across all class-syntax interfaces is a
+// known residual (name SETS match everywhere).
+(function () {
+  for (const P of [EventTarget.prototype, AudioBuffer.prototype,
+                   BaseAudioContext.prototype, AudioContext.prototype,
+                   OfflineAudioContext.prototype]) {
+    try {
+      const c = P.constructor;
+      if (Object.getOwnPropertyNames(P)[0] === 'constructor') {
+        delete P.constructor;
+        Object.defineProperty(P, 'constructor', { value: c, writable: true, configurable: true });
+      }
+    } catch (e) {}
+  }
+})();
 
 globalThis.speechSynthesis = {
   speaking: false, pending: false, paused: false,

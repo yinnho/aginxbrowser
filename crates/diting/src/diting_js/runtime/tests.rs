@@ -1570,6 +1570,139 @@
         assert_eq!(v["face"][5], true, "toBlob toString native");
     }
 
+    /// (300015 P4) Two in-page-detectable faces the XHS create page reads:
+    /// ① a DRAWN canvas through toDataURL('image/jpeg') must return real
+    /// baseline-JPEG bytes (FF D8 … FF D9) under a jpeg prefix — the engine
+    /// used to return PNG bytes there, a one-line detect; ② the audio class
+    /// surface must match Chrome 155 (tmp-agent/chrome-audio-truth.json):
+    /// prototype member lists in Chrome's order with constructor LAST,
+    /// accessor kind per member, ZERO own props on instances, born
+    /// 'suspended', resume/suspend on AudioContext + OfflineAudioContext but
+    /// NOT Base, EventTarget carrying addEventListener/dispatchEvent/
+    /// removeEventListener/when, OAC.suspend() throwing without an argument.
+    #[tokio::test(flavor = "current_thread")]
+    async fn canvas_jpeg_readout_and_audio_face_p4() {
+        let mut rt = setup_runtime("<html><body>x</body></html>");
+        let v = rt.evaluate(r#"
+            var r = {};
+            // --- drawn canvas jpeg: real FF D8...FF D9 bytes, jpeg prefix ---
+            var c = document.createElement('canvas');
+            c.width = 2000; c.height = 200;
+            var ctx = c.getContext('2d');
+            ctx.fillStyle = '#f60'; ctx.fillRect(0, 0, 1000, 100);
+            ctx.fillStyle = 'rgba(0,30,200,0.7)'; ctx.fillRect(500, 50, 800, 120);
+            var url = c.toDataURL('image/jpeg');
+            var bin = atob(url.slice(url.indexOf(',') + 1));
+            r.jpeg = [url.slice(0, 23),
+                      bin.charCodeAt(0) + ',' + bin.charCodeAt(1) + ',' + bin.charCodeAt(2),
+                      bin.charCodeAt(bin.length - 2) + ',' + bin.charCodeAt(bin.length - 1),
+                      bin.length];
+            r.png_still_png = c.toDataURL().slice(0, 14);
+            r.alias = c.toDataURL('image/jpg').slice(0, 23);
+            var lo = c.toDataURL('image/jpeg', 0.1).length;
+            var hi = c.toDataURL('image/jpeg', 0.99).length;
+            r.quality_gap = hi - lo;
+            var bt = null, bs = 0;
+            c.toBlob(function(b){ bt = b.type; bs = b.size; }, 'image/jpeg');
+            r.blob = [bt, bs, bs === bin.length];
+            // --- audio surface vs the Chrome truth capture ---
+            var ac = new AudioContext();
+            r.ac_own = Object.getOwnPropertyNames(ac);
+            r.ac_state = ac.state;
+            r.ac_proto = Object.getOwnPropertyNames(AudioContext.prototype);
+            var oac = new OfflineAudioContext(1, 44100, 44100);
+            r.oac_own = Object.getOwnPropertyNames(oac);
+            r.oac_proto = Object.getOwnPropertyNames(OfflineAudioContext.prototype);
+            r.base_proto = Object.getOwnPropertyNames(BaseAudioContext.prototype);
+            r.et_proto = Object.getOwnPropertyNames(EventTarget.prototype);
+            var oc = Object.getOwnPropertyDescriptor(OfflineAudioContext.prototype, 'oncomplete');
+            var lg = Object.getOwnPropertyDescriptor(OfflineAudioContext.prototype, 'length');
+            r.oac_desc = [typeof oc.get, lg.enumerable, lg.configurable];
+            r.oac_oncomplete = typeof oac.oncomplete;
+            r.oac_length = oac.length;
+            var rc = new AudioContext(); rc.resume();
+            r.state_after_resume = rc.state;
+            r.suspend_noarg = (function(){ try { oac.suspend(); return 'no-throw'; } catch(e){ return e.name; } })();
+            r.ac_extends_et = ac instanceof EventTarget;
+            r.complete_evt = (function(){
+                var o2 = new OfflineAudioContext(1, 500, 44100);
+                o2.addEventListener('complete', function(ev){ window.__completeFired = ev.type; });
+                o2.startRendering();
+                return 'armed'; // 'complete' fires from a microtask — read on the next eval
+            })();
+            r.ab_own = Object.getOwnPropertyNames(new AudioBuffer({numberOfChannels: 1, length: 100}));
+            r.ab_proto = Object.getOwnPropertyNames(AudioBuffer.prototype);
+            r.ab_same_ref = (function(){ var b = new AudioBuffer({numberOfChannels: 1, length: 10}); return b.getChannelData(0) === b.getChannelData(0); })();
+            JSON.stringify(r)
+        "#).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(v.as_str().expect("string from JSON.stringify")).unwrap();
+        // ① drawn jpeg — prefix, SOI+APP0 JFIF marker, EOI, nonzero payload.
+        assert_eq!(v["jpeg"][0], "data:image/jpeg;base64,", "drawn jpeg prefix");
+        assert_eq!(v["jpeg"][1], "255,216,255", "SOI + 0xFF marker (real JPEG magic)");
+        assert_eq!(v["jpeg"][2], "255,217", "EOI trailer");
+        assert!(v["jpeg"][3].as_i64().unwrap() > 1000, "drawn 2000x200 jpeg payload is real bytes");
+        assert_eq!(v["png_still_png"], "data:image/png", "default type stays PNG");
+        assert_eq!(v["alias"], "data:image/jpeg;base64,", "'image/jpg' alias dispatches jpeg");
+        assert!(v["quality_gap"].as_i64().unwrap() > 0, "higher quality → larger output");
+        assert_eq!(v["blob"][0], "image/jpeg", "toBlob jpeg type");
+        assert_eq!(v["blob"][2], true, "toBlob byte size === toDataURL payload");
+        // ② audio — exact prototype lists, Chrome order, constructor last.
+        assert_eq!(
+            v["ac_proto"],
+            serde_json::json!(["baseLatency","outputLatency","onerror","close",
+                "createMediaElementSource","createMediaStreamDestination","createMediaStreamSource",
+                "getOutputTimestamp","resume","suspend","playbackStats","constructor"]),
+            "AudioContext.prototype names"
+        );
+        assert_eq!(
+            v["oac_proto"],
+            serde_json::json!(["oncomplete","length","resume","startRendering","suspend","constructor"]),
+            "OfflineAudioContext.prototype names"
+        );
+        assert_eq!(
+            v["base_proto"],
+            serde_json::json!(["destination","sampleRate","currentTime","listener","state",
+                "onstatechange","createAnalyser","createBiquadFilter","createBuffer","createBufferSource",
+                "createChannelMerger","createChannelSplitter","createConstantSource","createConvolver",
+                "createDelay","createDynamicsCompressor","createGain","createIIRFilter","createOscillator",
+                "createPanner","createPeriodicWave","createScriptProcessor","createStereoPanner",
+                "createWaveShaper","decodeAudioData","renderQuantumSize","constructor"]),
+            "BaseAudioContext.prototype names (no resume/suspend — they moved up a level)"
+        );
+        assert_eq!(
+            v["et_proto"],
+            serde_json::json!(["addEventListener","dispatchEvent","removeEventListener","when","constructor"]),
+            "EventTarget.prototype names"
+        );
+        assert_eq!(v["ac_own"], serde_json::json!([]), "AudioContext instance carries zero own props");
+        assert_eq!(v["oac_own"], serde_json::json!([]), "OfflineAudioContext instance carries zero own props");
+        assert_eq!(v["ac_state"], "suspended", "born suspended (autoplay policy)");
+        assert_eq!(v["oac_desc"], serde_json::json!(["function", true, true]),
+            "oncomplete is an accessor; length getter is enumerable+configurable like Chrome");
+        assert_eq!(v["oac_oncomplete"], "object", "unset oncomplete reads as null ('object')");
+        assert_eq!(v["oac_length"], 44100, "OAC length reflects the constructor arg");
+        assert_eq!(v["state_after_resume"], "running", "resume() flips state");
+        assert_eq!(v["suspend_noarg"], "TypeError", "OAC.suspend() without an argument throws");
+        assert_eq!(v["ac_extends_et"], true, "contexts sit on the EventTarget chain");
+        // Microtask-flushed: pump the loop, then read the flag (Chrome's
+        // startRendering also settles async).
+        let _ = rt.run_event_loop_bounded(100).await;
+        let fired = rt.evaluate("window.__completeFired || 'never'").unwrap();
+        assert_eq!(
+            fired.as_str().unwrap_or("never"), "complete",
+            "'complete' listener fires from startRendering"
+        );
+        assert_eq!(v["ab_own"], serde_json::json!([]), "AudioBuffer instance carries zero own props");
+        assert_eq!(
+            v["ab_proto"],
+            serde_json::json!(["length","duration","sampleRate","numberOfChannels",
+                "copyFromChannel","copyToChannel","getChannelData","constructor"]),
+            "AudioBuffer.prototype names"
+        );
+        assert_eq!(v["ab_same_ref"], true, "getChannelData returns the same array every call");
+    }
+
     /// (#37) HTMLBodyElement's window-reflecting on* family: 24 names whose
     /// body accessors ARE the window's — shared identity both directions,
     /// `<body onX>` content attributes install as the window's handler and

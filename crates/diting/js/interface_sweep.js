@@ -80,6 +80,11 @@
     globalThis.WebSocket, globalThis.EventSource, globalThis.BroadcastChannel,
     globalThis.ReadableStream, globalThis.WritableStream,
     globalThis.FileList,
+    // (300015 P4) WebIDL prototype attributes are enumerable in Chrome
+    // (getOwnPropertyNames(OAC.prototype).length desc: enumerable true) —
+    // class-body getters come out non-enumerable, so sweep them too.
+    globalThis.AudioBuffer, globalThis.BaseAudioContext,
+    globalThis.AudioContext, globalThis.OfflineAudioContext,
   ]) add(C);
   for (const n of Object.getOwnPropertyNames(globalThis)) {
     if (/^(HTML|SVG)[A-Za-z]*Element$/.test(n)) add(globalThis[n]);

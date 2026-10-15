@@ -3030,7 +3030,7 @@ pub(crate) use band::{
     band_frame, band_frame_cut, band_frame_cut_with_text, band_frame_scaled,
     band_frame_with_text,
 };
-pub(crate) use canvas::op_canvas_png;
+pub(crate) use canvas::{op_canvas_jpeg, op_canvas_png};
 #[cfg(feature = "screenshot")]
 pub(crate) use canvas::{op_canvas_store, op_canvas_text};
 pub(crate) use ecdsa::{
@@ -5807,6 +5807,7 @@ pub fn build_extension() -> Extension {
             op_fetch_url_sync(),
             op_image_info(),
             op_canvas_png(),
+            op_canvas_jpeg(),
             #[cfg(feature = "screenshot")]
             op_canvas_store(),
             #[cfg(feature = "screenshot")]
