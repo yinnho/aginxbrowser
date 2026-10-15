@@ -1424,6 +1424,73 @@
             "input face gains size/maxLength/minLength only; textarea gains all five");
     }
 
+    /// (300015 P2) Window own-prop face parity with Chrome 155 (https page
+    /// baseline): the relocated trio lives on the proto layer, worker
+    /// plumbing and legacy globals are gone, and the generated surface
+    /// (global_surface.js) lands interface/method/object faces with
+    /// Chrome's own descriptor shapes. Truth captured via CDP —
+    /// tmp-agent/fp-winkeys-diff.json, fp-chrome-shapes.json.
+    #[test]
+    fn window_own_prop_face_p2() {
+        let mut rt = setup_runtime("<html><body>x</body></html>");
+        let v = rt.evaluate(r#"
+            var own = Object.getOwnPropertyNames(window);
+            var has = function(n){ return own.indexOf(n) >= 0; };
+            var r = {};
+            ['addEventListener','removeEventListener','dispatchEvent','constructor'].forEach(function(n){
+                r['reloc_'+n] = {off: !has(n), resolves: typeof window[n]};
+            });
+            ['bootWorker','runWorkerMessage','workerImportUrls','preloadWorkerImports',
+             'resolveWorkerImportUrl','CSS2Properties','WebKitMediaSource','SVGDiscardElement',
+             'scheduling','webkitAudioContext','webkitOfflineAudioContext'].forEach(function(n){
+                r['gone_'+n] = !has(n) && !(n in window);
+            });
+            ['oncopy','oncut','onpaste','ondragexit','ontouchstart'].forEach(function(n){
+                r['gone_'+n] = !has(n);
+            });
+            r.throw_iface = typeof window.PermissionsPolicy;
+            r.throw_msg = (function(){ try { new PermissionsPolicy(); return 'no-throw'; } catch(e){ return e.message; } })();
+            r.throw_enum = Object.getOwnPropertyDescriptor(window,'PermissionsPolicy').enumerable;
+            r.ok_iface = typeof window.XSLTProcessor;
+            r.ok_new = window.XSLTProcessor && (new XSLTProcessor()) instanceof XSLTProcessor;
+            r.method = typeof window.moveTo;
+            r.method_enum = Object.getOwnPropertyDescriptor(window,'moveTo').enumerable;
+            r.method_ctor = (function(){ try { new moveTo(); return 'no-throw'; } catch(e){ return e.message; } })();
+            r.obj_tag = Object.prototype.toString.call(window.locationbar);
+            r.obj_enum = Object.getOwnPropertyDescriptor(window,'locationbar').enumerable;
+            r.client_info = window.clientInformation === navigator;
+            r.credless = window.credentialless;
+            r.onsearch_acc = typeof Object.getOwnPropertyDescriptor(window,'onsearch').get;
+            r.onsearch_val = window.onsearch;
+            JSON.stringify(r)
+        "#).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(v.as_str().expect("string from JSON.stringify")).unwrap();
+        let obj = v.as_object().unwrap();
+        for n in ["addEventListener","removeEventListener","dispatchEvent","constructor"] {
+            let e = &obj[&format!("reloc_{}", n)];
+            assert_eq!(e["off"], true, "{} must not be a window own prop", n);
+            assert_eq!(e["resolves"], "function", "{} must still resolve", n);
+        }
+        for k in obj.keys().filter(|k| k.starts_with("gone_")) {
+            assert_eq!(obj[k], true, "{} leaked onto the window face", k);
+        }
+        assert_eq!(obj["throw_iface"], "function");
+        assert_eq!(obj["throw_msg"], "Failed to construct 'PermissionsPolicy': Illegal constructor");
+        assert_eq!(obj["throw_enum"], false);
+        assert_eq!(obj["ok_iface"], "function");
+        assert_eq!(obj["ok_new"], true);
+        assert_eq!(obj["method"], "function");
+        assert_eq!(obj["method_enum"], true);
+        assert_eq!(obj["method_ctor"], "moveTo is not a constructor");
+        assert_eq!(obj["obj_tag"], "[object BarProp]");
+        assert_eq!(obj["obj_enum"], true);
+        assert_eq!(obj["client_info"], true);
+        assert_eq!(obj["credless"], false);
+        assert_eq!(obj["onsearch_acc"], "function");
+        assert_eq!(obj["onsearch_val"], serde_json::Value::Null);
+    }
+
     /// (#37) HTMLBodyElement's window-reflecting on* family: 24 names whose
     /// body accessors ARE the window's — shared identity both directions,
     /// `<body onX>` content attributes install as the window's handler and

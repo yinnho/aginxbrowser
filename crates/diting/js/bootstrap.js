@@ -1400,7 +1400,9 @@ class CSSStyleDeclaration {
 // `CSSStyleDeclaration.prototype` for it — a missing global is flagged as a
 // tampered API, which flips their iframe fallback and runs destructive DOM
 // probes in the main document.
-globalThis.CSS2Properties = class CSS2Properties {};
+(() => { // chrome-155 truth: no window.CSS2Properties global (typeof probe must
+// see undefined), but the prototype chain under CSSStyleDeclaration survives.
+const CSS2Properties = class CSS2Properties {};
 Object.setPrototypeOf(CSSStyleDeclaration.prototype, CSS2Properties.prototype);
 for (const _m of ["setProperty", "getPropertyValue", "getPropertyPriority", "removeProperty", "item"]) {
   if (typeof CSSStyleDeclaration.prototype[_m] === "function") {
@@ -1410,6 +1412,7 @@ for (const _m of ["setProperty", "getPropertyValue", "getPropertyPriority", "rem
 _markNative(CSS2Properties);
 _markNativeProto(CSSStyleDeclaration.prototype);
 _markNativeProto(CSS2Properties.prototype);
+})();
 
 // DOMStringMap backs Element.dataset. Chrome throws on `new DOMStringMap()`;
 // the construction key keeps instances engine-only (upstream ec05ed0).
@@ -7182,45 +7185,20 @@ globalThis.frames = globalThis;
 globalThis.frameElement = null;
 globalThis.length = 0;
 
-// HTML spec exposes on* event handler IDL attributes on Window. Libraries like
-// jQuery feature-detect bubbling via `("on" + ev) in window` and fall back to
-// a legacy IE path that crashes on missing DOM APIs when the check returns
-// false. Initialising them to null makes the check match real browsers.
-for (const _ev of [
-  "abort","animationcancel","animationend","animationiteration","animationstart",
-  "beforeprint","beforeunload","blur","cancel","canplay","canplaythrough",
-  "change","click","close","contextmenu","cuechange","dblclick","drag","dragend",
-  "dragenter","dragleave","dragover","dragstart","drop","durationchange","emptied",
-  "ended","error","focus","focusin","focusout","formdata","gotpointercapture",
-  "hashchange","input","invalid","keydown","keypress","keyup","languagechange",
-  "load","loadeddata","loadedmetadata","loadstart","lostpointercapture","message",
-  "mousedown","mouseenter","mouseleave","mousemove","mouseout","mouseover","mouseup",
-  "offline","online","pagehide","pageshow","paste","pause","play","playing",
-  "pointercancel","pointerdown","pointerenter","pointerleave","pointermove",
-  "pointerout","pointerover","pointerup","popstate","progress","ratechange",
-  "rejectionhandled","reset","resize","scroll","seeked","seeking","select",
-  "slotchange","stalled","storage","submit","suspend","timeupdate","toggle",
-  "transitioncancel","transitionend","transitionrun","transitionstart",
-  "unhandledrejection",
-  "unload","volumechange","waiting","wheel",
-]) {
-  if (!(("on" + _ev) in globalThis)) globalThis["on" + _ev] = null;
-}
+// (face fix) The early `globalThis['on'+ev] = null` loop is gone: it installed
+// enumerable data props where Chrome has accessor pairs, and its name set was
+// the pre-P2 approximation. The single chrome-exact accessor install at
+// _WINDOW_EVENT_NAMES below now owns the whole window on* surface — `in`
+// checks and assignment behave the same through the accessors.
 
 globalThis.Window = globalThis.Window || function Window() {};
 Object.defineProperty(globalThis.Window, Symbol.hasInstance, {
   value(obj) { return obj === globalThis || (obj && obj.window === obj); },
   configurable: true,
 });
-// Framework environment gates (Ember's among them) check the direct identity
-// `self.constructor === Window`; the inherited Object constructor sends them
-// down their server-rendering path (upstream 9dfc67a).
-Object.defineProperty(globalThis, 'constructor', {
-  value: globalThis.Window,
-  writable: true,
-  configurable: true,
-  enumerable: false,
-});
+// (face fix) window must NOT own `constructor` — Chrome keeps it on
+// Window.prototype. global_surface.js moves it to the proto layer and points
+// it at Window so `self.constructor === Window` gates still pass.
 
 
 const _iframeRegistry = [];
@@ -7881,7 +7859,6 @@ globalThis.Scheduling = class Scheduling {
   constructor() { throw new TypeError("Illegal constructor"); }
   isInputPending() { return false; }
 };
-globalThis.scheduling = Object.create(globalThis.Scheduling.prototype);
 
 globalThis.TextTrackCue = class TextTrackCue {
   constructor() { throw new TypeError("Illegal constructor"); }
@@ -12562,7 +12539,6 @@ globalThis.SVGTextContentElement = class SVGTextContentElement extends globalThi
 };
 globalThis.SVGTextPositioningElement = class SVGTextPositioningElement extends globalThis.SVGTextContentElement {};
 globalThis.SVGAnimationElement = class SVGAnimationElement extends globalThis.SVGElement {};
-globalThis.SVGDiscardElement = class SVGDiscardElement extends globalThis.SVGElement {};
 globalThis.SVGFEDropShadowElement = class SVGFEDropShadowElement extends globalThis.SVGElement {};
 // (#28) Element interfaces for the common SVG tags, registered by exact
 // local name in _svgTagInterfaces (see _elementClassFor). Computed-name
@@ -12588,7 +12564,6 @@ globalThis.SVGFEDropShadowElement = class SVGFEDropShadowElement extends globalT
     ["SVGTextElement", SVGTextPositioningElement, ["text"]],
     ["SVGTSpanElement", SVGTextPositioningElement, ["tspan"]],
     ["SVGAnimateElement", SVGAnimationElement, ["animate", "set", "animateMotion", "animateTransform"]],
-    ["SVGDiscardElement", SVGDiscardElement, ["discard"]],
     ["SVGFEDropShadowElement", SVGFEDropShadowElement, ["feDropShadow"]],
     ["SVGTitleElement", SVGElement, ["title"]],
     ["SVGDescElement", SVGElement, ["desc"]],
@@ -14438,7 +14413,6 @@ globalThis.MediaSource = class MediaSource extends _MseEventTarget {
 };
 _markNative(globalThis.MediaSource);
 _markNative(globalThis.MediaSource.isTypeSupported);
-globalThis.WebKitMediaSource = globalThis.MediaSource;
 
 // Media element state — lives on HTMLMediaElement.prototype (Chrome's home
 // for it) so generic elements stop answering media questions: the mount path
@@ -14688,8 +14662,6 @@ globalThis.OfflineAudioContext = class OfflineAudioContext extends BaseAudioCont
     return p;
   }
 };
-globalThis.webkitAudioContext = globalThis.AudioContext;
-globalThis.webkitOfflineAudioContext = globalThis.OfflineAudioContext;
 _markNativeProto(globalThis.BaseAudioContext.prototype);
 _markNativeProto(globalThis.AudioContext.prototype);
 _markNativeProto(globalThis.OfflineAudioContext.prototype);
@@ -15907,7 +15879,7 @@ globalThis.Worker = class Worker {
       });
     };
     resolveCode()
-      .then(code => preloadWorkerImports(worker, code).then(() => code))
+      .then(code => _preloadWorkerImports(worker, code).then(() => code))
       .then(code => {
       worker._code = code;
       worker._codeReady = true;
@@ -15916,10 +15888,10 @@ globalThis.Worker = class Worker {
       // a self-posting pump — and never wait for a parent message, so
       // deferring the whole body to the first postMessage meant those
       // workers sat dead forever (obscura#851 family).
-      try { bootWorker(worker); }
+      try { _bootWorker(worker); }
       catch (e) {
         console.error('Worker error:', e.message);
-        fireWorkerError(worker, e, __evtStore.get(worker));
+        _fireWorkerError(worker, e, __evtStore.get(worker));
       }
       // Drain messages that queued while the source loaded. Delivery here
       // runs as a microtask at the next JS yield - immune to macro-task
@@ -15931,8 +15903,8 @@ globalThis.Worker = class Worker {
         const m = worker._pending.shift();
         if (m && !m.delivered) {
           m.delivered = true;
-          if (code) runWorkerMessage(worker, m.data);
-          else fireWorkerError(worker, worker._fetchError || new Error('Worker script failed to load or execute (no message from browser)'), __evtStore.get(worker));
+          if (code) _runWorkerMessage(worker, m.data);
+          else _fireWorkerError(worker, worker._fetchError || new Error('Worker script failed to load or execute (no message from browser)'), __evtStore.get(worker));
         }
       }
     });
@@ -15958,10 +15930,10 @@ globalThis.Worker = class Worker {
       msg.delivered = true;
       if (!worker._code) {
         const err = worker._fetchError || new Error('Worker script failed to load or execute (no message from browser)');
-        fireWorkerError(worker, err, __evtStore.get(worker));
+        _fireWorkerError(worker, err, __evtStore.get(worker));
         return;
       }
-      runWorkerMessage(worker, data);
+      _runWorkerMessage(worker, data);
     };
     setTimeout(attempt, 0);
   }
@@ -15992,7 +15964,7 @@ globalThis.Worker = class Worker {
 // importScripts surfaces the same way (the worker's error event). The
 // preloader goes through the page's own fetch, so the SSRF deny-set and
 // robots/proxy policy apply to worker imports exactly as to the page.
-function workerImportUrls(src) {
+function _workerImportUrls(src) {
   const urls = [];
   const callRe = /importScripts\s*\(([^)]*)\)/g;
   let call;
@@ -16003,9 +15975,9 @@ function workerImportUrls(src) {
   }
   return urls;
 }
-globalThis.__ditingWorkerImportUrls = workerImportUrls;
+globalThis.__ditingWorkerImportUrls = _workerImportUrls;
 
-function resolveWorkerImportUrl(u, worker) {
+function _resolveWorkerImportUrl(u, worker) {
   try {
     return new URL(u, worker._url || (globalThis.location && globalThis.location.href) || 'https://example.com/').href;
   } catch {
@@ -16013,22 +15985,22 @@ function resolveWorkerImportUrl(u, worker) {
   }
 }
 
-async function preloadWorkerImports(worker, code) {
+async function _preloadWorkerImports(worker, code) {
   worker._imported = {};
   if (typeof code !== 'string' || !code.includes('importScripts')) return;
-  let frontier = workerImportUrls(code);
+  let frontier = _workerImportUrls(code);
   for (let wave = 0; wave < 3 && frontier.length; wave++) {
     const batch = frontier;
     frontier = [];
     await Promise.all(batch.map(async raw => {
-      const u = resolveWorkerImportUrl(raw, worker);
+      const u = _resolveWorkerImportUrl(raw, worker);
       if (u in worker._imported) return;
       try {
         const text = u.startsWith('data:')
           ? _decodeDataScriptUrl(u)
           : await fetch(u).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); });
         worker._imported[u] = text;
-        for (const nested of workerImportUrls(text)) frontier.push(nested);
+        for (const nested of _workerImportUrls(text)) frontier.push(nested);
       } catch {
         worker._imported[u] = null;
       }
@@ -16172,7 +16144,7 @@ function _unmaskMainThreadGlobals() {
 }
 
 // The importScripts() body shared by both realms: replay preloaded sources
-// (see preloadWorkerImports) in order through indirect eval so top-level
+// (see _preloadWorkerImports) in order through indirect eval so top-level
 // declarations land in the global lexical scope. (#98) Chrome replays
 // imports in the worker's own global, where no DOM exists — ours replays
 // into the page realm, where PDD's wheel saw the page's MutationObserver,
@@ -16183,7 +16155,7 @@ function _unmaskMainThreadGlobals() {
 function _workerImportScripts(importShim) {
   return (...urls) => {
     for (const raw of urls) {
-      const u = resolveWorkerImportUrl(raw, importShim);
+      const u = _resolveWorkerImportUrl(raw, importShim);
       const text = importShim._imported && importShim._imported[u];
       if (typeof text !== 'string') {
         throw new Error('importScripts: failed to load "' + raw + '"');
@@ -16198,7 +16170,7 @@ function _workerImportScripts(importShim) {
 // Build the worker scope and execute the body's top level. Idempotent —
 // the constructor calls it once the source is ready, and every delivered
 // message lands here first.
-function bootWorker(worker) {
+function _bootWorker(worker) {
   if (worker._workerSelf) return;
     const workerSelf = _workerSurfaceCommon(_workerImportScripts(worker));
     // `onmessage` is pre-declared so the `with (self)` wrapper below catches a
@@ -16233,20 +16205,20 @@ function bootWorker(worker) {
         finally { restore(); }
 }
 
-function runWorkerMessage(worker, data) {
+function _runWorkerMessage(worker, data) {
   const restore = _maskMainThreadGlobals();
   try {
-    bootWorker(worker);
+    _bootWorker(worker);
     if (worker._workerSelf.onmessage) worker._workerSelf.onmessage({ data });
   } catch(e) {
     console.error('Worker error:', e.message);
-    fireWorkerError(worker, e, __evtStore.get(worker));
+    _fireWorkerError(worker, e, __evtStore.get(worker));
   } finally { restore(); }
 }
 
 // Module-level so both construction-time fetch failures and execution-time
 // throws share one ErrorEvent-shaped path.
-function fireWorkerError(worker, err, listeners) {
+function _fireWorkerError(worker, err, listeners) {
   const message = err instanceof Error ? (err.message || err.name) : String(err);
   const evt = { message, filename: '', lineno: 0, colno: 0, error: err };
   const handlers = ((listeners && listeners['error']) || []).slice();
@@ -18042,7 +18014,7 @@ if (typeof SharedWorker === 'undefined') {
         _workerSourceFor(url)
           .then(res => {
             inst.shim._url = res.fetchUrl;
-            return preloadWorkerImports(inst.shim, res.code).then(() => res.code);
+            return _preloadWorkerImports(inst.shim, res.code).then(() => res.code);
           })
           .then(code => {
             inst.code = code;
@@ -19179,6 +19151,7 @@ function _defineOnHandler(obj, name, storeKey, inlineFallback) {
   if (Object.prototype.hasOwnProperty.call(obj, name)) return;
   Object.defineProperty(obj, name, {
     configurable: true,
+    enumerable: true, // Chrome: event-handler IDL attributes are enumerable
     get() {
       const store = this[storeKey];
       if (store && Object.prototype.hasOwnProperty.call(store, name)) return store[name];
@@ -19200,12 +19173,35 @@ for (const _n of _GLOBAL_EVENT_NAMES) _defineOnHandler(Document.prototype, 'on' 
 // window-only handlers (WindowEventHandlers + the rest of GlobalEventHandlers).
 // globalThis.onerror / onunhandledrejection are already real data properties;
 // the `hasOwnProperty` guard above skips them, keeping the error capture intact.
-const _WINDOW_EVENT_NAMES = _GLOBAL_EVENT_NAMES.concat([
-  'afterprint', 'beforeprint', 'beforeunload', 'gamepadconnected',
-  'gamepaddisconnected', 'hashchange', 'languagechange',
-  'message', 'messageerror', 'offline', 'online', 'pagehide', 'pageshow',
-  'popstate', 'rejectionhandled', 'storage', 'unload',
-]);
+// chrome-155 truth: the EXACT window on* set, shot from a real https page
+// (tmp-agent/chrome-window-on-set.json). Not _GLOBAL_EVENT_NAMES — that's the
+// Element/Document face (copy/cut/paste/dragexit/touch*/focusin/focusout are
+// NOT window handlers in Chrome desktop; installing them here was the own-prop
+// face leak this batch fixes).
+const _WINDOW_EVENT_NAMES = [
+  'abort', 'afterprint', 'animationcancel', 'animationend', 'animationiteration', 'animationstart',
+  'appinstalled', 'auxclick', 'beforeinput', 'beforeinstallprompt', 'beforematch', 'beforeprint',
+  'beforetoggle', 'beforeunload', 'beforexrselect', 'blur', 'cancel', 'canplay',
+  'canplaythrough', 'change', 'click', 'close', 'command', 'contentvisibilityautostatechange',
+  'contextlost', 'contextmenu', 'contextrestored', 'cuechange', 'dblclick', 'devicemotion',
+  'deviceorientation', 'deviceorientationabsolute', 'drag', 'dragend', 'dragenter', 'dragleave',
+  'dragover', 'dragstart', 'drop', 'durationchange', 'emptied', 'ended',
+  'error', 'focus', 'formdata', 'gamepadconnected', 'gamepaddisconnected', 'gotpointercapture',
+  'hashchange', 'input', 'invalid', 'keydown', 'keypress', 'keyup',
+  'languagechange', 'load', 'loadeddata', 'loadedmetadata', 'loadstart', 'lostpointercapture',
+  'message', 'messageerror', 'mousedown', 'mouseenter', 'mouseleave', 'mousemove',
+  'mouseout', 'mouseover', 'mouseup', 'mousewheel', 'offline', 'online',
+  'pagehide', 'pagereveal', 'pageshow', 'pageswap', 'pause', 'play',
+  'playing', 'pointercancel', 'pointerdown', 'pointerenter', 'pointerleave', 'pointermove',
+  'pointerout', 'pointerover', 'pointerrawupdate', 'pointerup', 'popstate', 'progress',
+  'ratechange', 'rejectionhandled', 'reset', 'resize', 'scroll', 'scrollend',
+  'scrollsnapchange', 'scrollsnapchanging', 'search', 'securitypolicyviolation', 'seeked', 'seeking',
+  'select', 'selectionchange', 'selectstart', 'slotchange', 'stalled', 'storage',
+  'submit', 'suspend', 'timeupdate', 'toggle', 'transitioncancel', 'transitionend',
+  'transitionrun', 'transitionstart', 'unhandledrejection', 'unload', 'volumechange', 'waiting',
+  'webkitanimationend', 'webkitanimationiteration', 'webkitanimationstart', 'webkittransitionend', 'wheel',  'unhandledrejection', 'webkitanimationend', 'webkitanimationiteration',
+  'webkitanimationstart', 'webkittransitionend',
+];
 for (const _n of _WINDOW_EVENT_NAMES) _defineOnHandler(globalThis, 'on' + _n, '__windowOnHandlers', false);
 // (#37) The window-reflecting on* family on HTMLBodyElement. Chrome 152:
 // 24 handler names whose body accessors ARE the window's — one shared
