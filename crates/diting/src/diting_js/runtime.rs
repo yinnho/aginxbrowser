@@ -488,8 +488,13 @@ impl JsRuntime {
     /// fully-active document) from a retired frame is not a face (#256 /
     /// moli#1328).
     fn frame_swap(&mut self, nid: u32) -> Result<bool, String> {
+        // document/window/self/frames live on the window-table accessors
+        // (interface_sweep.js fp-diff-1015): document/window are getter-only
+        // non-configurable, so the bare assignments below are silent no-ops
+        // for them — every binding that the __ditingWinSlot bag backs is
+        // swapped through the slot instead.
         let code = format!(
-            "(function() {{ var el = globalThis._wrap && globalThis._wrap({nid}); if (!el || !el.isConnected) return 'not-ready'; var doc = el._iframeDoc || el.contentDocument; var win = el._iframeWin || el.contentWindow; if (!doc || !win) return 'not-ready'; globalThis.__diting_frame_saved = [document, window, self, frames]; document = doc; window = win; self = win; frames = win; Object.defineProperty(globalThis, '__diting_frame_location', {{ value: win.location, configurable: true, writable: true, enumerable: false }}); return 'ok'; }})()",
+            "(function() {{ var el = globalThis._wrap && globalThis._wrap({nid}); if (!el || !el.isConnected) return 'not-ready'; var doc = el._iframeDoc || el.contentDocument; var win = el._iframeWin || el.contentWindow; if (!doc || !win) return 'not-ready'; var sl = globalThis.__ditingWinSlot; globalThis.__diting_frame_saved = [document, window, self, frames, sl ? {{d: sl.document, w: sl.window, s: sl.self, f: sl.frames}} : null]; if (sl) {{ sl.document = doc; sl.window = win; sl.self = win; sl.frames = win; }} document = doc; window = win; self = win; frames = win; Object.defineProperty(globalThis, '__diting_frame_location', {{ value: win.location, configurable: true, writable: true, enumerable: false }}); return 'ok'; }})()",
         );
         let v = self
             .runtime
@@ -502,7 +507,7 @@ impl JsRuntime {
     /// logged rather than propagated: the eval result matters more, and the
     /// next navigation's fresh realm clears a stale swap anyway.
     fn frame_restore(&mut self) {
-        const RESTORE: &str = "(function() { var s = globalThis.__diting_frame_saved; if (!s) return; document = s[0]; window = s[1]; self = s[2]; frames = s[3]; delete globalThis.__diting_frame_saved; delete globalThis.__diting_frame_location; })()";
+        const RESTORE: &str = "(function() { var s = globalThis.__diting_frame_saved; if (!s) return; var sl = globalThis.__ditingWinSlot; if (s[4] && sl) { sl.document = s[4].d; sl.window = s[4].w; sl.self = s[4].s; sl.frames = s[4].f; } document = s[0]; window = s[1]; self = s[2]; frames = s[3]; delete globalThis.__diting_frame_saved; delete globalThis.__diting_frame_location; })()";
         if let Err(e) = self
             .runtime
             .execute_script("<frame-restore>", RESTORE.to_string())

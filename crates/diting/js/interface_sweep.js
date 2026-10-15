@@ -158,3 +158,100 @@ try {
     globalThis.__diting_frame_globals = globalThis.__diting_frame_globals_build();
   }
 } catch (e) {}
+
+// fp-diff-1015 descriptor parity pass. Chrome exposes the classic window
+// table as ACCESSORS, not writable data props: getter-only replaceable-false
+// (crossOriginIsolated/crypto/navigator/... - sloppy assignment is a silent
+// no-op, delete works), getter + [[Replaceable]] setter (name/dpr/self/... -
+// assignment really stores, name/status coerce via ToString), and
+// getter-only NON-configurable (document/top/window). The snapshot leaves
+// every one of these as a plain writable data prop, so a one-line
+// `typeof Object.getOwnPropertyDescriptor(window,'navigator').get` probe
+// separates us from Chrome. Convert in place, parking values in a hidden
+// slot bag (__ditingWinSlot - filtered by the enumeration boundary). The
+// bag doubles as the rebind surface for the worker DOM mask and CDP frame
+// scoping, which can no longer redefine/delete the frozen trio: they swap
+// slot entries instead, with the __ditingWinSlotHide sentinel making a
+// masked binding read undefined through the ordinary getters.
+// MUST run after __diting_frame_globals_build above: the iframe copy set
+// was captured from the pre-conversion data props, so iframe realms keep
+// the historical value-prop face (iframe descriptor face = separate ledger).
+try { (function () {
+  var g = globalThis;
+  var slot = {};
+  var HIDE = {};
+  g.__ditingWinSlotHide = HIDE;
+  function hideAware(fn) {
+    var wrapped = function () { var v = fn(); return v === HIDE ? undefined : v; };
+    _markNative(wrapped);
+    return wrapped;
+  }
+  function getterFor(k) {
+    var raw = function () { return slot[k]; };
+    _markNative(raw);
+    return raw;
+  }
+  function setterFor(k, coerce) {
+    var raw = coerce
+      ? function (v) { slot[k] = String(v); }
+      : function (v) { slot[k] = v; };
+    _markNative(raw);
+    return raw;
+  }
+  function convert(names, opts) {
+    for (var i = 0; i < names.length; i++) {
+      var n = names[i];
+      var d = Object.getOwnPropertyDescriptor(g, n);
+      // Only convert names that exist as plain data props here; accessor
+      // installs (document, handled below) and absent names keep their shape.
+      if (!d || d.get) continue;
+      slot[n] = d.value;
+      Object.defineProperty(g, n, {
+        enumerable: true,
+        configurable: opts.frozen ? false : true,
+        get: hideAware(getterFor(n)),
+        set: opts.replaceable ? setterFor(n, n === "name" || n === "status") : undefined
+      });
+    }
+  }
+  var GET_ONLY = ["crossOriginIsolated", "caches", "crypto", "customElements",
+    "frameElement", "history", "indexedDB", "localStorage", "navigator",
+    "sessionStorage", "speechSynthesis"];
+  var GET_SET = ["devicePixelRatio", "frames", "length", "name", "onerror",
+    "opener", "parent", "performance", "screen", "screenLeft", "screenTop",
+    "screenX", "screenY", "self", "status", "visualViewport"];
+  var GET_ONLY_FROZEN = ["top", "window"];
+  convert(GET_ONLY, {});
+  convert(GET_SET, { replaceable: true });
+  convert(GET_ONLY_FROZEN, { frozen: true });
+  // document keeps bootstrap's lazy accessor (per-page _dom resolution) as
+  // its fallback: slot.document === undefined means "resolve lazily", a
+  // concrete value (worker mask's HIDE sentinel, CDP frame scoping's frame
+  // doc) overrides it. Chrome truth: getter-only, non-configurable.
+  var ddoc = Object.getOwnPropertyDescriptor(g, "document");
+  if (ddoc && ddoc.get) {
+    var origDocGet = ddoc.get;
+    slot.document = undefined;
+    var docGet = function () {
+      var v = slot.document;
+      return v === HIDE ? undefined : (v !== undefined ? v : origDocGet());
+    };
+    _markNative(docGet);
+    // accessor->accessor redefine RETAINS an omitted setter — pass
+    // set: undefined explicitly or bootstrap's _documentInstance setter
+    // survives and pages can clobber the binding.
+    Object.defineProperty(g, "document", {
+      enumerable: ddoc.enumerable === true,
+      configurable: false,
+      get: docGet,
+      set: undefined
+    });
+  }
+  // webkitRTCPeerConnection: Chrome keeps the legacy alias non-enumerable
+  // (still in getOwnPropertyNames, absent from Object.keys).
+  var wd = Object.getOwnPropertyDescriptor(g, "webkitRTCPeerConnection");
+  if (wd && wd.enumerable) {
+    Object.defineProperty(g, "webkitRTCPeerConnection", { enumerable: false });
+  }
+  g.__ditingWinSlot = slot;
+})(); } catch (e) {}

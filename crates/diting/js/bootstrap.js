@@ -16289,19 +16289,26 @@ function _workerScopeChain(scope) {
 // globalThis reads (webpack's global helper) must be masked here, where no
 // with-scope can reach. Configurable properties swap descriptors
 // (accessors included); writable-but-locked ones take a plain undefined
-// assignment; anything else stays visible (degraded, not broken). Nesting
+// assignment; the frozen window-table trio (document/top/window — Chrome
+// truth is non-configurable) masks through the __ditingWinSlot bag their
+// getters read; anything else stays visible (degraded, not broken). Nesting
 // is reference-counted by the outermost window: an inner mask while one is
 // live is a no-op.
 const _mainMaskSaved = { list: null };
 function _restoreMainMask(saved) {
-    for (const [name, d, v] of saved) {
-      try { if (d) Object.defineProperty(globalThis, name, d); else globalThis[name] = v; } catch (_) {}
+    for (const [name, d, v, viaSlot] of saved) {
+      try {
+        if (viaSlot) globalThis.__ditingWinSlot[name] = v;
+        else if (d) Object.defineProperty(globalThis, name, d);
+        else globalThis[name] = v;
+      } catch (_) {}
     }
 }
 function _applyMainMask(saved) {
-    for (const [name, d] of saved) {
+    for (const [name, d, , viaSlot] of saved) {
       try {
-        if (d) Object.defineProperty(globalThis, name, { value: undefined, writable: true, configurable: true, enumerable: false });
+        if (viaSlot) globalThis.__ditingWinSlot[name] = globalThis.__ditingWinSlotHide;
+        else if (d) Object.defineProperty(globalThis, name, { value: undefined, writable: true, configurable: true, enumerable: false });
         else globalThis[name] = undefined;
       } catch (_) {}
     }
@@ -16313,9 +16320,13 @@ function _maskMainThreadGlobals() {
       const d = Object.getOwnPropertyDescriptor(globalThis, name);
       if (!d) continue;
       if (d.configurable) {
-        saved.push([name, d, undefined]);
+        saved.push([name, d, undefined, false]);
       } else if (d.writable) {
-        saved.push([name, null, d.value]);
+        saved.push([name, null, d.value, false]);
+      } else if (globalThis.__ditingWinSlot && (name in globalThis.__ditingWinSlot)) {
+        // Frozen window-table trio (document/top/window): the getter reads
+        // the slot bag, so mask and restore through it.
+        saved.push([name, d, globalThis.__ditingWinSlot[name], true]);
       } else {
         continue;
       }

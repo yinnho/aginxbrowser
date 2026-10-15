@@ -1491,6 +1491,96 @@
         assert_eq!(obj["onsearch_val"], serde_json::Value::Null);
     }
 
+    /// (300015 P5) Window descriptor parity: Chrome exposes the classic
+    /// window table as accessors, not writable data props — getter-only
+    /// enumerable configurable (crossOriginIsolated/crypto/navigator/...),
+    /// getter + [[Replaceable]] setter that really stores (name/dpr/self/...,
+    /// name/status coerce via ToString), getter-only NON-configurable
+    /// (document/top/window), and webkitRTCPeerConnection as a
+    /// non-enumerable writable value. Truth: tmp-agent/chrome-windesc-truth-1015.json.
+    #[test]
+    fn window_descriptor_face_p5() {
+        let mut rt = setup_runtime("<html><body>x</body></html>");
+        let v = rt.evaluate(r#"
+            var r = {};
+            var d = function(n){ return Object.getOwnPropertyDescriptor(window, n); };
+            // Group A: getter-only, enumerable, configurable (delete works).
+            ['crossOriginIsolated','crypto','customElements','frameElement','history',
+             'indexedDB','localStorage','navigator','sessionStorage','speechSynthesis']
+              .forEach(function(n){
+                var x = d(n);
+                r['ga_'+n] = !!(x && typeof x.get === 'function' && x.set === undefined
+                             && x.enumerable === true && x.configurable === true);
+              });
+            // Group B: getter + replaceable setter, enumerable, configurable.
+            ['devicePixelRatio','frames','length','name','onerror','opener','parent',
+             'performance','screen','screenLeft','screenTop','screenX','screenY',
+             'self','status','visualViewport'].forEach(function(n){
+                var x = d(n);
+                r['gb_'+n] = !!(x && typeof x.get === 'function' && typeof x.set === 'function'
+                             && x.enumerable === true && x.configurable === true);
+              });
+            // Group C: getter-only NON-configurable.
+            ['document','top','window'].forEach(function(n){
+                var x = d(n);
+                r['gc_'+n] = !!(x && typeof x.get === 'function' && x.set === undefined
+                             && x.enumerable === true && x.configurable === false);
+              });
+            // webkitRTCPeerConnection: non-enumerable writable data, still in gopn.
+            var w = d('webkitRTCPeerConnection');
+            r.wrtc = !!(w && !w.enumerable && w.writable === true && typeof w.value === 'function');
+            r.wrtc_gopn = Object.getOwnPropertyNames(window).indexOf('webkitRTCPeerConnection') >= 0;
+            r.wrtc_keys = Object.keys(window).indexOf('webkitRTCPeerConnection') < 0;
+            // Identity invariants survive the conversion.
+            r.self_eq = window.self === window;
+            r.window_eq = window.window === window;
+            r.top_eq = window.top === window;
+            r.frames_eq = window.frames === window;
+            r.parent_eq = window.parent === window;
+            r.doc_eq = window.document === document;
+            r.nav_type = typeof window.navigator;
+            r.perf_type = typeof window.performance;
+            r.hist_type = typeof window.history;
+            // Assignment semantics: Group A silently ignored (sloppy, like Chrome).
+            var navBefore = window.navigator;
+            r.nav_ignored = (function(){ try { window.navigator = 1; return window.navigator === navBefore; } catch(e){ return 'THROW'; } })();
+            var docBefore = window.document;
+            r.doc_ignored = (function(){ try { window.document = 1; return window.document === docBefore; } catch(e){ return 'THROW'; } })();
+            // Group B really stores; name/status coerce through String().
+            var dprBefore = window.devicePixelRatio;
+            window.devicePixelRatio = 3;
+            r.dpr_stored = window.devicePixelRatio === 3;
+            window.devicePixelRatio = dprBefore;
+            window.name = 42;
+            r.name_stored = window.name === '42';
+            r.name_type = typeof window.name;
+            window.status = {a:1};
+            r.status_coerced = window.status === '[object Object]';
+            window.opener = 2;
+            r.opener_stored = window.opener === 2;
+            // Group C: delete is refused (non-configurable); navigator delete works.
+            r.top_del = (function(){ try { delete window.top; return 'no-throw'; } catch(e){ return e.name; } })();
+            r.top_survives = window.top === window;
+            r.nav_del = delete window.navigator;
+            r.nav_gone = window.navigator === undefined;
+            JSON.stringify(r)
+        "#).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(v.as_str().expect("string from JSON.stringify")).unwrap();
+        let obj = v.as_object().unwrap();
+        let typed = ["nav_type", "perf_type", "hist_type", "name_type", "top_del"];
+        for k in obj.keys() {
+            if typed.contains(&k.as_str()) { continue; }
+            assert_eq!(obj[k], true, "face key {} must be true, got {:?}", k, obj[k]);
+        }
+        assert_eq!(obj["nav_type"], "object");
+        assert_eq!(obj["perf_type"], "object");
+        assert_eq!(obj["hist_type"], "object");
+        assert_eq!(obj["name_type"], "string", "name stores through String() coercion");
+        // Sloppy delete on a non-configurable is a silent false, never a throw.
+        assert_eq!(obj["top_del"], "no-throw", "sloppy delete must not throw on Group C");
+    }
+
     /// (300015 P3) Blank-canvas readout face: the XHS shield fingerprints
     /// `toDataURL('image/webp')` on a never-drawn 300x150 canvas — the
     /// encoder's byte output IS the signal, and for a blank canvas it is a
