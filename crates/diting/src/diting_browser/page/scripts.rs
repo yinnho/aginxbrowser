@@ -414,7 +414,17 @@ impl Page {
         let preload_sources = self.preload_scripts.clone();
         static ENV_INIT_SCRIPT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
         let env_init = ENV_INIT_SCRIPT.get_or_init(env_init_script_source);
+        // Same slot, different lifecycle: the signer gate's realm state
+        // (seenAt/signed counters) must reset per navigation, so this one is
+        // NOT a OnceLock — the source is, the object it defines is fresh
+        // every page.
+        static SIGNER_GATE_SOURCE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        let signer_gate_src =
+            SIGNER_GATE_SOURCE.get_or_init(super::env_signer_gate_source).clone();
         if let Some(js) = &mut self.js {
+            if let Some(source) = signer_gate_src.as_deref() {
+                let _ = js.execute_script("<signer-gate>", source);
+            }
             for source in &preload_sources {
                 if let Err(e) = js.execute_script_guarded("<preload>", source.as_str()) {
                     tracing::debug!("Preload script error: {}", e);

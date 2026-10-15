@@ -260,6 +260,51 @@ fn env_init_script_from(path: Option<&str>) -> Option<String> {
     }
 }
 
+/// Engine-side signer-wait gate: `AGINXBROWSER_SIGNER_GATE=<url-regex>;<js-expr>;<wait-ms>`
+/// arms the engine's own XHR send delegation (xhr.js `__ditingSignerGateHold`)
+/// to hold matching requests until the expression resolves to the page's
+/// signing function, then re-sign through that function. Apps whose boot
+/// races their signing SDK (xiaohongshu ark: publish_render fires <1s in,
+/// `proxy._webmsxyw` mounts ~6s later) 406-crash on every cold boot
+/// otherwise. Zero page surface: the config global is filtered by the
+/// internal-name enumeration boundary like every `__diting*` global.
+fn env_signer_gate_source() -> Option<String> {
+    signer_gate_source_from(std::env::var("AGINXBROWSER_SIGNER_GATE").ok().as_deref())
+}
+
+fn signer_gate_source_from(raw: Option<&str>) -> Option<String> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let mut parts = raw.split(';');
+    let pattern = parts.next().unwrap_or("").trim();
+    let signer = parts.next().unwrap_or("").trim();
+    let wait_ms: u64 = parts
+        .next()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(12_000);
+    if pattern.is_empty() || signer.is_empty() {
+        return None;
+    }
+    // JSON string literals are valid JS literals; the signer expression is
+    // spliced in as a standalone literal (never re-embedded inside another
+    // string — that would quote it into a constant). A bad regex dies in
+    // the realm-side catch and leaves the gate off (engine default).
+    let pattern = serde_json::to_string(pattern).ok()?;
+    let signer = serde_json::to_string(signer).ok()?;
+    Some(format!(
+        "try{{Object.defineProperty(globalThis,'__ditingSignerGate',{{value:{{\
+re:new RegExp({p}),signer:new Function(\"return (\" + {s} + \");\"),\
+waitMs:{w},settleMs:2000,pollMs:50,seenAt:0,signed:0,\
+resigned:0,passthrough:0,softfail:0,dropped:0,unsigned:0\
+}},writable:true,configurable:true,enumerable:false}});}}catch(e){{}}",
+        p = pattern,
+        s = signer,
+        w = wait_ms
+    ))
+}
+
 /// Emulated media environment from CDP `Emulation.setEmulatedMedia`
 /// (Playwright's `page.emulateMedia`). `features` holds `prefers-*`
 /// (name, value) pairs; `media` is the emulated media type, `Some(None)`

@@ -4378,6 +4378,200 @@
         );
     }
 
+    /// Signer-wait gate (engine-native): an async XHR matching the gate
+    /// pattern, sent while the page's signing function does not exist yet,
+    /// must hold inside the engine's own send delegation — no page-visible
+    /// wrapper anywhere — then re-sign through the page's signer at release:
+    /// X-s/X-t stamped from the signer's return value, the page's stale
+    /// X-S-Common stripped rather than paired with the fresh signature, and
+    /// the signer called with the URL's path plus the parsed JSON body. The
+    /// gate config global must stay invisible to the page on both Object.keys
+    /// and getOwnPropertyNames (the internal-name enumeration boundary).
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_xhr_signer_gate_holds_then_resigns_via_page_signer() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap();
+            let head = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+            // "x-s:" must not also match "x-s-common:" — startswith on the
+            // colon does the separating.
+            let saw_xs = head.lines().any(|l| l.starts_with("x-s:") && l.contains("engsig:"));
+            let saw_path_in_sig = head.contains("engsig:/api/edith/product/publish_render:");
+            let saw_xt = head.lines().any(|l| l.starts_with("x-t:"));
+            let stale_common = head.contains("stale-page-common");
+            let payload = format!(
+                "{{\"code\":0,\"sawXs\":{saw_xs},\"sigCarriedPath\":{saw_path},\"sawXt\":{saw_xt},\"staleCommon\":{stale_common}}}",
+                saw_xs = saw_xs,
+                saw_path = saw_path_in_sig,
+                saw_xt = saw_xt,
+                stale_common = stale_common,
+            );
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
+                payload.len(),
+                payload
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{port}/page"));
+        let result = rt
+            .call_function_on_remote(
+                r#"async () => {
+                    Object.defineProperty(globalThis, '__ditingSignerGate', {value: {
+                        re: /\/api\/edith\/product\/publish_render/,
+                        signer: () => (typeof window.__mySigner === 'function' ? window.__mySigner : null),
+                        waitMs: 5000, settleMs: 60, pollMs: 10, seenAt: 0, signed: 1,
+                        resigned: 0, passthrough: 0, softfail: 0, dropped: 0, unsigned: 0,
+                    }, writable: true, configurable: true, enumerable: false});
+                    const x = new XMLHttpRequest();
+                    x.open('POST', '/api/edith/product/publish_render');
+                    x.setRequestHeader('Content-Type', 'application/json');
+                    x.setRequestHeader('X-S-Common', 'stale-page-common');
+                    // The signer mounts after send(): the gate must hold the
+                    // delegation until it exists (plus the settle window).
+                    setTimeout(() => {
+                        window.__mySigner = (p, d) => ({'X-s': 'engsig:' + p + ':' + JSON.stringify(d), 'X-t': '1700000000000'});
+                    }, 120);
+                    const t0 = Date.now();
+                    x.send(JSON.stringify({name: 'test'}));
+                    await new Promise((res) => { x.onloadend = () => res(); });
+                    return {
+                        ms: Date.now() - t0,
+                        body: x.responseText ? JSON.parse(x.responseText) : null,
+                        keysLeak: Object.keys(window).includes('__ditingSignerGate'),
+                        gopnLeak: Object.getOwnPropertyNames(window).includes('__ditingSignerGate'),
+                        gate: {
+                            resigned: globalThis.__ditingSignerGate.resigned,
+                            softfail: globalThis.__ditingSignerGate.softfail,
+                        },
+                    };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let v = result.value.unwrap();
+        let body = v["body"].as_object().unwrap();
+        assert_eq!(body["code"], serde_json::json!(0), "wire echo must come back");
+        assert_eq!(body["sawXs"], serde_json::json!(true), "server must see the re-signed X-s");
+        assert_eq!(
+            body["sigCarriedPath"], serde_json::json!(true),
+            "signer must be called with the stripped path and parsed body"
+        );
+        assert_eq!(body["sawXt"], serde_json::json!(true), "fresh X-t stamped");
+        assert_eq!(
+            body["staleCommon"], serde_json::json!(false),
+            "page's stale X-S-Common must be stripped, not paired with the fresh signature"
+        );
+        let ms = v["ms"].as_f64().unwrap();
+        assert!(ms >= 150.0, "gate must hold past the signer mount (120ms), released at {ms}ms");
+        assert_eq!(v["keysLeak"], serde_json::json!(false), "gate global invisible to Object.keys");
+        assert_eq!(
+            v["gopnLeak"], serde_json::json!(false),
+            "gate global invisible to getOwnPropertyNames (enumeration boundary)"
+        );
+        assert_eq!(v["gate"]["resigned"], serde_json::json!(1));
+        assert_eq!(v["gate"]["softfail"], serde_json::json!(0));
+    }
+
+    /// Signer gate fail-closed: a signer that never mounts within waitMs must
+    /// NEVER wire the request unsigned — that 406 is exactly what crash-loops
+    /// the app and poisons the session. The app instead sees a synthetic
+    /// soft-fail response through the normal load pipeline, and no TCP
+    /// connection is made at all.
+    #[allow(clippy::await_holding_lock)] // the env guard must span the await — that's the serialization
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_xhr_signer_gate_softfails_without_touching_the_wire() {
+        let _env_guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let connections = connections.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    match stream {
+                        Ok(_) => {
+                            connections.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url(&format!("http://127.0.0.1:{port}/page"));
+        let result = rt
+            .call_function_on_remote(
+                r#"async () => {
+                    Object.defineProperty(globalThis, '__ditingSignerGate', {value: {
+                        re: /\/api\/edith\/product\/publish_render/,
+                        signer: () => null, // never mounts
+                        waitMs: 300, settleMs: 50, pollMs: 10, seenAt: 0, signed: 1,
+                        resigned: 0, passthrough: 0, softfail: 0, dropped: 0, unsigned: 0,
+                    }, writable: true, configurable: true, enumerable: false});
+                    const events = [];
+                    const x = new XMLHttpRequest();
+                    x.open('POST', '/api/edith/product/publish_render');
+                    x.setRequestHeader('Content-Type', 'application/json');
+                    for (const t of ['load', 'loadend', 'error', 'timeout']) {
+                        x.addEventListener(t, () => events.push(t));
+                    }
+                    x.send('{}');
+                    await new Promise((res) => { x.onloadend = () => res(); });
+                    return {
+                        events,
+                        status: x.status,
+                        state: x.readyState,
+                        body: JSON.parse(x.responseText),
+                        softfail: globalThis.__ditingSignerGate.softfail,
+                    };
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+
+        let v = result.value.unwrap();
+        assert_eq!(
+            v["events"], serde_json::json!(["load", "loadend"]),
+            "soft-fail must surface through the normal load pipeline, not an error"
+        );
+        assert_eq!(v["status"], serde_json::json!(200));
+        assert_eq!(v["state"], serde_json::json!(4));
+        assert_eq!(v["body"]["code"], serde_json::json!(-1));
+        assert_eq!(v["body"]["msg"], serde_json::json!("signer-not-ready"));
+        assert_eq!(v["softfail"], serde_json::json!(1));
+        assert_eq!(
+            connections.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "held request must never reach the wire unsigned"
+        );
+    }
+
     /// (#248) The #116 timeout fix only covered addEventListener handlers:
     /// the error and timeout paths set readyState with a raw assignment and
     /// _fireEvent('readystatechange'), which deliberately skips the

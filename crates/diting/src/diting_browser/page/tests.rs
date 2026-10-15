@@ -582,6 +582,35 @@
         std::fs::remove_file(&path).ok();
     }
 
+    #[test]
+    fn signer_gate_source_parses_fields_and_rejects_short_configs() {
+        // Three fields: regex source, signer expression, wait cap (ms).
+        let src = super::signer_gate_source_from(
+            Some("/api/edith/product/publish_render;(window.proxy&&window.proxy._webmsxyw)||null;12000"),
+        )
+        .unwrap();
+        assert!(src.contains(r#"new RegExp("/api/edith/product/publish_render")"#), "{src}");
+        assert!(
+            src.contains(r#"signer:new Function("return (" + "(window.proxy&&window.proxy._webmsxyw)||null" + ");")"#),
+            "{src}"
+        );
+        assert!(src.contains("waitMs:12000"), "{src}");
+        // Non-enumerable defineProperty: the gate global must never show up
+        // in Object.keys even before the enumeration-boundary wrappers run.
+        assert!(src.contains("enumerable:false"), "{src}");
+        // Wait cap defaults; pattern/signer are both required.
+        let dflt = super::signer_gate_source_from(Some("/a;fn()")).unwrap();
+        assert!(dflt.contains("waitMs:12000"));
+        assert!(super::signer_gate_source_from(Some("/a")).is_none());
+        assert!(super::signer_gate_source_from(Some(";fn();100")).is_none());
+        assert!(super::signer_gate_source_from(None).is_none());
+        assert!(super::signer_gate_source_from(Some("   ")).is_none());
+        // A quote inside the signer expression must survive as an escaped
+        // JS string literal, not break out into code.
+        let quoted = super::signer_gate_source_from(Some(r#"/a;window.x==="function""#)).unwrap();
+        assert!(quoted.contains(r#""window.x===\"function\"""#), "{quoted}");
+    }
+
     // ---- navigation chains over a local server ---------------------------
 
     #[tokio::test(flavor = "current_thread")]

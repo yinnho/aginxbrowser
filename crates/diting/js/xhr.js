@@ -7,6 +7,116 @@
 // and the _initiatorHint channel (#126) are the same globals the in-file
 // implementation always used.
 
+// Engine-native signer-wait gate. Apps can race their own signing SDK at
+// boot: xiaohongshu ark's library-axios fires /api/edith/product/
+// publish_render under a second in, while the AS sdk's proxy._webmsxyw
+// mounts ~6s later — the unsigned request 406s and the app reads that as a
+// fatal boot error (crash-loop, spam_sign_counter). The old fix wrapped the
+// page's XHR/fetch prototypes from a preload recipe — the exact enumerable
+// surface a "risk plugin" probe hunts for (300015). Holding the request
+// inside the ENGINE's own send delegation needs no page-visible wrapper:
+// when a matching URL is sent before the configured signer expression
+// resolves, the delegation waits (poll + settle contract below), then
+// re-signs by calling the page's own signer and stamps X-s/X-t directly on
+// the internal header store — a page X-S-Common older than the fresh
+// signature is stripped rather than paired. Timeout fail-closes into a
+// synthetic soft-fail response so an app whose signer never mounts still
+// reaches its own error UI without poisoning the session with an unsigned
+// 406 the server remembers. Ghost guards: abort() during the hold or a
+// re-open() of the same object drops the held decision — the release stays
+// pending forever, so the late settlement is ignored by the response heads
+// exactly like the #116 timeout case.
+globalThis.__ditingSignerGateHold = function (xhr, url, body, gate) {
+  const snapUrl = xhr._url;
+  const snapHeaders = xhr._headers; // open() replaces the store — identity detects reuse
+  const pageHasXs = (() => {
+    for (const k in snapHeaders) { if (k.toLowerCase() === 'x-s') return true; }
+    return false;
+  })();
+  const t0 = Date.now();
+  const signerNow = () => {
+    try {
+      const fn = gate.signer();
+      return typeof fn === 'function' ? fn : null;
+    } catch (e) { return null; }
+  };
+  // Release contract (Oct-11 wait rule, engine-native): signer present,
+  // settled >= settleMs after first sighting, and the page's SDK has signed
+  // at least one other request — else hold up to settleMs*1.5.
+  const ready = () => {
+    const fn = signerNow();
+    if (!fn) return null;
+    if (!gate.seenAt) gate.seenAt = Date.now();
+    if (Date.now() - gate.seenAt < (gate.settleMs || 0)) return null;
+    if (!gate.signed && Date.now() - gate.seenAt < (gate.settleMs || 0) * 1.5) return null;
+    return fn;
+  };
+  return new Promise((resolveRelease) => {
+    const settle = () => {
+      if (xhr._aborted || xhr._url !== snapUrl || xhr._headers !== snapHeaders) {
+        gate.dropped = (gate.dropped || 0) + 1;
+        return; // never resolve: the page moved on past this request
+      }
+      const fn = ready();
+      if (!fn) {
+        if (Date.now() - t0 < gate.waitMs) { setTimeout(settle, gate.pollMs || 50); return; }
+        gate.softfail = (gate.softfail || 0) + 1;
+        resolveRelease(new Response(
+          JSON.stringify({ code: -1, success: false, msg: 'signer-not-ready' }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        ));
+        return;
+      }
+      if (!pageHasXs) {
+        // Re-sign with the page's own signer: X-s/X-t fresh, X-S-Common only
+        // when the signer returns it atomically, page's stale one dropped.
+        let sg = null;
+        try {
+          const path = String(snapUrl).replace(/^(https?:)?\/\/[^/]+/, '');
+          let data;
+          if (typeof body === 'string') { try { data = JSON.parse(body); } catch (e) {} }
+          if (body == null
+              || (typeof FormData !== 'undefined' && body instanceof FormData)
+              || body instanceof ArrayBuffer || body instanceof Blob
+              || (ArrayBuffer.isView && ArrayBuffer.isView(body))) data = undefined;
+          sg = fn(path, data);
+        } catch (e) { sg = null; }
+        if (sg && sg['X-s']) {
+          const headers = {};
+          for (const k of Object.keys(snapHeaders)) {
+            const lk = k.toLowerCase();
+            if (lk === 'x-s' || lk === 'x-t' || lk === 'x-s-common') continue;
+            headers[k] = snapHeaders[k];
+          }
+          headers['X-s'] = String(sg['X-s']);
+          headers['X-t'] = String(sg['X-t']);
+          const cm = sg['X-s-common'] || sg['x-s-common'];
+          if (cm != null && cm !== '') headers['X-s-common'] = String(cm);
+          xhr._headers = headers;
+          gate.resigned = (gate.resigned || 0) + 1;
+        } else {
+          gate.unsigned = (gate.unsigned || 0) + 1;
+        }
+      } else {
+        gate.passthrough = (gate.passthrough || 0) + 1;
+      }
+      // #126: the initiator hint is consumed at the shim's synchronous
+      // entry - re-arm it here, past the gate's await points.
+      _initiatorHint = 'xmlhttprequest';
+      const d = __ditingFetchShim(url, {
+        method: xhr._method,
+        headers: xhr._headers,
+        body: body || undefined,
+        mode: 'cors',
+        credentials: xhr.withCredentials ? 'include' : 'same-origin',
+      });
+      _initiatorHint = null;
+      resolveRelease(d);
+    };
+    settle();
+  });
+};
+
 globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarget {
   static UNSENT = 0;
   static OPENED = 1;
@@ -343,16 +453,38 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     // #126: one record, the XHR's initiator — the hint is consumed at the
     // fetch shim's synchronous entry, before the first await.
     _initiatorHint = 'xmlhttprequest';
-    // #235: the engine's own fetch shim, NOT the page-visible fetch — a
-    // page that wraps window.fetch must not see (and re-process) native
-    // XHR traffic through its wrapper.
-    const delegated = __ditingFetchShim(url, {
-      method: this._method,
-      headers: this._headers,
-      body: body || undefined,
-      mode: 'cors',
-      credentials: this.withCredentials ? 'include' : 'same-origin',
-    });
+    // Signer-wait gate (see __ditingSignerGateHold above): armed per page
+    // via the engine config channel, never by page code. The config global
+    // is invisible to the page — it lives behind the internal-name
+    // enumeration boundary with every other __diting* global.
+    const __sg = globalThis.__ditingSignerGate;
+    let __gated = false;
+    if (__sg && __sg.re) {
+      try { __gated = __sg.re.test(url); } catch (e) {}
+      if (!__gated) {
+        // Feed the gate's release contract: a non-matching async send that
+        // already carries x-s was signed by the page's own SDK wrapper — one
+        // prior native sign proves the signer path is warm.
+        for (const k in xhr._headers) {
+          if (k.toLowerCase() === 'x-s') { __sg.signed = (__sg.signed || 0) + 1; break; }
+        }
+      }
+    }
+    let delegated;
+    if (__gated) {
+      delegated = __ditingSignerGateHold(xhr, url, body, __sg);
+    } else {
+      // #235: the engine's own fetch shim, NOT the page-visible fetch — a
+      // page that wraps window.fetch must not see (and re-process) native
+      // XHR traffic through its wrapper.
+      delegated = __ditingFetchShim(url, {
+        method: this._method,
+        headers: this._headers,
+        body: body || undefined,
+        mode: 'cors',
+        credentials: this.withCredentials ? 'include' : 'same-origin',
+      });
+    }
     _initiatorHint = null;
     delegated.then(async (resp) => {
       if (xhr._aborted) return;
