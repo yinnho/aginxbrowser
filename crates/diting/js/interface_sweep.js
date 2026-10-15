@@ -85,6 +85,10 @@
     // class-body getters come out non-enumerable, so sweep them too.
     globalThis.AudioBuffer, globalThis.BaseAudioContext,
     globalThis.AudioContext, globalThis.OfflineAudioContext,
+    // (300015 P6) same for the conn/uad interfaces — brands/mobile/platform/
+    // toJSON/getHighEntropyValues and the NetworkInformation getters are all
+    // enumerable in Chrome.
+    globalThis.NetworkInformation, globalThis.NavigatorUAData,
   ]) add(C);
   for (const n of Object.getOwnPropertyNames(globalThis)) {
     if (/^(HTML|SVG)[A-Za-z]*Element$/.test(n)) add(globalThis[n]);

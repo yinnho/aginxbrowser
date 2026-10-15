@@ -7675,47 +7675,28 @@ function __ditingBuildPdfPersona() {
   __mimeStore.get(mtText).enabledPlugin = _pluginsInst[0];
 }
 
-// navigator.connection must be an EventTarget-shaped object: analytics and
-// adaptive-streaming libraries register 'change' listeners on it (upstream
-// fc9f524 — the old data-only object lacked addEventListener entirely, so
-// `navigator.connection.addEventListener` threw). dispatchEvent also runs
-// the matching on* property handler, like a real EventTarget.
+// navigator.connection: Chrome's NetworkInformation. The interface IS on
+// window (`new` → Illegal constructor), the prototype holds exactly
+// onchange/effectiveType/rtt/downlink/saveData + constructor — in that
+// order, constructor LAST (WebIDL layout; the reorder pass at the bottom
+// fixes class-syntax's constructor-first). The EventTarget methods arrive
+// via the prototype CHAIN (relinked onto _EventTarget.prototype below), so
+// addEventListener et al. are never own names of the first prototype. The
+// dead-spec faces — type/downlinkMax/ontypechange — are gone from modern
+// Chrome (all read undefined). The singleton is Object.create'd:
+// gOPN(instance) = [], and addEventListener/removeEventListener keep working
+// through _EventTarget.prototype's own listener store.
 class NetworkInformation {
-  constructor() { __lmap(this); }
-  get downlink() { return 10; }
-  get downlinkMax() { return Infinity; }
-  get effectiveType() { return '4g'; }
-  get rtt() { return 50; }
-  get saveData() { return false; }
-  get type() { return 'wifi'; }
+  constructor() { throw new TypeError("Failed to construct 'NetworkInformation': Illegal constructor"); }
   get onchange() { return this._onchange || null; }
   set onchange(v) { this._onchange = typeof v === "function" ? v : null; }
-  get ontypechange() { return this._ontypechange || null; }
-  set ontypechange(v) { this._ontypechange = typeof v === "function" ? v : null; }
-  addEventListener(type, listener) {
-    __listenerGate(listener);
-    const L = __lmap(this);
-    (L[type] || (L[type] = [])).push(listener);
-  }
-  removeEventListener(type, listener) {
-    const L = __evtStore.get(this);
-    const listeners = L && L[type];
-    if (listeners) L[type] = listeners.filter((item) => item !== listener);
-  }
-  dispatchEvent(event) {
-    if (!event || !event.type) return true;
-    const L = __evtStore.get(this);
-    _mtWindow(() => { for (const listener of (L && L[event.type]) || []) {
-      try { _invokeListener(listener, this, event); } catch (error) { console.error(error); }
-    } });
-    const handler = this["on" + event.type];
-    if (typeof handler === "function") {
-      try { handler.call(this, event); } catch (error) { console.error(error); }
-    }
-    return !event.defaultPrevented;
-  }
+  get effectiveType() { return '4g'; }
+  get rtt() { return 50; }
+  get downlink() { return 10; }
+  get saveData() { return false; }
 }
 _markNative(NetworkInformation);
+globalThis.NetworkInformation = NetworkInformation;
 
 // ---- bchkAPIs global face (batch166, datadome-solver generators.go) ------
 // Interfaces real Chrome exposes that anti-bot probes check with
@@ -7994,18 +7975,15 @@ globalThis.IIRFilterNode = class IIRFilterNode {
 // fp-diff-1014 #11: Chrome's navigator.userAgentData has NavigatorUAData on
 // its prototype chain — a plain object literal reads as constructor "Object"
 // to the cheapest proto walk.
+// 300015 P6: the interface is exposed on window (`new` → Illegal
+// constructor), members sit on the prototype in Chrome's order (brands,
+// mobile, platform, getHighEntropyValues, toJSON, constructor LAST —
+// reorder pass at the bottom), and the instance carries ZERO own names
+// (gOPN = []). mobile used to be a constructor-stashed own prop: hidden
+// from Object.keys but visible to getOwnPropertyNames, and missing from
+// the prototype. Desktop persona → always false, like Chrome on macOS.
 class NavigatorUAData {
-  constructor(brands, mobile) {
-    this.mobile = mobile;
-    void brands;
-    // Chrome's userAgentData instance has ZERO own enumerable properties
-    // (Object.keys → []); brands/mobile/platform are all prototype accessors.
-    __hideOwn(this);
-  }
-  get platform() { return __ditingUADataPlatformFromUA(); }
-  // brands follows the UA major (the profile pool ships 143–146) and the
-  // current GREASE generation, same as getHighEntropyValues below — static
-  // "145 / Not=A?Brand" disagreed with both the UA and the header hints.
+  constructor() { throw new TypeError("Failed to construct 'NavigatorUAData': Illegal constructor"); }
   get brands() {
     const maj = __ditingChromeMajorFromUA();
     return [
@@ -8014,6 +7992,8 @@ class NavigatorUAData {
       {brand:"Not(A:Brand",version:"24"},
     ];
   }
+  get mobile() { return false; }
+  get platform() { return __ditingUADataPlatformFromUA(); }
   getHighEntropyValues(hints) {
     const plat = __ditingUADataPlatformFromUA();
     // Device faces come from the same persona draw as the WebGL renderer —
@@ -8036,6 +8016,7 @@ class NavigatorUAData {
   }
   toJSON() { return {brands:this.brands,mobile:this.mobile,platform:this.platform}; }
 }
+globalThis.NavigatorUAData = NavigatorUAData;
 const __navStore = {
   vendorSub: "",
   productSub: "20030107",
@@ -8092,7 +8073,7 @@ const __navStore = {
     return _mimeTypesInst;
   },
   pdfViewerEnabled: true,
-  connection: new NetworkInformation(),
+  connection: Object.create(NetworkInformation.prototype),
   getGamepads() { return []; },
   javaEnabled() { return false; },
   sendBeacon(url, data) {
@@ -8199,7 +8180,7 @@ const __navStore = {
   },
   wakeLock: { request() { return Promise.reject(new DOMException("Permission denied.", "NotAllowedError")); } },
   deviceMemory: 8,
-  userAgentData: new NavigatorUAData(null, false),
+  userAgentData: Object.create(NavigatorUAData.prototype),
   locks: { request() { return Promise.resolve(); }, query() { return Promise.resolve([]); } },
   storage: {
     estimate() { return Promise.resolve({ quota: 5000000000, usage: Math.floor(_fpRand(640) * 100000000) }); },
@@ -12677,6 +12658,12 @@ _EventTarget.prototype.addEventListener = function addEventListener(type, cb) {
 _EventTarget.prototype.dispatchEvent = function dispatchEvent(ev) {
   const l = (_etLs(this)[ev.type]) || [];
   for (const f of l.slice()) { try { _invokeListener(f, this, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } }
+  // Event handler IDL attributes (on*) fire during dispatch too — Chrome
+  // runs them for every EventTarget subclass (conn.onchange, node.onclick),
+  // not just for "real" DOM events (300015 P6, was conn-only before the
+  // EventTarget relink).
+  const h = this["on" + ev.type];
+  if (typeof h === "function") { try { _invokeListener(h, this, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } }
   return true;
 };
 _EventTarget.prototype.removeEventListener = function removeEventListener(type, cb) {
@@ -12691,6 +12678,10 @@ _EventTarget.prototype.when = function when(type) {
   });
 };
 Object.setPrototypeOf(Node.prototype, _EventTarget.prototype);
+// conn picks up the EventTarget methods through the chain, exactly like
+// Chrome (NetworkInformation.prototype → EventTarget.prototype), so they
+// are never own names of the first prototype.
+Object.setPrototypeOf(NetworkInformation.prototype, _EventTarget.prototype);
 globalThis.EventTarget = _EventTarget;
 globalThis.HTMLCollection = class HTMLCollection extends Array {
   item(i) {
@@ -14808,14 +14799,14 @@ globalThis.OfflineAudioContext = class OfflineAudioContext extends BaseAudioCont
   startRendering() {
     const b = _ctxBag(this);
     const buf = this.createBuffer(b.numberOfChannels, b.length, b.sampleRate);
-    // Deterministic, identity-seeded pseudo-signal: an all-zero render reads as
-    // "audio is fake" to detectors; real Chrome yields a compressor-shaped
-    // waveform. Stable per fingerprint seed, nonzero, consistent between
-    // getChannelData and copyFromChannel.
-    const d = buf.getChannelData(0);
-    for (let i = 0; i < d.length; i++) {
-      d[i] = (_fpRand(8100 + i) * 2 - 1) * 0.1 * Math.exp(-i / (d.length * 0.7));
-    }
+    // Chrome truth (headless+headed probe 10-15): an empty graph renders
+    // SILENCE - nonzero:0, sum:0 across the whole buffer. The old
+    // identity-seeded pseudo-signal here was an anti-detector guess that
+    // had the polarity backwards: the shield's probe is exactly
+    // `new OfflineAudioContext(1,44100,44100)` with nothing connected, and
+    // our shaped waveform was the mismatch. createBuffer hands back zeroed
+    // Float32Arrays, so the empty render is already correct. (A graph with
+    // real sources still renders zeros in this engine - separate ledger.)
     const self = this;
     return Promise.resolve().then(() => {
       _ctxSetState(self, 'closed');
@@ -19644,6 +19635,12 @@ try {
     });
   }
   __ditingReorderProto(Screen.prototype, ['availWidth','availHeight','width','height','colorDepth','pixelDepth','availLeft','availTop','orientation','constructor','onchange','isExtended']);
+} catch (e) {}
+// (300015 P6) WebIDL layout puts constructor LAST on these two; class
+// syntax always emits it first. Chrome order captured 1015.
+try {
+  __ditingReorderProto(NetworkInformation.prototype, ['onchange','effectiveType','rtt','downlink','saveData','constructor']);
+  __ditingReorderProto(NavigatorUAData.prototype, ['brands','mobile','platform','getHighEntropyValues','toJSON','constructor']);
 } catch (e) {}
 try {
   __ditingReorderProto(Navigator.prototype, [

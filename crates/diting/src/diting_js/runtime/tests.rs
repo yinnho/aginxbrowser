@@ -1581,6 +1581,85 @@
         assert_eq!(obj["top_del"], "no-throw", "sloppy delete must not throw on Group C");
     }
 
+    /// (300015 P6) navigator.connection / navigator.userAgentData shape.
+    /// Chrome truth (CDP 1015, ark.xiaohongshu.com): both interfaces are
+    /// window globals whose `new` throws Illegal constructor;
+    /// NetworkInformation.prototype holds exactly [onchange, effectiveType,
+    /// rtt, downlink, saveData, constructor] — constructor LAST — with the
+    /// EventTarget methods inherited one level up; the dead-spec faces
+    /// type/downlinkMax/ontypechange are gone (undefined).
+    /// NavigatorUAData.prototype is [brands, mobile, platform,
+    /// getHighEntropyValues, toJSON, constructor] with mobile a prototype
+    /// getter (desktop persona: false). Both instances have ZERO own names
+    /// and instanceof ties back to the exposed global.
+    #[test]
+    fn conn_uad_face_p6() {
+        let mut rt = setup_runtime("<html><body>x</body></html>");
+        let v = rt.evaluate(r#"
+            var r = {};
+            var c = navigator.connection, uad = navigator.userAgentData;
+            r.ni_type = typeof window.NetworkInformation;
+            r.nuad_type = typeof window.NavigatorUAData;
+            r.ni_enum = Object.getOwnPropertyDescriptor(window, 'NetworkInformation').enumerable === false;
+            r.nuad_enum = Object.getOwnPropertyDescriptor(window, 'NavigatorUAData').enumerable === false;
+            r.ni_ctor = (function(){ try { new NetworkInformation(); return 'no-throw'; } catch(e){ return e.name + ': ' + e.message; } })();
+            r.nuad_ctor = (function(){ try { new NavigatorUAData(); return 'no-throw'; } catch(e){ return e.name + ': ' + e.message; } })();
+            r.c_own = JSON.stringify(Object.getOwnPropertyNames(c));
+            r.c_tag = Object.prototype.toString.call(c);
+            r.c_str = '' + c;
+            r.c_typeof_type = typeof c.type;
+            r.c_typeof_dmax = typeof c.downlinkMax;
+            r.c_typeof_otc = typeof c.ontypechange;
+            r.c_vals = [c.effectiveType, c.rtt, c.downlink, c.saveData].join('|');
+            r.c_proto = JSON.stringify(Object.getOwnPropertyNames(Object.getPrototypeOf(c)));
+            r.c_proto_tag = Object.prototype.toString.call(Object.getPrototypeOf(c));
+            r.c_et_level = Object.getPrototypeOf(Object.getPrototypeOf(c)) === EventTarget.prototype;
+            r.c_add_rm = (function(){ var f=function(){}; c.addEventListener('change', f); c.removeEventListener('change', f); return typeof c.addEventListener; })();
+            r.c_onchange = (function(){ var f=function(){}; c.onchange = f; var ok = c.onchange === f; c.onchange = null; return ok && c.onchange === null; })();
+            r.c_instanceof = c instanceof NetworkInformation;
+            r.c_enum = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(c), 'downlink').enumerable === true;
+            r.u_own = JSON.stringify(Object.getOwnPropertyNames(uad));
+            r.u_tag = Object.prototype.toString.call(uad);
+            r.u_proto = JSON.stringify(Object.getOwnPropertyNames(Object.getPrototypeOf(uad)));
+            r.u_mobile = uad.mobile === false;
+            r.u_mobile_proto = typeof Object.getOwnPropertyDescriptor(Object.getPrototypeOf(uad), 'mobile').get;
+            r.u_json_shape = (function(){ var j = uad.toJSON(); return j.mobile === false && typeof j.platform === 'string' && j.platform.length > 0 && j.brands.length === 3 && j.brands[0].brand === 'Google Chrome' && j.brands[0].version === j.brands[1].version; })();
+            r.u_gev = typeof uad.getHighEntropyValues === 'function';
+            r.u_instanceof = uad instanceof NavigatorUAData;
+            r.u_enum = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(uad), 'brands').enumerable === true;
+            JSON.stringify(r)
+        "#).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(v.as_str().expect("string from JSON.stringify")).unwrap();
+        let obj = v.as_object().unwrap();
+        let typed = ["ni_type", "nuad_type", "ni_ctor", "nuad_ctor", "c_typeof_type",
+                     "c_typeof_dmax", "c_typeof_otc", "c_vals", "c_own", "c_tag", "c_str",
+                     "c_proto", "c_proto_tag", "c_add_rm", "u_own", "u_tag", "u_proto",
+                     "u_mobile_proto"];
+        for k in obj.keys() {
+            if typed.contains(&k.as_str()) { continue; }
+            assert_eq!(obj[k], true, "face key {} must be true, got {:?}", k, obj[k]);
+        }
+        assert_eq!(obj["ni_type"], "function");
+        assert_eq!(obj["nuad_type"], "function");
+        assert_eq!(obj["ni_ctor"], "TypeError: Failed to construct 'NetworkInformation': Illegal constructor");
+        assert_eq!(obj["nuad_ctor"], "TypeError: Failed to construct 'NavigatorUAData': Illegal constructor");
+        assert_eq!(obj["c_typeof_type"], "undefined", "dead-spec conn.type must be gone");
+        assert_eq!(obj["c_typeof_dmax"], "undefined");
+        assert_eq!(obj["c_typeof_otc"], "undefined");
+        assert_eq!(obj["c_vals"], "4g|50|10|false");
+        assert_eq!(obj["c_own"], "[]");
+        assert_eq!(obj["c_tag"], "[object NetworkInformation]");
+        assert_eq!(obj["c_str"], "[object NetworkInformation]");
+        assert_eq!(obj["c_proto"], r#"["onchange","effectiveType","rtt","downlink","saveData","constructor"]"#);
+        assert_eq!(obj["c_proto_tag"], "[object NetworkInformation]");
+        assert_eq!(obj["c_add_rm"], "function");
+        assert_eq!(obj["u_own"], "[]");
+        assert_eq!(obj["u_tag"], "[object NavigatorUAData]");
+        assert_eq!(obj["u_proto"], r#"["brands","mobile","platform","getHighEntropyValues","toJSON","constructor"]"#);
+        assert_eq!(obj["u_mobile_proto"], "function");
+    }
+
     /// (300015 P3) Blank-canvas readout face: the XHS shield fingerprints
     /// `toDataURL('image/webp')` on a never-drawn 300x150 canvas — the
     /// encoder's byte output IS the signal, and for a blank canvas it is a
@@ -1791,6 +1870,35 @@
             "AudioBuffer.prototype names"
         );
         assert_eq!(v["ab_same_ref"], true, "getChannelData returns the same array every call");
+    }
+
+    /// (300015 P6) Chrome truth (headed+headless probe 10-15): an
+    /// empty-graph OfflineAudioContext render is SILENCE — nonzero:0,
+    /// sum:0 over the whole buffer. The engine used to fill a seeded
+    /// pseudo-signal as an anti-detector guess with the polarity backwards;
+    /// the shield's probe is exactly this shape.
+    #[tokio::test(flavor = "current_thread")]
+    async fn oac_empty_render_is_silence() {
+        let mut rt = setup_runtime("<html><body>x</body></html>");
+        rt.evaluate(r#"
+            var oac = new OfflineAudioContext(1, 44100, 44100);
+            oac.startRendering().then(function (buf) {
+                var d = buf.getChannelData(0);
+                var nonzero = 0, sum = 0;
+                for (var i = 0; i < d.length; i++) { if (d[i] !== 0) nonzero++; sum += d[i]; }
+                window.__oacResult = JSON.stringify(
+                    {len: d.length, nonzero: nonzero, sum: sum, state: oac.state});
+            });
+        "#).unwrap();
+        let _ = rt.run_event_loop_bounded(500).await;
+        let v = rt.evaluate("window.__oacResult || 'unset'").unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(v.as_str().expect("string from JSON.stringify"))
+                .expect("oac result json");
+        assert_eq!(v["len"], 44100);
+        assert_eq!(v["nonzero"], 0, "empty graph renders all zeros like Chrome");
+        assert_eq!(v["sum"], 0);
+        assert_eq!(v["state"], "closed", "render settles the context into closed");
     }
 
     /// (#37) HTMLBodyElement's window-reflecting on* family: 24 names whose
