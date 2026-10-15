@@ -8,6 +8,7 @@ fn main() {
     println!("cargo:rerun-if-changed=js/performance.js");
     println!("cargo:rerun-if-changed=js/window_faces.js");
     println!("cargo:rerun-if-changed=js/global_surface.js");
+    println!("cargo:rerun-if-changed=js/canvas_face.js");
     println!("cargo:rerun-if-changed=js/interface_sweep.js");
     println!("cargo:rerun-if-changed=js/message_port.js");
     println!("cargo:rerun-if-changed=js/fetch_probe.js");
@@ -77,6 +78,11 @@ fn main() {
     // 300015 P2: the chrome-truth window own-prop surface (generated — see
     // the file header). Loads after every behavior module, before the sweeps.
     let global_surface_js = include_str!("js/global_surface.js");
+    // 300015 P3: Chrome-exact toDataURL/toBlob bytes for blank canvases
+    // (generated — see the file header). Wraps bootstrap's toDataURL (the
+    // non-blank path and the honest blank floor); must load before
+    // interface_sweep.js so the wrappers get native-marked with the rest.
+    let canvas_face_js = include_str!("js/canvas_face.js");
     // LAST script (#236 absorption split): the snapshot-time interface sweeps
     // walk globalThis to finish every interface (native marks, non-enumerable
     // globals, enumerable members, WebIDL toStringTag brands) — running them
@@ -125,6 +131,9 @@ fn main() {
                 runtime
                     .execute_script("<anonymous>", global_surface_js.to_string())
                     .expect("global_surface.js should not fail during snapshot creation");
+                runtime
+                    .execute_script("<anonymous>", canvas_face_js.to_string())
+                    .expect("canvas_face.js should not fail during snapshot creation");
                 runtime
                     .execute_script("<anonymous>", interface_sweep_js.to_string())
                     .expect("interface_sweep.js should not fail during snapshot creation");

@@ -1491,6 +1491,85 @@
         assert_eq!(obj["onsearch_val"], serde_json::Value::Null);
     }
 
+    /// (300015 P3) Blank-canvas readout face: the XHS shield fingerprints
+    /// `toDataURL('image/webp')` on a never-drawn 300x150 canvas — the
+    /// encoder's byte output IS the signal, and for a blank canvas it is a
+    /// CONSTANT per (format, w, h). Chrome truth: webp 279 / jpeg 783 /
+    /// png 2118 chars at 300x150 (CDP-captured, canvas_face.js table).
+    /// Blank = no 2D context OR an all-zero buffer; uncovered dims and
+    /// drawn canvases fall to the honest PNG floor (real magic bytes, no
+    /// seeded fake stub).
+    #[test]
+    fn canvas_blank_readout_face_p3() {
+        let mut rt = setup_runtime("<html><body>x</body></html>");
+        let v = rt.evaluate(r#"
+            var r = {};
+            // never-contexted 300x150 — the exact shield probe shape
+            var c = document.createElement('canvas');
+            var webp = c.toDataURL('image/webp');
+            var jpeg = c.toDataURL('image/jpeg');
+            var png = c.toDataURL();
+            var bmp = c.toDataURL('image/bmp');
+            // getContext'd but never drawn — the zero-buffer scan must agree
+            var c2 = document.createElement('canvas');
+            c2.getContext('2d');
+            var webp2 = c2.toDataURL('image/webp');
+            // webp blob from the constant: type + exact byte size
+            var bSize, bType;
+            c.toBlob(function(b){ bSize = b.size; bType = b.type; }, 'image/webp');
+            // uncovered dims (137x91) blank webp → honest floor: REAL png magic
+            var c3 = document.createElement('canvas');
+            c3.width = 137; c3.height = 91;
+            var odd = c3.toDataURL('image/webp');
+            var oddBin = atob(odd.slice(odd.indexOf(',') + 1));
+            // drawn canvas webp → falls through to the engine's real PNG
+            var c4 = document.createElement('canvas');
+            var x = c4.getContext('2d');
+            x.fillStyle = '#f60'; x.fillRect(0, 0, 50, 50);
+            var drawn = c4.toDataURL('image/webp');
+            // wrapper face: name/length native parity
+            var d1 = HTMLCanvasElement.prototype.toDataURL;
+            var d2 = HTMLCanvasElement.prototype.toBlob;
+            r.webp = [webp.length, webp.slice(0, 48), webp.slice(-24)];
+            r.jpeg = [jpeg.length, jpeg.slice(0, 48), jpeg.slice(-24)];
+            r.png = [png.length, png.slice(0, 48), png.slice(-24)];
+            r.bmp_is_png_const = bmp === png;
+            r.ctx_blank_same = webp2 === webp;
+            r.blob = [bType, bSize];
+            r.odd = [odd.slice(0, 22), oddBin.length,
+                     oddBin.charCodeAt(0) === 137 && oddBin.charCodeAt(1) === 80];
+            r.drawn = [drawn.slice(0, 22), drawn.length > 300];
+            r.face = [d1.name, d1.length, String(d1).indexOf('native code') >= 0,
+                      d2.name, d2.length, String(d2).indexOf('native code') >= 0];
+            JSON.stringify(r)
+        "#).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(v.as_str().expect("string from JSON.stringify")).unwrap();
+        assert_eq!(v["webp"][0], 279, "webp const length");
+        assert_eq!(v["webp"][1], "data:image/webp;base64,UklGRrgAAABXRUJQVlA4WAoAA", "webp const head");
+        assert_eq!(v["webp"][2], "ZOQ99qwAAP7/1gAAAAAAAAAA", "webp const tail");
+        assert_eq!(v["jpeg"][0], 783, "jpeg const length");
+        assert_eq!(v["jpeg"][1], "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABA", "jpeg const head");
+        assert_eq!(v["jpeg"][2], "AAAAAAAAAAAAAAAAAAA//9k=", "jpeg const tail");
+        assert_eq!(v["png"][0], 2118, "png const length");
+        assert_eq!(v["png"][1], "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAS", "png const head");
+        assert_eq!(v["png"][2], "AS0pote3AAAAAElFTkSuQmCC", "png const tail");
+        assert_eq!(v["bmp_is_png_const"], true, "unknown type normalizes to the png const");
+        assert_eq!(v["ctx_blank_same"], true, "zero-buffer canvas === never-contexted canvas");
+        assert_eq!(v["blob"][0], "image/webp", "toBlob webp type");
+        assert_eq!(v["blob"][1], 192, "toBlob webp exact byte size");
+        assert_eq!(v["odd"][0], "data:image/png;base64,", "uncovered dims → honest png prefix");
+        assert_eq!(v["odd"][2], true, "uncovered dims → real PNG magic bytes (no fake stub)");
+        assert_eq!(v["drawn"][0], "data:image/png;base64,", "drawn canvas → engine PNG (documented residual)");
+        assert_eq!(v["drawn"][1], true, "drawn canvas payload is real bytes");
+        assert_eq!(v["face"][0], "toDataURL", "wrapper name");
+        assert_eq!(v["face"][1], 2, "toDataURL.length (type, quality)");
+        assert_eq!(v["face"][2], true, "toDataURL toString native");
+        assert_eq!(v["face"][3], "toBlob", "wrapper name");
+        assert_eq!(v["face"][4], 3, "toBlob.length (callback, type, quality)");
+        assert_eq!(v["face"][5], true, "toBlob toString native");
+    }
+
     /// (#37) HTMLBodyElement's window-reflecting on* family: 24 names whose
     /// body accessors ARE the window's — shared identity both directions,
     /// `<body onX>` content attributes install as the window's handler and

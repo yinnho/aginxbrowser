@@ -13914,8 +13914,26 @@ HTMLCanvasElement.prototype.toDataURL = function(type) {
         s += String.fromCharCode.apply(null, png.subarray(i, i + 0x8000));
       }
       return 'data:image/png;base64,' + btoa(s);
-    } catch (e) { /* fall through to the seeded stub */ }
+    } catch (e) { /* fall through to the blank encode */ }
   }
+  // (300015 P3) A canvas with no 2D context is a pristine blank surface, not
+  // a fake-stub case: Chrome encodes real bytes of all-zero pixels. The old
+  // seeded `_fp('canvasFingerprint')` stub returned an 86-char corrupt PNG —
+  // exactly what the XHS shield's toDataURL('image/webp') probe hashed. The
+  // XHS-relevant formats/dims are layered over by canvas_face.js; this is
+  // the honest floor for everything else.
+  try {
+    if (_OPS.op_canvas_png) {
+      const w = this.width || 300, h = this.height || 150;
+      const px = new Uint8ClampedArray(w * h * 4);
+      const png = new Uint8Array(_OPS.op_canvas_png(w, h, px));
+      let s = '';
+      for (let i = 0; i < png.length; i += 0x8000) {
+        s += String.fromCharCode.apply(null, png.subarray(i, i + 0x8000));
+      }
+      return 'data:image/png;base64,' + btoa(s);
+    }
+  } catch (e) {}
   return _fp('canvasFingerprint');
 };
 HTMLCanvasElement.prototype.toBlob = function(cb, type, q) {
@@ -13927,6 +13945,16 @@ HTMLCanvasElement.prototype.toBlob = function(cb, type, q) {
       return;
     } catch (e) {}
   }
+  // (300015 P3) Same floor as toDataURL above: no-ctx canvas → real blank
+  // PNG blob, never the empty-string blob.
+  try {
+    if (_OPS.op_canvas_png) {
+      const w = this.width || 300, h = this.height || 150;
+      const px = new Uint8ClampedArray(w * h * 4);
+      cb(new Blob([new Uint8Array(_OPS.op_canvas_png(w, h, px))], { type: 'image/png' }));
+      return;
+    }
+  } catch (e) {}
   cb(new Blob(['']));
 };
 // (#164) canvas.width/height are reflected IDL attributes (default 300/150,
