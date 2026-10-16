@@ -2859,7 +2859,11 @@ class Node {
   get lastChild() { return _wrap(+_dom("last_child", this._nid)); }
   get nextSibling() { return _wrap(+_dom("next_sibling", this._nid)); }
   get previousSibling() { return _wrap(+_dom("prev_sibling", this._nid)); }
-  appendChild(c) {
+  // The trailing boolean is an internal flag: Element.append/prepend/
+  // replaceChildren batch their per-node inserts and emit ONE combined
+  // childList record (Chrome truth: append(i, b) is a single record with
+  // both nodes in addedNodes), so the per-call notify is suppressed there.
+  appendChild(c, _batchInsert) {
     if (!c) return c;
     // Per DOM spec, inserting a DocumentFragment inserts its CHILDREN — the
     // fragment itself never enters the tree (a `#document-fragment` visible
@@ -2872,15 +2876,29 @@ class Node {
       const kids = Array.from(c.childNodes);
       for (const k of kids) this.appendChild(k);
       if (globalThis.__mutationObservers?.length) {
-        globalThis.__notifyMutation('childList', this._nid, kids.map(k => k._nid), []);
+        const k0 = kids[0], k1 = kids[kids.length - 1];
+        globalThis.__notifyMutation('childList', this._nid, kids.map(k => k._nid), [],
+          null, null, k0.previousSibling ? k0.previousSibling._nid : null, k1.nextSibling ? k1.nextSibling._nid : null);
       }
       if (_nodeInDocument(this)) for (const k of kids) _registerIframesIn(k);
       // (#48) fragment children entering the document become window-named.
       if (_nodeInDocument(this)) for (const k of kids) _namedScanIn(k);
       return c;
     }
+    // A Document takes at most one element child (DOM standard's document
+    // child constraints; Chrome message pinned by the #272 Chrome probe).
+    if (this.nodeType === 9 && c.nodeType === 1) {
+      for (const k of this.childNodes) {
+        if (k !== c && k.nodeType === 1) {
+          throw new DOMException("Failed to execute 'appendChild' on 'Node': Only one element on document allowed.", "HierarchyRequestError");
+        }
+      }
+    }
     _dom("append_child", this._nid, c._nid);
-    if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('childList', this._nid, [c._nid], []);
+    if (!_batchInsert && globalThis.__mutationObservers?.length) {
+      globalThis.__notifyMutation('childList', this._nid, [c._nid], [],
+        null, null, c.previousSibling ? c.previousSibling._nid : null, c.nextSibling ? c.nextSibling._nid : null);
+    }
     // Insertion into the document instantiates browsing contexts for any
     // iframes in the inserted subtree (window[N] / window.length).
     if (_nodeInDocument(this)) _registerIframesIn(c);
@@ -2888,8 +2906,12 @@ class Node {
     __prepareInsertedSubtree(c);
     return c;
   }
-  removeChild(c) {
+  removeChild(c, _batchRemove) {
     if (!c) return c;
+    // The removed node's old neighbours ride the record (DOM standard: the
+    // remove steps capture them BEFORE the node leaves the tree).
+    const prevNid = c.previousSibling ? c.previousSibling._nid : null;
+    const nextNid = c.nextSibling ? c.nextSibling._nid : null;
     _dom("remove_child", c._nid);
     __disconnectCustomElementsIn(c);
     // (#48) the removed subtree loses its window-named properties.
@@ -2897,7 +2919,9 @@ class Node {
     // A tracked animation on a removed element must fire animationcancel.
     _cancelAnimationsInSubtree(c);
     _cancelTransitionsInSubtree(c);
-    if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('childList', this._nid, [], [c._nid]);
+    if (!_batchRemove && globalThis.__mutationObservers?.length) {
+      globalThis.__notifyMutation('childList', this._nid, [], [c._nid], null, null, prevNid, nextNid);
+    }
     return c;
   }
   replaceChild(newChild, oldChild) {
@@ -2915,25 +2939,41 @@ class Node {
     _dom("remove_child", oldChild._nid);
     __disconnectCustomElementsIn(oldChild);
     _namedUnscanIn(oldChild);
-    // A replacement is an insertion and a removal; an observer saw neither so far.
-    if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('childList', this._nid, [newChild._nid], [oldChild._nid]);
+    // A replacement is a single combined record in Chrome (added+removed in
+    // one childList entry, siblings from the replacement point), not the
+    // spec's remove+insert pair — #272 Chrome probe.
+    if (globalThis.__mutationObservers?.length) {
+      globalThis.__notifyMutation('childList', this._nid, [newChild._nid], [oldChild._nid],
+        null, null, newChild.previousSibling ? newChild.previousSibling._nid : null, newChild.nextSibling ? newChild.nextSibling._nid : null);
+    }
     if (_nodeInDocument(this)) _registerIframesIn(newChild);
     _namedScanIn(newChild);
     __prepareInsertedSubtree(newChild);
     return oldChild;
   }
-  insertBefore(n, ref) {
+  insertBefore(n, ref, _batchInsert) {
     if (!n) return n;
-    if (!ref) { this.appendChild(n); return n; }
+    if (!ref) { this.appendChild(n, _batchInsert); return n; }
     if (n.nodeType === 11 && n.nodeName === '#document-fragment' && !(n instanceof globalThis.ShadowRoot)) {
       const kids = Array.from(n.childNodes);
       for (const k of kids) this.insertBefore(k, ref);
       return n;
     }
+    // Same document-child constraint as appendChild (one element child).
+    if (this.nodeType === 9 && n.nodeType === 1) {
+      for (const k of this.childNodes) {
+        if (k !== n && k.nodeType === 1) {
+          throw new DOMException("Failed to execute 'insertBefore' on 'Node': Only one element on document allowed.", "HierarchyRequestError");
+        }
+      }
+    }
     _dom("insert_before", n._nid, ref._nid);
     // Same reporting as appendChild: where a node is inserted does not decide
     // whether an observer sees it.
-    if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('childList', this._nid, [n._nid], []);
+    if (!_batchInsert && globalThis.__mutationObservers?.length) {
+      globalThis.__notifyMutation('childList', this._nid, [n._nid], [],
+        null, null, n.previousSibling ? n.previousSibling._nid : null, n.nextSibling ? n.nextSibling._nid : null);
+    }
     if (_nodeInDocument(this)) _registerIframesIn(n);
     _namedScanIn(n);
     __prepareInsertedSubtree(n);
@@ -3818,6 +3858,7 @@ class Element extends Node {
       const ns = _namedNames(this);
       if (ns.length) oldNamed = [this._nid, ns];
     }
+    const __moOld = globalThis.__mutationObservers?.length ? this.getAttribute(n) : undefined;
     _dom("set_attribute", this._nid, n + "\0" + String(v));
     if (oldNamed) _namedUntrackBy(oldNamed[0], oldNamed[1]);
     if ((n === "id" || n === "name") && this.isConnected) _namedTrack(this);
@@ -3847,18 +3888,41 @@ class Element extends Node {
         (this.tagName || '').toUpperCase() === 'IFRAME' && this.isConnected) {
       this._loadIframeSrc('about:srcdoc');
     }
-    if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('attributes', this._nid, [], [], n);
+    if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('attributes', this._nid, [], [], n, __moOld, null, null);
     // class/style writes can start or stop a CSS animation on this element,
     // and may start a transition (before/after computed-value diff).
     if (n === "class" || n === "style") { _scheduleAnimationCheck(this); _scheduleTransitionCheck(this); }
   }
   setAttributeNS(ns, n, v) {
-    _dom("set_attribute", this._nid, String(n) + "\0" + String(v)); // exact name, no HTML folding
-    const ln = String(n).toLowerCase();
+    n = String(n);
+    const __moOld = globalThis.__mutationObservers?.length ? this.getAttributeNS(ns, n) : undefined;
+    _dom("set_attribute", this._nid, n + "\0" + String(v)); // exact name, no HTML folding
+    if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('attributes', this._nid, [], [], n, __moOld, null, null);
+    const ln = n.toLowerCase();
     if (ln === "class" || ln === "style") { _scheduleAnimationCheck(this); _scheduleTransitionCheck(this); }
   }
-  removeAttribute(n) { n = _htmlAttrName(this, n); const popoverPrev = (n === "popover") ? this.popover : undefined; if ((n === "id" || n === "name") && _namedEls.size && this.nodeType === 1) _namedUntrack(this); _dom("remove_attribute", this._nid, n); if (popoverPrev !== undefined) this._popoverTypeMaybeChanged(popoverPrev); if (n === "class" || n === "style") { _scheduleAnimationCheck(this); _scheduleTransitionCheck(this); } }
-  removeAttributeNS(ns, n) { _dom("remove_attribute", this._nid, String(n)); const ln = String(n).toLowerCase(); if (ln === "class" || ln === "style") { _scheduleAnimationCheck(this); _scheduleTransitionCheck(this); } }
+  removeAttribute(n) {
+    n = _htmlAttrName(this, n);
+    // No attribute present → no record (Chrome fires nothing when removing
+    // an absent attribute).
+    const __moHad = globalThis.__mutationObservers?.length ? this.hasAttribute(n) : false;
+    const __moOld = __moHad ? this.getAttribute(n) : undefined;
+    const popoverPrev = (n === "popover") ? this.popover : undefined;
+    if ((n === "id" || n === "name") && _namedEls.size && this.nodeType === 1) _namedUntrack(this);
+    _dom("remove_attribute", this._nid, n);
+    if (__moHad && globalThis.__mutationObservers?.length) globalThis.__notifyMutation('attributes', this._nid, [], [], n, __moOld, null, null);
+    if (popoverPrev !== undefined) this._popoverTypeMaybeChanged(popoverPrev);
+    if (n === "class" || n === "style") { _scheduleAnimationCheck(this); _scheduleTransitionCheck(this); }
+  }
+  removeAttributeNS(ns, n) {
+    n = String(n);
+    const __moHad = globalThis.__mutationObservers?.length ? this.getAttributeNS(ns, n) !== null : false;
+    const __moOld = __moHad ? this.getAttributeNS(ns, n) : undefined;
+    _dom("remove_attribute", this._nid, n);
+    if (__moHad && globalThis.__mutationObservers?.length) globalThis.__notifyMutation('attributes', this._nid, [], [], n, __moOld, null, null);
+    const ln = n.toLowerCase();
+    if (ln === "class" || ln === "style") { _scheduleAnimationCheck(this); _scheduleTransitionCheck(this); }
+  }
   getAttributeNames() {
     // Chrome 61+ API; the xhs creator publish page's mount path calls it
     // unguarded, so its absence rejects the whole component tree (#51).
@@ -5857,18 +5921,58 @@ class Element extends Node {
     return false;
   }
   remove() { if (this.parentNode) this.parentNode.removeChild(this); }
-  append(...nodes) { for (const n of _convertNodes(nodes)) this.appendChild(n); }
-  prepend(...nodes) {
-    const ref = this.firstChild;
-    for (const n of _convertNodes(nodes)) {
-      if (ref) this.insertBefore(n, ref); else this.appendChild(n);
+  // The ParentNode multi-arg mutators emit ONE childList record per call in
+  // Chrome (append(i, b) → single record, addedNodes [i, b], siblings around
+  // the whole range) — #272 Chrome probe. The per-node ops run with the
+  // batch flag so appendChild/insertBefore stay silent, then one combined
+  // notify fires; with no observers registered the notify is skipped and
+  // the plain loop runs untouched (zero added cost on the hot path).
+  append(...nodes) {
+    const conv = _convertNodes(nodes);
+    if (!conv.length) return;
+    if (!globalThis.__mutationObservers?.length) {
+      for (const n of conv) this.appendChild(n);
+      return;
     }
+    const prevNid = this.lastChild ? this.lastChild._nid : null;
+    for (const n of conv) this.appendChild(n, true);
+    const last = conv[conv.length - 1];
+    globalThis.__notifyMutation('childList', this._nid, conv.map(n => n._nid), [],
+      null, null, prevNid, last.nextSibling ? last.nextSibling._nid : null);
+  }
+  prepend(...nodes) {
+    const conv = _convertNodes(nodes);
+    if (!conv.length) return;
+    const ref = this.firstChild;
+    if (!globalThis.__mutationObservers?.length) {
+      for (const n of conv) {
+        if (ref) this.insertBefore(n, ref); else this.appendChild(n);
+      }
+      return;
+    }
+    const nextNid = ref ? ref._nid : null;
+    for (const n of conv) {
+      if (ref) this.insertBefore(n, ref, true); else this.appendChild(n, true);
+    }
+    globalThis.__notifyMutation('childList', this._nid, conv.map(n => n._nid), [],
+      null, null, conv[0].previousSibling ? conv[0].previousSibling._nid : null, nextNid);
   }
   replaceChildren(...nodes) {
     const converted = _convertNodes(nodes);
+    if (!globalThis.__mutationObservers?.length) {
+      let c;
+      while ((c = this.firstChild)) this.removeChild(c);
+      for (const n of converted) this.appendChild(n);
+      return;
+    }
+    // A whole-list swap is one replace-all record (same shape Chrome gives
+    // textContent/innerHTML writes): added+removed in one entry, no siblings.
+    const oldNids = Array.from(this.childNodes).map(n => n._nid);
     let c;
-    while ((c = this.firstChild)) this.removeChild(c);
-    for (const n of converted) this.appendChild(n);
+    while ((c = this.firstChild)) this.removeChild(c, true);
+    for (const n of converted) this.appendChild(n, true);
+    globalThis.__notifyMutation('childList', this._nid, converted.map(n => n._nid), oldNids,
+      null, null, null, null);
   }
 }
 
@@ -10160,11 +10264,48 @@ globalThis.MutationObserver = class MutationObserver {
     __hideOwn(this);
   }
   observe(target, options) {
-    this._targets.push({ target, options: options || {} });
-    globalThis.__mutationObservers.push(this);
+    // WebIDL validates parameter 1 first (Chrome: "parameter 1 is not of
+    // type 'Node'."), then the dictionary needs at least one of the three
+    // mutation kinds true — both messages pinned against Chrome 155 (#272).
+    if (!target || typeof target._nid !== 'number') {
+      throw new TypeError("Failed to execute 'observe' on 'MutationObserver': parameter 1 is not of type 'Node'.");
+    }
+    const o = options || {};
+    // Chrome's dictionary coercion: the option-value keys imply their
+    // family when the family's own key is ABSENT — attributeOldValue/
+    // attributeFilter imply attributes (and records really are delivered
+    // for {attributeOldValue:true} alone), characterDataOldValue implies
+    // characterData. An explicitly-false family key kills the implication:
+    // {attributes:false, attributeOldValue:true} throws (Chrome 155 probe).
+    const effAttrs = o.attributes !== undefined
+      ? !!o.attributes : (!!o.attributeOldValue || Array.isArray(o.attributeFilter));
+    const effCd = o.characterData !== undefined ? !!o.characterData : !!o.characterDataOldValue;
+    if (!o.childList && !effAttrs && !effCd) {
+      throw new TypeError("Failed to execute 'observe' on 'MutationObserver': The options object must set at least one of 'attributes', 'characterData', or 'childList' to true.");
+    }
+    // Normalize once (the spec snapshots the dictionary at observe time):
+    // the notify bridge reads the effective booleans, not the raw ones.
+    const normalized = {
+      childList: !!o.childList,
+      attributes: effAttrs,
+      characterData: effCd,
+      subtree: !!o.subtree,
+      attributeOldValue: !!o.attributeOldValue,
+      characterDataOldValue: !!o.characterDataOldValue,
+    };
+    if (Array.isArray(o.attributeFilter)) normalized.attributeFilter = o.attributeFilter;
+    // Re-observing the same target replaces the options (never stacks a
+    // second entry — Chrome delivers one record per mutation per observer).
+    this._targets = this._targets.filter(t => t.target !== target);
+    this._targets.push({ target, options: normalized });
+    if (globalThis.__mutationObservers.indexOf(this) < 0) globalThis.__mutationObservers.push(this);
   }
   disconnect() {
     this._targets = [];
+    // Chrome empties the record queue on disconnect: a queued-but-undelivered
+    // record is dropped (takeRecords returns [] after), and the flush loop
+    // skips unregistered observers, so no late callback fires either.
+    this._records = [];
     const idx = globalThis.__mutationObservers.indexOf(this);
     if (idx >= 0) globalThis.__mutationObservers.splice(idx, 1);
   }
@@ -10173,22 +10314,35 @@ globalThis.MutationObserver = class MutationObserver {
     this._records = [];
     return r;
   }
-  _notify(records) {
-    this._records.push(...records);
-    Promise.resolve().then(() => {
-      if (this._records.length > 0) {
-        const batch = this._records.splice(0);
-        try { this._callback(batch, this); } catch(e) { globalThis.__diting_reportUncaughtError(e); }
-      }
-    });
+};
+// All records queued in the same synchronous block deliver in ONE callback
+// per observer, at one microtask checkpoint, in registration order (Chrome
+// truth: 3 sync childList mutations → calls=1, records=3). Mutations during
+// a callback re-arm the flush for the next checkpoint.
+globalThis.__moFlush = function () {
+  globalThis.__moFlushArmed = false;
+  const list = globalThis.__mutationObservers.slice();
+  for (const obs of list) {
+    if (!obs._records.length) continue;
+    const batch = obs._records.splice(0);
+    try { obs._callback.call(obs, batch, obs); }
+    catch (e) { globalThis.__diting_reportUncaughtError(e); }
   }
 };
+globalThis.__moFlushArmed = false;
 // (#39) Chrome exposes WebKitMutationObserver as an alias of the same
 // constructor (zone.js patches both names; it skips absent classes, but
 // `typeof WebKitMutationObserver` must be 'function'). A data prop holding
 // the shared function survives the V8 snapshot and shares its native mark.
 globalThis.WebKitMutationObserver = globalThis.MutationObserver;
-globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNodes, attributeName, oldValue) {
+// prevNid/nextNid carry the record's sibling slots (post-insertion
+// neighbours for additions, pre-removal neighbours for removals; null for
+// replace-all records like innerHTML/textContent writes). oldValue arrives
+// from the mutation site (previous attribute value / previous text) and is
+// attached per observer only when that observer asked for it — Chrome
+// leaves oldValue null for observers without attributeOldValue/
+// characterDataOldValue.
+globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNodes, attributeName, oldValue, prevNid, nextNid) {
   if (!globalThis.__mutationObservers.length) return;
   // Use `_wrap` (the canonical node-id → wrapper resolver) instead of a
   // direct cache poke. The previous code referenced `globalThis._cache`,
@@ -10200,11 +10354,13 @@ globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNode
   // `set innerHTML`), which we need for record.target/added/removed.
   const target = _wrap(target_nid);
   if (!target) return;
-  // Match observers FIRST and build the (allocating) record only if someone
-  // wants this mutation — under attribute storms the overwhelming majority of
-  // calls match nobody, and the record build (wrap + array map/filter) was
-  // pure waste. Semantics unchanged: one notify per matching observer, same
-  // record identity shared across them.
+  // Match observers FIRST and build the (allocating) records only if
+  // someone wants this mutation — under attribute storms the overwhelming
+  // majority of calls match nobody, and the record build (wrap + array
+  // map/filter) was pure waste. Semantics unchanged: one record per
+  // matching observer; observers whose options produce identical records
+  // share one object (Chrome hands both observers the very same record
+  // instance when their option sets agree — #272 probe).
   const matched = [];
   // Ancestor nids, collected at most once and shared by every subtree
   // root — one parentNode walk instead of one per observed root.
@@ -10228,31 +10384,49 @@ globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNode
         (type === 'characterData' && t.options.characterData) ||
         (type === 'childList' && t.options.childList);
       if (!wantsType) continue;
-      if (root._nid === target_nid) { matched.push(obs); break; }
+      if (root._nid === target_nid) { matched.push([obs, t.options]); break; }
       if (t.options.subtree) {
         if (chain === -1) {
           chain = [];
           for (let cur = target.parentNode; cur; cur = cur.parentNode) chain.push(cur._nid);
         }
+        let hit = false;
         for (let i = 0; i < chain.length; i++) {
-          if (chain[i] === root._nid) { matched.push(obs); break; }
+          if (chain[i] === root._nid) { hit = true; break; }
         }
-        if (matched[matched.length - 1] === obs) break;
+        if (hit) { matched.push([obs, t.options]); break; }
       }
     }
   }
   if (!matched.length) return;
-  const record = {
-    type: type, // 'childList', 'attributes', 'characterData'
-    target: target,
-    addedNodes: addedNodes ? addedNodes.map(nid => _wrap(nid)).filter(Boolean) : [],
-    removedNodes: removedNodes ? removedNodes.map(nid => _wrap(nid)).filter(Boolean) : [],
-    attributeName: attributeName || null,
-    oldValue: oldValue ?? null,
-    previousSibling: null,
-    nextSibling: null,
-  };
-  for (const obs of matched) obs._notify([record]);
+  // One record object per distinct effective oldValue: observers with the
+  // same gating share the instance (Chrome's identity sharing), observers
+  // that gated differently get their own.
+  const cache = new Map();
+  for (const [obs, opts] of matched) {
+    let eff = null;
+    if (type === 'attributes' && opts.attributeOldValue) eff = oldValue ?? null;
+    else if (type === 'characterData' && opts.characterDataOldValue) eff = oldValue ?? null;
+    let record = cache.get(eff);
+    if (!record) {
+      record = {
+        type: type, // 'childList', 'attributes', 'characterData'
+        target: target,
+        addedNodes: addedNodes ? addedNodes.map(nid => _wrap(nid)).filter(Boolean) : [],
+        removedNodes: removedNodes ? removedNodes.map(nid => _wrap(nid)).filter(Boolean) : [],
+        attributeName: attributeName || null,
+        oldValue: eff,
+        previousSibling: prevNid != null ? (_wrap(prevNid) || null) : null,
+        nextSibling: nextNid != null ? (_wrap(nextNid) || null) : null,
+      };
+      cache.set(eff, record);
+    }
+    obs._records.push(record);
+  }
+  if (!globalThis.__moFlushArmed) {
+    globalThis.__moFlushArmed = true;
+    Promise.resolve().then(globalThis.__moFlush);
+  }
 };
 
 // A native shadow root: a real arena node with its own child list (kept out
