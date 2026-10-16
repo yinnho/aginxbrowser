@@ -59,3 +59,6 @@ scripts/__pycache__/
 
 # Local desktop UI experiment (not part of the product tree)
 /desktop.js
+
+# Agent scratch/forensics — runtime state & credentials, never commit (2026-10-16 audit S1)
+/tmp-agent/
