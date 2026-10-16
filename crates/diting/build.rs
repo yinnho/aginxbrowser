@@ -5,6 +5,7 @@ fn main() {
     println!("cargo:rerun-if-changed=js/fetch.js");
     println!("cargo:rerun-if-changed=js/audio.js");
     println!("cargo:rerun-if-changed=js/worker.js");
+    println!("cargo:rerun-if-changed=js/indexeddb.js");
     println!("cargo:rerun-if-changed=js/xhr.js");
     println!("cargo:rerun-if-changed=js/domparser.js");
     println!("cargo:rerun-if-changed=js/performance.js");
@@ -59,6 +60,7 @@ fn main() {
     // top level and touch bootstrap helpers at call time.
     let audio_js = include_str!("js/audio.js");
     let worker_js = include_str!("js/worker.js");
+    let indexeddb_js = include_str!("js/indexeddb.js");
     // Third script, same realm, runs after bootstrap.js: message_port.js
     // only consumes bindings the first script defined, so plain sequential
     // execute_script calls are equivalent to one concatenated script.
@@ -123,6 +125,9 @@ fn main() {
                 runtime
                     .execute_script("<anonymous>", worker_js.to_string())
                     .expect("worker.js should not fail during snapshot creation");
+                runtime
+                    .execute_script("<anonymous>", indexeddb_js.to_string())
+                    .expect("indexeddb.js should not fail during snapshot creation");
                 runtime
                     .execute_script("<anonymous>", xhr_js.to_string())
                     .expect("xhr.js should not fail during snapshot creation");
