@@ -26,7 +26,7 @@ pub use policy::{
 #[cfg(feature = "stealth")]
 pub(crate) use policy::custom_cert_store_requested;
 
-pub use ssrf::{is_forbidden_base, is_forbidden_ip, SsrfGuardResolver};
+pub use ssrf::{forbidden_after_dns, is_forbidden_base, is_forbidden_ip, SsrfGuardResolver};
 
 /// One hop a redirected request followed: the Location target and the 3xx
 /// status that sent it there. Network rows keep the REQUESTED url in

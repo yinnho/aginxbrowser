@@ -208,8 +208,15 @@ impl WsConnectJob {
         let target = if allow {
             addrs[0]
         } else {
-            match addrs.iter().find(|sa| !crate::diting_net::client::is_forbidden_ip(sa.ip())) {
-                Some(sa) => *sa,
+            let mut allowed = None;
+            for sa in &addrs {
+                if !crate::diting_net::client::forbidden_after_dns(sa.ip()).await {
+                    allowed = Some(*sa);
+                    break;
+                }
+            }
+            match allowed {
+                Some(sa) => sa,
                 None => {
                     return Err(format!(
                         "SSRF blocked: '{}' resolves only to forbidden addresses{}",

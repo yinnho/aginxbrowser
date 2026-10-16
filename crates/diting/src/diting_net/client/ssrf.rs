@@ -148,6 +148,81 @@ fn embedded_ipv4(v6: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
     v6.to_ipv4()
 }
 
+/// 198.18.0.0/15 — the benchmarking block that fake-ip DNS proxies (Clash /
+/// mihomo / FlClash TUN, Surge enhanced mode) hand out as synthetic answers.
+fn in_fake_ip_range(ip: IpAddr) -> bool {
+    matches!(ip, IpAddr::V4(v4) if { let o = v4.octets(); o[0] == 198 && o[1] & 0xfe == 18 })
+}
+
+/// How the fake-ip exemption is decided: `AGINXBROWSER_FAKE_IP=1` forces it
+/// on, `0` forces it off, anything else (default) probes the resolver.
+fn fake_ip_mode() -> Option<bool> {
+    match std::env::var("AGINXBROWSER_FAKE_IP").ok().as_deref().map(str::trim) {
+        Some("1") | Some("true") | Some("on") => Some(true),
+        Some("0") | Some("false") | Some("off") => Some(false),
+        _ => None,
+    }
+}
+
+/// True when the system resolver is a fake-ip DNS: a TUN proxy answers EVERY
+/// name — even one that cannot exist — with a synthetic 198.18.x.x address and
+/// maps it back to the real hostname inside the tunnel. A normal resolver
+/// answers NXDOMAIN for a random label, so the probe tells the two apart
+/// without any per-user configuration. The verdict is cached for 30s (the
+/// user can flip the TUN at any time).
+async fn fake_ip_dns_active() -> bool {
+    if let Some(forced) = fake_ip_mode() {
+        return forced;
+    }
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, bool)>> =
+        std::sync::Mutex::new(None);
+    if let Ok(slot) = CACHE.lock() {
+        if let Some((at, verdict)) = *slot {
+            if at.elapsed() < std::time::Duration::from_secs(30) {
+                return verdict;
+            }
+        }
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let probe = format!("aginx-probe-{nanos:x}.example.com");
+    let verdict = match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::net::lookup_host((probe.as_str(), 0)),
+    )
+    .await
+    {
+        Ok(Ok(addrs)) => {
+            let addrs: Vec<SocketAddr> = addrs.collect();
+            !addrs.is_empty() && addrs.iter().all(|sa| in_fake_ip_range(sa.ip()))
+        }
+        _ => false,
+    };
+    if let Ok(mut slot) = CACHE.lock() {
+        *slot = Some((std::time::Instant::now(), verdict));
+    }
+    verdict
+}
+
+/// Post-DNS verdict for an address a hostname RESOLVED to (never for IP
+/// literals in the URL — those keep the plain [`is_forbidden_ip`]). Same
+/// deny-set, with one exception: behind a fake-ip DNS proxy the 198.18.0.0/15
+/// answer is not a destination at all, the tunnel resolves the real target
+/// remotely, so the local address says nothing about where the request lands.
+/// Every other forbidden range (loopback, RFC1918, metadata…) stays blocked
+/// even under fake-ip.
+pub async fn forbidden_after_dns(ip: IpAddr) -> bool {
+    if !is_forbidden_ip(ip) {
+        return false;
+    }
+    if !in_fake_ip_range(ip) {
+        return true;
+    }
+    !fake_ip_dns_active().await
+}
+
 /// reqwest DNS resolver that performs the lookup and then rejects the whole
 /// request if ANY resolved address is in the SSRF deny-set. This closes the
 /// DNS-rebinding bypass a host-string check alone cannot: a public name that
@@ -175,7 +250,14 @@ impl Resolve for SsrfGuardResolver {
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
                 .collect();
             if !allow {
-                if let Some(bad) = addrs.iter().find(|sa| is_forbidden_ip(sa.ip())) {
+                let mut bad = None;
+                for sa in &addrs {
+                    if forbidden_after_dns(sa.ip()).await {
+                        bad = Some(sa);
+                        break;
+                    }
+                }
+                if let Some(bad) = bad {
                     return Err(format!(
                         "SSRF blocked: '{}' resolves to forbidden address {}{}",
                         host,
@@ -188,5 +270,30 @@ impl Resolve for SsrfGuardResolver {
             let iter: Addrs = Box::new(addrs.into_iter());
             Ok(iter)
         })
+    }
+}
+
+#[cfg(test)]
+mod fake_ip_tests {
+    use super::*;
+
+    #[test]
+    fn fake_ip_range_is_exactly_198_18_slash_15() {
+        for ok in ["198.18.0.1", "198.19.255.254"] {
+            assert!(in_fake_ip_range(ok.parse().unwrap()), "{ok}");
+        }
+        for no in ["198.17.255.255", "198.20.0.0", "127.0.0.1", "10.0.0.1", "169.254.169.254"] {
+            assert!(!in_fake_ip_range(no.parse().unwrap()), "{no}");
+        }
+    }
+
+    #[tokio::test]
+    async fn non_fake_ranges_stay_blocked_whatever_the_dns_looks_like() {
+        // These never reach the probe: loopback/RFC1918/metadata are not
+        // 198.18/15, so the exemption cannot apply to them.
+        for bad in ["127.0.0.1", "10.1.2.3", "169.254.169.254", "100.100.100.200"] {
+            assert!(forbidden_after_dns(bad.parse().unwrap()).await, "{bad}");
+        }
+        assert!(!forbidden_after_dns("93.184.216.34".parse().unwrap()).await);
     }
 }

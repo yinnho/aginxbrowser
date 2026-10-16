@@ -191,10 +191,14 @@ impl wreq::dns::Resolve for WreqSsrfGuardResolver {
                 .map_err(|e| -> Box<dyn Error + Send + Sync> { Box::new(e) })?
                 .collect();
             if !allow {
-                if let Some(bad) = addrs
-                    .iter()
-                    .find(|sa| crate::diting_net::client::is_forbidden_ip(sa.ip()))
-                {
+                let mut bad = None;
+                for sa in &addrs {
+                    if crate::diting_net::client::forbidden_after_dns(sa.ip()).await {
+                        bad = Some(sa);
+                        break;
+                    }
+                }
+                if let Some(bad) = bad {
                     return Err(format!(
                         "SSRF blocked: '{}' resolves to forbidden address {}{}",
                         host,
