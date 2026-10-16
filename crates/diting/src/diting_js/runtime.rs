@@ -2,12 +2,12 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use deno_core::{v8, RuntimeOptions};
+use deno_core::RuntimeOptions;
 use crate::diting_dom::DomTree;
 
 /// Re-exported so other crates (obscura-browser, obscura-cdp) can name the V8
 /// isolate handle without taking a direct dependency on deno_core.
-pub use deno_core::v8::IsolateHandle;
+pub use v8::IsolateHandle;
 
 use crate::diting_js::module_loader::DitingModuleLoader;
 use crate::diting_js::ops::{build_extension, JsState};
@@ -373,7 +373,7 @@ impl JsRuntime {
             .map(|t| t.trim())
             .filter(|t| !t.is_empty())
             .unwrap_or("zh-CN");
-        deno_core::v8::icu::set_default_locale(first_tag);
+        v8::icu::set_default_locale(first_tag);
     }
 
     pub fn evaluate(&mut self, expression: &str) -> Result<serde_json::Value, String> {
@@ -1461,11 +1461,11 @@ impl JsRuntime {
 
     fn v8_to_json(
         &mut self,
-        result: deno_core::v8::Global<deno_core::v8::Value>,
+        result: v8::Global<v8::Value>,
     ) -> Result<serde_json::Value, String> {
         // 0.411 removed JsRuntime::handle_scope; deno_core::scope! is the blessed rebuild.
         deno_core::scope!(scope, self.runtime);
-        let local = deno_core::v8::Local::new(scope, result);
+        let local = v8::Local::new(scope, result);
 
         if local.is_undefined() || local.is_null() {
             return Ok(serde_json::Value::Null);
@@ -1483,13 +1483,13 @@ impl JsRuntime {
         }
 
         let global = scope.get_current_context().global(scope);
-        let json_obj_str = deno_core::v8::String::new(scope, "JSON").unwrap();
+        let json_obj_str = v8::String::new(scope, "JSON").unwrap();
         if let Some(json_obj) = global.get(scope, json_obj_str.into()) {
             if let Some(json_obj) = json_obj.to_object(scope) {
-                let stringify_str = deno_core::v8::String::new(scope, "stringify").unwrap();
+                let stringify_str = v8::String::new(scope, "stringify").unwrap();
                 if let Some(stringify_fn) = json_obj.get(scope, stringify_str.into()) {
                     if let Ok(stringify_fn) =
-                        deno_core::v8::Local::<deno_core::v8::Function>::try_from(stringify_fn)
+                        v8::Local::<v8::Function>::try_from(stringify_fn)
                     {
                         let args = [local];
                         if let Some(result) = stringify_fn.call(scope, json_obj.into(), &args) {

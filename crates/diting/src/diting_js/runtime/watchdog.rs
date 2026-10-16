@@ -6,7 +6,7 @@
 //! handle. Split from the module root (god-file ratchet); #66's
 //! sustained-duty busy accounting lives here too — same family, the
 //! defenses against a realm burning a core.
-use deno_core::v8::{self, IsolateHandle};
+use v8::{self, IsolateHandle};
 
 /// Handle to an armed V8 execution watchdog (see [`JsRuntime::arm_watchdog`]).
 /// Holds the cancel channel and the watchdog thread; pass it back to

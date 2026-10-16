@@ -13,5 +13,5 @@ pub use markdown::HTML_TO_MARKDOWN_JS;
 /// engine truth behind the UA string a site sees. Safe to call before any
 /// isolate exists (a static string in the binary).
 pub fn v8_version() -> &'static str {
-    deno_core::v8::V8::get_version()
+    v8::V8::get_version()
 }

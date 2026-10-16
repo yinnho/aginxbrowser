@@ -1,5 +1,5 @@
 use super::JsRuntime;
-use deno_core::v8::IsolateHandle;
+use v8::IsolateHandle;
 
 /// How much the near-heap-limit callback raises the limit so V8 can unwind
 /// the terminated script instead of aborting the process.

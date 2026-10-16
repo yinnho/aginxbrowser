@@ -18232,17 +18232,17 @@
         let mut rt = JsRuntime::new();
         let context = {
             deno_core::scope!(scope, rt.runtime);
-            let ctx = deno_core::v8::Context::from_snapshot(scope, 1, Default::default())
+            let ctx = v8::Context::from_snapshot(scope, 1, Default::default())
                 .or_else(|| {
-                    deno_core::v8::Context::from_snapshot(scope, 0, Default::default())
+                    v8::Context::from_snapshot(scope, 0, Default::default())
                 })
                 .expect("snapshot context to restore");
-            deno_core::v8::Global::new(scope, ctx)
+            v8::Global::new(scope, ctx)
         };
         let isolate = rt.runtime.v8_isolate();
-        deno_core::v8::scope_with_context!(cscope, isolate, &context);
-        let src = deno_core::v8::String::new(cscope, "Promise.reject(1)").unwrap();
-        let script = deno_core::v8::Script::compile(cscope, src, None).unwrap();
+        v8::scope_with_context!(cscope, isolate, &context);
+        let src = v8::String::new(cscope, "Promise.reject(1)").unwrap();
+        let script = v8::Script::compile(cscope, src, None).unwrap();
         let _ = script.run(cscope);
         panic!("unreachable: the rejection should have crashed the process");
     }

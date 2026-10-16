@@ -134,6 +134,12 @@ precomputed-hash = "0.1"
 
 # --- V8 / JS runtime (inlined obscura-js) ---
 deno_core = "0.411"
+# Claim step 1 (docs/diting_runtime认领计划_20261017.md): direct pin on the
+# engine-bindings crate deno_core renames twice (crates.io "v8" <- deno_v8 as
+# "rusty_v8" <- deno_core as "v8"). Exact-pinned so engine bumps are our call
+# (fingerprint self-consistency); default-features off — deno_core still
+# supplies the feature union until step 6, so this edge adds nothing.
+v8 = { version = "=150.4.0", default-features = false }
 deno_error = "0.7"
 base64 = "0.22"
 sha1 = "0.11"

@@ -1378,6 +1378,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "v8",
  "webpki-roots 0.26.11",
  "wreq",
  "wreq-util",
