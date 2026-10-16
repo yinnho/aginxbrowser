@@ -173,6 +173,11 @@ peniko = { version = "0.6", optional = true }
 png = { version = "0.18", optional = true }
 # Same version blitz-dom pins (0.25.x); jpeg/webp/gif are the only features we need.
 image = { version = "0.25", optional = true, default-features = false, features = ["jpeg", "webp", "gif"] }
+rsa = { version = "0.9.10", features = ["sha1", "sha2"] }
+# sha1 on rsa's digest-0.10 line (our top-level sha1 = "0.11" rides the
+# newer stack; rsa's Oaep needs the same-line type for SHA-1 labels/hashes).
+rsa_sha1 = { package = "sha1", version = "0.10.6" }
+rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 wreq = { version = "=6.0.0-rc.31", optional = true, features = ["prefix-symbols", "socks", "gzip", "brotli", "deflate", "zstd"] }

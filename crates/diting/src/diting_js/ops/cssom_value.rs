@@ -367,7 +367,7 @@ pub(super) fn computed_style_value(
         // the number bare ("2") and the initial as "none".
         "line-clamp" | "-webkit-line-clamp" => Some(
             match s.line_clamp {
-                Some(n) => n.to_string().into(),
+                Some(n) => n.to_string(),
                 None => "none".into(),
             },
         ),

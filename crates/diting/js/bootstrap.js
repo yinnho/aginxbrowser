@@ -15082,7 +15082,11 @@ if (!globalThis.crypto.subtle) {
     try { return fn(); }
     catch (e) {
       if (e instanceof DOMException) throw e;
-      throw new DOMException(String((e && e.message) || e), "OperationError");
+      // `|| e` (not `?? e`): an empty-string message must survive as empty —
+      // Chrome's corrupt-unwrap/corrupt-OAEP OperationError carries no text,
+      // and falling back to `String(e)` would surface "Error" instead.
+      const msg = e && e.message !== undefined ? String(e.message) : String(e);
+      throw new DOMException(msg, "OperationError");
     }
   }
 
@@ -15091,8 +15095,14 @@ if (!globalThis.crypto.subtle) {
       case "HMAC":
         return { name: "HMAC", hash: { name: normalizeHash(alg.hash) }, length: bytes.length * 8 };
       case "AES-CTR": case "AES-CBC": case "AES-GCM": case "AES-KW":
-        if (bytes.length !== 16 && bytes.length !== 24 && bytes.length !== 32) {
-          throw new DOMException("AES key data must be 128, 192, or 256 bits", "DataError");
+        // Chrome 155 dropped 192-bit AES (BoringShell): raw import of a
+        // 24-byte key is an OperationError; the jwk path reports a DataError
+        // ("right length" wording) in the oct import branch above us.
+        if (bytes.length === 24) {
+          throw new DOMException("192-bit AES keys are not supported", "OperationError");
+        }
+        if (bytes.length !== 16 && bytes.length !== 32) {
+          throw new DOMException("AES key data must be 128 or 256 bits", "DataError");
         }
         return { name: alg.name, length: bytes.length * 8 };
       case "PBKDF2": return { name: "PBKDF2" };
@@ -15100,6 +15110,192 @@ if (!globalThis.crypto.subtle) {
       default:
         throw new DOMException("Unsupported key algorithm: " + alg.name, "NotSupportedError");
     }
+  }
+
+  // ---- Chrome-155-aligned shared validation (issue #269) ----
+  // The usage faces below are pinned from live Chrome 155, not from the spec:
+  // an unrecognized usage string is a TypeError; empty usages are a
+  // SyntaxError except on public keys; out-of-family usages are a different
+  // SyntaxError.
+  const KNOWN_USAGES = ["encrypt", "decrypt", "sign", "verify", "deriveKey", "deriveBits", "wrapKey", "unwrapKey"];
+  function checkUsageStrings(method, usages) {
+    for (const u of usages || []) {
+      if (!KNOWN_USAGES.includes(u)) {
+        throw new TypeError("Failed to execute '" + method + "' on 'SubtleCrypto': Invalid keyUsages argument");
+      }
+    }
+  }
+  function checkKeyUsages(usages, allowed, isPublic) {
+    if (!usages || usages.length === 0) {
+      if (!isPublic) {
+        throw new DOMException("Usages cannot be empty when creating a key.", "SyntaxError");
+      }
+      return;
+    }
+    for (const u of usages) {
+      if (!allowed.includes(u)) {
+        throw new DOMException("Cannot create a key using the specified key usages.", "SyntaxError");
+      }
+    }
+  }
+  function jwkRequire(jwk, member) {
+    if (jwk[member] === undefined || jwk[member] === null) {
+      throw new DOMException("The required JWK member \"" + member + "\" was missing", "DataError");
+    }
+  }
+  // Strict base64url: Chrome rejects any '=' padding and non-alphabet bytes.
+  function jwkMemberBytes(jwk, member) {
+    const s = jwk[member];
+    if (typeof s !== "string" || !/^[A-Za-z0-9_-]+$/.test(s) || s.length % 4 === 1) {
+      throw new DOMException("The JWK member \"" + member + "\" could not be base64url decoded or contained padding", "DataError");
+    }
+    return b64urlToBytes(s);
+  }
+  function jwkValidateCommon(jwk, extractable, usages, expectedAlg) {
+    if (expectedAlg && jwk.alg !== undefined && jwk.alg !== expectedAlg) {
+      throw new DOMException("The JWK \"alg\" member was inconsistent with that specified by the Web Crypto call", "DataError");
+    }
+    if (jwk.use !== undefined) {
+      const want = (jwk.use === "sig" || jwk.use === "enc") ? jwk.use : null;
+      for (const u of usages) {
+        const cat = (u === "sign" || u === "verify") ? "sig" : "enc";
+        if (cat !== want) {
+          throw new DOMException("The JWK \"use\" member was inconsistent with that specified by the Web Crypto call. The JWK usage must be a superset of those requested", "DataError");
+        }
+      }
+    }
+    if (Array.isArray(jwk.key_ops)) {
+      const seen = new Set();
+      for (const op of jwk.key_ops) {
+        if (seen.has(op)) {
+          throw new DOMException("The \"key_ops\" member of the JWK dictionary contains duplicate usages.", "DataError");
+        }
+        seen.add(op);
+      }
+      for (const u of usages) {
+        if (!jwk.key_ops.includes(u)) {
+          throw new DOMException("The JWK \"key_ops\" member was inconsistent with that specified by the Web Crypto call. The JWK usage must be a superset of those requested", "DataError");
+        }
+      }
+    }
+    if (jwk.ext === false && extractable) {
+      // Chrome's message carries this typo verbatim ("inconsistent what that").
+      throw new DOMException("The \"ext\" member of the JWK dictionary is inconsistent what that specified by the Web Crypto call", "DataError");
+    }
+  }
+  // Chrome requires a hash member on HMAC and RSA-OAEP imports/generation and
+  // words the missing/unrecognized cases differently per param tag.
+  function requireHashParam(alg, method, paramTag) {
+    const h = alg.hash;
+    if (h == null || (typeof h !== "string" && (typeof h !== "object" || h.name == null))) {
+      throw new TypeError("Failed to execute '" + method + "' on 'SubtleCrypto': " + paramTag + ": hash: Missing or not an AlgorithmIdentifier");
+    }
+    const n = String(typeof h === "string" ? h : h.name).toUpperCase().replace("_", "-");
+    if (n !== "SHA-1" && n !== "SHA-256" && n !== "SHA-384" && n !== "SHA-512") {
+      throw new DOMException("Failed to execute '" + method + "' on 'SubtleCrypto': " + paramTag + ": hash: Algorithm: Unrecognized name", "NotSupportedError");
+    }
+    return n;
+  }
+
+  // RSA-OAEP key material: a ten-section flat payload from the Rust ops
+  // [pkcs8, spki, n, e, d, p, q, dp, dq, qi]; public-only imports carry
+  // empty private sections. JWK alg names per OAEP hash (SHA-1 has no suffix).
+  const RSA_OAEP_JWK_ALG = { "SHA-1": "RSA-OAEP", "SHA-256": "RSA-OAEP-256", "SHA-384": "RSA-OAEP-384", "SHA-512": "RSA-OAEP-512" };
+  const RSA_OAEP_PUB_USAGES = ["encrypt", "wrapKey"];
+  const RSA_OAEP_PRIV_USAGES = ["decrypt", "unwrapKey"];
+  function rsaUnflat(buf) {
+    const parts = [];
+    let off = 0;
+    for (let i = 0; i < 10; i++) {
+      const len = (buf[off] << 8) | buf[off + 1];
+      off += 2;
+      parts.push(len ? buf.subarray(off, off + len) : null);
+      off += len;
+    }
+    return { pkcs8: parts[0], spki: parts[1], n: parts[2], e: parts[3], d: parts[4], p: parts[5], q: parts[6], dp: parts[7], dq: parts[8], qi: parts[9] };
+  }
+  function rsaMaterial(key) {
+    if (!(key instanceof CryptoKey) || !keyMaterial.has(key) || !keyMaterial.get(key) || keyMaterial.get(key).spki == null) {
+      throw new DOMException("Argument is not a valid CryptoKey", "InvalidAccessError");
+    }
+    return keyMaterial.get(key);
+  }
+  // RSA-OAEP import (spki / pkcs8 / jwk). The jwk ladder follows Chrome's
+  // order: kty → usage set (which depends on d's presence) → required
+  // members n,e,d,p,q,dp,dq,qi → strict b64url → alg/use/key_ops/ext.
+  function rsaImportKey(format, keyData, alg, extractable, usages) {
+    checkUsageStrings("importKey", usages);
+    const hash = requireHashParam(alg, "importKey", "RsaHashedImportParams");
+    let m, type;
+    if (format === "spki") {
+      checkKeyUsages(usages, RSA_OAEP_PUB_USAGES, true);
+      m = rsaUnflat(runOp(() => _OPS.op_subtle_rsa_import_spki(toBytes(keyData))));
+      type = "public";
+    } else if (format === "pkcs8") {
+      checkKeyUsages(usages, RSA_OAEP_PRIV_USAGES, false);
+      m = rsaUnflat(runOp(() => _OPS.op_subtle_rsa_import_pkcs8(toBytes(keyData))));
+      type = "private";
+    } else if (format === "jwk") {
+      const jwk = keyData;
+      if (!jwk || jwk.kty !== "RSA") {
+        throw new DOMException("The JWK \"kty\" member was not \"RSA\"", "DataError");
+      }
+      const isPriv = typeof jwk.d === "string";
+      checkKeyUsages(usages, isPriv ? RSA_OAEP_PRIV_USAGES : RSA_OAEP_PUB_USAGES, !isPriv);
+      jwkRequire(jwk, "n");
+      jwkRequire(jwk, "e");
+      const n = jwkMemberBytes(jwk, "n");
+      const e = jwkMemberBytes(jwk, "e");
+      const expected = RSA_OAEP_JWK_ALG[hash];
+      if (isPriv) {
+        for (const mem of ["d", "p", "q", "dp", "dq", "qi"]) jwkRequire(jwk, mem);
+        const d = jwkMemberBytes(jwk, "d");
+        const p = jwkMemberBytes(jwk, "p");
+        const q = jwkMemberBytes(jwk, "q");
+        jwkValidateCommon(jwk, extractable, usages, expected);
+        m = rsaUnflat(runOp(() => _OPS.op_subtle_rsa_import_private(n, e, d, p, q)));
+        type = "private";
+      } else {
+        jwkValidateCommon(jwk, extractable, usages, expected);
+        m = rsaUnflat(runOp(() => _OPS.op_subtle_rsa_import_public(n, e)));
+        type = "public";
+      }
+    } else {
+      throw new DOMException("Unsupported key format for RSA keys: " + format, "NotSupportedError");
+    }
+    const algorithm = {
+      name: "RSA-OAEP", modulusLength: m.n.length * 8,
+      publicExponent: new Uint8Array(m.e), hash: { name: hash },
+    };
+    return makeKey(type, extractable, algorithm, usages, m);
+  }
+  // Chrome's RSA-OAEP generateKey policy (pinned from 155): exponent must be
+  // 3 or 65537, modulus a multiple of 8 in [256, 8192], and the usages split
+  // into encrypt/wrapKey on the public half and decrypt/unwrapKey on the
+  // private half (the public key is always extractable).
+  function rsaGenerateKey(alg, extractable, usages) {
+    checkUsageStrings("generateKey", usages);
+    const hash = requireHashParam(alg, "generateKey", "RsaHashedKeyGenParams");
+    const combined = RSA_OAEP_PUB_USAGES.concat(RSA_OAEP_PRIV_USAGES);
+    checkKeyUsages(usages, combined, false);
+    const bits = alg.modulusLength;
+    if (!Number.isInteger(bits) || bits < 256 || bits > 8192 || bits % 8 !== 0) {
+      throw new DOMException("The modulus length must be a multiple of 8 bits and >= 256 and <= 8192", "OperationError");
+    }
+    const eBytes = toBytes(alg.publicExponent);
+    let ev = 0n;
+    for (const b of eBytes) ev = (ev << 8n) | BigInt(b);
+    if (ev !== 3n && ev !== 65537n) {
+      throw new DOMException("The \"publicExponent\" must be either 3 or 65537", "OperationError");
+    }
+    const m = rsaUnflat(runOp(() => _OPS.op_subtle_rsa_generate(bits, eBytes)));
+    const algorithm = {
+      name: "RSA-OAEP", modulusLength: bits,
+      publicExponent: new Uint8Array(m.e), hash: { name: hash },
+    };
+    const pub = makeKey("public", true, algorithm, usages.filter((u) => RSA_OAEP_PUB_USAGES.includes(u)), m);
+    const priv = makeKey("private", extractable, algorithm, usages.filter((u) => RSA_OAEP_PRIV_USAGES.includes(u)), m);
+    return { publicKey: pub, privateKey: priv };
   }
 
   const subtle = {
@@ -15180,16 +15376,40 @@ if (!globalThis.crypto.subtle) {
         }
         return makeKey(type, extractable, { name: alg.name, namedCurve: crv }, usages, m);
       }
+      if (alg.name === "RSA-OAEP") {
+        return rsaImportKey(format, keyData, alg, extractable, keyUsages || []);
+      }
+      checkUsageStrings("importKey", keyUsages || []);
       let bytes;
       if (format === "raw") {
         bytes = toBytes(keyData);
       } else if (format === "jwk") {
-        if (!keyData || keyData.kty !== "oct" || typeof keyData.k !== "string") {
-          throw new DOMException("Only symmetric 'oct' JWK keys are supported", "NotSupportedError");
+        if (!keyData || keyData.kty !== "oct") {
+          throw new DOMException("The JWK \"kty\" member was not \"oct\"", "DataError");
         }
-        bytes = b64urlToBytes(keyData.k);
+        jwkRequire(keyData, "k");
+        bytes = jwkMemberBytes(keyData, "k");
+        if (bytes.length === 24) {
+          throw new DOMException("The JWK \"k\" member did not include the right length of key data for the given algorithm.", "DataError");
+        }
       } else {
         throw new DOMException("Only 'raw' and symmetric 'jwk' key formats are supported", "NotSupportedError");
+      }
+      let expectedAlg = null;
+      if (alg.name === "HMAC") {
+        const hash = requireHashParam(alg, "importKey", "HmacImportParams");
+        checkKeyUsages(keyUsages || [], ["sign", "verify"], false);
+        // "SHA-1".slice(4) === "1" too — no special case needed.
+        expectedAlg = "HS" + hash.slice(4);
+      } else if (alg.name === "AES-CTR" || alg.name === "AES-CBC" || alg.name === "AES-GCM" || alg.name === "AES-KW") {
+        checkKeyUsages(keyUsages || [],
+          alg.name === "AES-KW" ? ["wrapKey", "unwrapKey"] : ["encrypt", "decrypt", "wrapKey", "unwrapKey"], false);
+        expectedAlg = "A" + (bytes.length * 8) + alg.name.slice(4);
+      } else if (alg.name === "PBKDF2" || alg.name === "HKDF") {
+        checkKeyUsages(keyUsages || [], ["deriveKey", "deriveBits"], false);
+      }
+      if (format === "jwk") {
+        jwkValidateCommon(keyData, extractable, keyUsages || [], expectedAlg);
       }
       return makeKey("secret", extractable, keyAlgorithmFor(alg, bytes), keyUsages, bytes);
     },
@@ -15220,14 +15440,56 @@ if (!globalThis.crypto.subtle) {
         }
         throw new DOMException("Unsupported key format for EC keys export: " + format, "NotSupportedError");
       }
+      if (key.algorithm && key.algorithm.name === "RSA-OAEP") {
+        const m = rsaMaterial(key);
+        if (format === "spki") {
+          if (key.type !== "public") throw new DOMException("The key is not of the expected type", "InvalidAccessError");
+          return bufferOf(m.spki);
+        }
+        if (format === "pkcs8") {
+          if (key.type !== "private") throw new DOMException("The key is not of the expected type", "InvalidAccessError");
+          return bufferOf(m.pkcs8);
+        }
+        if (format === "jwk") {
+          // Chrome emits RSA JWK fields in alphabetical insertion order.
+          const jwk = {};
+          const algName = key.algorithm.hash && RSA_OAEP_JWK_ALG[key.algorithm.hash.name];
+          if (algName) jwk.alg = algName;
+          if (key.type === "private") {
+            jwk.d = bytesToB64url(m.d);
+            jwk.dp = bytesToB64url(m.dp);
+            jwk.dq = bytesToB64url(m.dq);
+          }
+          jwk.e = bytesToB64url(m.e);
+          jwk.ext = key.extractable;
+          jwk.key_ops = key.usages.slice();
+          jwk.kty = "RSA";
+          jwk.n = bytesToB64url(m.n);
+          if (key.type === "private") {
+            jwk.p = bytesToB64url(m.p);
+            jwk.q = bytesToB64url(m.q);
+            jwk.qi = bytesToB64url(m.qi);
+          }
+          return jwk;
+        }
+        if (format === "raw") {
+          throw new DOMException("Unsupported export key format for algorithm", "NotSupportedError");
+        }
+        throw new DOMException("Unsupported key format for RSA keys export: " + format, "NotSupportedError");
+      }
       if (format === "raw") return bufferOf(bytes);
       if (format === "jwk") {
-        const jwk = { kty: "oct", k: bytesToB64url(bytes), ext: key.extractable, key_ops: key.usages.slice() };
+        // Chrome emits oct JWK fields in alphabetical insertion order.
+        const jwk = {};
         if (key.algorithm.name && key.algorithm.name.indexOf("AES-") === 0) {
           jwk.alg = "A" + (bytes.length * 8) + key.algorithm.name.slice(4);
         } else if (key.algorithm.name === "HMAC") {
           jwk.alg = "HS" + key.algorithm.hash.name.slice(4);
         }
+        jwk.ext = key.extractable;
+        jwk.k = bytesToB64url(bytes);
+        jwk.key_ops = key.usages.slice();
+        jwk.kty = "oct";
         return jwk;
       }
       throw new DOMException("Only 'raw' and 'jwk' export is supported", "NotSupportedError");
@@ -15235,16 +15497,27 @@ if (!globalThis.crypto.subtle) {
 
     async generateKey(algorithm, extractable, keyUsages) {
       const alg = normalizeAlgo(algorithm);
+      if (alg.name === "RSA-OAEP") {
+        return rsaGenerateKey(alg, extractable, keyUsages || []);
+      }
       if (alg.name === "HMAC") {
-        const hash = normalizeHash(alg.hash);
+        checkUsageStrings("generateKey", keyUsages || []);
+        const hash = requireHashParam(alg, "generateKey", "HmacKeyGenParams");
+        checkKeyUsages(keyUsages || [], ["sign", "verify"], false);
         const len = alg.length ? Math.ceil(alg.length / 8) : hashBlockSize(hash);
         const bytes = _OPS.op_random_bytes(len);
         return makeKey("secret", extractable, { name: "HMAC", hash: { name: hash }, length: len * 8 }, keyUsages, bytes);
       }
       if (alg.name === "AES-CTR" || alg.name === "AES-CBC" || alg.name === "AES-GCM" || alg.name === "AES-KW") {
-        if (alg.length !== 128 && alg.length !== 192 && alg.length !== 256) {
-          throw new DOMException("AES key length must be 128, 192, or 256 bits", "OperationError");
+        checkUsageStrings("generateKey", keyUsages || []);
+        if (alg.length === 192) {
+          throw new DOMException("192-bit AES keys are not supported", "OperationError");
         }
+        if (alg.length !== 128 && alg.length !== 256) {
+          throw new DOMException("AES key length must be 128 or 256 bits", "OperationError");
+        }
+        checkKeyUsages(keyUsages || [],
+          alg.name === "AES-KW" ? ["wrapKey", "unwrapKey"] : ["encrypt", "decrypt", "wrapKey", "unwrapKey"], false);
         const bytes = _OPS.op_random_bytes(alg.length / 8);
         return makeKey("secret", extractable, { name: alg.name, length: alg.length }, keyUsages, bytes);
       }
@@ -15310,8 +15583,8 @@ if (!globalThis.crypto.subtle) {
       throw new DOMException("verify does not support " + alg.name, "NotSupportedError");
     },
 
-    async encrypt(algorithm, key, data) { return aesCipher(true, algorithm, key, data); },
-    async decrypt(algorithm, key, data) { return aesCipher(false, algorithm, key, data); },
+    async encrypt(algorithm, key, data) { return subtleCipher(true, algorithm, key, data, false); },
+    async decrypt(algorithm, key, data) { return subtleCipher(false, algorithm, key, data, false); },
 
     async deriveBits(algorithm, baseKey, length) {
       const alg = normalizeAlgo(algorithm);
@@ -15372,11 +15645,12 @@ if (!globalThis.crypto.subtle) {
       const bytes = format === "jwk"
         ? new TextEncoder().encode(JSON.stringify(exported))
         : new Uint8Array(exported);
-      return this.encrypt(wrapAlgorithm, wrappingKey, bytes);
+      return subtleCipher(true, wrapAlgorithm, wrappingKey, bytes, true);
     },
 
     async unwrapKey(format, wrappedKey, unwrappingKey, unwrapAlgorithm, unwrappedKeyAlgorithm, extractable, keyUsages) {
-      const decrypted = await this.decrypt(unwrapAlgorithm, unwrappingKey, wrappedKey);
+      checkUsageStrings("unwrapKey", keyUsages || []);
+      const decrypted = subtleCipher(false, unwrapAlgorithm, unwrappingKey, toBytes(wrappedKey), true);
       const keyData = format === "jwk"
         ? JSON.parse(new TextDecoder().decode(new Uint8Array(decrypted)))
         : decrypted;
@@ -15384,10 +15658,49 @@ if (!globalThis.crypto.subtle) {
     },
   };
 
-  function aesCipher(encrypt, algorithm, key, data) {
+  // encrypt/decrypt core, shared with wrapKey/unwrapKey (`viaWrap` opens the
+  // AES-KW path — Chrome exposes AES-KW only through wrapping, and rejects a
+  // direct encrypt/decrypt call with NotSupportedError).
+  function subtleCipher(encrypt, algorithm, key, data, viaWrap) {
     const alg = normalizeAlgo(algorithm);
-    const bytes = keyBytes(key);
     const input = toBytes(data);
+    if (alg.name === "RSA-OAEP") {
+      const m = rsaMaterial(key);
+      const needed = encrypt ? ["encrypt", "wrapKey"] : ["decrypt", "unwrapKey"];
+      if (!key.usages.some((u) => needed.includes(u))) {
+        throw new DOMException("key.usages does not permit this operation", "InvalidAccessError");
+      }
+      if ((encrypt && key.type !== "public") || (!encrypt && key.type !== "private")) {
+        throw new DOMException("The key is not of the expected type", "InvalidAccessError");
+      }
+      const label = alg.label != null ? toBytes(alg.label) : new Uint8Array(0);
+      const hash = (key.algorithm && key.algorithm.hash && key.algorithm.hash.name) || "SHA-256";
+      const empty = new Uint8Array(0);
+      return bufferOf(runOp(() => _OPS.op_subtle_rsa_oaep(
+        encrypt, hash, label, m.n, m.e,
+        encrypt ? empty : m.d, encrypt ? empty : m.p, encrypt ? empty : m.q, input)));
+    }
+    if (alg.name === "AES-KW") {
+      if (!viaWrap) {
+        throw new DOMException(
+          "Failed to execute '" + (encrypt ? "encrypt" : "decrypt") + "' on 'SubtleCrypto': AES-KW: Unsupported operation: " + (encrypt ? "encrypt" : "decrypt"),
+          "NotSupportedError");
+      }
+      const bytes = keyBytes(key);
+      const needed = encrypt ? ["encrypt", "wrapKey"] : ["decrypt", "unwrapKey"];
+      if (!key.usages.some((u) => needed.includes(u))) {
+        throw new DOMException("key.usages does not permit this operation", "InvalidAccessError");
+      }
+      if (encrypt && input.length % 8 !== 0) {
+        throw new DOMException("The AES-KW input data length is invalid: not a multiple of 8 bytes", "DataError");
+      }
+      return bufferOf(runOp(() => _OPS.op_subtle_aes_kw(encrypt, bytes, input)));
+    }
+    const bytes = keyBytes(key);
+    const needed = encrypt ? ["encrypt", "wrapKey"] : ["decrypt", "unwrapKey"];
+    if (!key.usages.some((u) => needed.includes(u))) {
+      throw new DOMException("key.usages does not permit this operation", "InvalidAccessError");
+    }
     if (alg.name === "AES-GCM") {
       const iv = toBytes(alg.iv);
       const aad = alg.additionalData != null ? toBytes(alg.additionalData) : new Uint8Array(0);

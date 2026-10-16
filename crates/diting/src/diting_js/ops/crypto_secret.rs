@@ -102,7 +102,9 @@ pub(crate) fn op_subtle_aes_gcm(
             } else {
                 cipher
                     .decrypt(nonce, Payload { msg: data, aad })
-                    .map_err(|_| crypto_err("AES-GCM decryption failed: authentication tag mismatch"))?
+                    .map_err(|_| {
+                        crypto_err("AES-GCM decryption failed: authentication tag mismatch")
+                    })?
             }
         }};
     }
@@ -191,9 +193,104 @@ pub(crate) fn op_subtle_aes_ctr(
         128 => by_key!(Ctr128BE),
         64 => by_key!(Ctr64BE),
         32 => by_key!(Ctr32BE),
-        _ => return Err(crypto_err("AES-CTR supports counter lengths of 32, 64, or 128 bits")),
+        _ => {
+            return Err(crypto_err(
+                "AES-CTR supports counter lengths of 32, 64, or 128 bits",
+            ))
+        }
     }
     Ok(buf)
+}
+
+/// AES-KW key wrap / unwrap (RFC 3394) — Chrome exposes this face only via
+/// wrapKey/unwrapKey, not encrypt/decrypt (the JS shim enforces that split).
+/// Wrap input (and the plaintext behind an unwrap input) must be a nonempty
+/// multiple of 8 bytes of at least 16 (two 64-bit blocks); the wrapped form
+/// is 8 bytes longer. Chrome 155 dropped 192-bit AES, so only 128/256-bit
+/// KEKs are accepted here (the JS layer rejects 192 before reaching the op).
+/// Failures surface as OperationError with an empty message, matching
+/// Chrome's corrupt-unwrap face.
+#[op2]
+#[buffer]
+pub(crate) fn op_subtle_aes_kw(
+    encrypt: bool,
+    #[buffer] key: &[u8],
+    #[buffer] data: &[u8],
+) -> Result<Vec<u8>, deno_error::JsErrorBox> {
+    use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+
+    const IV: [u8; 8] = [0xA6; 8];
+    if data.is_empty() || !data.len().is_multiple_of(8) || data.len() < 16 {
+        return Err(crypto_err(""));
+    }
+    macro_rules! kw {
+        ($ty:ty) => {{
+            let cipher = <$ty>::new_from_slice(key).map_err(crypto_err)?;
+            if encrypt {
+                let n = data.len() / 8;
+                let mut a = IV;
+                let mut r: Vec<[u8; 8]> = data
+                    .chunks_exact(8)
+                    .map(|c| c.try_into().unwrap())
+                    .collect();
+                for j in 0..6u64 {
+                    for i in 0..n {
+                        let mut block = [0u8; 16];
+                        block[..8].copy_from_slice(&a);
+                        block[8..].copy_from_slice(&r[i]);
+                        let mut b = aes::Block::from(block);
+                        cipher.encrypt_block(&mut b);
+                        let t = n as u64 * j + i as u64 + 1;
+                        let a_int = u64::from_be_bytes(b[..8].try_into().unwrap()) ^ t;
+                        a = a_int.to_be_bytes();
+                        r[i] = b[8..].try_into().unwrap();
+                    }
+                }
+                let mut out = Vec::with_capacity(data.len() + 8);
+                out.extend_from_slice(&a);
+                for part in &r {
+                    out.extend_from_slice(part);
+                }
+                out
+            } else {
+                if data.len() < 24 {
+                    return Err(crypto_err(""));
+                }
+                let n = (data.len() - 8) / 8;
+                let mut a: [u8; 8] = data[..8].try_into().unwrap();
+                let mut r: Vec<[u8; 8]> = data[8..]
+                    .chunks_exact(8)
+                    .map(|c| c.try_into().unwrap())
+                    .collect();
+                for j in (0..6u64).rev() {
+                    for i in (0..n).rev() {
+                        let t = n as u64 * j + i as u64 + 1;
+                        let a_int = u64::from_be_bytes(a) ^ t;
+                        let mut block = [0u8; 16];
+                        block[..8].copy_from_slice(&a_int.to_be_bytes());
+                        block[8..].copy_from_slice(&r[i]);
+                        let mut b = aes::Block::from(block);
+                        cipher.decrypt_block(&mut b);
+                        a = b[..8].try_into().unwrap();
+                        r[i] = b[8..].try_into().unwrap();
+                    }
+                }
+                if a != IV {
+                    return Err(crypto_err(""));
+                }
+                let mut out = Vec::with_capacity(data.len() - 8);
+                for part in &r {
+                    out.extend_from_slice(part);
+                }
+                out
+            }
+        }};
+    }
+    Ok(match key.len() {
+        16 => kw!(aes::Aes128),
+        32 => kw!(aes::Aes256),
+        _ => return Err(crypto_err("AES-KW key must be 128 or 256 bits")),
+    })
 }
 
 /// Generous upper bounds on PBKDF2 parameters. WebCrypto imposes no limit, but

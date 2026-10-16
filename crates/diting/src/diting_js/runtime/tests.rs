@@ -7169,6 +7169,366 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn test_webcrypto_aes_kw_wrap_unwrap() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // #269: AES-KW (RFC 3394) wrapKey/unwrapKey against the RFC's own
+        // test vectors and live-Chrome-155 error faces (AES-KW is reachable
+        // only through wrapKey/unwrapKey; direct encrypt throws).
+        let script = r#"async () => {
+            const enc = new TextEncoder();
+            const hex = (u8) => Array.from(u8, b => b.toString(16).padStart(2, '0')).join('');
+            const face = async (p) => { try { await p; return 'no-throw'; } catch (e) { return e.name + ': ' + e.message; } };
+            const S = crypto.subtle;
+
+            // RFC 3394 §4.1: KEK 000102..0f wraps 00112233..ff.
+            const kek = await S.importKey('raw', new Uint8Array([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]), { name: 'AES-KW' }, true, ['wrapKey', 'unwrapKey']);
+            const dat = await S.importKey('raw', new Uint8Array([0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff]), { name: 'AES-GCM' }, true, ['encrypt']);
+            const v1 = hex(new Uint8Array(await S.wrapKey('raw', dat, kek, 'AES-KW')));
+            // 256-bit KEK wrapping 32 bytes of key data (Chrome-155 capture).
+            const kek256 = await S.importKey('raw', new Uint8Array([...Array(32).keys()]), { name: 'AES-KW' }, true, ['wrapKey', 'unwrapKey']);
+            const dat32 = await S.importKey('raw', new Uint8Array([...Array(32).keys()]), { name: 'AES-GCM' }, true, ['encrypt']);
+            const v2 = hex(new Uint8Array(await S.wrapKey('raw', dat32, kek256, 'AES-KW')));
+            // Unwrap round-trips back to the exact key bytes.
+            const unwrapped = await S.unwrapKey('raw', await S.wrapKey('raw', dat, kek, 'AES-KW'), kek, 'AES-KW', { name: 'AES-GCM', length: 128 }, true, ['encrypt']);
+            const round = hex(new Uint8Array(await S.exportKey('raw', unwrapped)));
+
+            const gen = await S.generateKey({ name: 'AES-KW', length: 256 }, true, ['wrapKey', 'unwrapKey']);
+            const genShape = [gen.type, gen.usages.join(','), gen.algorithm.name, gen.algorithm.length];
+            const expJwk = await S.exportKey('jwk', gen);
+
+            const errors = {
+                jwkFormat: await face(S.wrapKey('jwk', dat, kek, { name: 'AES-KW' })),
+                directEncrypt: await face(S.encrypt({ name: 'AES-KW' }, kek, new Uint8Array(16))),
+                directDecrypt: await face(S.decrypt({ name: 'AES-KW' }, kek, new Uint8Array(24))),
+                noWrapUsage: await face((async () => {
+                    const k = await S.generateKey({ name: 'AES-KW', length: 128 }, true, ['unwrapKey']);
+                    return S.wrapKey('raw', dat, k, { name: 'AES-KW' });
+                })()),
+                corrupt: await face((async () => {
+                    const w = new Uint8Array(await S.wrapKey('raw', dat, kek, { name: 'AES-KW' }));
+                    w[3] ^= 0xff;
+                    return S.unwrapKey('raw', w, kek, 'AES-KW', { name: 'AES-GCM', length: 128 }, true, ['encrypt']);
+                })()),
+                unwrapBadUsage: await face(S.unwrapKey('raw', await S.wrapKey('raw', dat, kek, { name: 'AES-KW' }), kek, 'AES-KW', { name: 'AES-GCM', length: 128 }, true, ['sign'])),
+                gen192: await face(S.generateKey({ name: 'AES-KW', length: 192 }, true, ['wrapKey'])),
+                gen100: await face(S.generateKey({ name: 'AES-KW', length: 100 }, true, ['wrapKey'])),
+                genEncryptUsage: await face(S.generateKey({ name: 'AES-KW', length: 128 }, true, ['encrypt'])),
+                raw192: await face(S.importKey('raw', new Uint8Array(24), { name: 'AES-KW' }, true, ['wrapKey'])),
+                jwk192: await face(S.importKey('jwk', { kty: 'oct', k: btoa('123456789012345678901234').replace(/\+/g, '-').replace(/\//g, '_') }, { name: 'AES-KW', length: 192 }, true, ['wrapKey'])),
+                emptyUsages: await face(S.importKey('raw', new Uint8Array(16), { name: 'AES-KW' }, true, [])),
+                bogusUsage: await face(S.importKey('raw', new Uint8Array(16), { name: 'AES-KW' }, true, ['bogus'])),
+                hmac64Wrap: await (async () => {
+                    const h = await S.generateKey({ name: 'HMAC', hash: 'SHA-512' }, true, ['sign']);
+                    const w = await S.wrapKey('raw', h, gen, { name: 'AES-KW' });
+                    return w.byteLength;
+                })(),
+                gcmWrap: await (async () => {
+                    const g = await S.generateKey({ name: 'AES-GCM', length: 128 }, true, ['wrapKey']);
+                    const w = await S.wrapKey('raw', dat, g, { name: 'AES-GCM', iv: new Uint8Array(12) });
+                    return w.byteLength;
+                })(),
+            };
+            return { v1, v2, round, genShape, expOrder: Object.keys(expJwk), expAlg: expJwk.alg, expOps: expJwk.key_ops.join(','), errors };
+        }"#;
+        let result = rt
+            .call_function_on_remote(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        assert_eq!(v["v1"], serde_json::json!("1fa68b0a8112b447aef34bd8fb5a7b829d3e862371d2cfe5"), "RFC 3394 §4.1 wrap vector");
+        assert_eq!(
+            v["v2"],
+            serde_json::json!("82c693bff487db7c31a7f0cc440ad9e37709511b52efce48094b4548eee3cfc2bf7805b51201bc01"),
+            "256-bit KEK over 32 bytes of data (Chrome-155 capture)"
+        );
+        assert_eq!(v["round"], serde_json::json!("00112233445566778899aabbccddeeff"), "unwrap restores the key bytes");
+        assert_eq!(v["genShape"], serde_json::json!(["secret", "wrapKey,unwrapKey", "AES-KW", 256]));
+        assert_eq!(v["expOrder"], serde_json::json!(["alg", "ext", "k", "key_ops", "kty"]), "jwk export fields in Chrome's alphabetical order");
+        assert_eq!(v["expAlg"], serde_json::json!("A256KW"));
+        assert_eq!(v["expOps"], serde_json::json!("wrapKey,unwrapKey"));
+        let e = &v["errors"];
+        assert_eq!(e["jwkFormat"], serde_json::json!("DataError: The AES-KW input data length is invalid: not a multiple of 8 bytes"));
+        assert_eq!(e["directEncrypt"], serde_json::json!("NotSupportedError: Failed to execute 'encrypt' on 'SubtleCrypto': AES-KW: Unsupported operation: encrypt"));
+        assert_eq!(e["directDecrypt"], serde_json::json!("NotSupportedError: Failed to execute 'decrypt' on 'SubtleCrypto': AES-KW: Unsupported operation: decrypt"));
+        assert_eq!(e["noWrapUsage"], serde_json::json!("InvalidAccessError: key.usages does not permit this operation"));
+        assert_eq!(e["corrupt"], serde_json::json!("OperationError: "), "corrupt unwrap fails with Chrome's empty-message OperationError");
+        assert_eq!(e["unwrapBadUsage"], serde_json::json!("SyntaxError: Cannot create a key using the specified key usages."));
+        assert_eq!(e["gen192"], serde_json::json!("OperationError: 192-bit AES keys are not supported"));
+        assert_eq!(e["gen100"], serde_json::json!("OperationError: AES key length must be 128 or 256 bits"));
+        assert_eq!(e["genEncryptUsage"], serde_json::json!("SyntaxError: Cannot create a key using the specified key usages."));
+        assert_eq!(e["raw192"], serde_json::json!("OperationError: 192-bit AES keys are not supported"));
+        assert_eq!(e["jwk192"], serde_json::json!("DataError: The JWK \"k\" member did not include the right length of key data for the given algorithm."));
+        assert_eq!(e["emptyUsages"], serde_json::json!("SyntaxError: Usages cannot be empty when creating a key."));
+        assert_eq!(e["bogusUsage"], serde_json::json!("TypeError: Failed to execute 'importKey' on 'SubtleCrypto': Invalid keyUsages argument"));
+        assert_eq!(e["hmac64Wrap"], serde_json::json!(136), "HMAC-SHA-512 default key is 128 bytes → 136-byte wrap");
+        assert_eq!(e["gcmWrap"], serde_json::json!(32), "AES-GCM wrapper (16-byte key + 16-byte tag)");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_webcrypto_rsa_oaep_import_export_cipher() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // #269: RSA-OAEP generate/import/export/encrypt faces pinned from
+        // Chrome 155 — jwk field order (alphabetical), spki/pkcs8 DER shape,
+        // OAEP round-trips with labels, and the exact error wording.
+        let script = r#"async () => {
+            const enc = new TextEncoder();
+            const dec = new TextDecoder();
+            const hex = (u8) => Array.from(u8, b => b.toString(16).padStart(2, '0')).join('');
+            const face = async (p) => { try { await p; return 'no-throw'; } catch (e) { return e.name + ': ' + e.message; } };
+            const S = crypto.subtle;
+            const OA = { name: 'RSA-OAEP', modulusLength: 1024, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' };
+
+            const pair = await S.generateKey(OA, true, ['encrypt', 'decrypt', 'wrapKey', 'unwrapKey']);
+            const genShape = [
+                pair.publicKey.type, pair.publicKey.usages.join(','), pair.publicKey.extractable,
+                pair.privateKey.type, pair.privateKey.usages.join(','), pair.privateKey.extractable,
+                pair.publicKey.algorithm.name, pair.publicKey.algorithm.modulusLength,
+                Array.from(pair.publicKey.algorithm.publicExponent).join(','),
+                pair.publicKey.algorithm.hash.name,
+            ];
+
+            const jwkPub = await S.exportKey('jwk', pair.publicKey);
+            const jwkPriv = await S.exportKey('jwk', pair.privateKey);
+            const pubOrder = Object.keys(jwkPub);
+            const privOrder = Object.keys(jwkPriv);
+
+            const spki = new Uint8Array(await S.exportKey('spki', pair.publicKey));
+            const pkcs8 = new Uint8Array(await S.exportKey('pkcs8', pair.privateKey));
+            const spkiHex = hex(spki);
+            const pkcs8Hex = hex(pkcs8);
+
+            // Round-trips: spki/pkcs8/jwk imports all reproduce the same key.
+            const rePub = await S.importKey('spki', spki, { name: 'RSA-OAEP', hash: 'SHA-256' }, true, ['encrypt']);
+            const spkiRt = (await S.exportKey('jwk', rePub)).n === jwkPub.n;
+            const rePriv = await S.importKey('pkcs8', pkcs8, { name: 'RSA-OAEP', hash: 'SHA-256' }, true, ['decrypt']);
+            const pkcs8Rt = (await S.exportKey('jwk', rePriv)).d === jwkPriv.d;
+            const jwkPrivRe = await S.importKey('jwk', jwkPriv, { name: 'RSA-OAEP', hash: 'SHA-256' }, true, ['decrypt']);
+            const jwkRt = (await S.exportKey('jwk', jwkPrivRe)).d === jwkPriv.d;
+            const bare = await S.importKey('jwk', { kty: 'RSA', n: jwkPub.n, e: jwkPub.e }, { name: 'RSA-OAEP', hash: 'SHA-256' }, true, ['encrypt']);
+
+            // encrypt/decrypt, labels, and corruption.
+            const msg = enc.encode('attack at dawn');
+            const ct = new Uint8Array(await S.encrypt({ name: 'RSA-OAEP' }, pair.publicKey, msg));
+            const pt = dec.decode(await S.decrypt({ name: 'RSA-OAEP' }, pair.privateKey, ct));
+            const ctLbl = new Uint8Array(await S.encrypt({ name: 'RSA-OAEP', label: enc.encode('lbl') }, pair.publicKey, msg));
+            const ptLbl = dec.decode(await S.decrypt({ name: 'RSA-OAEP', label: enc.encode('lbl') }, pair.privateKey, ctLbl));
+            const bad = ct.slice(); bad[13] ^= 1;
+
+            // wrapKey with the RSA wrapper.
+            const aesk = await S.generateKey({ name: 'AES-GCM', length: 128 }, true, ['encrypt']);
+            const rw = await S.wrapKey('raw', aesk, pair.publicKey, { name: 'RSA-OAEP' });
+            const uw = await S.unwrapKey('raw', rw, pair.privateKey, { name: 'RSA-OAEP' }, { name: 'AES-GCM', length: 128 }, true, ['encrypt']);
+
+            const errors = {
+                encPriv: await face(S.encrypt({ name: 'RSA-OAEP' }, pair.privateKey, msg)),
+                decPub: await face(S.decrypt({ name: 'RSA-OAEP' }, pair.publicKey, ct)),
+                corrupt: await face(S.decrypt({ name: 'RSA-OAEP' }, pair.privateKey, bad)),
+                labelMismatch: await face(S.decrypt({ name: 'RSA-OAEP' }, pair.privateKey, ctLbl)),
+                shortCt: await face(S.decrypt({ name: 'RSA-OAEP' }, pair.privateKey, new Uint8Array(10))),
+                exportSpkiPriv: await face(S.exportKey('spki', pair.privateKey)),
+                exportRaw: await face(S.exportKey('raw', pair.publicKey)),
+                importSpkiDecrypt: await face(S.importKey('spki', spki, { name: 'RSA-OAEP', hash: 'SHA-256' }, true, ['decrypt'])),
+                spkiNoHash: await face(S.importKey('spki', spki, { name: 'RSA-OAEP' }, true, ['encrypt'])),
+                pkcs8NoHash: await face(S.importKey('pkcs8', pkcs8, { name: 'RSA-OAEP' }, true, ['decrypt'])),
+                genE1: await face(S.generateKey({ name: 'RSA-OAEP', modulusLength: 1024, publicExponent: new Uint8Array([1]), hash: 'SHA-256' }, true, ['encrypt', 'decrypt'])),
+                genMod1023: await face(S.generateKey({ name: 'RSA-OAEP', modulusLength: 1023, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['encrypt', 'decrypt'])),
+                genMd5: await face(S.generateKey({ name: 'RSA-OAEP', modulusLength: 1024, publicExponent: new Uint8Array([1, 0, 1]), hash: 'MD5' }, true, ['encrypt', 'decrypt'])),
+                genEmpty: await face(S.generateKey({ name: 'RSA-OAEP', modulusLength: 1024, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, [])),
+                genSign: await face(S.generateKey({ name: 'RSA-OAEP', modulusLength: 1024, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign'])),
+                jwkAlg: await face(S.importKey('jwk', jwkPub, { name: 'RSA-OAEP', hash: 'SHA-1' }, true, ['encrypt'])),
+                jwkKty: await face(S.importKey('jwk', { kty: 'oct', k: 'AAAA' }, { name: 'RSA-OAEP', hash: 'SHA-256' }, true, ['encrypt'])),
+                jwkMissingN: await face(S.importKey('jwk', { kty: 'RSA', e: jwkPub.e }, { name: 'RSA-OAEP', hash: 'SHA-256' }, true, ['encrypt'])),
+                jwkMissingE: await face(S.importKey('jwk', { kty: 'RSA', n: jwkPub.n }, { name: 'RSA-OAEP', hash: 'SHA-256' }, true, ['encrypt'])),
+                jwkMissingD: await face(S.importKey('jwk', { kty: 'RSA', n: jwkPub.n, e: jwkPub.e, p: jwkPriv.p }, { name: 'RSA-OAEP', hash: 'SHA-256' }, true, ['decrypt'])),
+                jwkDOnly: await face(S.importKey('jwk', { kty: 'RSA', n: jwkPub.n, e: jwkPub.e, d: jwkPriv.d }, { name: 'RSA-OAEP', hash: 'SHA-256' }, true, ['decrypt'])),
+                jwkExtFalse: await face(S.importKey('jwk', { kty: 'RSA', n: jwkPub.n, e: jwkPub.e, ext: false }, { name: 'RSA-OAEP', hash: 'SHA-256' }, true, ['encrypt'])),
+                jwkOpsDup: await face(S.importKey('jwk', { kty: 'RSA', n: jwkPub.n, e: jwkPub.e, key_ops: ['encrypt', 'encrypt'] }, { name: 'RSA-OAEP', hash: 'SHA-256' }, true, ['encrypt'])),
+                jwkOpsConflict: await face(S.importKey('jwk', { kty: 'RSA', n: jwkPub.n, e: jwkPub.e, key_ops: ['decrypt'] }, { name: 'RSA-OAEP', hash: 'SHA-256' }, true, ['encrypt'])),
+                jwkUseSig: await face(S.importKey('jwk', { kty: 'RSA', n: jwkPub.n, e: jwkPub.e, use: 'sig' }, { name: 'RSA-OAEP', hash: 'SHA-256' }, true, ['encrypt'])),
+                usageBogus: await face(S.importKey('jwk', { kty: 'RSA', n: jwkPub.n, e: jwkPub.e }, { name: 'RSA-OAEP', hash: 'SHA-256' }, true, ['nope'])),
+                rawFormat: await face(S.importKey('raw', new Uint8Array(4), { name: 'RSA-OAEP', hash: 'SHA-256' }, true, ['encrypt'])),
+            };
+            return {
+                genShape, pubOrder, privOrder, jwkPubAlg: jwkPub.alg, jwkE: jwkPub.e,
+                spkiLen: spki.length,
+                spkiOk: spkiHex.startsWith('3081') && spkiHex.includes('2a864886f70d010101'),
+                pkcs8Len: pkcs8.length, pkcs8HeadOk: pkcs8Hex.startsWith('3082') && pkcs8Hex.includes('020100300d06092a864886f70d01010105000482'),
+                rt: [spkiRt, pkcs8Rt, jwkRt], bareUsages: bare.usages.join(','), bareExt: bare.extractable,
+                ctLen: ct.length, pt, ptLbl, wrapLen: rw.byteLength, unwrapUsages: uw.usages.join(','),
+                privAlgNames: jwkPriv.alg, errors,
+            };
+        }"#;
+        let result = rt
+            .call_function_on_remote(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        assert_eq!(
+            v["genShape"],
+            serde_json::json!(["public", "encrypt,wrapKey", true, "private", "decrypt,unwrapKey", true, "RSA-OAEP", 1024, "1,0,1", "SHA-256"]),
+            "generateKey splits usages across the halves exactly like Chrome"
+        );
+        assert_eq!(v["pubOrder"], serde_json::json!(["alg", "e", "ext", "key_ops", "kty", "n"]), "public jwk fields in Chrome's order");
+        assert_eq!(v["privOrder"], serde_json::json!(["alg", "d", "dp", "dq", "e", "ext", "key_ops", "kty", "n", "p", "q", "qi"]), "private jwk fields in Chrome's order");
+        assert_eq!(v["jwkPubAlg"], serde_json::json!("RSA-OAEP-256"));
+        assert_eq!(v["jwkE"], serde_json::json!("AQAB"));
+        let spki_len = v["spkiLen"].as_u64().unwrap();
+        assert!((162..=163).contains(&spki_len), "1024-bit spki is 162 bytes (163 when the modulus MSB needs a 0x00 pad), got {spki_len}");
+        assert_eq!(v["spkiOk"], serde_json::json!(true), "spki is a DER SEQUENCE carrying the rsaEncryption OID 2a864886f70d010101");
+        assert_eq!(v["pkcs8HeadOk"], serde_json::json!(true), "pkcs8 is a standard PrivateKeyInfo wrapping RSAPrivateKey");
+        let pkcs8_len = v["pkcs8Len"].as_u64().unwrap();
+        assert!((605..=640).contains(&pkcs8_len), "1024-bit pkcs8 length in the leading-zero-variable band, got {pkcs8_len}");
+        assert_eq!(v["rt"], serde_json::json!([true, true, true]), "spki/pkcs8/jwk imports reproduce the key");
+        assert_eq!(v["bareUsages"], serde_json::json!("encrypt"));
+        assert_eq!(v["ctLen"], serde_json::json!(128), "1024-bit OAEP ciphertext");
+        assert_eq!(v["pt"], serde_json::json!("attack at dawn"));
+        assert_eq!(v["ptLbl"], serde_json::json!("attack at dawn"));
+        assert_eq!(v["wrapLen"], serde_json::json!(128));
+        assert_eq!(v["unwrapUsages"], serde_json::json!("encrypt"));
+        let e = &v["errors"];
+        assert_eq!(e["encPriv"], serde_json::json!("InvalidAccessError: key.usages does not permit this operation"));
+        assert_eq!(e["decPub"], serde_json::json!("InvalidAccessError: key.usages does not permit this operation"));
+        assert_eq!(e["corrupt"], serde_json::json!("OperationError: "));
+        assert_eq!(e["labelMismatch"], serde_json::json!("OperationError: "));
+        assert_eq!(e["shortCt"], serde_json::json!("OperationError: "));
+        assert_eq!(e["exportSpkiPriv"], serde_json::json!("InvalidAccessError: The key is not of the expected type"));
+        assert_eq!(e["exportRaw"], serde_json::json!("NotSupportedError: Unsupported export key format for algorithm"));
+        assert_eq!(e["importSpkiDecrypt"], serde_json::json!("SyntaxError: Cannot create a key using the specified key usages."));
+        assert_eq!(e["spkiNoHash"], serde_json::json!("TypeError: Failed to execute 'importKey' on 'SubtleCrypto': RsaHashedImportParams: hash: Missing or not an AlgorithmIdentifier"));
+        assert_eq!(e["pkcs8NoHash"], serde_json::json!("TypeError: Failed to execute 'importKey' on 'SubtleCrypto': RsaHashedImportParams: hash: Missing or not an AlgorithmIdentifier"));
+        assert_eq!(e["genE1"], serde_json::json!("OperationError: The \"publicExponent\" must be either 3 or 65537"));
+        assert_eq!(e["genMod1023"], serde_json::json!("OperationError: The modulus length must be a multiple of 8 bits and >= 256 and <= 8192"));
+        assert_eq!(e["genMd5"], serde_json::json!("NotSupportedError: Failed to execute 'generateKey' on 'SubtleCrypto': RsaHashedKeyGenParams: hash: Algorithm: Unrecognized name"));
+        assert_eq!(e["genEmpty"], serde_json::json!("SyntaxError: Usages cannot be empty when creating a key."));
+        assert_eq!(e["genSign"], serde_json::json!("SyntaxError: Cannot create a key using the specified key usages."));
+        assert_eq!(e["jwkAlg"], serde_json::json!("DataError: The JWK \"alg\" member was inconsistent with that specified by the Web Crypto call"));
+        assert_eq!(e["jwkKty"], serde_json::json!("DataError: The JWK \"kty\" member was not \"RSA\""));
+        assert_eq!(e["jwkMissingN"], serde_json::json!("DataError: The required JWK member \"n\" was missing"));
+        assert_eq!(e["jwkMissingE"], serde_json::json!("DataError: The required JWK member \"e\" was missing"));
+        assert_eq!(e["jwkMissingD"], serde_json::json!("SyntaxError: Cannot create a key using the specified key usages."), "no d ⇒ public key ⇒ decrypt usage rejected first");
+        assert_eq!(e["jwkDOnly"], serde_json::json!("DataError: The required JWK member \"p\" was missing"), "private jwk needs the full CRT set");
+        assert_eq!(e["jwkExtFalse"], serde_json::json!("DataError: The \"ext\" member of the JWK dictionary is inconsistent what that specified by the Web Crypto call"), "Chrome's typo kept verbatim");
+        assert_eq!(e["jwkOpsDup"], serde_json::json!("DataError: The \"key_ops\" member of the JWK dictionary contains duplicate usages."));
+        assert_eq!(e["jwkOpsConflict"], serde_json::json!("DataError: The JWK \"key_ops\" member was inconsistent with that specified by the Web Crypto call. The JWK usage must be a superset of those requested"));
+        assert_eq!(e["jwkUseSig"], serde_json::json!("DataError: The JWK \"use\" member was inconsistent with that specified by the Web Crypto call. The JWK usage must be a superset of those requested"));
+        assert_eq!(e["usageBogus"], serde_json::json!("TypeError: Failed to execute 'importKey' on 'SubtleCrypto': Invalid keyUsages argument"));
+        assert_eq!(e["rawFormat"], serde_json::json!("NotSupportedError: Unsupported key format for RSA keys: raw"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_webcrypto_jwk_oct_field_validation() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // #269: JWK import field validation for symmetric keys — kty/k
+        // presence, strict base64url, alg/use/key_ops/ext consistency and
+        // Chrome's exact wording, plus the oct jwk export shape.
+        let script = r#"async () => {
+            const enc = new TextEncoder();
+            const face = async (p) => { try { const r = await p; return 'no-throw:' + (r && r.usages ? r.usages.join(',') : ''); } catch (e) { return e.name + ': ' + e.message; } };
+            const S = crypto.subtle;
+            const k16 = 'MTIzNDU2Nzg5MDEyMzQ1Ng';
+            // 32-byte oct key as base64url (HS256's own length).
+            const k32 = btoa(String.fromCharCode(...[...Array(32).keys()])).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+            const GCM = { name: 'AES-GCM', length: 128 };
+            const imp = (jwk, alg, ext, usages) => S.importKey('jwk', jwk, alg, ext, usages);
+
+            const ok = await imp({ kty: 'oct', k: k16 }, GCM, true, ['encrypt']);
+            const errors = {
+                kty: await face(imp({ kty: 'RSA', k: k16 }, GCM, true, ['encrypt'])),
+                noK: await face(imp({ kty: 'oct' }, GCM, true, ['encrypt'])),
+                badB64: await face(imp({ kty: 'oct', k: '!!!!' }, GCM, true, ['encrypt'])),
+                padded: await face(imp({ kty: 'oct', k: k16 + '==' }, GCM, true, ['encrypt'])),
+                algBad: await face(imp({ kty: 'oct', k: k16, alg: 'A128CBC' }, GCM, true, ['encrypt'])),
+                opsConflict: await face(imp({ kty: 'oct', k: k16, key_ops: ['sign'] }, GCM, true, ['encrypt'])),
+                opsSubset: await face(imp({ kty: 'oct', k: k16, key_ops: ['encrypt'] }, GCM, true, ['encrypt', 'decrypt'])),
+                opsSuperset: await face(imp({ kty: 'oct', k: k16, key_ops: ['encrypt', 'decrypt'] }, GCM, true, ['encrypt'])),
+                opsDup: await face(imp({ kty: 'oct', k: k16, key_ops: ['encrypt', 'encrypt'] }, GCM, true, ['encrypt'])),
+                opsBogus: await face(imp({ kty: 'oct', k: k16, key_ops: ['bogus'] }, GCM, true, ['encrypt'])),
+                useSig: await face(imp({ kty: 'oct', k: k16, use: 'sig' }, GCM, true, ['encrypt'])),
+                useEnc: await face(imp({ kty: 'oct', k: k16, use: 'enc' }, GCM, true, ['encrypt'])),
+                extFalse: await face(imp({ kty: 'oct', k: k16, ext: false }, GCM, true, ['encrypt'])),
+                extFalseOk: await face(imp({ kty: 'oct', k: k16, ext: false }, GCM, false, ['encrypt'])),
+                extTrue: await face(imp({ kty: 'oct', k: k16, ext: true }, GCM, false, ['encrypt'])),
+                emptyUsages: await face(imp({ kty: 'oct', k: k16 }, GCM, true, [])),
+                bogusUsage: await face(imp({ kty: 'oct', k: k16 }, GCM, true, ['nope'])),
+                kwAlgBad: await face(imp({ kty: 'oct', k: k16, alg: 'A128GCM' }, { name: 'AES-KW', length: 128 }, true, ['wrapKey'])),
+                hmacOk: await face(imp({ kty: 'oct', k: k32, alg: 'HS256' }, { name: 'HMAC', hash: 'SHA-256' }, true, ['sign'])),
+                hmacBad: await face(imp({ kty: 'oct', k: k32, alg: 'HS512' }, { name: 'HMAC', hash: 'SHA-256' }, true, ['sign'])),
+                hmacNoHash: await face(imp({ kty: 'oct', k: k16 }, { name: 'HMAC' }, true, ['sign'])),
+                rawNoLen: await face(S.importKey('raw', enc.encode('0123456789abcdef'), { name: 'AES-GCM' }, true, ['encrypt'])),
+                rawLenMismatch: await face(S.importKey('raw', enc.encode('0123456789abcdef'), { name: 'AES-GCM', length: 256 }, true, ['encrypt'])),
+                rawEmptyUsages: await face(S.importKey('raw', enc.encode('0123456789abcdef'), GCM, true, [])),
+                encNoUsage: await face((async () => {
+                    const k = await S.importKey('raw', enc.encode('0123456789abcdef'), GCM, true, ['decrypt']);
+                    return S.encrypt({ name: 'AES-GCM', iv: new Uint8Array(12) }, k, new Uint8Array(4));
+                })()),
+            };
+
+            const g = await S.generateKey({ name: 'AES-GCM', length: 128 }, true, ['encrypt']);
+            const gj = await S.exportKey('jwk', g);
+            const h = await S.generateKey({ name: 'HMAC', hash: 'SHA-384' }, true, ['sign', 'verify']);
+            const hj = await S.exportKey('jwk', h);
+            const cbc = await S.generateKey({ name: 'AES-CBC', length: 256 }, true, ['encrypt']);
+            const cj = await S.exportKey('jwk', cbc);
+            const jwkWrapRoundtrip = await (async () => {
+                // jwk-format wrap under AES-GCM and unwrap back (the jwk+KW
+                // path dies on the multiple-of-8 gate, so GCM carries it).
+                const wrapKey = await S.generateKey({ name: 'AES-GCM', length: 128 }, true, ['wrapKey', 'unwrapKey']);
+                const w = await S.wrapKey('jwk', g, wrapKey, { name: 'AES-GCM', iv: new Uint8Array(12) });
+                const back = await S.unwrapKey('jwk', w, wrapKey, { name: 'AES-GCM', iv: new Uint8Array(12) }, GCM, true, ['encrypt']);
+                return back.usages.join(',') + ':' + (await S.exportKey('raw', back)).byteLength;
+            })();
+            return {
+                okUsages: ok.usages.join(','), okAlg: ok.algorithm.name, okLen: ok.algorithm.length, okExt: ok.extractable,
+                gOrder: Object.keys(gj), gAlg: gj.alg,
+                hOrder: Object.keys(hj), hAlg: hj.alg, hOps: hj.key_ops.join(','),
+                cAlg: cj.alg, jwkWrapRoundtrip, errors,
+            };
+        }"#;
+        let result = rt
+            .call_function_on_remote(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        assert_eq!(v["okUsages"], serde_json::json!("encrypt"));
+        assert_eq!(v["okAlg"], serde_json::json!("AES-GCM"));
+        assert_eq!(v["okLen"], serde_json::json!(128));
+        assert_eq!(v["okExt"], serde_json::json!(true));
+        assert_eq!(v["gOrder"], serde_json::json!(["alg", "ext", "k", "key_ops", "kty"]));
+        assert_eq!(v["gAlg"], serde_json::json!("A128GCM"));
+        assert_eq!(v["hOrder"], serde_json::json!(["alg", "ext", "k", "key_ops", "kty"]));
+        assert_eq!(v["hAlg"], serde_json::json!("HS384"));
+        assert_eq!(v["hOps"], serde_json::json!("sign,verify"));
+        assert_eq!(v["cAlg"], serde_json::json!("A256CBC"));
+        assert_eq!(v["jwkWrapRoundtrip"], serde_json::json!("encrypt:16"), "jwk-format wrap/unwrap under AES-GCM round-trips");
+        let e = &v["errors"];
+        assert_eq!(e["kty"], serde_json::json!("DataError: The JWK \"kty\" member was not \"oct\""));
+        assert_eq!(e["noK"], serde_json::json!("DataError: The required JWK member \"k\" was missing"));
+        assert_eq!(e["badB64"], serde_json::json!("DataError: The JWK member \"k\" could not be base64url decoded or contained padding"));
+        assert_eq!(e["padded"], serde_json::json!("DataError: The JWK member \"k\" could not be base64url decoded or contained padding"), "explicit '=' padding rejected");
+        assert_eq!(e["algBad"], serde_json::json!("DataError: The JWK \"alg\" member was inconsistent with that specified by the Web Crypto call"));
+        assert_eq!(e["opsConflict"], serde_json::json!("DataError: The JWK \"key_ops\" member was inconsistent with that specified by the Web Crypto call. The JWK usage must be a superset of those requested"));
+        assert_eq!(e["opsSubset"], serde_json::json!("DataError: The JWK \"key_ops\" member was inconsistent with that specified by the Web Crypto call. The JWK usage must be a superset of those requested"));
+        assert_eq!(e["opsSuperset"], serde_json::json!("no-throw:encrypt"), "a superset keeps the requested usages");
+        assert_eq!(e["opsDup"], serde_json::json!("DataError: The \"key_ops\" member of the JWK dictionary contains duplicate usages."));
+        assert_eq!(e["opsBogus"], serde_json::json!("DataError: The JWK \"key_ops\" member was inconsistent with that specified by the Web Crypto call. The JWK usage must be a superset of those requested"));
+        assert_eq!(e["useSig"], serde_json::json!("DataError: The JWK \"use\" member was inconsistent with that specified by the Web Crypto call. The JWK usage must be a superset of those requested"));
+        assert_eq!(e["useEnc"], serde_json::json!("no-throw:encrypt"));
+        assert_eq!(e["extFalse"], serde_json::json!("DataError: The \"ext\" member of the JWK dictionary is inconsistent what that specified by the Web Crypto call"));
+        assert_eq!(e["extFalseOk"], serde_json::json!("no-throw:encrypt"));
+        assert_eq!(e["extTrue"], serde_json::json!("no-throw:encrypt"), "ext:true with extractable:false is fine");
+        assert_eq!(e["emptyUsages"], serde_json::json!("SyntaxError: Usages cannot be empty when creating a key."));
+        assert_eq!(e["bogusUsage"], serde_json::json!("TypeError: Failed to execute 'importKey' on 'SubtleCrypto': Invalid keyUsages argument"));
+        assert_eq!(e["kwAlgBad"], serde_json::json!("DataError: The JWK \"alg\" member was inconsistent with that specified by the Web Crypto call"));
+        assert_eq!(e["hmacOk"], serde_json::json!("no-throw:sign"));
+        assert_eq!(e["hmacBad"], serde_json::json!("DataError: The JWK \"alg\" member was inconsistent with that specified by the Web Crypto call"));
+        assert_eq!(e["hmacNoHash"], serde_json::json!("TypeError: Failed to execute 'importKey' on 'SubtleCrypto': HmacImportParams: hash: Missing or not an AlgorithmIdentifier"));
+        assert_eq!(e["rawNoLen"], serde_json::json!("no-throw:encrypt"), "the length param is derived from the data, not required");
+        assert_eq!(e["rawLenMismatch"], serde_json::json!("no-throw:encrypt"), "Chrome ignores a mismatched length param on raw import");
+        assert_eq!(e["rawEmptyUsages"], serde_json::json!("SyntaxError: Usages cannot be empty when creating a key."));
+        assert_eq!(e["encNoUsage"], serde_json::json!("InvalidAccessError: key.usages does not permit this operation"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn test_structured_clone_preserves_cryptokey_identity() {
         let mut rt = setup_runtime("<html><body></body></html>");
         // A CryptoKey reached twice in a graph must clone to one shared object

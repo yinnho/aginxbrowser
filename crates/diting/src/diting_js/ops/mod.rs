@@ -3054,7 +3054,12 @@ pub use fetch_gate::validate_fetch_url;
 pub(crate) use cors::request_origin;
 pub(crate) use crypto_secret::{
     crypto_err, op_random_bytes, op_subtle_aes_cbc, op_subtle_aes_ctr, op_subtle_aes_gcm,
-    op_subtle_digest, op_subtle_hkdf, op_subtle_hmac, op_subtle_pbkdf2,
+    op_subtle_aes_kw, op_subtle_digest, op_subtle_hkdf, op_subtle_hmac, op_subtle_pbkdf2,
+};
+mod crypto_rsa;
+pub(crate) use crypto_rsa::{
+    op_subtle_rsa_generate, op_subtle_rsa_import_pkcs8, op_subtle_rsa_import_private,
+    op_subtle_rsa_import_public, op_subtle_rsa_import_spki, op_subtle_rsa_oaep,
 };
 
 /// The page's text-ink extent alone ((width, height) in CSS px), from the
@@ -4663,6 +4668,13 @@ pub fn build_extension() -> Extension {
             op_subtle_aes_gcm(),
             op_subtle_aes_cbc(),
             op_subtle_aes_ctr(),
+            op_subtle_aes_kw(),
+            op_subtle_rsa_generate(),
+            op_subtle_rsa_import_public(),
+            op_subtle_rsa_import_spki(),
+            op_subtle_rsa_import_private(),
+            op_subtle_rsa_import_pkcs8(),
+            op_subtle_rsa_oaep(),
             op_subtle_pbkdf2(),
             op_subtle_hkdf(),
             op_subtle_ecdsa_generate(),
