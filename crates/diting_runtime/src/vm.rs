@@ -1,20 +1,20 @@
 //! The V8 vertical slice — a bare isolate driven by our own loop.
 //!
-//! Batch 2 of the crate's roadmap: prove the seam end to end on raw `v8`,
-//! with no deno_core anywhere. One isolate, one context, one JS settlement
-//! face, and a loop pass that runs the [`SettleQueue`] into JS and drains
-//! microtasks. The acceptance pin is the campaign's minimal closed loop:
-//! terminate lands mid-settlement → the batch parks instead of evaporating
-//! → `cancel_terminate_execution` revives the isolate → the next poll
+//! Batch 2 proved the seam end to end on raw `v8`, with no deno_core
+//! anywhere: one isolate, one context, one JS settlement face, and a loop
+//! pass that runs the [`SettleQueue`] into JS and drains microtasks. The
+//! acceptance pin is the campaign's minimal closed loop: terminate lands
+//! mid-settlement → the batch parks instead of evaporating →
+//! `cancel_terminate_execution` revives the isolate → the next poll
 //! re-delivers → the awaiting promise settles. The #226/#240 shape, owned.
 //!
 //! What this slice deliberately does NOT have yet: the immediates/close
 //! phases (diting uses neither — no setImmediate, no close callbacks
-//! anywhere in the tree) and the ring promise table (the JS face here is a
-//! Map — the seed, same law). Those are later batches; building them now
-//! would be scaffolding without a test behind it. The op driver (batch 3)
-//! IS wired in: async futures driven each pass, completions parking in the
-//! settle queue — see [`crate::driver`].
+//! anywhere in the tree) and the snapshot-backed persistence face. The op
+//! driver (batch 3) and the ring promise table (batch 4, replacing the
+//! original Map seed — same settle law, deno_core's ring shape learned
+//! and one deliberate divergence: Missing-absorb instead of deno's throw)
+//! are wired in. See [`crate::driver`] and the PRELUDE below.
 
 use crate::driver::{AfterTicks, OpDriver};
 use crate::settle::SettleQueue;
@@ -31,48 +31,86 @@ use std::sync::Once;
 /// queue.
 const BATCH_CAP: usize = 512;
 
-/// The JS face of settlement — the seed of our own promise table. Kept in
-/// sync with the Rust call in [`deliver_batch`]: (id, ok, payload).
-/// Missing ids absorb natively (Map lookup miss → return), which is the
-/// same Missing-absorb law js/core_base.js implements against deno's ring.
+/// The JS face of settlement — our own promise table, ring-shaped.
+///
+/// The law is deno_core's (00_infra.js, learned not copied): a fixed ring
+/// holds the live promises, `slot = id % RING_SIZE`; a slot reclaimed
+/// while its entry is still pending evicts that entry to an overflow Map
+/// keyed on the entry's OWN id (so the id counter wrapping back to zero
+/// can never mistake a reused slot for the older promise). Ids stay
+/// non-negative i32 — the counter wraps at 2^31-1, same arithmetic deno's
+/// async op stubs use. Known inherited limit (documented upstream too): a
+/// promise pending while 2^31 more ids dispatch gets its id reused and
+/// the older map entry silently lost — no real workload spans that.
+///
+/// ONE deliberate divergence: deno's resolve THROWS on a missing id
+/// ("Missing promise @ N"). Ours absorbs — a settle racing a page
+/// teardown or a parked-batch replay must not kill the batch (a throw
+/// parks + poison-drops it), and the Missing-absorb law is already
+/// pinned by the vm tests. Kept in sync with the Rust call in
+/// [`deliver_batch`]: (id, ok, payload).
 const PRELUDE: &str = r#"
 "use strict";
-globalThis.__diting_promises = new Map();
-globalThis.__diting_nextId = 1;
+const RING_SIZE = 4 * 1024;
+let nextPromiseId = 0;
+// slot = [resolve, reject, id] or null; the id rides along so a reused
+// slot is never mistaken for the evicted promise now living in the map.
+const promiseRing = new Array(RING_SIZE).fill(null);
+const promiseMap = new Map();
+
+function __diting_register() {
+  const id = nextPromiseId;
+  nextPromiseId = (id + 1) & 0x7fffffff;
+  const idx = id % RING_SIZE;
+  const old = promiseRing[idx];
+  if (old !== null) promiseMap.set(old[2], old);
+  const promise = new Promise(function (resolve, reject) {
+    promiseRing[idx] = [resolve, reject, id];
+  });
+  return { id: id, promise: promise };
+}
+
 globalThis.__diting_lastResolved = null;
 globalThis.__diting_lastRejected = null;
 globalThis.__diting_settle = function (id, ok, payload) {
-  const entry = globalThis.__diting_promises.get(id);
-  if (entry === undefined) return; // stale or unknown: absorb, keep delivering
-  globalThis.__diting_promises.delete(id);
-  if (ok) entry.resolve(payload);
-  else entry.reject(new Error(payload));
+  const idx = id % RING_SIZE;
+  let entry = promiseRing[idx];
+  if (entry !== null && entry[2] === id) {
+    promiseRing[idx] = null;
+  } else {
+    entry = promiseMap.get(id);
+    if (entry === undefined) return; // stale or unknown: absorb, keep delivering
+    promiseMap.delete(id);
+  }
+  if (ok) entry[0](payload);
+  else entry[1](new Error(payload));
 };
 // Driver probe: register a promise in the table, return its id. The .then
 // taps make settlement observable from Rust without extra plumbing — the
 // microtask drain flips the global, eval reads it.
 globalThis.__diting_defer = function () {
-  const id = globalThis.__diting_nextId++;
-  const p = new Promise(function (resolve, reject) {
-    globalThis.__diting_promises.set(id, { resolve, reject });
-  });
-  p.then(
+  const r = __diting_register();
+  r.promise.then(
     function (v) { globalThis.__diting_lastResolved = String(v); },
     function (e) { globalThis.__diting_lastRejected = String(e && e.message || e); }
   );
-  return id;
+  return r.id;
 };
 // The async op face: register a promise, hand the op to Rust
 // (__diting_spawn is a raw native callback installed from the Rust side),
 // return the promise. This is the op_sleep shape bootstrap.js runs page
 // timers on; here it drives AfterTicks futures inside the driver.
 globalThis.__diting_op_sleep = function (ticks, payload) {
-  const id = globalThis.__diting_nextId++;
-  let resolve, reject;
-  const p = new Promise(function (res, rej) { resolve = res; reject = rej; });
-  globalThis.__diting_promises.set(id, { resolve, reject });
-  globalThis.__diting_spawn(id, ticks, String(payload));
-  return p;
+  const r = __diting_register();
+  globalThis.__diting_spawn(r.id, ticks, String(payload));
+  return r.promise;
+};
+// Test taps — deno exposes the same pair for wraparound testing.
+globalThis.__diting_setNextId = function (n) { nextPromiseId = n; };
+globalThis.__diting_tableCounts = function () {
+  let ring = 0;
+  for (let i = 0; i < RING_SIZE; i++) if (promiseRing[i] !== null) ring++;
+  return ring + "," + promiseMap.size;
 };
 "#;
 
@@ -553,9 +591,9 @@ mod tests {
             "second"
         );
         assert_eq!(
-            vm.eval_string("globalThis.__diting_promises.size").unwrap(),
-            "0",
-            "both ids settled exactly once on the replay"
+            vm.eval_string("globalThis.__diting_tableCounts()").unwrap(),
+            "0,0",
+            "both ids settled exactly once on the replay — ring and map drained"
         );
         assert_eq!(vm.stats().delivered, 2);
     }
@@ -752,5 +790,149 @@ mod tests {
 
         vm.poll().unwrap(); // 'b' completes this pass, settles, drain flips the flag
         assert_eq!(vm.eval_string("globalThis.done").unwrap(), "true");
+    }
+
+    /// Ring law 1 — eviction: more concurrent promises than ring slots.
+    /// The first RING_SIZE+ entries keep their slots; the extra ten evict
+    /// the OLDEST occupants of their slots into the overflow map. All of
+    /// them settle, settled in reverse order (map path and ring path
+    /// interleaved).
+    #[test]
+    fn ring_overflow_evicts_to_map_and_all_settle() {
+        let mut vm = Vm::new();
+        vm.eval_string(
+            "globalThis.count = 0; globalThis.ids = []; \
+             for (let i = 0; i < RING_SIZE + 10; i++) { \
+               const r = __diting_register(); \
+               r.promise.then(function () { globalThis.count++; }); \
+               globalThis.ids.push(r.id); \
+             } \
+             globalThis.__diting_tableCounts()",
+        )
+        .unwrap();
+        // 4096 ring slots hold the LAST 4096 registrations; the first 10
+        // were evicted to the map when their slots got reclaimed.
+        assert_eq!(
+            vm.eval_string("globalThis.__diting_tableCounts()").unwrap(),
+            "4096,10"
+        );
+
+        vm.eval_string(
+            "for (let i = globalThis.ids.length - 1; i >= 0; i--) { \
+               __diting_settle(globalThis.ids[i], true, 'x'); \
+             }",
+        )
+        .unwrap();
+        assert_eq!(
+            vm.eval_string("globalThis.__diting_tableCounts()").unwrap(),
+            "0,0",
+            "every promise taken, both ring and map drained"
+        );
+        vm.poll().unwrap(); // drain the 4106 microtask continuations
+        assert_eq!(vm.eval_string("globalThis.count").unwrap(), "4106");
+    }
+
+    /// Ring law 2 — slot collision: two live promises whose ids differ by
+    /// exactly RING_SIZE land on the same slot. The second takes the ring
+    /// slot; the first moves to the map. Both settle through their own
+    /// path.
+    #[test]
+    fn ring_same_slot_two_live_ids_both_settle() {
+        let mut vm = Vm::new();
+        vm.eval_string(
+            "globalThis.count = 0; \
+             __diting_setNextId(5); \
+             const a = __diting_register(); \
+             __diting_setNextId(5 + RING_SIZE); \
+             const b = __diting_register(); \
+             a.promise.then(function () { globalThis.count++; }); \
+             b.promise.then(function () { globalThis.count++; }); \
+             __diting_settle(a.id, true, 'a'); \
+             __diting_settle(b.id, true, 'b');",
+        )
+        .unwrap();
+        vm.poll().unwrap(); // drain the two continuations
+        assert_eq!(
+            vm.eval_string("globalThis.count").unwrap(),
+            "2",
+            "a settled via the map, b via the ring — own paths, both land"
+        );
+        assert_eq!(
+            vm.eval_string("globalThis.__diting_tableCounts()").unwrap(),
+            "0,0"
+        );
+    }
+
+    /// Ring law 3 — the id guard: a settle for an id that maps to an
+    /// occupied slot but is NOT the entry's own id must absorb WITHOUT
+    /// clearing that slot (the entry[2] === id check). The ring's promise
+    /// still settles afterwards.
+    #[test]
+    fn missing_id_on_occupied_slot_absorbs_without_disturbance() {
+        let mut vm = Vm::new();
+        vm.eval_string(
+            "globalThis.count = 0; \
+             const a = __diting_register(); \
+             globalThis.firstId = a.id; \
+             a.promise.then(function () { globalThis.count++; }); \
+             __diting_settle(a.id + RING_SIZE, true, 'bogus');",
+        )
+        .unwrap();
+        assert_eq!(
+            vm.eval_string("globalThis.__diting_tableCounts()").unwrap(),
+            "1,0",
+            "the bogus settle neither cleared the slot nor leaked an entry"
+        );
+        let id: i32 = vm
+            .eval_string("globalThis.firstId")
+            .unwrap()
+            .parse()
+            .unwrap();
+        vm.settle(Triplet {
+            promise_id: id,
+            ok: true,
+            payload: "real".into(),
+        });
+        vm.poll().unwrap();
+        assert_eq!(
+            vm.eval_string("globalThis.count").unwrap(),
+            "1",
+            "the real settle still lands through Rust delivery"
+        );
+    }
+
+    /// Ring law 4 — wraparound: the id counter wraps at 2^31-1 back to 0
+    /// (deno's async op stub arithmetic). Ids on both sides of the wrap
+    /// settle normally.
+    #[test]
+    fn id_counter_wraps_at_i32_max() {
+        let mut vm = Vm::new();
+        let ids = vm
+            .eval_string(
+                "globalThis.count = 0; \
+                 __diting_setNextId(0x7fffffff); \
+                 const top = __diting_register(); \
+                 const wrapped = __diting_register(); \
+                 [top.id, wrapped.id].join(',')",
+            )
+            .unwrap();
+        assert_eq!(
+            ids, "2147483647,0",
+            "the counter wrapped back to zero, both ids stay non-negative i32"
+        );
+        vm.eval_string(
+            "top.promise.then(function () { globalThis.count++; }); \
+             wrapped.promise.then(function () { globalThis.count++; }); \
+             __diting_settle(2147483647, true, 'x'); \
+             __diting_settle(0, true, 'x'); \
+             globalThis.__diting_tableCounts()",
+        )
+        .unwrap();
+        assert_eq!(
+            vm.eval_string("globalThis.__diting_tableCounts()").unwrap(),
+            "0,0"
+        );
+        vm.poll().unwrap();
+        assert_eq!(vm.eval_string("globalThis.count").unwrap(), "2");
     }
 }

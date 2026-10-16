@@ -27,10 +27,14 @@
 //!    完成按完成序灌进 settle 队列；裸 V8 回调（`__diting_spawn`）经
 //!    isolate slot 找到 driver——Rust 侧对 terminate 免疫，恰好就是
 //!    "op 在 terminate 中完成 → 停泊 → revive 落地"的 #226 钉测面。
-//!    环形表自建（ring + overflow map + async op stub + resolver）、
-//!    immediates/close 相（diting 现役零消费，先不建）后续批。
-//! 4. 自有快照格式（[v8 data][sidecar][ulen] 三段式，sidecar 自有）。
-//! 5. op 注册面（40 ops 从 `#[op2]` 迁出）+ diting 换装 + 删 deno_core。
+//! 4. **环形 promise 表**（vm prelude，已落）：deno_core 00_infra.js
+//!    的环表法学来自有——4096 槽 ring + 溢出 Map（entry 自带 id 键控、
+//!    槽被占则旧 entry 挪 map、id 计数 &0x7fffffff 回卷），一处刻意
+//!    分叉：resolve miss 吸收而不是 deno 的 throw（停泊重投法不允许
+//!    一个 stale settle 毒死整批）。immediates/close 相（diting 现役
+//!    零消费，先不建）。
+//! 5. 自有快照格式（[v8 data][sidecar][ulen] 三段式，sidecar 自有）。
+//! 6. op 注册面（40 ops 从 `#[op2]` 迁出）+ diting 换装 + 删 deno_core。
 //!
 //! ## 法条（与 js/core_base.js v1 同一条法，两层各自实现）
 //!
