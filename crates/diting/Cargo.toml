@@ -133,7 +133,7 @@ cssparser = "0.37"
 precomputed-hash = "0.1"
 
 # --- V8 / JS runtime (inlined obscura-js) ---
-deno_core = "0.411"
+deno_core = "0.412"
 # Claim step 1 (docs/diting_runtime认领计划_20261017.md): direct pin on the
 # engine-bindings crate deno_core renames twice (crates.io "v8" <- deno_v8 as
 # "rusty_v8" <- deno_core as "v8"). Exact-pinned so engine bumps are our call
@@ -192,7 +192,7 @@ wreq = { version = "=6.0.0-rc.31", optional = true, features = ["prefix-symbols"
 wreq = { version = "=6.0.0-rc.31", optional = true, features = ["socks", "gzip", "brotli", "deflate", "zstd"] }
 
 [build-dependencies]
-deno_core = "0.411"
+deno_core = "0.412"
 
 [dev-dependencies]
 # Test-only decode oracle for the hand-rolled canvas PNG encoder (#117):
