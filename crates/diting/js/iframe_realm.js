@@ -26,6 +26,15 @@ class _IframeDocument {
     // this stamp instead.
     this._root._isIframeDocRoot = true;
     this._root._ownerDoc = this;
+    // Keep <head> content as real nodes (not just strip it for the body
+    // extract): srcdoc documents run their head scripts (see
+    // _runSrcdocScripts), and title/meta land in the tree where
+    // querySelector finds them. innerHTML never executes scripts, so this
+    // only changes DOM shape — execution stays opt-in per load path.
+    var headMatch = html.match(/<head[^>]*>([\s\S]*?)<\/head>/i);
+    if (headMatch && headMatch[1].trim()) {
+      this._head.innerHTML = headMatch[1];
+    }
     var bodyContent = html
       .replace(/^<!DOCTYPE[^>]*>/i, '')
       .replace(/<\/?html[^>]*>/gi, '')
@@ -177,16 +186,27 @@ class _IframeWindow {
     this.console = globalThis.console;
     this.chrome = globalThis.chrome;
 
-    try {
-      const u = new URL(url);
+    if (url === 'about:srcdoc') {
+      // about:srcdoc inherits the PARENT's origin (same-origin document);
+      // URL() can't express that, so build the location directly.
+      const pOrigin = (function() { try { return new URL(_domParse("document_url") || "about:blank").origin; } catch (e) { return ''; } })();
       this.location = {
-        href: url, origin: u.origin, protocol: u.protocol,
-        host: u.host, hostname: u.hostname, port: u.port,
-        pathname: u.pathname, search: u.search, hash: u.hash,
-        toString() { return url; }, assign(){}, reload(){}, replace(){},
+        href: 'about:srcdoc', origin: pOrigin, protocol: 'about:',
+        host: '', hostname: '', port: '', pathname: 'srcdoc', search: '', hash: '',
+        toString() { return 'about:srcdoc'; }, assign() {}, reload() {}, replace() {},
       };
-    } catch(e) {
-      this.location = { href: url, origin: '', protocol: '', host: '', hostname: '', port: '', pathname: '/', search: '', hash: '', toString() { return url; }, assign(){}, reload(){}, replace(){} };
+    } else {
+      try {
+        const u = new URL(url);
+        this.location = {
+          href: url, origin: u.origin, protocol: u.protocol,
+          host: u.host, hostname: u.hostname, port: u.port,
+          pathname: u.pathname, search: u.search, hash: u.hash,
+          toString() { return url; }, assign(){}, reload(){}, replace(){},
+        };
+      } catch(e) {
+        this.location = { href: url, origin: '', protocol: '', host: '', hostname: '', port: '', pathname: '/', search: '', hash: '', toString() { return url; }, assign(){}, reload(){}, replace(){} };
+      }
     }
     // fp-diff-1014 #3: a real about:blank iframe window carries the FULL
     // global set (~1235 own keys); ours exposed ~25, so one

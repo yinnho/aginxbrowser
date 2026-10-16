@@ -16367,6 +16367,82 @@
         assert_eq!(v["bodyText"], serde_json::json!("frame-MARKER-42"), "frame document must be fetched and parsed: {v}");
     }
 
+    /// #268: iframe srcdoc — the child document comes from the attribute
+    /// (about:srcdoc, inherits the parent's origin, wins over src), its
+    /// inline scripts RUN (a document load, not innerHTML), and the load
+    /// event fires only after the scripts finished (obscura #1265).
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_iframe_srcdoc_document_scripts_and_load() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        rt.set_url("https://example.com/page");
+        let script = r##"async () => {
+            const f = document.createElement('iframe');
+            f.setAttribute('srcdoc', '<head><title>t-42</title><script>window.__srcdocRan = document.querySelector("#srcdoc-el") ? "dom-ready" : "no-dom";<\/script></head><body><div id="srcdoc-el">SRCDOC-BODY-42</div><script>self.__srcdocWinIsSelf = (self === window);<\/script></body>');
+            // srcdoc present must win over src (never fetched).
+            f.setAttribute('src', 'http://127.0.0.1:1/never-fetched');
+            const events = [];
+            f.addEventListener('load', () => events.push('load:' + (f.contentWindow.__srcdocRan || 'missed')));
+            document.body.appendChild(f);
+            await new Promise(r => setTimeout(r, 50));
+            const doc = f.contentDocument;
+            const win = f.contentWindow;
+            return {
+                events,
+                url: doc ? doc.URL : 'no-doc',
+                title: doc ? doc.title : 'no-doc',
+                bodyText: doc && doc.body ? (doc.body.textContent || '').trim() : 'no-body',
+                scriptRan: win ? win.__srcdocRan : 'no-win',
+                winIsSelf: win ? String(win.__srcdocWinIsSelf) : 'no-win',
+                docReachable: doc !== null && doc !== undefined,
+                locHref: win ? win.location.href : 'no-win',
+                locProtocol: win ? win.location.protocol : 'no-win',
+                originInherited: win ? String(win.location.origin === location.origin) : 'no-win',
+            };
+        }"##;
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
+        let v = result.value.unwrap();
+        assert_eq!(v["events"], serde_json::json!(["load:dom-ready"]), "load must fire after the scripts ran: {v}");
+        assert_eq!(v["url"], serde_json::json!("about:srcdoc"), "srcdoc browsing context URL: {v}");
+        assert_eq!(v["title"], serde_json::json!("t-42"), "head content (title) must survive parsing: {v}");
+        // Chrome truth: textContent includes <script> bodies, so assert the
+        // marker is present rather than exact equality.
+        assert!(v["bodyText"].as_str().unwrap_or("").contains("SRCDOC-BODY-42"), "srcdoc body must parse: {v}");
+        assert_eq!(v["scriptRan"], serde_json::json!("dom-ready"), "inline scripts in srcdoc must run against the frame document: {v}");
+        assert_eq!(v["winIsSelf"], serde_json::json!("true"), "self === window inside the frame: {v}");
+        assert_eq!(v["docReachable"], serde_json::json!(true), "srcdoc contentDocument is same-origin, never null: {v}");
+        assert_eq!(v["locHref"], serde_json::json!("about:srcdoc"), "frame location.href: {v}");
+        assert_eq!(v["locProtocol"], serde_json::json!("about:"), "frame location.protocol: {v}");
+        assert_eq!(v["originInherited"], serde_json::json!("true"), "about:srcdoc inherits the parent origin: {v}");
+    }
+
+    /// #268 second path: `iframe.srcdoc = …` (IDL property, connected
+    /// element) navigates the frame to the inline document, and null
+    /// removes the attribute (nullable reflected string).
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_iframe_srcdoc_property_setter_navigates() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r##"async () => {
+            const f = document.createElement('iframe');
+            document.body.appendChild(f);
+            f.srcdoc = '<body><div id="p">P-42</div><script>window.__p = 7;<\/script></body>';
+            await new Promise(r => setTimeout(r, 30));
+            const first = {
+                body: f.contentDocument ? (f.contentDocument.body.textContent || '').trim() : 'no-doc',
+                ran: f.contentWindow ? f.contentWindow.__p : 'no-win',
+                reflected: f.srcdoc.indexOf('P-42') !== -1,
+            };
+            f.srcdoc = null;
+            return { first, removedAfterNull: !f.hasAttribute('srcdoc'), reflectedEmpty: f.srcdoc === '' };
+        }"##;
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
+        let v = result.value.unwrap();
+        assert!(v["first"]["body"].as_str().unwrap_or("").contains("P-42"), "srcdoc property setter must navigate: {v}");
+        assert_eq!(v["first"]["ran"], serde_json::json!(7), "srcdoc scripts must run via the property path too: {v}");
+        assert_eq!(v["first"]["reflected"], serde_json::json!(true), "srcdoc getter reflects the attribute: {v}");
+        assert_eq!(v["removedAfterNull"], serde_json::json!(true), "srcdoc = null removes the attribute: {v}");
+        assert_eq!(v["reflectedEmpty"], serde_json::json!(true), "absent srcdoc reflects as '': {v}");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn test_timer_string_handlers_run_in_global_scope_at_fire_time() {
         // Upstream 452cc85: string setTimeout/setInterval handlers run as

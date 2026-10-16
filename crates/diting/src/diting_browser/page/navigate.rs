@@ -795,7 +795,7 @@ impl Page {
         }
         if let Some(js) = &mut self.js {
             let _ = js.execute_script("<iframe-load>",
-                "(function() { var iframes = document.querySelectorAll('iframe[src]'); for (var i = 0; i < iframes.length; i++) { var src = iframes[i].getAttribute('src'); if (src && src !== 'about:blank') iframes[i]._loadIframeSrc(src); } })()");
+                "(function() { var iframes = document.querySelectorAll('iframe[src],iframe[srcdoc]'); for (var i = 0; i < iframes.length; i++) { if (iframes[i].hasAttribute('srcdoc')) { iframes[i]._loadIframeSrc('about:srcdoc'); continue; } var src = iframes[i].getAttribute('src'); if (src && src !== 'about:blank') iframes[i]._loadIframeSrc(src); } })()");
         }
 
         // Spec: DOMContentLoaded fires AFTER parser-blocking scripts run,

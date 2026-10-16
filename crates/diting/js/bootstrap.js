@@ -3841,6 +3841,12 @@ class Element extends Node {
       const s = String(v);
       if (s && s !== 'about:blank') this._loadIframeSrc(s);
     }
+    // srcdoc present wins over src (HTML spec): setting it navigates the
+    // frame to about:srcdoc regardless of any src attribute.
+    if (n === "srcdoc" &&
+        (this.tagName || '').toUpperCase() === 'IFRAME' && this.isConnected) {
+      this._loadIframeSrc('about:srcdoc');
+    }
     if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('attributes', this._nid, [], [], n);
     // class/style writes can start or stop a CSS animation on this element,
     // and may start a transition (before/after computed-value diff).
@@ -4738,6 +4744,16 @@ class Element extends Node {
       globalThis.__mediaSources[v]._attachToElement(this);
     }
   }
+  get srcdoc() {
+    // Reflected attribute: absent reflects as "" (HTML spec).
+    return this.getAttribute("srcdoc") ?? '';
+  }
+  set srcdoc(v) {
+    // Null/undefined removes the attribute (nullable reflected string) —
+    // the frame then falls back to src navigation like browsers.
+    if (v === null || v === undefined) { this.removeAttribute("srcdoc"); return; }
+    this.setAttribute("srcdoc", v);
+  }
   _loadIframeSrc(url) {
     // Loads can be kicked off from three places — the src property setter,
     // the post-navigation scan, and the document.write insertion scan — and
@@ -4745,6 +4761,22 @@ class Element extends Node {
     // one fetch.
     if (this._iframeLoading) return;
     this._iframeLoading = true;
+    // srcdoc wins over src (HTML §the-iframe-element): the child document
+    // comes from the attribute, the browsing context URL is about:srcdoc,
+    // and the document inherits the parent's origin (same-origin).
+    const srcdoc = this.getAttribute('srcdoc');
+    if (srcdoc !== null) {
+      const el = this;
+      try {
+        el._iframeDoc = new _IframeDocument(srcdoc, 'about:srcdoc', el);
+        el._iframeWin = new _IframeWindow(el._iframeDoc, 'about:srcdoc');
+        _registerIframe(el);
+        _runSrcdocScripts(el);
+      } catch (e) {
+        globalThis.__diting_reportUncaughtError?.(e);
+      }
+      return;
+    }
     let fullUrl = url;
     if (!url.includes('://')) {
       try { fullUrl = new URL(url, _docBase()).href; } catch(e) {}
@@ -4782,9 +4814,10 @@ class Element extends Node {
   get contentDocument() {
     if (this.localName !== 'iframe') return undefined;
     if (this._iframeDoc) {
+      // A srcdoc document inherits the parent's origin: always same-origin.
       const pageOrigin = (function(){ try { return new URL(_domParse("document_url")).origin; } catch(e) { return ''; } })();
       const iframeOrigin = (function(url){ try { return new URL(url).origin; } catch(e) { return ''; } })(this.src);
-      if (pageOrigin === iframeOrigin || this.src === '' || this.src === 'about:blank' || !this.src.includes('://')) {
+      if (this.hasAttribute('srcdoc') || pageOrigin === iframeOrigin || this.src === '' || this.src === 'about:blank' || !this.src.includes('://')) {
         return this._iframeDoc;
       }
       return null; // Cross-origin: blocked
@@ -4794,7 +4827,8 @@ class Element extends Node {
       // from the src attribute when present (browsers do this at context
       // creation), so contentWindow.location.origin and postMessage
       // targetOrigin checks see the authored origin, not about:blank.
-      const lazyUrl = (this.src && this.src.includes('://')) ? this.src : 'about:blank';
+      const lazyUrl = this.hasAttribute('srcdoc') ? 'about:srcdoc'
+        : ((this.src && this.src.includes('://')) ? this.src : 'about:blank');
       __def(this, '_iframeDoc', new _IframeDocument('<!DOCTYPE html><html><head></head><body></body></html>', lazyUrl, this));
       __def(this, '_iframeWin', new _IframeWindow(this._iframeDoc, lazyUrl));
     }
@@ -6889,9 +6923,10 @@ class Document extends Node {
     // property setter only covers JS assignment, and the post-navigation
     // scan only covers the initial parse. Written markup (which is how
     // Playwright's setContent delivers the page) needs its own scan.
-    var iframes = this.querySelectorAll('iframe[src]');
+    var iframes = this.querySelectorAll('iframe[src],iframe[srcdoc]');
     for (var j = 0; j < iframes.length; j++) {
       var f = iframes[j];
+      if (f.hasAttribute('srcdoc')) { f._loadIframeSrc('about:srcdoc'); continue; }
       var s = f.getAttribute('src');
       if (s && s !== 'about:blank') f._loadIframeSrc(s);
     }
@@ -7220,6 +7255,51 @@ Object.defineProperty(globalThis.Window, Symbol.hasInstance, {
 
 
 const _iframeRegistry = [];
+// srcdoc documents run their scripts — a document load, not innerHTML
+// (#268). Inline scripts run synchronously in tree order; external ones are
+// fetched (resolving against the PARENT base — about:srcdoc has no path of
+// its own) and run parser-blocking style, each delaying the ones after it.
+// The element's load event fires only after the last script finishes
+// (obscura #1265: finish document work before iframe load).
+function _runSrcdocScripts(el) {
+  const doc = el._iframeDoc, win = el._iframeWin;
+  const finish = () => el.dispatchEvent(new Event('load'));
+  if (!doc || !win) { Promise.resolve().then(finish); return; }
+  const scripts = doc._root ? doc._root.querySelectorAll('script') : [];
+  const evalInFrame = (code, label) => {
+    try {
+      // A srcdoc document is its own global in a real browser; in the
+      // single-realm shim the frame's window/document stand in as the
+      // script's bindings (parent/top stay the host page's, frameElement
+      // is the iframe). module scripts run as classic — best effort.
+      const fn = new Function('window', 'document', 'self', 'parent', 'top',
+        'frameElement', 'globalThis', code);
+      fn.call(win, win, doc, win, globalThis, globalThis, el, win);
+    } catch (e) {
+      globalThis.__diting_reportUncaughtError?.(e);
+    }
+  };
+  let idx = 0;
+  const step = () => {
+    while (idx < scripts.length) {
+      const s = scripts[idx++];
+      const type = (s.getAttribute('type') || 'text/javascript').toLowerCase();
+      if (type !== 'text/javascript' && type !== 'module' &&
+          type !== 'application/javascript' && type !== 'application/ecmascript') continue;
+      const srcAttr = s.getAttribute('src');
+      if (!srcAttr) { evalInFrame(s.textContent || '', 'srcdoc-inline'); continue; }
+      const abs = (function() { try { return new URL(srcAttr, _docBase()).href; } catch (e) { return null; } })();
+      if (!abs) continue;
+      fetch(abs, { credentials: 'include' })
+        .then(r => r.ok ? r.text() : Promise.reject(new Error('http ' + r.status)))
+        .then(code => evalInFrame(code, abs), () => {})
+        .then(step);
+      return; // wait for the external script before continuing
+    }
+    finish();
+  };
+  Promise.resolve().then(step); // async start: document work first, then scripts
+}
 function _registerIframe(iframeEl) {
   // Idempotent: attachment points (appendChild/innerHTML) and src loading can
   // both reach the same element.
@@ -7260,6 +7340,8 @@ function _registerIframesIn(node) {
     // the attribute before insertion, so the load has to start here
     // (#121's sucai-selector iframe). _loadIframeSrc's flag collapses the
     // repeat against the post-navigation scan and the write-path scan.
+    // srcdoc iframes navigate on insertion the same way (and win over src).
+    if (f.hasAttribute('srcdoc')) { f._loadIframeSrc('about:srcdoc'); continue; }
     const s = f.getAttribute('src');
     if (s && s !== 'about:blank') f._loadIframeSrc(s);
   }
@@ -12476,7 +12558,7 @@ globalThis.HTMLDialogElement = _htmlInterface('HTMLDialogElement', ['dialog']);
     HTMLStyleElement: ['sheet'],
     HTMLMetaElement: ['content', 'scheme'],
     HTMLLabelElement: ['htmlFor', 'form'],
-    HTMLIFrameElement: ['sandbox', 'contentDocument', 'contentWindow', 'src'],
+    HTMLIFrameElement: ['sandbox', 'contentDocument', 'contentWindow', 'src', 'srcdoc'],
     HTMLDialogElement: ['open', 'returnValue', 'closedBy'],
     HTMLFieldSetElement: ['disabled', 'form', 'name', 'type'],
     HTMLProgressElement: ['max', 'value'],
