@@ -26,6 +26,7 @@ mod flow;
 mod har;
 mod page;
 mod panel;
+mod panic_guard;
 // Same gate as its only consumer (panel::on): without screenshot+unix the
 // whole DRM family is unreferenced and dead-code-warns on plain dev builds.
 #[cfg(all(feature = "screenshot", unix))]
@@ -448,6 +449,8 @@ async fn main() -> anyhow::Result<()> {
         })),
         None => app,
     };
+    // Outermost: a handler panic (auth gate included) answers JSON 500.
+    let app = app.layer(panic_guard::layer());
 
     // #246: loopback by default — the binary's own dogfood shape (curl
     // 127.0.0.1:8089) never needs the LAN, and a default 0.0.0.0 with the
