@@ -8228,6 +8228,120 @@
         assert_eq!(v["unknownMethod"], true, "unknown WebGL methods must not throw");
     }
 
+    #[test]
+    fn test_stealth_webgl_chrome_truth_interface_shape() {
+        // (P8 #300015) The WebGL interface must match Chrome 155 byte-for-byte
+        // at the reflection level: the INSTANCE carries zero own properties,
+        // the PROTOTYPE carries exactly 443/792 own names (constants +
+        // methods + 6 accessors), constants are enumerable/non-writable/
+        // non-configurable, and extension objects keep their constants on the
+        // carrier prototype. The old shape leaked ~80 own props on the
+        // instance and a 29-entry constant table — a counting detector's
+        // one-liner. Truth captured from Chrome 155.0.8059.41 (macOS).
+        let mut rt = setup_runtime(
+            "<html><body><canvas id='c' width='320' height='200'></canvas></body></html>",
+        );
+        let res = rt.evaluate(r#"
+            const out = {};
+            const c = document.getElementById('c');
+            const gl = c.getContext('webgl');
+            const gl2 = document.createElement('canvas').getContext('webgl2');
+            const P1 = WebGLRenderingContext.prototype;
+            const P2 = WebGL2RenderingContext.prototype;
+            out.instKeys1 = Object.keys(gl).length;
+            out.instKeys2 = Object.keys(gl2).length;
+            out.instNames1 = Object.getOwnPropertyNames(gl).length;
+            out.protoNames1 = Object.getOwnPropertyNames(P1).length;
+            out.protoNames2 = Object.getOwnPropertyNames(P2).length;
+            out.protoKeys1 = Object.keys(P1).length;
+            out.protoKeys2 = Object.keys(P2).length;
+            const d = Object.getOwnPropertyDescriptor(P1, 'VERTEX_SHADER');
+            out.constDesc = [d.value, d.writable, d.enumerable, d.configurable];
+            const md = Object.getOwnPropertyDescriptor(P1, 'getParameter');
+            out.methodDesc = [md.writable, md.enumerable, md.configurable, typeof md.get];
+            out.ctorEnum = Object.getOwnPropertyDescriptor(P1, 'constructor').enumerable;
+            out.acc = Object.getOwnPropertyDescriptor(P1, 'canvas');
+            out.accIsGetter = typeof out.acc.get === 'function' && out.acc.set === undefined && !('value' in out.acc);
+            out.canvasIsC = gl.canvas === c;
+            out.dbw = gl.drawingBufferWidth;
+            out.dbh = gl.drawingBufferHeight;
+            out.dbcs = gl.drawingBufferColorSpace;
+            out.ucs = gl.unpackColorSpace;
+            out.dbf = gl.drawingBufferFormat;
+            out.dbf2 = gl2.drawingBufferFormat;
+            const ext = gl.getExtension('WEBGL_debug_renderer_info');
+            out.extKeys = Object.keys(ext).length;
+            out.extNames = Object.getOwnPropertyNames(ext).length;
+            out.extConstIn = 'UNMASKED_VENDOR_WEBGL' in ext;
+            out.extConstVal = ext.UNMASKED_VENDOR_WEBGL;
+            out.extCtorName = ext.constructor && ext.constructor.name;
+            out.extProtoProtoObject = Object.getPrototypeOf(Object.getPrototypeOf(ext)) === Object.prototype;
+            const lose = gl.getExtension('WEBGL_lose_context');
+            out.loseMethods = typeof lose.loseContext === 'function' && typeof lose.restoreContext === 'function';
+            out.loseOwn = Object.keys(lose).length;
+            out.gl2Methods = typeof gl2.createVertexArray === 'function' && typeof gl2.transformFeedbackVaryings === 'function';
+            out.gl2Const = gl2.TEXTURE_BINDING_3D === 32874 && gl2.MAX_ELEMENT_INDEX === 36203;
+            out.memPow2 = [8, 16, 32].includes(navigator.deviceMemory);
+            out.memGt8Possible = navigator.deviceMemory >= 8;
+            return JSON.stringify(out);
+        "#).unwrap();
+        let v = serde_json::from_str::<serde_json::Value>(res.as_str().unwrap()).unwrap();
+        assert_eq!(v["instKeys1"], 0, "GL1 instance must carry ZERO own enumerable props (Chrome: [])");
+        assert_eq!(v["instKeys2"], 0, "GL2 instance must carry ZERO own enumerable props");
+        assert_eq!(v["instNames1"], 0, "GL1 instance must carry ZERO own props of any kind (only hidden _canvas)");
+        assert_eq!(
+            v["protoNames1"].as_i64().unwrap(),
+            443,
+            "GL1 prototype own-name count must be exactly Chrome's 443 (298 consts + 139 methods + 6 accessors)"
+        );
+        assert_eq!(
+            v["protoNames2"].as_i64().unwrap(),
+            792,
+            "GL2 prototype own-name count must be exactly Chrome's 792 (559 + 227 + 6)"
+        );
+        assert_eq!(
+            v["protoKeys1"].as_i64().unwrap(),
+            442,
+            "GL1 enumerable proto keys = 442 (constructor is non-enumerable)"
+        );
+        assert_eq!(
+            v["protoKeys2"].as_i64().unwrap(),
+            791,
+            "GL2 enumerable proto keys = 791"
+        );
+        assert_eq!(
+            v["constDesc"], serde_json::json!([35633, false, true, false]),
+            "constants: value-carrying, enumerable, NON-writable, NON-configurable"
+        );
+        assert_eq!(
+            v["methodDesc"], serde_json::json!([true, true, true, "undefined"]),
+            "methods: writable+enumerable+configurable, not accessors"
+        );
+        assert_eq!(v["ctorEnum"], false, "constructor stays non-enumerable (the class default)");
+        assert_eq!(v["accIsGetter"], true, "canvas must be a getter-only accessor (no value, no set)");
+        assert_eq!(v["acc"]["enumerable"], true);
+        assert_eq!(v["acc"]["configurable"], true);
+        assert_eq!(v["canvasIsC"], true, "gl.canvas must be the creating canvas by identity");
+        assert_eq!(v["dbw"].as_i64().unwrap(), 320, "drawingBufferWidth tracks the canvas width");
+        assert_eq!(v["dbh"].as_i64().unwrap(), 200, "drawingBufferHeight tracks the canvas height");
+        assert_eq!(v["dbcs"], "srgb");
+        assert_eq!(v["ucs"], "srgb");
+        assert_eq!(v["dbf"].as_i64().unwrap(), 32856, "drawingBufferFormat is the GLenum GL_RGBA8 (0x8058)");
+        assert_eq!(v["dbf2"].as_i64().unwrap(), 32856);
+        assert_eq!(v["extKeys"], 0, "extension objects carry ZERO own enumerable props");
+        assert_eq!(v["extNames"], 0, "extension objects carry ZERO own props, period");
+        assert_eq!(v["extConstIn"], true, "the ext constant resolves through the carrier prototype");
+        assert_eq!(v["extConstVal"].as_i64().unwrap(), 0x9245);
+        assert_eq!(v["extCtorName"], "Object", "Chrome ext objects report constructor name \"Object\"");
+        assert_eq!(v["extProtoProtoObject"], true, "carrier chain ends at Object.prototype");
+        assert_eq!(v["loseMethods"], true, "WEBGL_lose_context carries loseContext/restoreContext");
+        assert_eq!(v["loseOwn"], 0);
+        assert_eq!(v["gl2Methods"], true, "GL2-only methods must exist (createVertexArray, transformFeedbackVaryings)");
+        assert_eq!(v["gl2Const"], true, "GL2-only constants must resolve (TEXTURE_BINDING_3D)");
+        assert_eq!(v["memPow2"], true, "deviceMemory must be a power-of-two GiB value from the persona table");
+        assert_eq!(v["memGt8Possible"], true, "Chrome 155 dropped the 8 GiB cap — persona mem can exceed 8");
+    }
+
     /// #126: the resource-timing buffer carries REAL entries from both
     /// faces — the navigation pipeline's fetch timings (Rust-recorded,
     /// epoch-stamped, converted into the resource clock) and the fetch/XHR
