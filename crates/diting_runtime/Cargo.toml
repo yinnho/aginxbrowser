@@ -7,8 +7,12 @@ license = "Apache-2.0"
 repository = "https://github.com/yinnho/aginxbrowser"
 publish = false
 
-# Zero dependencies by design: this crate owns the semantics deno_core rented
-# to us, and the first owned layer (the settle queue) is pure Rust. The V8
-# face (loop driver, promise table, snapshot format) joins in later batches
-# and will depend on the pinned `v8` crate directly.
+# One dependency, by design: V8 itself, pinned (same =150.4.0 as the rest of
+# the workspace — one build, and version moves stay our decision, aligned with
+# UA/TLS fingerprint declarations). Feature-for-feature the same declaration
+# deno_core uses (simdutf, no defaults): a `-p diting_runtime` solo build
+# then downloads the SAME prebuilt static lib as the full workspace build —
+# v8's build script shares one gn_out/obj path per target dir, and two
+# variants would clobber each other on every alternation.
 [dependencies]
+v8 = { version = "=150.4.0", default-features = false, features = ["simdutf"] }

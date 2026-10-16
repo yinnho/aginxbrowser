@@ -1387,6 +1387,9 @@ dependencies = [
 [[package]]
 name = "diting_runtime"
 version = "0.1.0"
+dependencies = [
+ "v8",
+]
 
 [[package]]
 name = "dlib"

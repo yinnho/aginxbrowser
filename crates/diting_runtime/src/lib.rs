@@ -18,9 +18,11 @@
 //!
 //! ## 认领路线（逐批，每批独立测试绿）
 //!
-//! 1. **settle 队列**（本批）：重投递法的 Rust 正身。纯 Rust，无 V8。
-//! 2. v8 竖切片：裸 isolate + 自有事件循环（三相：pending work+tick /
-//!    immediates / close）+ 本队列接线 + terminate/cancel 重投闭环钉测。
+//! 1. **settle 队列**：重投递法的 Rust 正身。纯 Rust，无 V8。
+//! 2. **v8 竖切片**（`vm`）：裸 isolate + 自有 loop pass（settle 投递 +
+//!    microtask 排水）+ 队列接线；terminate → 停泊 → cancel → 重投 →
+//!    promise settle 的最小闭环钉测。op driver、immediates/close 相、
+//!    环形表是后续批——现在建就是没有测试钉着的脚手架。
 //! 3. 环形 promise 表自建（ring + overflow map + async op stub + resolver），
 //!    JS 底座换自家。
 //! 4. 自有快照格式（[v8 data][sidecar][ulen] 三段式，sidecar 自有）。
@@ -37,5 +39,7 @@
 //!   poll 自动重投，无需特殊处理。
 
 pub mod settle;
+pub mod vm;
 
 pub use settle::{SettleQueue, Stats};
+pub use vm::{LoopError, Triplet, Vm};

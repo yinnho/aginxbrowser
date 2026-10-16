@@ -71,8 +71,7 @@ impl<T> SettleQueue<T> {
     /// Triplets not yet delivered — fresh plus parked. The loop's
     /// has-more-work signal.
     pub fn pending(&self) -> usize {
-        self.ready.len()
-            + self.parked.iter().map(|p| p.batch.len()).sum::<usize>()
+        self.ready.len() + self.parked.iter().map(|p| p.batch.len()).sum::<usize>()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -179,14 +178,21 @@ mod tests {
         for i in 0..5u32 {
             q.push(i);
         }
-        let mut r = Recorder { batches: vec![], fail: false, failures: 0 };
+        let mut r = Recorder {
+            batches: vec![],
+            fail: false,
+            failures: 0,
+        };
         let delivered = q.deliver(3, |b| r.deliver(b)).unwrap();
         assert!(delivered);
         let delivered = q.deliver(3, |b| r.deliver(b)).unwrap();
         assert!(delivered);
         assert_eq!(r.batches, vec![vec![0, 1, 2], vec![3, 4]]);
         assert_eq!(q.pending(), 0);
-        assert!(!q.deliver(3, |b| r.deliver(b)).unwrap(), "empty rounds are Ok(false)");
+        assert!(
+            !q.deliver(3, |b| r.deliver(b)).unwrap(),
+            "empty rounds are Ok(false)"
+        );
     }
 
     #[test]
@@ -196,7 +202,11 @@ mod tests {
         for i in 0..3u32 {
             q.push(i);
         }
-        let mut r = Recorder { batches: vec![], fail: true, failures: 0 };
+        let mut r = Recorder {
+            batches: vec![],
+            fail: true,
+            failures: 0,
+        };
         assert!(q.deliver(10, |b| r.deliver(b)).is_err());
         assert_eq!(q.pending(), 3, "parked batch still counts as pending");
 
@@ -224,14 +234,22 @@ mod tests {
         // (drop happens on the third FAILURE).
         let mut q = SettleQueue::new();
         q.push(7u32);
-        let mut r = Recorder { batches: vec![], fail: true, failures: 0 };
+        let mut r = Recorder {
+            batches: vec![],
+            fail: true,
+            failures: 0,
+        };
         assert!(q.deliver(10, |b| r.deliver(b)).is_err());
         assert!(q.deliver(10, |b| r.deliver(b)).is_err());
         assert_eq!(r.failures, 2);
         r.fail = false;
         assert!(q.deliver(10, |b| r.deliver(b)).unwrap());
         assert_eq!(q.pending(), 0);
-        assert_eq!(q.stats().dropped_batches, 0, "recovered batches are never dropped");
+        assert_eq!(
+            q.stats().dropped_batches,
+            0,
+            "recovered batches are never dropped"
+        );
         assert_eq!(q.stats().delivered, 1);
     }
 
@@ -240,7 +258,11 @@ mod tests {
         let mut q = SettleQueue::new();
         q.push(1u32);
         q.push(2);
-        let mut r = Recorder { batches: vec![], fail: true, failures: 0 };
+        let mut r = Recorder {
+            batches: vec![],
+            fail: true,
+            failures: 0,
+        };
         assert!(q.deliver(10, |b| r.deliver(b)).is_err());
         assert!(q.deliver(10, |b| r.deliver(b)).is_err());
         assert!(q.deliver(10, |b| r.deliver(b)).is_err());
@@ -265,7 +287,11 @@ mod tests {
     #[test]
     fn multiple_parked_batches_keep_order() {
         let mut q = SettleQueue::new();
-        let mut r = Recorder { batches: vec![], fail: true, failures: 0 };
+        let mut r = Recorder {
+            batches: vec![],
+            fail: true,
+            failures: 0,
+        };
 
         // Round 1: everything fails — [1] parks.
         q.push(1u32);
