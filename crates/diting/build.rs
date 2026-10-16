@@ -3,6 +3,8 @@ use std::path::PathBuf;
 fn main() {
     println!("cargo:rerun-if-changed=js/bootstrap.js");
     println!("cargo:rerun-if-changed=js/fetch.js");
+    println!("cargo:rerun-if-changed=js/audio.js");
+    println!("cargo:rerun-if-changed=js/worker.js");
     println!("cargo:rerun-if-changed=js/xhr.js");
     println!("cargo:rerun-if-changed=js/domparser.js");
     println!("cargo:rerun-if-changed=js/performance.js");
@@ -52,6 +54,11 @@ fn main() {
     // Headers…) is touched at call time, by which point bootstrap.js has
     // run. It must precede xhr.js, whose send() rides __ditingFetchShim.
     let fetch_js = include_str!("js/fetch.js");
+    // Ratchet split (pure move): the Web Audio / speechSynthesis faces and the
+    // Worker family left bootstrap.js wholesale. Both only declare bindings at
+    // top level and touch bootstrap helpers at call time.
+    let audio_js = include_str!("js/audio.js");
+    let worker_js = include_str!("js/worker.js");
     // Third script, same realm, runs after bootstrap.js: message_port.js
     // only consumes bindings the first script defined, so plain sequential
     // execute_script calls are equivalent to one concatenated script.
@@ -110,6 +117,12 @@ fn main() {
                 runtime
                     .execute_script("<anonymous>", fetch_js.to_string())
                     .expect("fetch.js should not fail during snapshot creation");
+                runtime
+                    .execute_script("<anonymous>", audio_js.to_string())
+                    .expect("audio.js should not fail during snapshot creation");
+                runtime
+                    .execute_script("<anonymous>", worker_js.to_string())
+                    .expect("worker.js should not fail during snapshot creation");
                 runtime
                     .execute_script("<anonymous>", xhr_js.to_string())
                     .expect("xhr.js should not fail during snapshot creation");
