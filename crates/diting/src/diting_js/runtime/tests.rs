@@ -68,6 +68,51 @@
         );
     }
 
+    /// Re-delivery v1 (same claim, js/core_base.js replay stash): a batch
+    /// interrupted mid-delivery (terminate landing mid-loop, or an internal
+    /// resolver throw) stays parked and the NEXT tick drains it before
+    /// delivering anything new — instead of deno's evaporate-the-tail
+    /// (#226/#240 shape). Pinned by parking a stale batch (bogus promise
+    /// ids, as if a terminate ate the previous tick) and forcing a real op
+    /// settlement (setTimeout): the drain must empty the stash, absorb the
+    /// missing ids without surfacing an error, and leave the settlement
+    /// path working.
+    #[tokio::test(flavor = "current_thread")]
+    async fn claimed_event_loop_tick_redelivery() {
+        let mut rt = setup_runtime(r#"<body></body>"#);
+        let result = rt
+            .call_function_on_remote(
+                r#"async () => {
+                    const probe = globalThis.__diting_core_base;
+                    // Park two stale batches — the shape a terminate-mid-tick
+                    // leaves behind (ids that resolve nowhere).
+                    probe.__forceReplay(999001, true, "gone1");
+                    probe.__forceReplay(999002, false, "gone2", 999003, true, null);
+                    const parked = probe.__replayLength();
+                    // Real settlement: the completion tick drains the stash
+                    // first (missing ids absorb), then delivers its own batch.
+                    await new Promise(r => setTimeout(r, 10));
+                    return JSON.stringify({
+                        parked: parked,
+                        drained: probe.__replayLength() === 0,
+                    });
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(result.value.unwrap().as_str().unwrap()).unwrap();
+        assert_eq!(v["parked"], serde_json::json!(2), "both stale batches must register as parked");
+        assert_eq!(
+            v["drained"], serde_json::json!(true),
+            "the next real settlement tick must drain the parked batches (missing ids absorbed, no error surfaced)"
+        );
+    }
+
     /// #208: FontFaceSet.forEach shadowed Array.prototype.forEach with a
     /// function that called itself — every call was a RangeError. The
     /// replacement iterates by index and keeps Set callback semantics

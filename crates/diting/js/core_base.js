@@ -1,12 +1,14 @@
 // Diting claim of the op-settlement tick face — plan step 2
-// (docs/diting_runtime认领计划_20261017.md).
+// (docs/diting_runtime认领计划_20261017.md), plus re-delivery v1.
 //
 // deno_core's __eventLoopTick resolves a batch of (promiseId, isOk, res)
-// triplets in one bare loop: one unknown promise id throws and kills every
-// remaining triplet in the batch — the #226/#240 delivery shape (popped
-// from the Rust FIFO, then evaporated). Our tick invokes the ORIGINAL tick
-// once per triplet inside a try/catch, so a missing id is absorbed and the
-// rest of the batch still delivers.
+// triplets in one bare loop with two failure shapes: one unknown promise id
+// throws (absorbed here per-triplet), and an interrupted loop — terminate
+// landing mid-batch, or an internal resolver throw — evaporates every
+// remaining triplet (the #226/#240 delivery shape). Our tick wraps the
+// original: each batch is PARKED before delivery and unparked only after
+// every triplet was attempted; every later tick drains parked batches
+// first, so an interrupted batch's tail re-delivers instead of vanishing.
 //
 // Why slice-invocation instead of calling the ring resolver directly: the
 // executing deno_core state exposes no __infra global (probe 2026-10-17:
@@ -14,7 +16,9 @@
 // state disagree — only Deno.core is reachable). The original tick's
 // closure is the one door into the promise ring, so we keep it as the
 // resolver and claim the delivery loop around it. The ring itself stays
-// deno's until the diting_runtime crate swap (step 3).
+// deno's until the diting_runtime crate swap. The Rust-side half of the
+// wound (pop-under-terminate: triplets popped but the tick never invoked)
+// also waits for the crate — this file closes only the JS-side half.
 //
 // Install ladder: the executing core object is sealed read-only, so the
 // tick can only be replaced by re-pointing the Deno.core PATH — deno_core's
@@ -63,17 +67,68 @@
     }
   }
 
-  const claimed = function __eventLoopTick() {
-    for (let i = 0; i + 2 < arguments.length; i += 3) {
+  function isMissingThrow(e) {
+    return (typeof e === "string" && e.startsWith("Missing promise")) ||
+      (e && typeof e === "object" &&
+        typeof e.message === "string" && e.message.startsWith("Missing promise"));
+  }
+
+  // ---- re-delivery v1 ------------------------------------------------
+  // A parked batch { t: flat triplets } stays parked until every triplet
+  // was attempted. Missing ids absorb (already-settled or stale-realm
+  // promises — a navigation rebuilds the realm and stale entries
+  // self-clean). A batch that parks MAX_ATTEMPTS times without completing
+  // is dropped and rethrows: an internal resolver bug must surface, never
+  // spin. Terminate lands as an uncatchable unwind — no finally runs, the
+  // entry simply stays parked; the next tick drains it.
+  const replay = [];
+  const MAX_ATTEMPTS = 3;
+
+  function deliverTriplets(list) {
+    for (let i = 0; i + 2 < list.length; i += 3) {
       try {
-        original(arguments[i], arguments[i + 1], arguments[i + 2]);
+        original(list[i], list[i + 1], list[i + 2]);
       } catch (e) {
-        const isMissing =
-          (typeof e === "string" && e.startsWith("Missing promise")) ||
-          (e && typeof e === "object" &&
-            typeof e.message === "string" && e.message.startsWith("Missing promise"));
-        if (!isMissing) throw e;
+        if (!isMissingThrow(e)) {
+          // Keep the current triplet in the tail: the resolver may have
+          // settled the promise before throwing, and re-resolving an
+          // already-settled id absorbs as Missing — harmless either way.
+          list.splice(0, i);
+          throw e;
+        }
       }
+    }
+    list.length = 0;
+  }
+
+  function drainReplay() {
+    let attemptsLeft = MAX_ATTEMPTS;
+    while (replay.length) {
+      const entry = replay[0];
+      try {
+        deliverTriplets(entry.t);
+      } catch (e) {
+        if (--attemptsLeft > 0) continue;
+        replay.shift();
+        throw e;
+      }
+      replay.shift();
+    }
+  }
+
+  const claimed = function __eventLoopTick() {
+    // Settlement order is oldest first: drain parked batches, then deliver.
+    drainReplay();
+
+    const t = Array.prototype.slice.call(arguments);
+    replay.push({ t: t });
+    try {
+      deliverTriplets(t);
+      replay.pop();
+    } catch (e) {
+      // Tail stays parked at the top of the stack; the error surfaces
+      // exactly like deno's would.
+      throw e;
     }
   };
 
@@ -113,8 +168,19 @@
 
   // Claim marker: enumeration-hidden by the bootstrap wrappers (underscore +
   // diting patterns), never deleted; runtime tests read it to pin that the
-  // overlay actually landed in the snapshot.
-  globalThis.__diting_core_base = { claimed: true, missingThrow: missingThrow, install: install };
+  // overlay actually landed in the snapshot. The __-prefixed handles exist
+  // for the re-delivery pin test only.
+  globalThis.__diting_core_base = {
+    claimed: true,
+    missingThrow: missingThrow,
+    install: install,
+    __replayLength: function () { return replay.length; },
+    __forceReplay: function () {
+      const t = [];
+      for (let i = 0; i < arguments.length; i++) t.push(arguments[i]);
+      replay.push({ t: t });
+    },
+  };
 
   // Verify through the PATH (in the shell branch, the local `core` binding
   // still points at the untouched original).
