@@ -5,6 +5,8 @@ fn main() {
     println!("cargo:rerun-if-changed=js/fetch.js");
     println!("cargo:rerun-if-changed=js/audio.js");
     println!("cargo:rerun-if-changed=js/worker.js");
+    println!("cargo:rerun-if-changed=js/media_source.js");
+    println!("cargo:rerun-if-changed=js/iframe_realm.js");
     println!("cargo:rerun-if-changed=js/range_selection.js");
     println!("cargo:rerun-if-changed=js/indexeddb.js");
     println!("cargo:rerun-if-changed=js/xhr.js");
@@ -61,6 +63,8 @@ fn main() {
     // top level and touch bootstrap helpers at call time.
     let audio_js = include_str!("js/audio.js");
     let worker_js = include_str!("js/worker.js");
+    let media_source_js = include_str!("js/media_source.js");
+    let iframe_realm_js = include_str!("js/iframe_realm.js");
     let range_selection_js = include_str!("js/range_selection.js");
     let indexeddb_js = include_str!("js/indexeddb.js");
     // Third script, same realm, runs after bootstrap.js: message_port.js
@@ -127,6 +131,12 @@ fn main() {
                 runtime
                     .execute_script("<anonymous>", worker_js.to_string())
                     .expect("worker.js should not fail during snapshot creation");
+                runtime
+                    .execute_script("<anonymous>", media_source_js.to_string())
+                    .expect("media_source.js should not fail during snapshot creation");
+                runtime
+                    .execute_script("<anonymous>", iframe_realm_js.to_string())
+                    .expect("iframe_realm.js should not fail during snapshot creation");
                 runtime
                     .execute_script("<anonymous>", range_selection_js.to_string())
                     .expect("range_selection.js should not fail during snapshot creation");
