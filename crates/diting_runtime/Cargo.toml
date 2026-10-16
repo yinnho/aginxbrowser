@@ -1,0 +1,14 @@
+[package]
+name = "diting_runtime"
+version = "0.1.0"
+edition = "2021"
+description = "The Diting JS runtime crate: the event loop, op-settlement pipeline, and promise table we own — the deno_core retirement campaign (docs/diting_runtime认领计划_20261017.md)."
+license = "Apache-2.0"
+repository = "https://github.com/yinnho/aginxbrowser"
+publish = false
+
+# Zero dependencies by design: this crate owns the semantics deno_core rented
+# to us, and the first owned layer (the settle queue) is pure Rust. The V8
+# face (loop driver, promise table, snapshot format) joins in later batches
+# and will depend on the pinned `v8` crate directly.
+[dependencies]
