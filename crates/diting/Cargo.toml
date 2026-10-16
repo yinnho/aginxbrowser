@@ -54,26 +54,20 @@ screenshot = [
 ]
 
 [dependencies]
-# Taffy git pin, mirroring blitz's workspace declaration (their tree tracks
-# taffy main; 2d936b77 is blitz main's current pin, 2026-10-09 — the
-# 4142c9d→2d936b77 delta carries taffy #1286 indefinite percentage
-# flex-basis (falls back to content sizing instead of collapsing to 0,
-# our #241), #1278-#1284 (grid/serialization family blitz absorbed for
-# their WPT runs), and the block-layout vertical-margins-in-LayoutOutput
-# rework. The 22f941e→4142c9d delta we absorbed 2026-10-07 carries the
-# grid % re-run family, abspos self-align, and the normal-keyword Style
-# rework where align_items/justify_content/align_content went non-Option
-# with NORMAL as the unset value.
-# When blitz-reference is also enabled, features must EXACTLY mirror blitz's
-# workspace declaration (default-features = false, no float_layout): cargo
-# unifies features across the graph, so any extra feature would silently
-# change the product pipeline's layout behavior (float_layout alters block
-# layout). In a screenshot-only build there is no unification partner, but
-# keep the mirror anyway so toggling blitz-reference can't shift diting.
+# Taffy 0.15.0 from crates.io (2026-10-12, #270). The retired git pin
+# tracked blitz main (4142c9d→2d936b77, 2026-10-09) for taffy #1286
+# indefinite percentage flex-basis (falls back to content sizing instead
+# of collapsing to 0, our #241), the #1278-#1284 grid family, and the
+# block-layout vertical-margins rework; 0.15.0 = that rev + #1293/#1242 +
+# the release bump, so the pin is gone. Root-crate blitz-reference still
+# pulls blitz@916fa89 whose own taffy stays a git copy versioned 0.14.0 —
+# a different version, so cargo keeps the copies separate; keep mirroring
+# blitz's feature set (default-features = false, no float_layout) anyway
+# so toggling blitz-reference can't shift diting's layout behavior.
 # taffy_tree is additionally listed because the unified graph already enables
 # it (Cargo.lock shows taffy pulling slotmap) — an explicit no-op.
 # Used by diting_layout box layout and the fork-delta tests (docs/engine/render.md).
-taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "2d936b7701f64b0fe95e50f1bfdcfc65a9f88f6f", optional = true, default-features = false, features = [
+taffy = { version = "0.15", optional = true, default-features = false, features = [
     "std",
     "taffy_tree",
     "flexbox",
