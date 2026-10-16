@@ -23,8 +23,12 @@
 //!    microtask 排水）+ 队列接线；terminate → 停泊 → cancel → 重投 →
 //!    promise settle 的最小闭环钉测。op driver、immediates/close 相、
 //!    环形表是后续批——现在建就是没有测试钉着的脚手架。
-//! 3. 环形 promise 表自建（ring + overflow map + async op stub + resolver），
-//!    JS 底座换自家。
+//! 3. **op driver**（`driver`，已落）：异步 op future 每轮驱动一次，
+//!    完成按完成序灌进 settle 队列；裸 V8 回调（`__diting_spawn`）经
+//!    isolate slot 找到 driver——Rust 侧对 terminate 免疫，恰好就是
+//!    "op 在 terminate 中完成 → 停泊 → revive 落地"的 #226 钉测面。
+//!    环形表自建（ring + overflow map + async op stub + resolver）、
+//!    immediates/close 相（diting 现役零消费，先不建）后续批。
 //! 4. 自有快照格式（[v8 data][sidecar][ulen] 三段式，sidecar 自有）。
 //! 5. op 注册面（40 ops 从 `#[op2]` 迁出）+ diting 换装 + 删 deno_core。
 //!
@@ -38,8 +42,10 @@
 //! - terminate 打断一切 catch——停泊态就是中断现场，cancel 后下一轮
 //!   poll 自动重投，无需特殊处理。
 
+pub mod driver;
 pub mod settle;
 pub mod vm;
 
+pub use driver::{AfterTicks, OpDriver};
 pub use settle::{SettleQueue, Stats};
 pub use vm::{LoopError, Triplet, Vm};

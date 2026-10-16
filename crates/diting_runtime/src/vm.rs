@@ -8,14 +8,19 @@
 //! → `cancel_terminate_execution` revives the isolate → the next poll
 //! re-delivers → the awaiting promise settles. The #226/#240 shape, owned.
 //!
-//! What this slice deliberately does NOT have yet: the op driver (real
-//! async futures pumping completions into the queue), the immediates/close
-//! phases that only mean something once there is a driver, and the ring
-//! promise table (the JS face here is a Map — the seed, same law). Those
-//! are later batches; building them now would be scaffolding without a
-//! test behind it.
+//! What this slice deliberately does NOT have yet: the immediates/close
+//! phases (diting uses neither — no setImmediate, no close callbacks
+//! anywhere in the tree) and the ring promise table (the JS face here is a
+//! Map — the seed, same law). Those are later batches; building them now
+//! would be scaffolding without a test behind it. The op driver (batch 3)
+//! IS wired in: async futures driven each pass, completions parking in the
+//! settle queue — see [`crate::driver`].
 
+use crate::driver::{AfterTicks, OpDriver};
 use crate::settle::SettleQueue;
+use std::cell::RefCell;
+use std::future::Future;
+use std::rc::Rc;
 use std::sync::Once;
 
 /// Triplets per delivery batch. deno_core ships the whole completed-ops vec
@@ -57,6 +62,18 @@ globalThis.__diting_defer = function () {
   );
   return id;
 };
+// The async op face: register a promise, hand the op to Rust
+// (__diting_spawn is a raw native callback installed from the Rust side),
+// return the promise. This is the op_sleep shape bootstrap.js runs page
+// timers on; here it drives AfterTicks futures inside the driver.
+globalThis.__diting_op_sleep = function (ticks, payload) {
+  const id = globalThis.__diting_nextId++;
+  let resolve, reject;
+  const p = new Promise(function (res, rej) { resolve = res; reject = rej; });
+  globalThis.__diting_promises.set(id, { resolve, reject });
+  globalThis.__diting_spawn(id, ticks, String(payload));
+  return p;
+};
 "#;
 
 /// V8 initializes once per process (platform + engine). Same pattern as
@@ -73,7 +90,7 @@ fn ensure_v8() {
 }
 
 /// One completed async-op result on its way to a JS promise.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Triplet {
     pub promise_id: i32,
     pub ok: bool,
@@ -95,6 +112,52 @@ pub enum LoopError {
     Terminated,
     /// The settlement call itself threw (not a termination interrupt).
     TickThrew(String),
+}
+
+/// The driver lives in an isolate slot behind Rc<RefCell>: raw V8 function
+/// callbacks have no closure capture, so `__diting_spawn` recovers the
+/// isolate from the callback parts and finds the driver here (deno's ops
+/// reach their OpCtx external the same way). RefCell because spawn can
+/// fire from inside JS microtasks while the loop holds no borrow — the
+/// loop drops its borrow before any JS runs (pinned by a test).
+type DriverSlot = Rc<RefCell<OpDriver>>;
+
+/// `__diting_spawn(id, ticks, payload)` — the JS→Rust op entry.
+///
+/// SAFETY: V8 invokes this under the API-callback contract (valid
+/// FunctionCallbackInfo pointer, an open handle scope, on the isolate's
+/// thread). We only touch the isolate through the recovered reference and
+/// never outlive the call. No panics across this boundary — a panic inside
+/// `extern "C"` is UB (abort), so a missing slot is a silent no-op: the
+/// promise would hang, and every driver test would fail loudly anyway.
+unsafe extern "C" fn spawn_callback(info: *const v8::FunctionCallbackInfo) {
+    let info = unsafe { &*info };
+    let parts = info.get_parts();
+    let args = v8::FunctionCallbackArguments::from_function_callback_info_parts(info, &parts);
+    let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr(&parts.isolate) };
+    let int_arg = |i: i32| {
+        args.get(i)
+            .try_cast::<v8::Integer>()
+            .map(|v| v.value())
+            .unwrap_or(0)
+    };
+    let id = int_arg(0);
+    let ticks = int_arg(1).clamp(0, u32::MAX as i64) as u32;
+    let payload = args
+        .get(2)
+        .try_cast::<v8::String>()
+        .map(|s| s.to_rust_string_lossy(isolate))
+        .unwrap_or_default();
+    if let Some(driver) = isolate.get_slot::<DriverSlot>() {
+        driver.borrow_mut().spawn(AfterTicks {
+            ticks,
+            triplet: Triplet {
+                promise_id: id as i32,
+                ok: true,
+                payload,
+            },
+        });
+    }
 }
 
 /// A bare V8 isolate driven by our loop. Single-threaded by design, like
@@ -120,6 +183,9 @@ impl Vm {
         // implicitly at some V8-internal checkpoint. The loop owns the
         // schedule.
         isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+        // The op driver goes in before any JS runs — __diting_spawn finds
+        // it through this slot.
+        isolate.set_slot::<DriverSlot>(Rc::new(RefCell::new(OpDriver::new())));
 
         let context = {
             v8::scope!(let scope, &mut isolate);
@@ -132,8 +198,16 @@ impl Vm {
             let script = v8::Script::compile(cs, src, None).expect("prelude compiles");
             script.run(cs).expect("prelude runs");
 
-            let name = v8::String::new(cs, "__diting_settle").unwrap();
+            // The native op entry: a raw callback function, no template
+            // machinery needed.
             let global = cs.get_current_context().global(cs);
+            let spawn_name = v8::String::new(cs, "__diting_spawn").unwrap();
+            let spawn_fn =
+                v8::Function::new_raw(cs, spawn_callback).expect("__diting_spawn template builds");
+            spawn_fn.set_name(spawn_name);
+            global.set(cs, spawn_name.into(), spawn_fn.into());
+
+            let name = v8::String::new(cs, "__diting_settle").unwrap();
             let settle_fn = global
                 .get(cs, name.into())
                 .and_then(|f| f.try_cast::<v8::Function>().ok())
@@ -163,6 +237,27 @@ impl Vm {
         self.queue.stats()
     }
 
+    /// An async op starts on this Vm — the Rust-side face of what
+    /// `__diting_spawn` does from JS. Its completion settles on a later
+    /// [`Vm::poll`].
+    pub fn spawn_op(&mut self, fut: impl Future<Output = Triplet> + 'static) {
+        let driver = self
+            .isolate
+            .get_slot::<DriverSlot>()
+            .expect("Vm::new installs the driver slot")
+            .clone();
+        driver.borrow_mut().spawn(fut);
+    }
+
+    /// Async ops in flight (started, no completion yet).
+    pub fn pending_ops(&self) -> usize {
+        self.isolate
+            .get_slot::<DriverSlot>()
+            .expect("Vm::new installs the driver slot")
+            .borrow()
+            .pending_ops()
+    }
+
     /// The watchdog arm: any JS currently running stops at the next
     /// checkpoint (uncatchable). Triplets already queued are untouched —
     /// parking is the queue's job. The interrupt itself is one-shot
@@ -177,14 +272,28 @@ impl Vm {
         self.isolate.cancel_terminate_execution();
     }
 
-    /// One loop pass: deliver queued settlements into JS, then drain
-    /// microtasks (promise continuations queued by this round's resolves).
+    /// One loop pass: drive async op futures (completions enter the
+    /// queue), deliver queued settlements into JS, then drain microtasks
+    /// (promise continuations queued by this round's resolves).
+    ///
+    /// The driver borrow ends before delivery on purpose: JS that runs
+    /// during settle/drain may spawn new ops, and the spawn callback needs
+    /// the driver free (pinned by the chained-op test).
     ///
     /// `Ok(true)` = something was delivered. `Err` = a batch parked; the
     /// pass stops there — under termination the microtask drain would
     /// refuse anyway, and after a tick throw the poison policy owns what
-    /// happens next.
+    /// happens next. The drive still ran: an op completing under terminate
+    /// parks in the queue instead of evaporating (#226/#240, the law).
     pub fn poll(&mut self) -> Result<bool, LoopError> {
+        {
+            let driver = self
+                .isolate
+                .get_slot::<DriverSlot>()
+                .expect("Vm::new installs the driver slot")
+                .clone();
+            driver.borrow_mut().drive(&mut self.queue);
+        }
         let delivered = self.deliver_round()?;
         self.drain_microtasks();
         Ok(delivered)
@@ -532,5 +641,116 @@ mod tests {
             vm.eval_string("globalThis.__diting_lastResolved").unwrap(),
             "null"
         );
+    }
+
+    /// The async op roundtrip: JS calls __diting_op_sleep → the raw spawn
+    /// callback starts an AfterTicks future in the driver → polls drive it
+    /// to completion → the queue delivers → the promise settles → the
+    /// microtask drain runs the continuation. ticks=2 = two passes pending,
+    /// settlement on the second poll.
+    #[test]
+    fn op_roundtrip_through_future() {
+        let mut vm = Vm::new();
+        vm.eval_string(
+            "globalThis.r = null; \
+             __diting_op_sleep(2, 'hi').then(function (v) { globalThis.r = v; })",
+        )
+        .unwrap();
+        assert_eq!(vm.pending_ops(), 1, "the spawn callback started the op");
+        assert_eq!(vm.eval_string("globalThis.r").unwrap(), "null");
+
+        vm.poll().unwrap(); // tick 1 of 2: future still pending
+        assert_eq!(
+            vm.eval_string("globalThis.r").unwrap(),
+            "null",
+            "nothing settled a tick early"
+        );
+        assert_eq!(vm.pending_ops(), 1);
+
+        vm.poll().unwrap(); // tick 2 of 2: completes, delivers, drains
+        assert_eq!(vm.eval_string("globalThis.r").unwrap(), "hi");
+        assert_eq!(vm.pending_ops(), 0);
+    }
+
+    /// The money pin — #226's exact shape with a real op: watchdog
+    /// terminates while an op is in flight; the op completes Rust-side
+    /// anyway (the interrupt only bites JS); the completion parks in the
+    /// queue instead of evaporating; revive re-delivers and the promise
+    /// settles. deno_core drops this triplet on the floor at the same
+    /// moment; that gap is why this crate exists.
+    #[test]
+    fn op_completing_under_terminate_parks_and_lands_on_revive() {
+        let mut vm = Vm::new();
+        vm.eval_string(
+            "globalThis.r = null; \
+             __diting_op_sleep(1, 'late').then(function (v) { globalThis.r = v; })",
+        )
+        .unwrap();
+        vm.terminate();
+
+        // Pass under terminate: the drive runs (Rust is immune), the
+        // completion lands in the queue, the delivery bites the one-shot
+        // interrupt and parks.
+        assert!(matches!(vm.poll(), Err(LoopError::Terminated)));
+        assert_eq!(vm.pending(), 1, "the completion parked, not evaporated");
+        assert_eq!(
+            vm.pending_ops(),
+            0,
+            "the op itself finished — the queue is the survival layer"
+        );
+
+        vm.revive();
+        assert!(vm.poll().unwrap());
+        assert_eq!(vm.eval_string("globalThis.r").unwrap(), "late");
+    }
+
+    /// Completion order wins over spawn order: fast op settles first even
+    /// though it was started second.
+    #[test]
+    fn multiple_ops_settle_in_completion_order() {
+        let mut vm = Vm::new();
+        vm.eval_string(
+            "globalThis.order = []; \
+             __diting_op_sleep(3, 'slow').then(function (v) { order.push(v); }); \
+             __diting_op_sleep(1, 'fast').then(function (v) { order.push(v); })",
+        )
+        .unwrap();
+        assert_eq!(vm.pending_ops(), 2);
+        for _ in 0..3 {
+            vm.poll().unwrap();
+        }
+        assert_eq!(
+            vm.eval_string("globalThis.order.join(',')").unwrap(),
+            "fast,slow"
+        );
+        assert_eq!(vm.pending_ops(), 0);
+    }
+
+    /// The RefCell discipline pin: a continuation that runs during the
+    /// microtask drain spawns the next op — the loop must have dropped its
+    /// driver borrow before any JS ran, or this callback would deadlock
+    /// (borrow_mut inside borrow_mut). Chained ops work exactly like the
+    /// chained timers real pages run.
+    #[test]
+    fn op_chained_from_continuation_spawns_next_pass() {
+        let mut vm = Vm::new();
+        vm.eval_string(
+            "globalThis.done = false; \
+             __diting_op_sleep(1, 'a').then(function () { \
+               __diting_op_sleep(1, 'b').then(function () { globalThis.done = true; }); \
+             })",
+        )
+        .unwrap();
+
+        vm.poll().unwrap(); // 'a' settles; the drain runs the continuation → spawns 'b'
+        assert_eq!(
+            vm.pending_ops(),
+            1,
+            "the continuation spawned op 'b' during the microtask drain"
+        );
+        assert_eq!(vm.eval_string("globalThis.done").unwrap(), "false");
+
+        vm.poll().unwrap(); // 'b' completes this pass, settles, drain flips the flag
+        assert_eq!(vm.eval_string("globalThis.done").unwrap(), "true");
     }
 }
