@@ -361,6 +361,53 @@ fn truncate_tokens_clips_to_limit_and_appends_marker() {
     assert!(bold_w > marker_w, "bold marker measures wider ({bold_w} > {marker_w})");
 }
 
+/// line-clamp (#271): the bake keeps exactly N lines, cuts the Nth so the
+/// flagged marker fits, and — the takumi #1965 edge — a run that wraps to
+/// EXACTLY N lines is not clamped at all (no marker, no line dropped):
+/// the clamp limits the line COUNT, never the box's content height.
+#[test]
+fn line_clamp_bake_keeps_n_lines_and_flags_marker() {
+    let fonts = crate::diting_fonts::font_book();
+    let ws = crate::diting_css::WhiteSpace::Normal;
+    let text = "alpha beta gamma delta epsilon zeta eta theta";
+    let tokens = tokens_of(text, 16.0, false, &fonts, false, 0.0, ws, false, None);
+    let wrap_at = 60.0;
+    let lines = greedy_wrap(&tokens, Some(wrap_at), ws);
+    assert!(lines.len() > 3, "fixture must wrap to >3 lines at {wrap_at}, got {}", lines.len());
+
+    // Exactly-N wrapped lines: no clamp (takumi #1965's exactly-fits edge).
+    let n = lines.len() as u32;
+    assert!(line_clamp_bake(&tokens, n, wrap_at, ws, 16.0, false, &fonts, false, 0.0, None).is_none());
+    // Generous clamp: no clamp.
+    assert!(line_clamp_bake(&tokens, 100, wrap_at, ws, 16.0, false, &fonts, false, 0.0, None).is_none());
+
+    let (baked, baked_text) = line_clamp_bake(&tokens, 3, wrap_at, ws, 16.0, false, &fonts, false, 0.0, None)
+        .expect("over-clamped run bakes");
+    // A token PREFIX re-wraps to the same lines: every kept line was full.
+    let rewrapped = greedy_wrap(&baked, Some(wrap_at), ws);
+    assert_eq!(rewrapped.len(), 3, "baked stream re-wraps to exactly the clamp count");
+    assert!(baked.iter().any(|t| t.is_ellipsis), "marker is flagged");
+    assert!(baked_text.ends_with('\u{2026}'), "joined text ends with the marker: {baked_text:?}");
+    let last_w: f32 = rewrapped[2].token_idx.iter().map(|&i| baked[i].width).sum();
+    assert!(last_w <= wrap_at + f32::EPSILON, "last line {last_w} within {wrap_at}");
+}
+
+/// The pre family's hard breaks must survive the bake — the kept lines
+/// stay separate lines on the downstream re-wrap (an index-wise copy
+/// without the break tokens would fuse "aa" and "bb" into "aabb").
+#[test]
+fn line_clamp_bake_preserves_hard_breaks() {
+    let fonts = crate::diting_fonts::font_book();
+    let ws = crate::diting_css::WhiteSpace::PreWrap;
+    let tokens = tokens_of("aa bb\ncc dd\nee ff\ngg", 16.0, false, &fonts, false, 0.0, ws, false, None);
+    let (baked, baked_text) = line_clamp_bake(&tokens, 2, 500.0, ws, 16.0, false, &fonts, false, 0.0, None)
+        .expect("hard-broken run clamps");
+    assert!(baked_text.contains("aa") && baked_text.contains("cc") && !baked_text.contains("ee"), "keeps the first two lines: {baked_text:?}");
+    assert!(baked_text.ends_with('\u{2026}'));
+    let rewrapped = greedy_wrap(&baked, Some(500.0), ws);
+    assert_eq!(rewrapped.len(), 2, "hard breaks survive the bake ({} lines)", rewrapped.len());
+}
+
 /// Paint half of obscura#983: a pre-shaped token slice must rasterize
 /// byte-identically to re-shaping from scratch — same wrap lines, same
 /// ellipsis truncation, same tile.

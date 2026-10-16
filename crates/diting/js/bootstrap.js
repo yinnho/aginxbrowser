@@ -9690,7 +9690,7 @@ const _COMPUTED_PROPS_KEBAB = ('accent-color align-content align-items align-sel
   'grid-template-columns grid-template-rows hanging-punctuation height hyphenate-character hyphenate-limit-chars hyphens ' +
   'image-orientation image-rendering image-resolution inherits initial-letter initial-letter-align inline-size input-security inset ' +
   'inset-block inset-block-end inset-block-start inset-inline inset-inline-end inset-inline-start isolation justify-content ' +
-  'justify-items justify-self left letter-spacing lighting-color line-break line-height line-height-step list-style list-style-image ' +
+  'justify-items justify-self left letter-spacing lighting-color line-break line-clamp line-height line-height-step list-style list-style-image ' +
   'list-style-position list-style-type margin margin-block margin-block-end margin-block-start margin-bottom margin-inline ' +
   'margin-inline-end margin-inline-start margin-left margin-right margin-top marker marker-end marker-mid marker-start mask mask-border ' +
   'mask-border-mode mask-border-outset mask-border-repeat mask-border-slice mask-border-source mask-border-width mask-clip ' +
@@ -9840,6 +9840,7 @@ globalThis.getComputedStyle = (el, pseudoElt) => {
     'z-index': 'auto', 'pointer-events': 'auto',
     'box-sizing': 'content-box', cursor: 'auto',
     'white-space': 'normal', 'text-align': 'start', 'text-align-last': 'auto', 'text-transform': 'none',
+    'line-clamp': 'none', '-webkit-line-clamp': 'none',
     'flex-direction': 'row', 'flex-wrap': 'nowrap', 'align-items': 'normal',
     'justify-content': 'normal', gap: 'normal',
     'grid-template-columns': 'none', 'grid-template-rows': 'none',

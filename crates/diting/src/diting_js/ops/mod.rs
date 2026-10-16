@@ -3130,6 +3130,8 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "container-name",
     "white-space",
     "text-overflow",
+    "line-clamp",
+    "-webkit-line-clamp",
     "color",
     "background-color",
     "box-shadow",

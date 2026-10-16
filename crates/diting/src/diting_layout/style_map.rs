@@ -455,10 +455,10 @@ pub(super) fn resolve_sizing_keywords(
         let space = taffy::geometry::Size { width: w, height: AvailableSpace::MaxContent };
         let _ = taffy_tree.compute_layout_with_measure(node, space, |inputs, _id, ctx, style| {
             match ctx {
-                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, han, .. }) => {
+                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, han, line_clamp, .. }) => {
                     let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
                     let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han);
-                    measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws)
+                    measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws, *line_clamp)
                 }
                 Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | Some(TextLeaf::Pseudo { .. }) | None => {
                     taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)

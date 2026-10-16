@@ -1026,6 +1026,12 @@ pub struct ComputedStyle {
     /// `text-overflow` (non-inherited): the marker a clipping box draws over
     /// overflowing inline content. `None` = `clip`.
     pub text_overflow: Option<TextOverflow>,
+    /// `line-clamp` / `-webkit-line-clamp` (non-inherited, both names write
+    /// this slot): keep at most N line boxes, ellipsize the Nth. Count-only
+    /// by design (takumi #1965): the clamp never consults the box's content
+    /// height, so N lines that sum a hair past a rounded height all stay.
+    /// `None` = `none`.
+    pub line_clamp: Option<u32>,
     pub text_align: Option<TextAlign>,
     /// Inline base direction (#188-3, blitz#981): `direction: ltr|rtl`,
     /// inherited; the `dir` attribute hint fills the same slot below author
@@ -3825,6 +3831,8 @@ css_wide_longhands! {
     "vertical-align" => vertical_align, false;
     "text-decoration-line" => text_decoration_line, false;
     "text-overflow" => text_overflow, false;
+    "line-clamp" => line_clamp, false;
+    "-webkit-line-clamp" => line_clamp, false;
     "position" => position, false;
     "top" => top, false;
     "right" => right, false;
@@ -4783,6 +4791,24 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 "clip" => Some(TextOverflow::Clip),
                 "ellipsis" => Some(TextOverflow::Ellipsis),
                 _ => return false,
+            };
+            true
+        }
+        // Both spellings write the same slot; the legacy prefixed name is
+        // what card templates actually ship (`display:-webkit-box` +
+        // `-webkit-line-clamp:2`). The standard form's trailing
+        // `/ <block-ellipsis>` component parses but is ignored (the marker
+        // is always U+2026 here). 0 and negatives are invalid per spec —
+        // the declaration drops, not clamps to 1.
+        "line-clamp" | "-webkit-line-clamp" => {
+            let head = v.split('/').next().unwrap_or("").trim();
+            style.line_clamp = if head.eq_ignore_ascii_case("none") {
+                None
+            } else {
+                match head.parse::<u32>() {
+                    Ok(n) if n >= 1 => Some(n),
+                    _ => return false,
+                }
             };
             true
         }

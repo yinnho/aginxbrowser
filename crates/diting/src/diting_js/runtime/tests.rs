@@ -18336,6 +18336,55 @@ fn computed_style_and_geometry_for_nowrap_ellipsis() {
     assert!(h > 10.0 && h < 30.0, "nowrap keeps the run on one line ({h})");
 }
 
+/// line-clamp / -webkit-line-clamp (#271): the clamp caps the box's HEIGHT
+/// by line count — count-only, never the content height (takumi #1965's
+/// exactly-fits edge: a run wrapping to exactly N lines keeps all of them),
+/// the computed style serializes "2"/"none", and it does not inherit.
+#[cfg(feature = "screenshot")]
+#[test]
+fn line_clamp_caps_height_by_line_count() {
+    let mut rt = setup_runtime(
+        r#"<div style="width:120px;line-height:20px;font-size:16px">
+             <div id="clamped" style="-webkit-line-clamp:2">alpha beta gamma delta epsilon zeta eta theta</div>
+             <div id="exact" style="line-clamp:2">alpha beta gamma</div>
+             <div id="free">alpha beta gamma delta epsilon zeta eta theta</div>
+             <div id="kid"><span>alpha beta gamma</span></div>
+           </div>"#,
+    );
+    let parts = rt
+        .evaluate(
+            r#"
+            const clamped = document.getElementById("clamped"),
+                  exact = document.getElementById("exact"),
+                  free = document.getElementById("free"),
+                  kid = document.getElementById("kid");
+            return [
+                getComputedStyle(clamped).getPropertyValue("-webkit-line-clamp"),
+                getComputedStyle(clamped).getPropertyValue("line-clamp"),
+                getComputedStyle(exact).getPropertyValue("line-clamp"),
+                getComputedStyle(kid).getPropertyValue("line-clamp"),
+                clamped.getBoundingClientRect().height,
+                exact.getBoundingClientRect().height,
+                free.getBoundingClientRect().height,
+            ];
+        "#,
+        )
+        .unwrap();
+    let parts = parts.as_array().expect("array result");
+    assert_eq!(parts[0], serde_json::json!("2"), "-webkit-line-clamp reads back");
+    assert_eq!(parts[1], serde_json::json!("2"), "the standard spelling answers from the same slot (alias)");
+    assert_eq!(parts[2], serde_json::json!("2"), "standard line-clamp reads back");
+    assert_eq!(parts[3], serde_json::json!("none"), "line-clamp does not inherit");
+    let (h_clamped, h_exact, h_free) =
+        (parts[4].as_f64().unwrap(), parts[5].as_f64().unwrap(), parts[6].as_f64().unwrap());
+    assert!((h_clamped - 40.0).abs() < 2.0, "clamped box is exactly 2 lines tall ({h_clamped})");
+    assert!((h_exact - 40.0).abs() < 2.0, "exactly-2-line text is NOT clamped shorter ({h_exact}) — takumi #1965");
+    assert!(h_free > 60.0, "unclamped sibling wraps taller ({h_free})");
+    // The count-only rule: the clamped box is 2 lines even though its
+    // content height (h_free) is taller — clamped == 40 no matter what.
+    assert!(h_clamped < h_free - 20.0, "clamp cut lines away ({h_clamped} < {h_free})");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn test_css_animation_start_end_events() {
     // blitz#863 family 1: diting samples CSS animations at a fixed clock (no

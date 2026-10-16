@@ -998,7 +998,7 @@ fn colorize_layered(alpha: &[u8], layer: Option<&[u8]>, color: [u8; 4]) -> Vec<u
 mod wrap;
 
 pub use wrap::{greedy_wrap, last_line_offset, tokens_of, Token, WrapLine};
-pub(crate) use wrap::{caps_case_runs, truncate_tokens, SMALL_CAPS_RATIO};
+pub(crate) use wrap::{caps_case_runs, line_clamp_bake, truncate_tokens, SMALL_CAPS_RATIO};
 
 /// 批240 / blitz#924: `text-transform` case mapping, Chrome-grounded via a
 /// headless probe table (2026-09-28). Uppercase/lowercase use the full

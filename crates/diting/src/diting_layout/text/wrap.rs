@@ -21,6 +21,10 @@ pub struct Token {
     /// (1.0 = normal). Small-caps segments carry 0.7 (Blink's ratio) and
     /// already-uppercased text; the paint path multiplies the font size.
     pub scale: f32,
+    /// The U+2026 clamp/overflow marker appended by truncation: painted as
+    /// ink, but skipped by decoration strokes (Chrome leaves the ellipsis
+    /// undecorated) and by any text built FROM the run.
+    pub is_ellipsis: bool,
 }
 
 /// The small-caps synthesis ratio (Blink's kSmallCapsFontSizeMultiplier).
@@ -76,6 +80,7 @@ fn push_caps_segment(
         out.push(Token {
             is_space: false,
             is_break: false,
+            is_ellipsis: false,
             width,
             text: up,
             scale: SMALL_CAPS_RATIO,
@@ -85,6 +90,7 @@ fn push_caps_segment(
         out.push(Token {
             is_space: false,
             is_break: false,
+            is_ellipsis: false,
             width,
             text: seg.to_string(),
             scale: 1.0,
@@ -124,6 +130,7 @@ pub fn tokens_of(
                 vec![Token {
                     is_space,
                     is_break,
+                    is_ellipsis: false,
                     width: if is_break {
                         0.0
                     } else {
@@ -288,7 +295,10 @@ pub(crate) fn truncate_tokens(
     if total <= limit {
         return None;
     }
-    let marker = tokens_of("\u{2026}", font_size, bold, fonts, mono, word_spacing, ws, false, han);
+    let mut marker = tokens_of("\u{2026}", font_size, bold, fonts, mono, word_spacing, ws, false, han);
+    if let Some(first) = marker.first_mut() {
+        first.is_ellipsis = true;
+    }
     let marker_w = marker.first().map(|t| t.width).unwrap_or(0.0);
     let mut kept: Vec<Token> = Vec::with_capacity(tokens.len());
     let mut w = 0.0f32;
@@ -329,6 +339,7 @@ pub(crate) fn truncate_tokens(
                         width: acc_w - w,
                         is_space: false,
                         is_break: false,
+                        is_ellipsis: false,
                         scale: t.scale,
                     });
                 }
@@ -341,6 +352,7 @@ pub(crate) fn truncate_tokens(
             width: t.width,
             is_space: t.is_space,
             is_break: t.is_break,
+            is_ellipsis: false,
             scale: t.scale,
         });
     }
@@ -350,5 +362,121 @@ pub(crate) fn truncate_tokens(
         kept.pop();
     }
     Some((kept, marker))
+}
+
+/// `line-clamp` (#271): bake a clamp into the token stream itself. Wrap the
+/// run at `wrap_at`; if that yields at most `n` lines no clamp applies —
+/// exactly N lines is NOT clamped, they all render (takumi #1965's
+/// exactly-fits edge) — and `None` comes back. Otherwise the result is the
+/// first `n` lines' tokens with the Nth line cut so it plus a flagged "…"
+/// marker fits the wrap width, and the joined visible text. The run's paint
+/// item carries both, so every downstream re-wrap (raster, decorations,
+/// PDF, band estimates) reproduces the same N lines for free: greedy wrap
+/// of a token prefix breaks at the same places because each kept line was
+/// already full. Layout does not pass through here — `measure_text_leaf`
+/// clamps its line COUNT directly (count-only, never content height).
+///
+/// Unlike [`truncate_tokens`], the marker budget applies even when the Nth
+/// line has slack: clamping shows the ellipsis whenever lines followed,
+/// while text-overflow only marks a line that itself overflows.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn line_clamp_bake(
+    tokens: &[Token],
+    n: u32,
+    wrap_at: f32,
+    ws: crate::diting_css::WhiteSpace,
+    font_size: f32,
+    bold: bool,
+    fonts: &FontBook,
+    mono: bool,
+    word_spacing: f32,
+    han: Option<super::HanSlot>,
+) -> Option<(Vec<Token>, String)> {
+    let limit = wrap_at.max(0.0);
+    let lines = greedy_wrap(tokens, Some(limit), ws);
+    let n = n as usize;
+    if lines.len() <= n || n == 0 {
+        return None;
+    }
+    let mut out: Vec<Token> = Vec::new();
+    if ws.preserves_newlines() {
+        // Hard breaks don't join WrapLines — copy the kept span VERBATIM
+        // from the source (interior break tokens and their blank lines
+        // included) so the downstream re-wrap reproduces the same line
+        // count instead of fusing the kept lines into one.
+        let start = lines[0].token_idx.first().copied().unwrap_or(0);
+        let end = lines[n - 1].token_idx.last().copied().unwrap_or(start);
+        out.extend(tokens[start..=end].iter().cloned());
+    } else {
+        for line in &lines[..n] {
+            for &i in &line.token_idx {
+                out.push(tokens[i].clone());
+            }
+        }
+    }
+    // The last kept line, re-cut against the wrap width with the marker's
+    // advance always in the budget (same char-boundary fill posture as
+    // truncate_tokens — per-char widths skip intra-run kerning).
+    let last: Vec<Token> = lines[n - 1].token_idx.iter().map(|&i| tokens[i].clone()).collect();
+    let mut marker = tokens_of("\u{2026}", font_size, bold, fonts, mono, word_spacing, ws, false, han);
+    if let Some(first) = marker.first_mut() {
+        first.is_ellipsis = true;
+    }
+    let marker_w = marker.first().map(|t| t.width).unwrap_or(0.0);
+    let mut kept: Vec<Token> = Vec::with_capacity(last.len());
+    let mut w = 0.0f32;
+    for t in &last {
+        if w + t.width + marker_w > limit {
+            if !t.is_space {
+                let mut acc = String::new();
+                let mut acc_w = 0.0f32;
+                for ch in t.text.chars() {
+                    let cw = tokens_of(
+                        &ch.to_string(),
+                        font_size * t.scale,
+                        bold,
+                        fonts,
+                        mono,
+                        0.0,
+                        ws,
+                        false,
+                        han,
+                    )
+                    .first()
+                    .map(|t| t.width)
+                    .unwrap_or(0.0);
+                    if w + acc_w + cw + marker_w > limit {
+                        break;
+                    }
+                    acc_w += cw;
+                    acc.push(ch);
+                }
+                if !acc.is_empty() {
+                    kept.push(Token {
+                        text: acc,
+                        width: acc_w,
+                        is_space: false,
+                        is_break: false,
+                        is_ellipsis: false,
+                        scale: t.scale,
+                    });
+                }
+            }
+            break;
+        }
+        w += t.width;
+        kept.push(t.clone());
+    }
+    // Whitespace left at the cut carries no ink and would only sit between
+    // the kept glyphs and the marker.
+    while kept.last().is_some_and(|t| t.is_space) {
+        kept.pop();
+    }
+    let drop = lines[n - 1].token_idx.len();
+    out.truncate(out.len() - drop);
+    out.extend(kept);
+    out.extend(marker);
+    let text: String = out.iter().map(|t| t.text.as_str()).collect();
+    Some((out, text))
 }
 

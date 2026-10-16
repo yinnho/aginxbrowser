@@ -363,6 +363,14 @@ pub(super) fn computed_style_value(
             }
             .into(),
         ),
+        // #271: both spellings answer from the one slot; Chrome serializes
+        // the number bare ("2") and the initial as "none".
+        "line-clamp" | "-webkit-line-clamp" => Some(
+            match s.line_clamp {
+                Some(n) => n.to_string().into(),
+                None => "none".into(),
+            },
+        ),
         "color" => s.color.as_ref().map(&color),
         "background-color" => s.background_color.as_ref().map(&color),
         // Raw author token stream (var() already substituted by the cascade);

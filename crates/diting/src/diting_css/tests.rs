@@ -2655,6 +2655,33 @@ fn white_space_and_text_overflow_parse_and_inherit() {
     assert_eq!(child.text_overflow, None, "text-overflow does not inherit");
 }
 
+/// line-clamp / -webkit-line-clamp (#271): both spellings write the one
+/// slot, `none` resets it, the standard form's `/ <ellipsis>` tail parses,
+/// and 0/negative/garbage drop the declaration per spec.
+#[cfg(feature = "screenshot")]
+#[test]
+fn line_clamp_parses_both_spellings_and_does_not_inherit() {
+    let mut s = ComputedStyle::default();
+    apply_declarations(&mut s, "-webkit-line-clamp: 2");
+    assert_eq!(s.line_clamp, Some(2));
+    let mut s = ComputedStyle::default();
+    apply_declarations(&mut s, "line-clamp: 3 / \"…\"");
+    assert_eq!(s.line_clamp, Some(3), "the standard form's block-ellipsis tail parses and is ignored");
+    let mut s = ComputedStyle::default();
+    apply_declarations(&mut s, "-webkit-line-clamp: 2; line-clamp: none");
+    assert_eq!(s.line_clamp, None, "a later none resets the prefixed set");
+
+    let mut s = ComputedStyle::default();
+    apply_declarations(&mut s, "line-clamp: 0; -webkit-line-clamp: -1; line-clamp: 1.5; line-clamp: two");
+    assert_eq!(s.line_clamp, None, "0, negatives, fractions and keywords drop");
+
+    let tree = diting_dom::tree_sink::parse_html(r#"<div><p>x</p></div>"#);
+    let p = tree.query_selector("p").unwrap().unwrap();
+    let parent = ComputedStyle { line_clamp: Some(2), ..Default::default() };
+    let child = cascade_element("p", &tree, p, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
+    assert_eq!(child.line_clamp, None, "line-clamp does not inherit");
+}
+
 /// The UA stylesheet gives pre/xmp/listing/plaintext `white-space: pre`,
 /// filled only when neither inheritance nor an author declaration
 /// provides one.

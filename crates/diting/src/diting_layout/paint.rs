@@ -1444,6 +1444,16 @@ fn paint_text_decorations(
         }
         None => tokens,
     };
+    // #271: the clamp's "…" marker rides the token stream but is
+    // undecorated (Chrome) — wrap a markerless copy so strokes stop at
+    // the cut, never under the ellipsis.
+    let stripped;
+    let tokens: &[Token] = if tokens.iter().any(|t| t.is_ellipsis) {
+        stripped = tokens.iter().filter(|t| !t.is_ellipsis).cloned().collect::<Vec<_>>();
+        &stripped
+    } else {
+        tokens
+    };
     let lines = greedy_wrap(tokens, Some(wrap_at.max(0.0)), ws);
     let m = fonts.metrics(font_size, bold).unwrap_or(ScaledMetrics {
         ascent: font_size,
@@ -1753,15 +1763,24 @@ fn pdf_vectorize_line(
         }
         None => tokens,
     };
-    let decorated;
+    // #271: same markerless set as paint_text_decorations — strokes span
+    // the kept tokens only (the clamp's "…" is ink, not decorated text).
+    let stripped;
+    let markerless: &[Token] = if tokens.iter().any(|t| t.is_ellipsis) {
+        stripped = tokens.iter().filter(|t| !t.is_ellipsis).cloned().collect::<Vec<_>>();
+        &stripped
+    } else {
+        tokens
+    };
+    let truncated_kept;
     let kept: &[Token] = match truncate_at.and_then(|limit| {
-        truncate_tokens(tokens, limit, font_size, bold, fonts, mono, word_spacing, ws, han)
+        truncate_tokens(markerless, limit, font_size, bold, fonts, mono, word_spacing, ws, han)
     }) {
         Some((k, _)) => {
-            decorated = k;
-            &decorated
+            truncated_kept = k;
+            &truncated_kept
         }
-        None => tokens,
+        None => markerless,
     };
     let lines = greedy_wrap(painted, Some(wrap_at.max(0.0)), ws);
     if lines.iter().all(|l| l.width <= 0.0) {

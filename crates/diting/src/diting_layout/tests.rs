@@ -655,6 +655,7 @@ mod run_token_memo_tests {
                 word_spacing: 0.0,
                 ws: WhiteSpace::Normal,
                 ellipsis: false,
+                line_clamp: None,
                 tokens: std::cell::RefCell::new(None),
                 small_caps: false,
                 han: None,
@@ -700,7 +701,7 @@ mod run_token_memo_tests {
                 Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, .. }) => {
                     let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
                     let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, None);
-                    measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws)
+                    measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws, None)
                 }
                 _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
             }
