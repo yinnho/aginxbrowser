@@ -19,6 +19,55 @@
         assert_eq!(title, serde_json::json!("Test Page"));
     }
 
+    /// Claim step 2 (docs/diting_runtime认领计划_20261017.md): the op
+    /// settlement tick is ours — js/core_base.js wraps deno_core's
+    /// __eventLoopTick at snapshot time with a per-triplet try/catch
+    /// (deno's loop lets one unknown promise id kill the whole remaining
+    /// batch — the #226/#240 delivery shape). Page JS can't call the tick
+    /// (the Deno global is deleted per page init and the promise ring is
+    /// closured), so we pin the claim marker the overlay writes — if
+    /// core_base.js ever silently stops landing in the snapshot, this
+    /// fires — and the real settlement path through the claimed tick
+    /// (setTimeout rides an async op whose promise resolves via the tick).
+    #[tokio::test(flavor = "current_thread")]
+    async fn claimed_event_loop_tick_face() {
+        let mut rt = setup_runtime(r#"<body></body>"#);
+        let result = rt
+            .call_function_on_remote(
+                r#"async () => {
+                    const probe = globalThis.__diting_core_base;
+                    await new Promise(r => setTimeout(r, 10));
+                    return JSON.stringify({
+                        claimed: probe && probe.claimed === true,
+                        missingThrow: probe && probe.missingThrow,
+                        install: probe && probe.install,
+                    });
+                }"#,
+                None,
+                &[],
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(result.value.unwrap().as_str().unwrap()).unwrap();
+        assert_eq!(
+            v["claimed"], serde_json::json!(true),
+            "core_base.js claim marker absent — the tick overlay did not land in the snapshot"
+        );
+        let shape = v["missingThrow"].as_str().unwrap_or("");
+        assert!(
+            shape == "string" || shape == "error-msg" || shape == "none",
+            "missing-promise throw shape recorded as {shape:?} — absorb filter not derived from a known shape"
+        );
+        let install = v["install"].as_str().unwrap_or("");
+        assert!(
+            install == "defineProperty" || install == "assign" || install == "shell",
+            "tick install path recorded as {install:?} — unknown install branch"
+        );
+    }
+
     /// #208: FontFaceSet.forEach shadowed Array.prototype.forEach with a
     /// function that called itself — every call was a RangeError. The
     /// replacement iterates by index and keeps Set callback semantics
