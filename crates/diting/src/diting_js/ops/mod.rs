@@ -4,10 +4,8 @@ use std::io::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use deno_core::op2;
 use diting_ops::diting_op;
-use deno_core::OpState;
-use deno_core::Extension;
+use diting_runtime::state::OpState;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use crate::diting_dom::{AttachShadowError, DomTree, NodeData, NodeId, ShadowRootMode};
 use crate::diting_net::{CookieJar, HttpClient};
@@ -3570,19 +3568,23 @@ fn op_fetch_take(state: &mut OpState, #[string] key: String) -> String {
         .unwrap_or_default()
 }
 
-#[op2(async(deferred), fast)]
-#[string]
-async fn op_fetch_url(
+/// 10d host flip: the body runs on OUR Vm host — hand-called from
+/// `async_glue::op_fetch_url_impl` (the raw wrapper sees `(promise_id,
+/// user args...)`; the JS async stub owns the promise). The `Rc<RefCell<
+/// OpState>>` face is our own state cell now; the JsErrorBox error face
+/// stays (leaf crate), collapsing to a message string at the glue.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn op_fetch_url_body(
     state: Rc<RefCell<OpState>>,
-    #[string] url: String,
-    #[string] method: String,
-    #[string] headers_json: String,
-    #[string] body: String,
-    #[string] origin: String,
-    #[string] mode: String,
-    #[string] credentials: String,
+    url: String,
+    method: String,
+    headers_json: String,
+    body: String,
+    origin: String,
+    mode: String,
+    credentials: String,
     // "policy\0init" — bundled to stay under deno_core's async op arg limit.
-    #[string] referrer: String,
+    referrer: String,
 ) -> Result<String, deno_error::JsErrorBox> {
     // deno_core async op codegen caps explicit args; the Referer pair rides one slot
     // (and, third segment, the #226 settlement key — see FetchSettlements).
@@ -4271,9 +4273,9 @@ fn op_history_jump_to(state: &OpState, target: i32) {
     gs.pending_history_jump = Some(target);
 }
 
-/// Free body of `op_sleep` — the hand glue (`diting_js::async_glue`) calls
-/// this directly off our Vm host; the #[op2] wrapper below is the deno-host
-/// shim until 10d's assembly swap retires it.
+/// Free body of `op_sleep` — the hand glue (`diting_js::async_glue`)
+/// calls this directly off our Vm host (10d swap; the #[op2] wrapper died
+/// with the deno host).
 pub(crate) async fn op_sleep_body(millis: u64) {
     // Reactor-less contexts (plain #[test] isolates): a tokio timer would
     // panic mid-poll inside v8, which aborts the whole test binary. Resolve
@@ -4283,11 +4285,6 @@ pub(crate) async fn op_sleep_body(millis: u64) {
         return;
     }
     tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
-}
-
-#[op2(async(deferred), fast)]
-async fn op_sleep(#[number] millis: u64) {
-    op_sleep_body(millis).await;
 }
 
 // Records a binding call from page JS. The CDP layer drains this queue
@@ -4635,107 +4632,78 @@ fn op_clock_ms() -> f64 {
     (ms * 10.0).round() / 10.0
 }
 
-/// Transitional adapter (campaign step ⑤→⑥, dies with the host swap):
-/// `#[diting_op]` wrappers now return OUR OpDecl; the still-live deno_core
-/// host installs from its own decl type. The leaked OneByteConst is the
-/// only 'static face FastStaticString accepts — one tiny allocation per
-/// op per runtime, gone when the deno host goes.
-fn to_deno(d: diting_runtime::op_reg::OpDecl) -> deno_core::OpDecl {
-    use deno_core::v8::OneByteConst;
-    use deno_core::FastStaticString;
-    let literal = d.name.as_bytes();
-    let one_byte: &'static OneByteConst =
-        Box::leak(Box::new(FastStaticString::create_external_onebyte_const(
-            literal,
-        )));
-    deno_core::OpDecl::new_internal_op2(
-        (d.name, FastStaticString::new(one_byte)),
-        d.is_async,
-        d.is_reentrant,
-        false,
-        d.arg_count,
-        d.no_side_effects,
-        false,
-        d.slow_fn,
-        d.slow_function_impl,
-        deno_core::AccessorType::None,
-        None,
-        None,
-        deno_core::OpMetadata::default(),
-    )
-}
-
-pub fn build_extension() -> Extension {
-    Extension {
-        name: "diting_dom",
-        ops: std::borrow::Cow::Owned(vec![
-            to_deno(css::op_css_supports()),
-            to_deno(op_dom()),
-            to_deno(op_clock_ms()),
-            to_deno(op_svg_path_len()),
-            to_deno(op_svg_path_point()),
-            to_deno(op_shadow_attach()),
-            to_deno(op_console_msg()),
-            to_deno(op_dialog()),
-            to_deno(op_script_mark_started()),
-            to_deno(op_script_try_start()),
-            to_deno(op_dyn_script_fetch_begin()),
-            to_deno(op_dyn_script_fetch_end()),
-            to_deno(op_blob_register()),
-            to_deno(op_blob_revoke()),
-            op_fetch_url(),
-            to_deno(op_fetch_take()),
-            to_deno(op_fetch_url_sync()),
-            to_deno(op_image_info()),
-            to_deno(op_canvas_png()),
-            to_deno(op_canvas_jpeg()),
-            #[cfg(feature = "screenshot")]
-            to_deno(op_canvas_store()),
-            #[cfg(feature = "screenshot")]
-            to_deno(op_canvas_text()),
-            to_deno(op_get_cookies()),
-            to_deno(op_set_cookie()),
-            to_deno(op_storage_read()),
-            to_deno(op_storage_write()),
-            to_deno(op_navigate()),
-            to_deno(op_history_jump_to()),
-            op_sleep(),
-            to_deno(op_binding_called()),
-            to_deno(op_subtle_digest()),
-            to_deno(op_subtle_hmac()),
-            to_deno(op_subtle_aes_gcm()),
-            to_deno(op_subtle_aes_cbc()),
-            to_deno(op_subtle_aes_ctr()),
-            to_deno(op_subtle_aes_kw()),
-            to_deno(op_subtle_rsa_generate()),
-            to_deno(op_subtle_rsa_import_public()),
-            to_deno(op_subtle_rsa_import_spki()),
-            to_deno(op_subtle_rsa_import_private()),
-            to_deno(op_subtle_rsa_import_pkcs8()),
-            to_deno(op_subtle_rsa_oaep()),
-            to_deno(op_subtle_pbkdf2()),
-            to_deno(op_subtle_hkdf()),
-            to_deno(op_subtle_ecdsa_generate()),
-            to_deno(op_subtle_ecdsa_import_private()),
-            to_deno(op_subtle_ecdsa_import_public()),
-            to_deno(op_subtle_ecdh_derive_bits()),
-            to_deno(op_subtle_ecdsa_sign()),
-            to_deno(op_subtle_ecdsa_verify()),
-            to_deno(op_random_bytes()),
-            to_deno(op_url_parse()),
-            to_deno(op_url_set()),
-            to_deno(op_url_resolve()),
-            to_deno(op_add_import_map()),
-            to_deno(op_encoding_for_label()),
-            to_deno(op_text_decode()),
-            to_deno(op_url_encode_query()),
-            crate::diting_js::ws::op_ws_open(),
-            crate::diting_js::ws::op_ws_next_message(),
-            to_deno(crate::diting_js::ws::op_ws_send()),
-            to_deno(crate::diting_js::ws::op_ws_close()),
-        ]),
-        ..Default::default()
-    }
+/// The op table our own host installs (10d flip): every #[diting_op]
+/// wrapper already returns OUR OpDecl, and the four async ops come in as
+/// hand glue from `diting_js::async_glue` (op_fetch_url / op_sleep /
+/// op_ws_open / op_ws_next_message). The list mirrors the retired
+/// build_extension() entry-for-entry; the to_deno adapter and the
+/// Extension wrapper died with the deno host.
+pub fn our_decls() -> Vec<diting_runtime::op_reg::OpDecl> {
+    let mut decls = vec![
+        css::op_css_supports(),
+        op_dom(),
+        op_clock_ms(),
+        op_svg_path_len(),
+        op_svg_path_point(),
+        op_shadow_attach(),
+        op_console_msg(),
+        op_dialog(),
+        op_script_mark_started(),
+        op_script_try_start(),
+        op_dyn_script_fetch_begin(),
+        op_dyn_script_fetch_end(),
+        op_blob_register(),
+        op_blob_revoke(),
+        op_fetch_take(),
+        op_fetch_url_sync(),
+        op_image_info(),
+        op_canvas_png(),
+        op_canvas_jpeg(),
+        #[cfg(feature = "screenshot")]
+        op_canvas_store(),
+        #[cfg(feature = "screenshot")]
+        op_canvas_text(),
+        op_get_cookies(),
+        op_set_cookie(),
+        op_storage_read(),
+        op_storage_write(),
+        op_navigate(),
+        op_history_jump_to(),
+        op_binding_called(),
+        op_subtle_digest(),
+        op_subtle_hmac(),
+        op_subtle_aes_gcm(),
+        op_subtle_aes_cbc(),
+        op_subtle_aes_ctr(),
+        op_subtle_aes_kw(),
+        op_subtle_rsa_generate(),
+        op_subtle_rsa_import_public(),
+        op_subtle_rsa_import_spki(),
+        op_subtle_rsa_import_private(),
+        op_subtle_rsa_import_pkcs8(),
+        op_subtle_rsa_oaep(),
+        op_subtle_pbkdf2(),
+        op_subtle_hkdf(),
+        op_subtle_ecdsa_generate(),
+        op_subtle_ecdsa_import_private(),
+        op_subtle_ecdsa_import_public(),
+        op_subtle_ecdh_derive_bits(),
+        op_subtle_ecdsa_sign(),
+        op_subtle_ecdsa_verify(),
+        op_random_bytes(),
+        op_url_parse(),
+        op_url_set(),
+        op_url_resolve(),
+        op_add_import_map(),
+        op_encoding_for_label(),
+        op_text_decode(),
+        op_url_encode_query(),
+        crate::diting_js::ws::op_ws_send(),
+        crate::diting_js::ws::op_ws_close(),
+    ];
+    // The async four ride the hand glue (promise stub + OpDriver spawn).
+    decls.extend(crate::diting_js::async_glue::all_decls());
+    decls
 }
 
 #[cfg(test)]

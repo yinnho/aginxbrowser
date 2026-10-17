@@ -15,9 +15,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use deno_core::op2;
-use deno_core::OpState;
 use diting_ops::diting_op;
+use diting_runtime::state::OpState;
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -445,8 +444,8 @@ fn ws_error_json(message: &str) -> String {
 }
 
 /// Free body of `op_ws_open` — the hand glue (`diting_js::async_glue`) calls
-/// this with the SharedState cell directly; the #[op2] wrapper below stays
-/// as the deno-host shim until 10d retires it.
+/// this with the SharedState cell directly (10d flip: the #[op2] wrapper died
+/// with the deno host).
 ///
 /// Returns Err(the JSON error payload) when the open must fail. JS surfaces
 /// every failure as error + close(1006) events — the constructor itself only
@@ -606,19 +605,6 @@ pub(crate) async fn op_ws_open_body(
     serde_json::Value::Object(obj).to_string()
 }
 
-/// The deno-host shim for [`op_ws_open_body`] — extracts the SharedState
-/// cell from deno's OpState once up front, then awaits the free body.
-#[op2(async(deferred), fast)]
-#[string]
-pub(crate) async fn op_ws_open(
-    state: Rc<RefCell<OpState>>,
-    #[string] url: String,
-    #[string] protocols_json: String,
-) -> String {
-    let gs_cell = state.borrow().borrow::<SharedState>().clone();
-    op_ws_open_body(gs_cell, url, protocols_json).await
-}
-
 fn translated_cookie_header(ws_url: &url::Url, jar: &Option<Arc<crate::diting_net::cookies::CookieJar>>) -> String {
     let Some(jar) = jar else { return String::new() };
     match translate_ws_url(ws_url) {
@@ -668,8 +654,8 @@ enum Taken {
 }
 
 /// Free body of `op_ws_next_message` — the hand glue (`diting_js::async_glue`)
-/// calls this with the SharedState cell directly; the #[op2] wrapper below is
-/// the deno-host shim until 10d retires it.
+/// calls this with the SharedState cell directly (10d flip: the #[op2]
+/// wrapper died with the deno host).
 pub(crate) async fn op_ws_next_message_body(gs_cell: SharedState, id: u64) -> String {
     if tokio::runtime::Handle::try_current().is_err() {
         return WsInbound::Close(1006, String::new()).to_json();
@@ -703,14 +689,6 @@ pub(crate) async fn op_ws_next_message_body(gs_cell: SharedState, id: u64) -> St
         }
     })
     .await
-}
-
-/// The deno-host shim for [`op_ws_next_message_body`].
-#[op2(async(deferred), fast)]
-#[string]
-pub(crate) async fn op_ws_next_message(state: Rc<RefCell<OpState>>, #[number] id: u64) -> String {
-    let gs_cell = state.borrow().borrow::<SharedState>().clone();
-    op_ws_next_message_body(gs_cell, id).await
 }
 
 /// Side effects on delivery: the 101 goes into the script-initiated network

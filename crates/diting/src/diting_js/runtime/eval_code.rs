@@ -37,8 +37,9 @@ impl JsRuntime {
     /// thenable — everything else (probes, assignments, reads: the majority
     /// of evals) assigns the slot and sets the done sentinel inside this very
     /// execute_script call. An unconditional `await` parks the sentinel in a
-    /// microtask, and deno_core executes scripts with no microtask
-    /// checkpoint, so the sentinel can only turn true on the next event-loop
+    /// microtask, and the runtime executes scripts with no microtask
+    /// checkpoint (our Vm matches deno_core's law — #114), so the sentinel
+    /// can only turn true on the next event-loop
     /// turn — which a churny page (a revived persistent session re-running
     /// its boot scripts) holds hostage behind multi-second synchronous page
     /// scripts until the eval burns its whole budget into EVAL_TIMEOUT.

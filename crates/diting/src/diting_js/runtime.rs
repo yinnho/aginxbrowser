@@ -2,15 +2,16 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use deno_core::RuntimeOptions;
 use crate::diting_dom::DomTree;
 
 /// Re-exported so other crates (obscura-browser, obscura-cdp) can name the V8
-/// isolate handle without taking a direct dependency on deno_core.
+/// isolate handle without taking a direct dependency on diting_runtime.
 pub use v8::IsolateHandle;
 
 use crate::diting_js::module_loader::DitingModuleLoader;
-use crate::diting_js::ops::{build_extension, JsState};
+use crate::diting_js::ops::{JsState, our_decls};
+use diting_runtime::vm::Vm;
+use diting_runtime::ModuleId;
 
 // The V8 termination watchdog family (token, stack-dump sampler, spawn) —
 // split from the module root (god-file ratchet). Re-exported so the
@@ -129,15 +130,16 @@ pub struct JsRuntime {
     /// via the bootstrap recovery hook.
     termination_unwound: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Per-module evaluation outcome cache (upstream 4f6d256): browsers
-    /// evaluate a module script exactly once per document. deno_core 0.350
-    /// asserts on a second mod_evaluate of the same ModuleId instead of
-    /// treating it as the spec's module-map no-op, so a page loading the same
-    /// module URL twice (duplicate <script type=module src>, or a root already
-    /// evaluated earlier as another graph's dependency) panics without this.
-    module_evaluations: HashMap<deno_core::ModuleId, Result<(), String>>,
+    /// evaluate a module script exactly once per document. Our module map
+    /// treats a second mod_evaluate of the same ModuleId like the spec's
+    /// module-map no-op instead of panicking, so a page loading the same
+    /// module URL twice (duplicate <script type=module src>, or a root
+    /// already evaluated earlier as another graph's dependency) stays
+    /// legal without this — the cache keeps the outcome readable too.
+    module_evaluations: HashMap<ModuleId, Result<(), String>>,
     /// Handle to the ES-module loader this runtime was built with. Kept so
-    /// `set_http_client` can reach the loader after construction (the Rc also
-    /// lives inside deno_core's RuntimeOptions, which gives nothing back).
+    /// `set_http_client` can reach the loader after construction (the Rc
+    /// also lives inside the Vm's module map, which gives nothing back).
     module_loader: Rc<DitingModuleLoader>,
 }
 
@@ -153,14 +155,11 @@ fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-/// deno_core 0.411 captures the ambient tokio handle when the isolate is
-/// registered and later spawns V8 platform tasks (the memory reducer's
-/// delayed GC probe, ~30s after heap growth, posts from inside an eval)
-/// through it — `std::process::abort()` when none was captured, by design,
-/// since a panic cannot unwind through V8's FFI frames. Server paths run
-/// under `#[tokio::main]`, but sync callers (tests, warmup) don't. This
-/// enters a process-lifetime background runtime; the returned guard must
-/// outlive the `deno_core::JsRuntime::new` call so registration finds the
+/// Sync callers (tests, warmup) have no ambient tokio runtime, but the
+/// async op BODIES (op_sleep's Handle::try_current guard, the fetch/ws
+/// futures' reactor) need one or they silently no-op. This enters a
+/// process-lifetime background runtime; the returned guard must
+/// outlive the Vm construction so the first op spawn finds the
 /// handle. Delayed tasks keep spawning afterward through the stored
 /// `Handle` clone, which stays valid because the runtime never drops.
 static BACKGROUND_TOKIO: std::sync::OnceLock<tokio::runtime::Runtime> =
@@ -204,8 +203,13 @@ impl JsRuntime {
             blob_store,
         ));
 
-        // Must stay alive through the deno_core::JsRuntime::new call inside
-        // the lock below — isolate registration reads the ambient handle.
+        // Our Vm spawns no V8-platform tasks of its own, but async op
+        // BODIES park on tokio (op_sleep guards with Handle::try_current;
+        // the fetch/ws futures need the reactor) — sync callers (tests,
+        // warmup) have no ambient runtime, so the ops would silently
+        // no-op. Enter a process-lifetime background runtime; the guard
+        // needs to outlive only the construction below, but keeping it to
+        // the end of the function costs nothing.
         let _tokio_context = enter_tokio_context();
 
         // Serialize isolate construction process-wide: V8's JSDispatchTable
@@ -230,15 +234,14 @@ impl JsRuntime {
                 // which would leave the default ~984 KB ceiling in place.
                 v8::V8::set_flags_from_string(&format!("--stack-size={kb}"));
             });
-            // #224: same one-shot shape for the old-space ceiling. deno_core
-            // 0.411 has no max_heap_size option, so V8's default (~1400MB)
-            // stood — doudian's publish boot crossed it mid-commit and the
-            // heap guard severed the form init chain (getCategoryDetail took
-            // 7 minutes to complete; getSchema retries lost their op
-            // deliveries entirely). Commerce-scale heaps are legal; raise the
-            // ceiling and let the pressure-GC escalation (#224 A1) handle a
-            // page that still won't fit. `AGINXBROWSER_JS_HEAP_MB=0` keeps
-            // V8's default.
+            // #224: same one-shot shape for the old-space ceiling. V8's
+            // default (~1400MB) stood — doudian's publish boot crossed it
+            // mid-commit and the heap guard severed the form init chain
+            // (getCategoryDetail took 7 minutes to complete; getSchema
+            // retries lost their op deliveries entirely). Commerce-scale
+            // heaps are legal; raise the ceiling and let the pressure-GC
+            // escalation (#224 A1) handle a page that still won't fit.
+            // `AGINXBROWSER_JS_HEAP_MB=0` keeps V8's default.
             static V8_HEAP_FLAG: std::sync::Once = std::sync::Once::new();
             V8_HEAP_FLAG.call_once(|| {
                 let mb = crate::env_knobs::js_heap_mb();
@@ -257,29 +260,30 @@ impl JsRuntime {
                     v8::V8::set_flags_from_string(extra.trim());
                 }
             });
-            deno_core::JsRuntime::new(RuntimeOptions {
-                extensions: vec![build_extension()],
-                module_loader: Some(module_loader.clone()),
-                startup_snapshot: Some(SNAPSHOT),
-                ..Default::default()
-            })
+            Vm::from_snapshot(SNAPSHOT).expect("our snapshot container revives")
         };
 
-        runtime.op_state().borrow_mut().put(state_clone);
+        // 10d law: the ops land INSIDE the Deno.core.ops namespace object the
+        // snapshot baked (bootstrap.js captured it as `const _OPS` — object
+        // identity survives the snapshot restore). Never on globalThis: op
+        // names as window properties would change the fingerprint face.
+        let op_state = runtime.install_ops_under(our_decls(), &["Deno", "core", "ops"]);
+        op_state.borrow_mut().put(state_clone);
         // #226: async fetch completion mirror — see FetchSettlements in ops.
-        runtime
-            .op_state()
+        op_state
             .borrow_mut()
             .put(crate::diting_js::ops::FetchSettlements::default());
+
+        runtime.install_modules(module_loader.clone());
 
         runtime
             .execute_script(
                 "<anonymous>"  /* was diting:init; page-visible Error.stack */,
-                "globalThis.__diting_objects = {}; globalThis.__diting_oid = 0; globalThis.__diting_init();".to_string(),
+                "globalThis.__diting_objects = {}; globalThis.__diting_oid = 0; globalThis.__diting_init();",
             )
             .expect("init should not fail");
 
-        let isolate_handle = runtime.v8_isolate().thread_safe_handle();
+        let isolate_handle = runtime.isolate_handle();
         let heap_limit_state = std::sync::Arc::new(HeapLimitState::default());
         install_heap_limit_guard(&mut runtime, isolate_handle.clone(), heap_limit_state.clone());
 
@@ -311,7 +315,7 @@ impl JsRuntime {
         // default — leaving Mesa GL strings behind a macOS UA.
         let _ = self.runtime.execute_script(
             "<set-ua>",
-            format!(
+            &format!(
                 "globalThis.__diting_ua = '{}'; \
                  globalThis._fpCache = null; globalThis.__diting_hw_plat = undefined; \
                  globalThis.__diting_setPersona();",
@@ -328,7 +332,7 @@ impl JsRuntime {
         let s32 = (seed & 0xFFFF_FFFF) as u32;
         let _ = self.runtime.execute_script(
             "<set-fp-seed>",
-            format!("globalThis.__diting_setFpSeed({});", s32),
+            &format!("globalThis.__diting_setFpSeed({});", s32),
         );
     }
     /// Move only the navigator.language(s) persona (the `__diting_lang`
@@ -342,7 +346,7 @@ impl JsRuntime {
         let escaped = lang.replace('\\', "\\\\").replace('\'', "\\'");
         let _ = self.runtime.execute_script(
             "<set-lang>",
-            format!("globalThis.__diting_lang = '{}';", escaped),
+            &format!("globalThis.__diting_lang = '{}';", escaped),
         );
     }
     /// Move only the navigator.platform persona (the CDP `platform` field of
@@ -353,7 +357,7 @@ impl JsRuntime {
         let escaped = platform.replace('\\', "\\\\").replace('\'', "\\'");
         let _ = self.runtime.execute_script(
             "<set-platform>",
-            format!("globalThis.__diting_platform_override = '{}';", escaped),
+            &format!("globalThis.__diting_platform_override = '{}';", escaped),
         );
     }
     pub fn set_language(&mut self, lang: &str) {
@@ -498,7 +502,7 @@ impl JsRuntime {
         );
         let v = self
             .runtime
-            .execute_script("<frame-swap>", code)
+            .execute_script("<frame-swap>", &code)
             .map_err(|e| format!("JS error: {}", e))?;
         Ok(self.v8_to_json(v)?.as_str() == Some("ok"))
     }
@@ -510,7 +514,7 @@ impl JsRuntime {
         const RESTORE: &str = "(function() { var s = globalThis.__diting_frame_saved; if (!s) return; var sl = globalThis.__ditingWinSlot; if (s[4] && sl) { sl.document = s[4].d; sl.window = s[4].w; sl.self = s[4].s; sl.frames = s[4].f; } document = s[0]; window = s[1]; self = s[2]; frames = s[3]; delete globalThis.__diting_frame_saved; delete globalThis.__diting_frame_location; })()";
         if let Err(e) = self
             .runtime
-            .execute_script("<frame-restore>", RESTORE.to_string())
+            .execute_script("<frame-restore>", RESTORE)
         {
             tracing::warn!("frame restore failed: {}", e);
         }
@@ -542,11 +546,11 @@ impl JsRuntime {
         // retries once, which would just re-enter the spin - the watchdog
         // becomes useless. Pre-clear any stray flag from an earlier watchdog
         // instead, then run the plain one-shot execute.
-        self.runtime.v8_isolate().cancel_terminate_execution();
+        self.runtime.revive();
         let eval_wd = self.arm_watchdog(Self::eval_watchdog_duration(await_budget_ms));
         let result = self
             .runtime
-            .execute_script("<eval-remote>", meta_code);
+            .execute_script("<eval-remote>", &meta_code);
         let eval_fired = self.disarm_watchdog(eval_wd);
         if eval_fired {
             let secs = Self::eval_watchdog_duration(await_budget_ms).as_secs();
@@ -560,7 +564,7 @@ impl JsRuntime {
             let __t0 = std::time::Instant::now();
             let sentinel = format!("globalThis.__diting_done_{done_counter} === true");
             let settled = self.resolve_promises_until(
-                |rt| rt.runtime.execute_script("<done?>", sentinel.clone())
+                |rt| rt.runtime.execute_script("<done?>", &sentinel)
                     .ok()
                     .and_then(|v| rt.v8_to_json(v).ok())
                     .and_then(|j| j.as_bool())
@@ -601,7 +605,7 @@ impl JsRuntime {
 
         let rejected = self
             .runtime
-            .execute_script("<readRejected>", "globalThis.__diting_await_rejected".to_string())
+            .execute_script("<readRejected>", "globalThis.__diting_await_rejected")
             .map_err(|e| format!("JS error: {}", e))?;
         let rejected = self.v8_to_json(rejected)?.as_bool().unwrap_or(false);
 
@@ -615,7 +619,7 @@ impl JsRuntime {
             } else {
                 let read = self
                     .runtime
-                    .execute_script("<readResult>", Self::object_slot(&oid))
+                    .execute_script("<readResult>", &Self::object_slot(&oid))
                     .map_err(|e| format!("JS error: {}", e))?;
                 let json_val = self.v8_to_json(read)?;
                 Self::info_from_json(&json_val)
@@ -623,7 +627,7 @@ impl JsRuntime {
         } else {
             let meta = self
                 .runtime
-                .execute_script("<readMeta>", "globalThis.__diting_await_meta".to_string())
+                .execute_script("<readMeta>", "globalThis.__diting_await_meta")
                 .map_err(|e| format!("JS error: {}", e))?;
             let meta_str = self.v8_to_json(meta)?;
             let meta_json = if let serde_json::Value::String(s) = &meta_str {
@@ -689,7 +693,7 @@ impl JsRuntime {
     fn exception_outcome(&mut self, oid: &str, await_promise: bool) -> Result<EvalOutcome, String> {
         let exc_meta = self
             .runtime
-            .execute_script("<readExcMeta>", "globalThis.__diting_await_meta".to_string())
+            .execute_script("<readExcMeta>", "globalThis.__diting_await_meta")
             .map_err(|e| format!("JS error: {}", e))?;
         let exc_meta = self.v8_to_json(exc_meta)?;
         let exc_meta = if let serde_json::Value::String(s) = &exc_meta {
@@ -813,12 +817,12 @@ impl JsRuntime {
             );
 
             self.runtime
-                .execute_script("<callFnAsync>", code)
+                .execute_script("<callFnAsync>", &code)
                 .map_err(|e| format!("JS error: {}", e))?;
 
             let sentinel = format!("globalThis.__diting_done_{done_counter} === true");
             let settled = self.resolve_promises_until(
-                |rt| rt.runtime.execute_script("<done?>", sentinel.clone())
+                |rt| rt.runtime.execute_script("<done?>", &sentinel)
                     .ok()
                     .and_then(|v| rt.v8_to_json(v).ok())
                     .and_then(|j| j.as_bool())
@@ -836,7 +840,7 @@ impl JsRuntime {
 
             let rejected = self
                 .runtime
-                .execute_script("<readRejected>", "globalThis.__diting_await_rejected".to_string())
+                .execute_script("<readRejected>", "globalThis.__diting_await_rejected")
                 .map_err(|e| format!("JS error: {}", e))?;
             if self.v8_to_json(rejected)?.as_bool().unwrap_or(false) {
                 return self.exception_outcome(&oid, true);
@@ -848,7 +852,7 @@ impl JsRuntime {
                 } else {
                     let read = self
                         .runtime
-                        .execute_script("<readResult>", Self::object_slot(&oid))
+                        .execute_script("<readResult>", &Self::object_slot(&oid))
                         .map_err(|e| format!("JS error: {}", e))?;
                     let json_val = self.v8_to_json(read)?;
                     Self::info_from_json(&json_val)
@@ -856,7 +860,7 @@ impl JsRuntime {
             } else {
                 let meta_result = self
                     .runtime
-                    .execute_script("<readMeta>", "globalThis.__diting_await_meta".to_string())
+                    .execute_script("<readMeta>", "globalThis.__diting_await_meta")
                     .map_err(|e| format!("JS error: {}", e))?;
                 let meta_str = self.v8_to_json(meta_result)?;
                 let meta_json = if let serde_json::Value::String(s) = &meta_str {
@@ -899,11 +903,11 @@ impl JsRuntime {
             );
             let result = self
                 .runtime
-                .execute_script("<callFnByValue>", code)
+                .execute_script("<callFnByValue>", &code)
                 .map_err(|e| format!("JS error: {}", e))?;
             let rejected = self
                 .runtime
-                .execute_script("<readRejected>", "globalThis.__diting_await_rejected".to_string())
+                .execute_script("<readRejected>", "globalThis.__diting_await_rejected")
                 .map_err(|e| format!("JS error: {}", e))?;
             if self.v8_to_json(rejected)?.as_bool().unwrap_or(false) {
                 return self.exception_outcome(&oid, false);
@@ -947,11 +951,11 @@ impl JsRuntime {
             exc_meta_fn = exc_meta_fn,
         );
         self.runtime
-            .execute_script("<callFnRemote>", code)
+            .execute_script("<callFnRemote>", &code)
             .map_err(|e| format!("JS error: {}", e))?;
         let rejected = self
             .runtime
-            .execute_script("<readRejected>", "globalThis.__diting_await_rejected".to_string())
+            .execute_script("<readRejected>", "globalThis.__diting_await_rejected")
             .map_err(|e| format!("JS error: {}", e))?;
         if self.v8_to_json(rejected)?.as_bool().unwrap_or(false) {
             return self.exception_outcome(&oid, false);
@@ -963,7 +967,7 @@ impl JsRuntime {
         // through unconditionally (obscura#779 tightened that contract).
         let meta = self
             .runtime
-            .execute_script("<readMeta>", "globalThis.__diting_await_meta".to_string())
+            .execute_script("<readMeta>", "globalThis.__diting_await_meta")
             .map_err(|e| format!("JS error: {}", e))?;
         let meta_str = self.v8_to_json(meta)?;
         let meta_json = if let serde_json::Value::String(s) = &meta_str {
@@ -991,7 +995,7 @@ impl JsRuntime {
     pub fn release_object(&mut self, object_id: &str) {
         if self.object_store.remove(object_id).is_some() {
             let code = format!("delete {};", Self::object_slot(object_id));
-            let _ = self.runtime.execute_script("<release>", code);
+            let _ = self.runtime.execute_script("<release>", &code);
         }
     }
 
@@ -1029,10 +1033,7 @@ impl JsRuntime {
         // module loader, so a slow import chain must not hang page load.
         let module_id = match tokio::time::timeout(
             budget,
-            self.runtime.load_side_es_module_from_code(
-                &specifier,
-                deno_core::ModuleCodeString::from(source_code),
-            ),
+            self.runtime.load_side_es_module_from_code(specifier.as_str(), source_code),
         )
         .await
         {
@@ -1055,13 +1056,13 @@ impl JsRuntime {
     /// a setInterval) keeps the loop busy forever, and waiting for idle burned
     /// the whole budget on an early module and starved the one that mounts the
     /// app, leaving #root empty (upstream #374). The outcome is cached per
-    /// ModuleId: browsers evaluate a module exactly once per document, and
-    /// deno_core 0.350 asserts on a repeat evaluation instead of no-op'ing —
-    /// the cache (plus a contained panic check) covers both duplicate roots
-    /// and roots already evaluated as another graph's dependency.
+    /// ModuleId: browsers evaluate a module exactly once per document; our
+    /// module map no-ops a second evaluation (Evaluated short-circuit), and
+    /// the cache hands the FIRST outcome back for duplicate roots and roots
+    /// already evaluated as another graph's dependency.
     async fn drive_module_eval(
         &mut self,
-        module_id: deno_core::ModuleId,
+        module_id: ModuleId,
         budget_ms: u64,
         what: &str,
     ) -> Result<(), String> {
@@ -1083,9 +1084,10 @@ impl JsRuntime {
         // module, never the page's load lifecycle.
         let eval_wd = self
             .arm_watchdog(budget + tokio::time::Duration::from_millis(250));
-        // deno_core 0.350 panics ("Module already evaluated") rather than
-        // treating a second evaluation as the module-map no-op browsers
-        // perform; that panic is a success, not a crash.
+        // Contained-panic belt (module machinery panics stay module errors,
+        // never page-process deaths). The deno_core 0.350 "Module already
+        // evaluated" panic face is gone with the host — our map no-ops —
+        // but a panic here is still success-shaped when it IS a repeat.
         let evaluation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.runtime.mod_evaluate(module_id)
         }));
@@ -1166,10 +1168,7 @@ impl JsRuntime {
 
         let module_id = match tokio::time::timeout(
             budget,
-            self.runtime.load_side_es_module_from_code(
-                &specifier,
-                deno_core::ModuleCodeString::from(code.to_string()),
-            ),
+            self.runtime.load_side_es_module_from_code(specifier.as_str(), code.to_string()),
         )
         .await
         {
@@ -1190,7 +1189,7 @@ impl JsRuntime {
 
     pub fn execute_script(&mut self, _name: &str, source: &str) -> Result<(), String> {
         self.runtime
-            .execute_script("<script>", source.to_string())
+            .execute_script("<script>", source)
             .map_err(|e| format!("JS error: {}", e))?;
         Ok(())
     }
@@ -1210,12 +1209,12 @@ impl JsRuntime {
     ) -> Result<(), String> {
         if timeout.is_zero() {
             self.runtime
-                .execute_script("<script>", source.to_string())
+                .execute_script("<script>", source)
                 .map_err(|e| format!("JS error: {}", e))?;
             return Ok(());
         }
 
-        let isolate_handle = self.runtime.v8_isolate().thread_safe_handle();
+        let isolate_handle = self.runtime.isolate_handle();
 
         let pair = std::sync::Arc::new((
             std::sync::Mutex::new(false),
@@ -1245,7 +1244,7 @@ impl JsRuntime {
 
         let result = self
             .runtime
-            .execute_script("<script>", source.to_string());
+            .execute_script("<script>", source);
 
         {
             let (lock, cvar) = &*pair;
@@ -1272,7 +1271,7 @@ impl JsRuntime {
                     // never the page — the page's remaining scripts keep
                     // running. cancel_terminate_execution is the same
                     // healing disarm_watchdog applies at its phase boundary.
-                    self.runtime.v8_isolate().cancel_terminate_execution();
+                    self.runtime.revive();
                     // #227: this guard arms a raw thread with no stale
                     // flag, so the #39/#50 heals are blind to its fires —
                     // a dispatch window beheaded here leaks _mtDepth and
@@ -1281,7 +1280,7 @@ impl JsRuntime {
                     self.termination_unwound
                         .store(true, std::sync::atomic::Ordering::SeqCst);
                     tracing::warn!("Script killed after {}s timeout", timeout.as_secs());
-                    self.runtime.execute_script("<reset>", "undefined".to_string()).ok();
+                    self.runtime.execute_script("<reset>", "undefined").ok();
                     Ok(())
                 } else {
                     Err(format!("JS error: {}", msg))
@@ -1297,7 +1296,7 @@ impl JsRuntime {
         // session task is parked with no JS on the stack (in the captured
         // repro the task was starved 14.65s past the wall-clock deadline).
         // The terminate flag then sits stale on the isolate, and the first
-        // V8 entry after wake — usually deno_core's op-delivery tick — dies
+        // V8 entry after wake — usually our op-delivery settle — dies
         // with "execution terminated", dropping the whole batch of
         // already-popped op results: fetch promises never settle. Detection
         // cannot ask V8: `is_execution_terminating()` only reports an
@@ -1312,10 +1311,12 @@ impl JsRuntime {
         let stale = self.stale_termination.clone();
         let unwound_flag = self.termination_unwound.clone();
         let active_ns = &self.v8_active_ns;
-        let mut inner = std::pin::pin!(self
-            .runtime
-            .run_event_loop(deno_core::PollEventLoopOptions::default()));
-        let result = std::future::poll_fn(|cx| {
+        // Our host's loop face (10d): one `poll_event_loop` pass IS the
+        // reactor pass — async ops and module loads park on this waker
+        // (tokio's), settlement delivery and the microtask drain run inside.
+        // LoopActivity tells idle from busy: idle completes this future,
+        // busy parks in the poll_fn until the next wake.
+        let result: Result<(), String> = std::future::poll_fn(|cx| {
             if stale.swap(false, std::sync::atomic::Ordering::SeqCst) {
                 isolate.cancel_terminate_execution();
                 unwound_flag.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1329,18 +1330,22 @@ impl JsRuntime {
             // doesn't count, so a page polling on a slow timer never trips
             // the busy freeze while an under-budget interval burner does.
             let poll_t0 = std::time::Instant::now();
-            let poll_result = std::future::Future::poll(inner.as_mut(), cx);
+            let poll_result = self.runtime.poll_event_loop(cx);
             active_ns.set(active_ns.get() + poll_t0.elapsed().as_nanos() as u64);
-            poll_result
+            match poll_result {
+                Ok(activity) if activity.idle() => std::task::Poll::Ready(Ok(())),
+                Ok(_) => std::task::Poll::Pending,
+                Err(e) => std::task::Poll::Ready(Err(e.to_string())),
+            }
         })
         .await;
         if let Err(e) = &result {
-            // An event-loop error (e.g. an exception inside deno_core's
-            // __eventLoopTick while resolving op promises) is the silent-loss
+            // An event-loop error (e.g. an exception inside the settle
+            // delivery while resolving op promises) is the silent-loss
             // surface of #50: results already popped from the completed-ops
-            // deque are dropped when the tick aborts, and every pump wrapper
-            // (run_event_loop_until_idle / _bounded / `let _ =`) discards the
-            // Err. Log it here so the loss leaves a signature.
+            // deque are dropped when the delivery aborts, and every pump
+            // wrapper (run_event_loop_until_idle / _bounded / `let _ =`)
+            // discards the Err. Log it here so the loss leaves a signature.
             tracing::warn!("event loop error (op results may be lost): {}", e);
         }
         result.map_err(|e| format!("Event loop error: {}", e))
@@ -1360,7 +1365,7 @@ impl JsRuntime {
         self.recover_heap_limit();
         let wrapped = Self::wrap_expression(expression);
         let token = self.arm_watchdog(timeout);
-        let result = self.runtime.execute_script("<eval>", wrapped);
+        let result = self.runtime.execute_script("<eval>", &wrapped);
         let fired = self.disarm_watchdog(token);
         match result {
             Ok(v) if !fired => self.v8_to_json(v),
@@ -1463,48 +1468,50 @@ impl JsRuntime {
         &mut self,
         result: v8::Global<v8::Value>,
     ) -> Result<serde_json::Value, String> {
-        // 0.411 removed JsRuntime::handle_scope; deno_core::scope! is the blessed rebuild.
-        deno_core::scope!(scope, self.runtime);
-        let local = v8::Local::new(scope, result);
+        // Our Vm's handle-scope face (with_scope) — the deno_core::scope!
+        // rebuild of 0.411, now ours.
+        self.runtime.with_scope(|scope| {
+            let local = v8::Local::new(scope, result);
 
-        if local.is_undefined() || local.is_null() {
-            return Ok(serde_json::Value::Null);
-        }
-        if local.is_boolean() {
-            return Ok(serde_json::Value::Bool(local.boolean_value(scope)));
-        }
-        if local.is_number() {
-            let n = local.number_value(scope).unwrap_or(0.0);
-            return Ok(serde_json::json!(n));
-        }
-        if local.is_string() {
-            let s = local.to_rust_string_lossy(scope);
-            return Ok(serde_json::Value::String(s));
-        }
+            if local.is_undefined() || local.is_null() {
+                return Ok(serde_json::Value::Null);
+            }
+            if local.is_boolean() {
+                return Ok(serde_json::Value::Bool(local.boolean_value(scope)));
+            }
+            if local.is_number() {
+                let n = local.number_value(scope).unwrap_or(0.0);
+                return Ok(serde_json::json!(n));
+            }
+            if local.is_string() {
+                let s = local.to_rust_string_lossy(scope);
+                return Ok(serde_json::Value::String(s));
+            }
 
-        let global = scope.get_current_context().global(scope);
-        let json_obj_str = v8::String::new(scope, "JSON").unwrap();
-        if let Some(json_obj) = global.get(scope, json_obj_str.into()) {
-            if let Some(json_obj) = json_obj.to_object(scope) {
-                let stringify_str = v8::String::new(scope, "stringify").unwrap();
-                if let Some(stringify_fn) = json_obj.get(scope, stringify_str.into()) {
-                    if let Ok(stringify_fn) =
-                        v8::Local::<v8::Function>::try_from(stringify_fn)
-                    {
-                        let args = [local];
-                        if let Some(result) = stringify_fn.call(scope, json_obj.into(), &args) {
-                            let json_str = result.to_rust_string_lossy(scope);
-                            if let Ok(val) = serde_json::from_str(&json_str) {
-                                return Ok(val);
+            let global = scope.get_current_context().global(scope);
+            let json_obj_str = v8::String::new(scope, "JSON").unwrap();
+            if let Some(json_obj) = global.get(scope, json_obj_str.into()) {
+                if let Some(json_obj) = json_obj.to_object(scope) {
+                    let stringify_str = v8::String::new(scope, "stringify").unwrap();
+                    if let Some(stringify_fn) = json_obj.get(scope, stringify_str.into()) {
+                        if let Ok(stringify_fn) =
+                            v8::Local::<v8::Function>::try_from(stringify_fn)
+                        {
+                            let args = [local];
+                            if let Some(result) = stringify_fn.call(scope, json_obj.into(), &args) {
+                                let json_str = result.to_rust_string_lossy(scope);
+                                if let Ok(val) = serde_json::from_str(&json_str) {
+                                    return Ok(val);
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        let s = local.to_rust_string_lossy(scope);
-        Ok(serde_json::Value::String(s))
+            let s = local.to_rust_string_lossy(scope);
+            Ok(serde_json::Value::String(s))
+        })
     }
 
     /// Chrome spells a JS number via Number→String: integral doubles lose
@@ -1608,7 +1615,7 @@ impl JsRuntime {
             .runtime
             .execute_script(
                 "<typeofResult>",
-                format!("typeof {} === 'undefined'", Self::object_slot(oid)),
+                &format!("typeof {} === 'undefined'", Self::object_slot(oid)),
             )
             .map_err(|e| format!("JS error: {}", e))?;
         Ok(self.v8_to_json(probe)?.as_bool().unwrap_or(false))

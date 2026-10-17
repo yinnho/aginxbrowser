@@ -4,17 +4,23 @@ use std::path::PathBuf;
 // in one realm inside the snapshot runtime; each script only declares
 // bindings at top level and touches earlier scripts' bindings at call time.
 const SNAPSHOT_SCRIPTS: &[(&str, &str)] = &[
-    // Claim step 2 (docs/diting_runtime认领计划_20261017.md): our own
-    // __eventLoopTick — hardened (promiseId, isOk, res) triplet delivery
-    // over deno_core's closured promise ring. deno's loop (01_core.js) has
-    // no try/catch: one unknown promise id — 00_infra.js throws the bare
-    // string "Missing promise @ N" — kills the whole remaining batch, the
-    // exact #226/#240 delivery shape. Must run FIRST: the snapshot
-    // serializes globals after all scripts, and every production JsRuntime
-    // captures whatever Deno.core.__eventLoopTick then points at (the
-    // capture happens inside the constructor, before __diting_init deletes
-    // the Deno global).
-    ("core_base.js", include_str!("js/core_base.js")),
+    // 10d host flip: the Deno shell. The retired deno_core snapshot carried
+    // the whole Deno.core object (promise ring, tick, encode/decode); the
+    // only face our scripts ever read is `Deno.core.ops` — bootstrap.js
+    // captures it at line 110 as a top-level const (`const _OPS =
+    // Deno.core.ops`) that every later script shares through the global
+    // lexical environment. The runtime installs the ops INTO that same
+    // object (Vm::install_ops_under), never onto globalThis — op names as
+    // window properties would change the fingerprint face. __diting_init
+    // deletes the `Deno` property per page exactly as before (anti-bot
+    // law: a Deno prop on window is the canonical deno-runtime marker).
+    // Must run FIRST: bootstrap's const capture is the first Deno read.
+    // 10d rejection face: bootstrap.js:10819+ registers its window-event
+    // handlers through Deno.core.set{Unhandled,Handled}PromiseRejectionHandler
+    // at bake time; the PRELUDE's registration functions store the closures
+    // into heap globals (baked, restore-free) where Vm::dispatch_rejections
+    // reads them live each round.
+    ("deno_shell", "globalThis.Deno = { core: { ops: {}, setUnhandledPromiseRejectionHandler: __diting_set_unhandled_rejection_handler, setHandledPromiseRejectionHandler: __diting_set_handled_rejection_handler } };"),
     // Main script: the bootstrap god-file-turned-root.
     ("bootstrap.js", include_str!("js/bootstrap.js")),
     // #252 god-file ratchet split: the fetch family moved out of
@@ -101,38 +107,15 @@ fn main() {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let snapshot_path = out_dir.join("DITING_SNAPSHOT.bin");
 
-    let output = deno_core::snapshot::create_snapshot(
-        deno_core::snapshot::CreateSnapshotOptions {
-            cargo_manifest_dir: env!("CARGO_MANIFEST_DIR"),
-            startup_snapshot: None,
-            skip_op_registration: true,
-            extensions: vec![],
-            extension_transpiler: None,
-            with_runtime_cb: Some(Box::new(|runtime| {
-                // Stack frames from these scripts are visible to page JS
-                // (Error.stack / catch). Do NOT use "<diting:…>" names —
-                // they leak the engine brand (300015 env probes). Chrome
-                // shows "<anonymous>" for eval-like builtins; match that.
-                for (name, src) in SNAPSHOT_SCRIPTS {
-                    runtime
-                        .execute_script("<anonymous>", src.to_string())
-                        .unwrap_or_else(|e| {
-                            panic!("{name} failed during snapshot creation: {e:?}")
-                        });
-                }
-            })),
-        },
-        None,
-    )
-    .expect("Failed to create V8 snapshot");
+    // 10d: our own snapshot creator (diting_runtime::vm::create_snapshot) —
+    // PRELUDE + raw faces + the script list above, in our [blob][sidecar]
+    // container. Scripts run origin-less: stack frames surface as
+    // "<anonymous>" (300015 brand-leak law; the name rides only panics).
+    let output = diting_runtime::vm::create_snapshot(SNAPSHOT_SCRIPTS);
 
-    std::fs::write(&snapshot_path, &*output.output).expect("Failed to write snapshot");
+    std::fs::write(&snapshot_path, &output).expect("Failed to write snapshot");
     println!(
         "cargo:rustc-env=AGINXBROWSER_SNAPSHOT_PATH={}",
         snapshot_path.display()
     );
-
-    for file in &output.files_loaded_during_snapshot {
-        println!("cargo:rerun-if-changed={}", file.display());
-    }
 }

@@ -17,6 +17,7 @@
 
 use crate::settle::SettleQueue;
 use crate::vm::Triplet;
+use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -60,6 +61,18 @@ impl Wake for WakeFlag {
 pub struct OpDriver {
     futures: Vec<Pin<Box<dyn Future<Output = Triplet>>>>,
     woken: Arc<WakeFlag>,
+    /// The loop task's waker — deno_core's `state.waker` cell law. A future
+    /// spawned from INSIDE a pass (a JS op call during the microtask drain)
+    /// is invisible until its first poll: a tokio `Sleep` registers with the
+    /// timer wheel at first poll, so nothing can wake the loop for it — the
+    /// loop parks forever if that spawn is the only pending work. deno_core
+    /// solves this with the driver task: every push into its FuturesUnordered
+    /// re-schedules the driver, whose completions wake the JS loop's
+    /// registered waker. We are single-task: the loop face registers its
+    /// waker here every pass, and every [`OpDriver::spawn`] wakes it — the
+    /// next pass first-polls the newborn future (registering its real wake
+    /// source), and the chain keeps flowing.
+    loop_waker: RefCell<Option<Waker>>,
 }
 
 impl Default for OpDriver {
@@ -73,6 +86,7 @@ impl OpDriver {
         Self {
             futures: Vec::new(),
             woken: Arc::new(WakeFlag(AtomicBool::new(false))),
+            loop_waker: RefCell::new(None),
         }
     }
 
@@ -80,6 +94,23 @@ impl OpDriver {
     /// triplet: the promise id it must settle, the outcome, the payload.
     pub fn spawn(&mut self, fut: impl Future<Output = Triplet> + 'static) {
         self.futures.push(Box::pin(fut));
+        // The push-wake law (see `loop_waker`): a newborn future needs a
+        // first poll from the NEXT pass — this wake is what guarantees that
+        // pass runs at all. Also sets the flag for poll-driven embedders.
+        self.woken.0.store(true, Ordering::Release);
+        if let Some(w) = self.loop_waker.borrow().as_ref() {
+            w.wake_by_ref();
+        }
+    }
+
+    /// The loop face registers its waker at every pass — fresh, never stale.
+    pub fn register_loop_waker(&self, waker: &Waker) {
+        *self.loop_waker.borrow_mut() = Some(waker.clone());
+    }
+
+    /// The advisory flag as a Waker — the sync loop face's registration.
+    pub(crate) fn flag_waker(&self) -> Waker {
+        Waker::from(self.woken.clone())
     }
 
     /// Ops in flight (no completion yet).

@@ -1,5 +1,7 @@
 pub(super) static ISOLATE_CONSTRUCT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+use diting_runtime::vm::Vm;
+
 /// #108: the inner runtime wrapped so its ISOLATE DISPOSAL serializes with
 /// isolate construction under `ISOLATE_CONSTRUCT_LOCK`. Construction was
 /// already serialized (upstream obscura #430 lineage); disposal is the one
@@ -18,12 +20,10 @@ pub(super) static ISOLATE_CONSTRUCT_LOCK: std::sync::Mutex<()> = std::sync::Mute
 /// with the lock held and destroys the inner runtime explicitly; the
 /// compiler's own field drop is suppressed, so teardown happens exactly
 /// once, inside the guard.
-pub(super) struct SerializedDropRuntime(
-    pub(super) std::mem::ManuallyDrop<deno_core::JsRuntime>,
-);
+pub(super) struct SerializedDropRuntime(pub(super) std::mem::ManuallyDrop<Vm>);
 
 impl std::ops::Deref for SerializedDropRuntime {
-    type Target = deno_core::JsRuntime;
+    type Target = Vm;
     fn deref(&self) -> &Self::Target {
         &self.0
     }

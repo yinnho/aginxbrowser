@@ -12,9 +12,10 @@
 //! 三元组就地蒸发，零重投递。V8 对这层零立法（那是 deno_core 的私产传输
 //! 层），cancel 之后重投完全合法——但 deno_core 不做，我们只能自己做。
 //!
-//! JS 侧已先遣落了半边（`crates/diting/js/core_base.js` 的 replay 停泊栈，
-//! 同一条法）：tick 已开跑才被打断的窗口，尾巴不再蒸发。剩 Rust 侧窗口
-//! （三元组 pop 了、tick 压根没被调）只有本 crate 拿下 dispatch 才闭环。
+//! JS 侧曾先遣落了半边（`crates/diting/js/core_base.js` 的 replay 停泊栈，
+//! 同一条法；10d 起随 deno 宿主退役，法正身全在本 crate）：tick 已开跑
+//! 才被打断的窗口，尾巴不再蒸发。剩 Rust 侧窗口（三元组 pop 了、tick
+//! 压根没被调）由本 crate 拿下 dispatch 闭环。
 //!
 //! ## 认领路线（逐批，每批独立测试绿）
 //!
@@ -41,7 +42,7 @@
 //!    v8 crate 自家快照测试就进程级独占跑，法条照学。
 //! 6. op 注册面（40 ops 从 `#[op2]` 迁出）+ diting 换装 + 删 deno_core。
 //!
-//! ## 法条（与 js/core_base.js v1 同一条法，两层各自实现）
+//! ## 法条（与退役的 js/core_base.js v1 同一条法，如今一层实现）
 //!
 //! - 批次先停泊、完整投递才出队；投递失败整个批次停泊（前缀可能已被
 //!   tick 结算过——JS 侧 Missing-absorb 层把重复投递折叠成 no-op）。
@@ -52,6 +53,7 @@
 //!   poll 自动重投，无需特殊处理。
 
 pub mod driver;
+pub mod foreground;
 pub mod modules;
 pub mod op_glue;
 pub mod op_reg;

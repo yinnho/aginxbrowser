@@ -291,7 +291,7 @@ impl super::JsRuntime {
     /// control back. Always balance with [`Self::disarm_watchdog`].
     pub fn arm_watchdog(&mut self, budget: std::time::Duration) -> WatchdogToken {
         spawn_watchdog(
-            self.runtime.v8_isolate().thread_safe_handle(),
+            self.runtime.isolate_handle(),
             budget,
             Some(self.stale_termination.clone()),
         )
@@ -358,7 +358,7 @@ impl super::JsRuntime {
             // bracket the fire leaked.
             self.termination_unwound
                 .store(true, std::sync::atomic::Ordering::SeqCst);
-            self.runtime.v8_isolate().cancel_terminate_execution();
+            self.runtime.revive();
             self.watchdog_fired_total
                 .set(self.watchdog_fired_total.get() + 1);
             tracing::warn!(
@@ -382,7 +382,7 @@ impl super::JsRuntime {
         name: &'static str,
         source: String,
     ) -> Result<v8::Global<v8::Value>, String> {
-        match self.runtime.execute_script(name, source.clone()) {
+        match self.runtime.execute_script(name, &source) {
             Ok(v) => Ok(v),
             Err(e) => {
                 let msg = e.to_string();
@@ -390,9 +390,9 @@ impl super::JsRuntime {
                     return Err(format!("JS error: {}", msg));
                 }
                 tracing::warn!("cleared stray V8 termination flag before {}", name);
-                self.runtime.v8_isolate().cancel_terminate_execution();
+                self.runtime.revive();
                 self.runtime
-                    .execute_script(name, source)
+                    .execute_script(name, &source)
                     .map_err(|e| format!("JS error: {}", e))
             }
         }
@@ -415,14 +415,13 @@ impl super::JsRuntime {
             .stale_termination
             .swap(false, std::sync::atomic::Ordering::SeqCst);
         if stale_entry {
-            self.runtime.v8_isolate().cancel_terminate_execution();
+            self.runtime.revive();
         }
         if unwound || stale_entry {
             let _ = self.runtime.execute_script(
                 "<mt-recover>",
                 "if (globalThis.__diting_mt_recover_termination) \
-                 globalThis.__diting_mt_recover_termination()"
-                    .to_string(),
+                 globalThis.__diting_mt_recover_termination()",
             );
             tracing::warn!("#39: reset macrotask depth after V8 termination");
         }
@@ -467,8 +466,7 @@ impl super::JsRuntime {
             let _ = self.runtime.execute_script(
                 "<mt-force-recover>",
                 "if (globalThis.__diting_mt_recover_termination) \
-                 globalThis.__diting_mt_recover_termination()"
-                    .to_string(),
+                 globalThis.__diting_mt_recover_termination()",
             );
             tracing::warn!("#227/#240: re-armed stalled macrotask chain / timer wheel");
         }

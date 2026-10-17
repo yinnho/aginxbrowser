@@ -36,6 +36,21 @@ pub enum ModuleEvalError {
     Terminated,
 }
 
+/// Message-shaped, same strings deno_core's CoreError arms display (the
+/// host formats load/eval errors with `{}`; `Terminated` uses the
+/// ExecutionTerminated text so host-side `contains("execution terminated")`
+/// checks keep matching).
+impl std::fmt::Display for ModuleEvalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ModuleEvalError::Threw(msg) => f.write_str(msg),
+            ModuleEvalError::Terminated => f.write_str(
+                "Cannot evaluate module, because JavaScript execution has been terminated",
+            ),
+        }
+    }
+}
+
 /// The shared cell behind [`OneshotSender`]/[`OneshotReceiver`].
 struct OneshotInner<T> {
     value: Option<T>,

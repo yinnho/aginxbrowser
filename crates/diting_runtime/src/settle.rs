@@ -22,8 +22,8 @@ struct Parked<T> {
 
 /// A batch is parked this many times without completing before it is dropped
 /// as poison: an internal bug must surface in the stats and let the loop
-/// move on, never wedge it. Matches the JS-side constant in
-/// `crates/diting/js/core_base.js`.
+/// move on, never wedge it. (Same constant the retired js/core_base.js
+/// overlay carried — the law survived its first implementation.)
 pub const MAX_DELIVERY_ATTEMPTS: u32 = 3;
 
 /// Delivery-loop observability. A dropped batch is a real bug somewhere
@@ -87,9 +87,10 @@ impl<T> SettleQueue<T> {
     /// Parked batches go first (oldest first), then one fresh batch of up
     /// to `cap` items. `deliver` receives the whole batch slice; an `Err`
     /// parks the batch — its ENTIRE content, even if the tick had already
-    /// resolved a prefix before failing: the JS-side Missing-absorb layer
-    /// (js/core_base.js) folds re-delivered prefixes into no-ops — and
-    /// propagates the error so the loop sees terminates/exceptions. A batch
+    /// resolved a prefix before failing: the PRELUDE's settlement face
+    /// (the __diting_settle promise ring) folds re-delivered prefixes
+    /// into no-ops — and propagates the error so the loop sees
+    /// terminates/exceptions. A batch
     /// reaching [`MAX_DELIVERY_ATTEMPTS`] failed attempts is dropped
     /// (counted in [`Stats`]), and its error still propagates.
     ///

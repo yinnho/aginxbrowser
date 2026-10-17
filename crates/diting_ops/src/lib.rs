@@ -36,8 +36,9 @@
 //!   the op driver host swap, where the settle-queue pipeline replaces
 //!   deno's deferred machinery.
 //!
-//! The emitted wrapper keeps the op's fn name, so `build_extension` call
-//! sites do not change — a migration diff is the attribute line only.
+//! The emitted wrapper keeps the op's fn name and now returns OUR
+//! `diting_runtime::op_reg::OpDecl` directly — the host's decl table
+//! (`ops::our_decls()`) lists the calls one for one.
 
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, Literal};
@@ -290,7 +291,7 @@ fn expand(func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
                 &*(::v8::Local::<::v8::External>::cast_unchecked(
                     args.data(),
                 )
-                .value() as *const ::deno_core::_ops::OpCtx)
+                .value() as *const ::diting_runtime::op_reg::OpCtx)
             };
             let opstate = &opctx.state;
         }
@@ -544,7 +545,7 @@ fn result_match(ok_arm: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
             ::core::result::Result::Ok(result) => { #ok_arm }
             ::core::result::Result::Err(err) => {
                 let exception =
-                    ::deno_core::error::to_v8_error(&mut scope, &err);
+                    ::diting_runtime::op_glue::to_v8_error(&mut scope, &err);
                 scope.throw_exception(exception);
                 return 1;
             }

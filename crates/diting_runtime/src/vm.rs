@@ -27,6 +27,7 @@ use crate::modules::{ModuleError, ModuleId, ModuleLoader};
 use crate::settle::SettleQueue;
 use crate::snapshot::{self, SnapshotError};
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::future::Future;
 use std::rc::Rc;
 use std::sync::Once;
@@ -128,6 +129,22 @@ globalThis.__diting_wrap_async = function (raw) {
     return r.promise;
   };
 };
+// Rejection-handler registration (10d): the raw tracking lives in Rust
+// (promise_reject_callback + the RejectionSlot); the HANDLERS live in JS land
+// so a snapshot restore needs no handle rehydration — deno_core 0.411
+// serialized the registered Global into its snapshot sidecar instead
+// (runtime/snapshot.rs), the one face our container law rejects: bake the
+// binding, not the handle. The host's shell exposes these as
+// Deno.core.set{Unhandled,Handled}PromiseRejectionHandler while the shell
+// lives; the host's bootstrap registers its window-event handlers at bake
+// time and the closures ride the blob. Rust reads the handler globals live
+// each dispatch round (Vm::dispatch_rejections).
+globalThis.__diting_set_unhandled_rejection_handler = function (h) {
+  globalThis.__ditingUnhandledRejectionHandler = h;
+};
+globalThis.__diting_set_handled_rejection_handler = function (h) {
+  globalThis.__ditingHandledRejectionHandler = h;
+};
 // Test taps — deno exposes the same pair for wraparound testing.
 globalThis.__diting_setNextId = function (n) { nextPromiseId = n; };
 globalThis.__diting_tableCounts = function () {
@@ -145,7 +162,7 @@ globalThis.__diting_tableCounts = function () {
 fn ensure_v8() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        v8::V8::initialize_platform(v8::new_default_platform(0, false).make_shared());
+        v8::V8::initialize_platform(crate::foreground::platform());
         v8::V8::initialize();
     });
 }
@@ -175,6 +192,22 @@ pub enum LoopError {
     TickThrew(String),
 }
 
+/// Host-facing rendering (10d): diting formats entry-face errors with
+/// `{}` and string-matches the termination symptom — "Uncaught Error:
+/// execution terminated" is the exact shape the old deno_core host
+/// surfaced, kept byte-for-byte so the host's
+/// `contains("execution terminated")` heals stay honest.
+impl std::fmt::Display for LoopError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoopError::Terminated => f.write_str("Uncaught Error: execution terminated"),
+            LoopError::TickThrew(msg) => f.write_str(msg),
+        }
+    }
+}
+
+impl std::error::Error for LoopError {}
+
 /// What one [`Vm::poll_event_loop`] pass found — the reactor host's idle
 /// signal. `idle()` is deno's run_event_loop-resolution law in our shape:
 /// nothing in flight means the loop's work is done (timers are op_sleep
@@ -187,11 +220,23 @@ pub struct LoopActivity {
     pub pending_ops: usize,
     /// A module evaluation or dynamic import is still in flight.
     pub pending_modules: bool,
+    /// Promise-rejection events are still waiting to fire (deno's
+    /// `has_pending_promise_events`: unhandled or handled pairs queued).
+    /// The loop is not done while an event has not reached the page.
+    pub pending_rejections: bool,
+    /// V8 engine-side asynchronous work (wasm async compilation's
+    /// background half) or queued foreground tasks — deno's
+    /// `has_pending_background_tasks` law: the loop is not idle while the
+    /// engine still owes the page a resolution.
+    pub pending_background: bool,
 }
 
 impl LoopActivity {
     pub fn idle(&self) -> bool {
-        self.pending_ops == 0 && !self.pending_modules
+        self.pending_ops == 0
+            && !self.pending_modules
+            && !self.pending_rejections
+            && !self.pending_background
     }
 }
 
@@ -202,6 +247,82 @@ impl LoopActivity {
 /// fire from inside JS microtasks while the loop holds no borrow — the
 /// loop drops its borrow before any JS runs (pinned by a test).
 type DriverSlot = Rc<RefCell<OpDriver>>;
+
+/// Promise-rejection tracking, the deno_core `exception_state.rs` law in our
+/// shape: the raw V8 promise-reject callback appends (promise, reason) pairs
+/// here; [`Vm::poll`] fires the JS handlers after the microtask drain.
+/// Single-threaded next to the isolate like the DriverSlot.
+#[derive(Default)]
+struct RejectionState {
+    /// Rejected with no handler, oldest first — unhandledrejection events
+    /// waiting to fire.
+    pending: VecDeque<(v8::Global<v8::Promise>, v8::Global<v8::Value>)>,
+    /// Rejected, dispatched as unhandled, THEN handled late —
+    /// rejectionhandled events, oldest first.
+    pending_handled: VecDeque<(v8::Global<v8::Promise>, v8::Global<v8::Value>)>,
+}
+
+type RejectionSlot = Rc<RefCell<RejectionState>>;
+
+/// The raw V8 promise-reject callback (installed in [`Vm::build`]).
+///
+/// Law verbatim from deno_core 0.411 `exception_state.rs::
+/// track_promise_rejection` (MIT, 2018-2026 Deno authors):
+/// `PromiseRejectWithNoHandler` → queue the (promise, reason) pair;
+/// `PromiseHandlerAddedAfterReject` → retain-remove from the pending queue,
+/// and when it was ALREADY dispatched (not found), queue a rejectionhandled
+/// pair using the promise's own result as the reason. The two AfterResolved
+/// events never warn (deno #1272). One divergence: deno gates the
+/// rejectionhandled enqueue on a registered handled-callback (an enqueue-time
+/// scope dance); we queue unconditionally and no-op at dispatch when nobody
+/// listens — same observable events.
+///
+/// SAFETY: V8 invokes this on the isolate's thread under its callback
+/// contract; the scope macro opens the handle scope Global creation needs.
+/// No panics across the boundary — a missing slot is a silent no-op (the
+/// promise would simply never fire an event, loud in every rejection test).
+pub(crate) unsafe extern "C" fn promise_reject_callback(message: v8::PromiseRejectMessage) {
+    use v8::PromiseRejectEvent::*;
+    // SAFETY: `message` is alive for this callback; the macro enters the
+    // scope V8 requires.
+    v8::callback_scope!(unsafe scope, &message);
+    let Some(slot) = scope.get_slot::<RejectionSlot>() else {
+        return;
+    };
+    let promise = message.get_promise();
+    match message.get_event() {
+        PromiseRejectWithNoHandler => {
+            let error = message.get_value().unwrap_or_else(|| {
+                // deno unwrap()s here; the Option is real API surface and a
+                // missing value pairs with undefined, not a panic in a raw
+                // callback (a panic inside extern "C" is UB — abort).
+                v8::undefined(scope).into()
+            });
+            let promise_global = v8::Global::new(scope, promise);
+            let error_global = v8::Global::new(scope, error);
+            slot.borrow_mut().pending.push_back((promise_global, error_global));
+        }
+        PromiseHandlerAddedAfterReject => {
+            // The code has until the loop yields to attach a handler and
+            // avoid the unhandled event. If we already delivered it, this is
+            // a rejectionhandled pair instead.
+            let promise_global = v8::Global::new(scope, promise);
+            let mut st = slot.borrow_mut();
+            let previous_len = st.pending.len();
+            st.pending.retain(|(key, _)| key != &promise_global);
+            if st.pending.len() == previous_len {
+                // Drop the borrow before touching V8 again (promise.result).
+                drop(st);
+                let result = promise.result(scope);
+                let result_global = v8::Global::new(scope, result);
+                slot.borrow_mut()
+                    .pending_handled
+                    .push_back((promise_global, result_global));
+            }
+        }
+        PromiseRejectAfterResolved | PromiseResolveAfterResolved => {}
+    }
+}
 
 /// `__diting_spawn(id, ticks, payload)` — the JS→Rust op entry.
 ///
@@ -335,6 +456,10 @@ pub fn create_snapshot(scripts: &[(&str, &str)]) -> Vec<u8> {
     // time, but the driver slot goes in anyway — if that ever changes,
     // tests get a loud hang instead of the callback's silent no-op drop.
     isolate.set_slot::<DriverSlot>(Rc::new(RefCell::new(OpDriver::new())));
+    // Same posture for rejection tracking: bake scripts are quiet, but the
+    // callback must never fire into a slotless isolate.
+    isolate.set_slot::<RejectionSlot>(Rc::new(RefCell::new(RejectionState::default())));
+    isolate.set_promise_reject_callback(promise_reject_callback);
 
     let context = {
         v8::scope!(let scope, &mut isolate);
@@ -406,11 +531,27 @@ pub struct Vm {
     /// host can read advisory ("a module future woke"). A reactor-driven
     /// host (10d) passes its real waker to [`Vm::poll_modules`] instead.
     module_wake: std::sync::Arc<WakeFlag>,
+    /// The foreground-task registry entry (wasm async compilation and other
+    /// engine-side completions land here from any thread; the loop drains
+    /// at pass top — [`crate::foreground`]).
+    fg: std::sync::Arc<crate::foreground::ForegroundEntry>,
+    /// The registry key (the raw isolate pointer). Drop deregisters — the
+    /// key is only unique while the isolate lives.
+    fg_key: usize,
 }
 
 impl Default for Vm {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Deregister from the foreground-task registry BEFORE the isolate drops —
+/// a later isolate can reuse the address, and a stale entry would route its
+/// posts into a dead queue.
+impl Drop for Vm {
+    fn drop(&mut self) {
+        crate::foreground::deregister(self.fg_key);
     }
 }
 
@@ -448,6 +589,10 @@ impl Vm {
         // The op driver goes in before any JS runs — __diting_spawn finds
         // it through this slot.
         isolate.set_slot::<DriverSlot>(Rc::new(RefCell::new(OpDriver::new())));
+        // Rejection tracking from the first JS on: the raw callback finds
+        // its queue through this slot (deno installs both at JsRuntime init).
+        isolate.set_slot::<RejectionSlot>(Rc::new(RefCell::new(RejectionState::default())));
+        isolate.set_promise_reject_callback(promise_reject_callback);
 
         let context = {
             v8::scope!(let scope, &mut isolate);
@@ -472,6 +617,18 @@ impl Vm {
                 .expect("context has __diting_settle — without it this is not our shell");
             v8::Global::new(cs, settle_fn)
         };
+        // deno_core setup.rs `isolate_ptr_to_key` law: transmute the
+        // repr(transparent) UnsafeRawIsolatePtr to the usize the platform's
+        // post_task will hand back as the isolate key.
+        let fg_key = {
+            const _: () = assert!(
+                std::mem::size_of::<v8::UnsafeRawIsolatePtr>()
+                    == std::mem::size_of::<usize>()
+            );
+            // SAFETY: pointer-sized transparent wrapper, asserted above.
+            unsafe { std::mem::transmute::<v8::UnsafeRawIsolatePtr, usize>(isolate.as_raw_isolate_ptr()) }
+        };
+        let fg = crate::foreground::register(fg_key);
 
         Ok(Self {
             isolate,
@@ -480,6 +637,8 @@ impl Vm {
             queue: SettleQueue::new(),
             ops: None,
             module_wake: std::sync::Arc::new(WakeFlag::new()),
+            fg,
+            fg_key,
         })
     }
 
@@ -538,6 +697,53 @@ impl Vm {
         unsafe { self.isolate.exit() };
         self.ops = Some(set);
         state
+    }
+
+    /// Install sync ops into a NAMESPACE OBJECT reached by walking
+    /// `globalThis.path[0].path[1]…` (10d flip: diting's snapshot scripts
+    /// capture `const _OPS = Deno.core.ops` at bake time — the ops must
+    /// land in THAT object, never on globalThis, where they would become
+    /// enumerable window properties and change the fingerprint face). The
+    /// shell script bakes the empty namespace; every segment must exist
+    /// here, or the host forgot to bake its shell — a loud panic, not a
+    /// silent empty ops table.
+    pub fn install_ops_under(
+        &mut self,
+        decls: Vec<crate::op_reg::OpDecl>,
+        path: &[&str],
+    ) -> std::rc::Rc<std::cell::RefCell<crate::state::OpState>> {
+        let set = crate::op_reg::OpSet::new(decls);
+        let state = set.state();
+        unsafe { self.isolate.enter() };
+        {
+            v8::scope_with_context!(cs, &mut self.isolate, &self.context);
+            let mut target = cs.get_current_context().global(cs);
+            for seg in path {
+                let key = v8::String::new(cs, seg)
+                    .unwrap_or_else(|| panic!("namespace segment {seg} does not fit a string"));
+                let next = target
+                    .get(cs, key.into())
+                    .and_then(|v| v.try_cast::<v8::Object>().ok())
+                    .unwrap_or_else(|| {
+                        panic!("namespace {seg} missing on the global object — bake the shell script before installing ops under it")
+                    });
+                target = next;
+            }
+            set.install_onto(cs, target);
+        }
+        unsafe { self.isolate.exit() };
+        self.ops = Some(set);
+        state
+    }
+
+    /// Raw isolate access under the enter/exit discipline — the host's
+    /// isolate-level faces (near-heap-limit guard family) go through here.
+    /// The closure must not run JS and must not stash the reference.
+    pub fn with_isolate<R>(&mut self, f: impl FnOnce(&mut v8::OwnedIsolate) -> R) -> R {
+        unsafe { self.isolate.enter() };
+        let out = f(&mut self.isolate);
+        unsafe { self.isolate.exit() };
+        out
     }
 
     /// Install the module machinery: the map goes in the isolate slot,
@@ -760,14 +966,24 @@ impl Vm {
     /// happens next. The drive still ran: an op completing under terminate
     /// parks in the queue instead of evaporating (#226/#240, the law).
     pub fn poll(&mut self) -> Result<bool, LoopError> {
-        {
+        let flag_waker = {
             let driver = self
                 .isolate
                 .get_slot::<DriverSlot>()
                 .expect("Vm::new installs the driver slot")
                 .clone();
+            // The sync face's "waker" is the advisory flag (see
+            // register_loop_waker): spawn wakes the flag, the poll-driven
+            // embedder re-drives until idle.
+            let flag_waker = driver.borrow().flag_waker();
+            driver
+                .borrow_mut()
+                .register_loop_waker(&flag_waker.clone());
             driver.borrow_mut().drive(&mut self.queue);
-        }
+            flag_waker
+        };
+        // Same flag wakes for foreground posts on the sync face.
+        crate::foreground::set_waker(&self.fg, &flag_waker);
         // Module progress (dynamic imports) rides between the Rust drive
         // and JS delivery: its loads are Rust-side futures like ops, its
         // settlements land in JS like triplets.
@@ -779,9 +995,14 @@ impl Vm {
         // Enter/exit discipline — see eval_string. The early-return on a
         // parked batch must NOT skip the exit, so the drain moves inside.
         unsafe { self.isolate.enter() };
+        // Pre-phase: drain foreground tasks (same law as poll_event_loop —
+        // the sync embedder parks between polls, so every queued post runs
+        // now or never).
+        let _ran_fg = crate::foreground::drain(&self.fg);
         let delivered = self.deliver_round();
         if delivered.is_ok() {
             self.drain_microtasks();
+            self.dispatch_rejections()?;
         }
         unsafe { self.isolate.exit() };
         delivered
@@ -802,23 +1023,47 @@ impl Vm {
                 .get_slot::<DriverSlot>()
                 .expect("Vm::new installs the driver slot")
                 .clone();
+            // deno's state.waker.register(cx.waker()) law: spawns from inside
+            // a pass (and completions racing the park) re-schedule THIS task.
+            driver.borrow_mut().register_loop_waker(cx.waker());
             driver.borrow_mut().drive_with(&mut self.queue, cx.waker());
         }
+        // Foreground posts wake this same task (deno setup.rs law).
+        crate::foreground::set_waker(&self.fg, cx.waker());
         self.poll_modules(cx)?;
         // Enter/exit discipline — see eval_string. The early-return on a
         // parked batch must NOT skip the exit, so the drain moves inside.
         unsafe { self.isolate.enter() };
+        // Pre-phase: drain foreground tasks (deno poll_event_loop phase 0).
+        // Runs BEFORE any delivery — an async wasm compile resolving here is
+        // what unblocks the promises this pass is about to settle.
+        let _ran_fg = crate::foreground::drain(&self.fg);
         let delivered = self.deliver_round();
         if delivered.is_ok() {
             self.drain_microtasks();
+            self.dispatch_rejections()?;
         }
         unsafe { self.isolate.exit() };
         let delivered = delivered?;
+        let pending_rejections = self
+            .isolate
+            .get_slot::<RejectionSlot>()
+            .map(|slot| {
+                let st = slot.borrow();
+                !st.pending.is_empty() || !st.pending_handled.is_empty()
+            })
+            .unwrap_or(false);
+        // V8's own counter + our queue: both faces of "engine work still in
+        // flight" (background threads compiling, foreground posts waiting).
+        let pending_background = self.isolate.has_pending_background_tasks()
+            || crate::foreground::has_pending(&self.fg);
         Ok(LoopActivity {
             delivered,
             pending_ops: self.pending_ops(),
             pending_modules: self.has_pending_module_evaluation()
                 || self.has_pending_dynamic_imports(),
+            pending_rejections,
+            pending_background,
         })
     }
 
@@ -843,6 +1088,104 @@ impl Vm {
         // failures are the loop's only terminate signal.
         v8::scope_with_context!(scope, &mut self.isolate, &self.context);
         scope.perform_microtask_checkpoint();
+    }
+
+    /// Phase 2c — fire pending promise-rejection events, AFTER the microtask
+    /// drain (deno_core `jsruntime.rs::dispatch_rejections` law): handled
+    /// pairs first (rejectionhandled fires before any later
+    /// unhandledrejection), then the unhandled batch, swapped out WHOLE so
+    /// rejections arriving inside the handlers queue for the next round.
+    ///
+    /// The handlers are read live from the context globals each round
+    /// (PRELUDE registration face) — absent handler = drain silently (a bare
+    /// V8 fired no event either). Handled-phase exceptions are ignored, deno
+    /// law (`dispatch_handled_rejections` never opens a try-catch); an
+    /// unhandled-phase exception or termination propagates to the loop with
+    /// the un-fired remainder re-queued — deno drops the tail; we park it,
+    /// the settle-queue law applied to its sibling queue.
+    ///
+    /// Enter/exit discipline: the caller holds the isolate entered (both
+    /// `poll` faces call this inside their enter/exit block).
+    fn dispatch_rejections(&mut self) -> Result<(), LoopError> {
+        let Some(slot) = self.isolate.get_slot::<RejectionSlot>() else {
+            return Ok(());
+        };
+        let slot = slot.clone();
+
+        // Phase 1 — rejectionhandled. Pop-per-item: the borrow must be DOWN
+        // while JS runs (the promise-reject callback re-enters the slot from
+        // any rejection born inside a listener).
+        loop {
+            let item = slot.borrow_mut().pending_handled.pop_front();
+            let Some((promise, reason)) = item else { break };
+            let handler = {
+                v8::scope_with_context!(cs, &mut self.isolate, &self.context);
+                read_rejection_handler(cs, "__ditingHandledRejectionHandler")
+            };
+            if let Some(handler) = handler {
+                v8::scope_with_context!(cs, &mut self.isolate, &self.context);
+                let f = v8::Local::new(cs, &handler);
+                let recv: v8::Local<v8::Value> = v8::undefined(cs).into();
+                let args: [v8::Local<v8::Value>; 2] = [
+                    v8::Local::<v8::Promise>::new(cs, &promise).into(),
+                    v8::Local::new(cs, &reason),
+                ];
+                // Return ignored — see the law note above.
+                let _ = f.call(cs, recv, &args);
+            }
+        }
+
+        // Phase 2 — unhandled, swap out whole.
+        let batch: Vec<(v8::Global<v8::Promise>, v8::Global<v8::Value>)> = {
+            let mut st = slot.borrow_mut();
+            std::mem::take(&mut st.pending).into()
+        };
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let handler = {
+            v8::scope_with_context!(cs, &mut self.isolate, &self.context);
+            read_rejection_handler(cs, "__ditingUnhandledRejectionHandler")
+        };
+        let Some(handler) = handler else {
+            return Ok(()); // nobody listens: drained, like a bare V8
+        };
+
+        let mut failure: Option<Option<String>> = None;
+        {
+            v8::scope_with_context!(cs, &mut self.isolate, &self.context);
+            v8::tc_scope!(let tc, cs);
+            let f = v8::Local::new(tc, &handler);
+            let recv: v8::Local<v8::Value> = v8::undefined(tc).into();
+            for (i, (promise, reason)) in batch.iter().enumerate() {
+                let args: [v8::Local<v8::Value>; 2] = [
+                    v8::Local::<v8::Promise>::new(tc, promise).into(),
+                    v8::Local::new(tc, reason),
+                ];
+                if f.call(tc, recv, &args).is_none() {
+                    // Park the un-fired remainder, order kept, ahead of
+                    // anything queued during the handler run.
+                    let mut st = slot.borrow_mut();
+                    for (p, r) in batch[i..].iter().rev() {
+                        st.pending.push_front((p.clone(), r.clone()));
+                    }
+                    failure = Some(if tc.has_terminated() {
+                        None
+                    } else {
+                        Some(match tc.message() {
+                            Some(m) => m.get(tc).to_rust_string_lossy(tc),
+                            None => "<no message>".into(),
+                        })
+                    });
+                    break;
+                }
+            }
+        }
+        match failure {
+            None => Ok(()),
+            Some(None) => Err(LoopError::Terminated),
+            Some(Some(msg)) => Err(LoopError::TickThrew(msg)),
+        }
     }
 
     /// Run a script in the context and return its value as a string
@@ -1008,6 +1351,21 @@ fn deliver_batch(
         Some(None) => Err(LoopError::Terminated),
         Some(Some(msg)) => Err(LoopError::TickThrew(msg)),
     }
+}
+
+/// The live handler under a rejection-face global, if the page registered
+/// one (PRELUDE's registration face stores it there — baked into the blob
+/// with the registering bootstrap, so restores need no rehydration).
+fn read_rejection_handler<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    name: &str,
+) -> Option<v8::Global<v8::Function>> {
+    let key = v8::String::new(scope, name)?;
+    let global = scope.get_current_context().global(scope);
+    global
+        .get(scope, key.into())
+        .and_then(|v| v.try_cast::<v8::Function>().ok())
+        .map(|f| v8::Global::new(scope, f))
 }
 
 #[cfg(test)]

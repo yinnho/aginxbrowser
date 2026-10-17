@@ -198,6 +198,34 @@ pub fn throw_serde_v8_error<'s, 'i>(scope: &mut v8::PinScope<'s, 'i>, err: &serd
     scope.throw_exception(exc);
 }
 
+/// An op's `Err` face → a V8 exception value (10d flip; the shape deno_core
+/// `error.rs::to_v8_error` gave the macro's `Result` arm). Deliberate
+/// divergence on the same law as [`throw_serde_v8_error`]: deno_core 0.411
+/// builds classed errors through a JS builder callback stored in the
+/// isolate's exception-state embedder data (`js_build_custom_error_cb`,
+/// installed by its bootstrap) — a host face we never install. Instead this
+/// uses the native constructors directly, the pre-builder shape deno_core
+/// itself kept as a commented-out fallback (error.rs "match class" block):
+/// class name selects the v8::Exception constructor, anything unknown is a
+/// plain Error. `get_additional_properties` is dropped (our embedder's
+/// error types set none).
+pub fn to_v8_error<'s, 'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
+    error: &dyn deno_error::JsErrorClass,
+) -> v8::Local<'s, v8::Value> {
+    let class = error.get_class();
+    let message = v8::String::new(scope, &error.get_message()).unwrap_or_else(|| {
+        v8::String::new_from_one_byte(scope, b"error", v8::NewStringType::Normal).unwrap()
+    });
+    match class.as_ref() {
+        "TypeError" => v8::Exception::type_error(scope, message),
+        "RangeError" => v8::Exception::range_error(scope, message),
+        "ReferenceError" => v8::Exception::reference_error(scope, message),
+        "SyntaxError" => v8::Exception::syntax_error(scope, message),
+        _ => v8::Exception::error(scope, message),
+    }
+}
+
 //
 // Rust→V8 conversion traits (ops_rust_to_v8.rs subset)
 //

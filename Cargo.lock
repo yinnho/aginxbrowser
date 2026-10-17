@@ -1399,6 +1399,7 @@ dependencies = [
 name = "diting_runtime"
 version = "0.1.0"
 dependencies = [
+ "deno_error",
  "diting_ops",
  "serde",
  "serde_v8",

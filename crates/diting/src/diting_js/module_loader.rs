@@ -5,13 +5,11 @@ use std::rc::Rc;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
-use deno_core::error::ModuleLoaderError;
-use deno_core::ModuleLoadResponse;
-use deno_core::ModuleLoader;
-use deno_core::ModuleLoadOptions;
-use deno_core::ModuleLoadReferrer;
-use deno_core::ModuleSource;
-use deno_core::ModuleSourceCode;
+use diting_runtime::modules::ModuleLoadResponse;
+use diting_runtime::modules::ModuleLoader;
+use diting_runtime::modules::ModuleLoaderError;
+use diting_runtime::modules::ModuleSource;
+use diting_runtime::modules::resolve_import;
 use url::Url as ModuleSpecifier;
 
 use crate::diting_js::import_map::ImportMap;
@@ -71,7 +69,7 @@ impl DitingModuleLoader {
 }
 
 fn io_err(msg: String) -> ModuleLoaderError {
-    // 0.411 aliases ModuleLoaderError = deno_error 0.7 JsErrorBox (no From<io::Error>).
+    // Our machinery only renders the message (diting_runtime::modules).
     ModuleLoaderError::generic(msg)
 }
 
@@ -146,7 +144,7 @@ fn decode_base64_payload(payload: &str) -> Result<Vec<u8>, ModuleLoaderError> {
 /// fetch()/classic-script decoders (b12405d, f841205) with the one module-
 /// specific addition: the MIME essence must be a JavaScript type.
 fn data_module_source(
-    module_specifier: &ModuleSpecifier,
+    _module_specifier: &ModuleSpecifier,
     url: &str,
 ) -> Result<ModuleSource, ModuleLoaderError> {
     let comma = url
@@ -189,12 +187,7 @@ fn data_module_source(
         )));
     }
     let code = String::from_utf8_lossy(&bytes).into_owned();
-    Ok(ModuleSource::new(
-        deno_core::ModuleType::JavaScript,
-        ModuleSourceCode::String(code.into()),
-        module_specifier,
-        None,
-    ))
+    Ok(ModuleSource { code })
 }
 
 /// Resolve a `blob:` module from the Rust-side mirror of
@@ -202,7 +195,7 @@ fn data_module_source(
 /// modules whose type is not a JavaScript MIME), and a revoked or unknown
 /// URL is a catchable rejection.
 fn blob_module_source(
-    module_specifier: &ModuleSpecifier,
+    _module_specifier: &ModuleSpecifier,
     url: &str,
     blob_store: &RefCell<HashMap<String, (Vec<u8>, String)>>,
 ) -> Result<ModuleSource, ModuleLoaderError> {
@@ -225,12 +218,7 @@ fn blob_module_source(
         )));
     }
     let code = String::from_utf8_lossy(&bytes).into_owned();
-    Ok(ModuleSource::new(
-        deno_core::ModuleType::JavaScript,
-        ModuleSourceCode::String(code.into()),
-        module_specifier,
-        None,
-    ))
+    Ok(ModuleSource { code })
 }
 
 impl ModuleLoader for DitingModuleLoader {
@@ -238,14 +226,14 @@ impl ModuleLoader for DitingModuleLoader {
         &self,
         specifier: &str,
         referrer: &str,
-        _kind: deno_core::ResolutionKind,
     ) -> Result<ModuleSpecifier, ModuleLoaderError> {
-        // deno_core represents the root passed to load_side_es_module with a
-        // synthetic "." referrer. A browser resolves <script type=module src>
-        // as a resource URL before it starts a graph; the document import map
-        // must not remap that root URL.
+        // The module machinery represents the root passed to
+        // load_side_es_module with a synthetic "." referrer. A browser
+        // resolves <script type=module src> as a resource URL before it
+        // starts a graph; the document import map must not remap that root
+        // URL.
         if referrer == "." {
-            return deno_core::resolve_import(specifier, &self.base_url)
+            return resolve_import(specifier, &self.base_url)
                 .map_err(|error| io_err(error.to_string()));
         }
 
@@ -268,8 +256,7 @@ impl ModuleLoader for DitingModuleLoader {
     fn load(
         &self,
         module_specifier: &ModuleSpecifier,
-        _maybe_referrer: Option<&ModuleLoadReferrer>,
-        _options: ModuleLoadOptions,
+        _maybe_referrer: Option<&str>,
     ) -> ModuleLoadResponse {
         let url = module_specifier.to_string();
         // data:/blob: resolve locally — no HTTP client can fetch either
@@ -445,7 +432,7 @@ impl ModuleLoader for DitingModuleLoader {
 /// UTF-8 decode + MODULE_TRACE bracketing + ModuleSource build — the tail
 /// both the streaming path and the legacy-TLS fallback converge on.
 fn decoded_module_source(
-    specifier: &ModuleSpecifier,
+    _specifier: &ModuleSpecifier,
     url: &str,
     code_bytes: Vec<u8>,
 ) -> Result<ModuleSource, ModuleLoaderError> {
@@ -468,10 +455,5 @@ fn decoded_module_source(
         code
     };
 
-    Ok(ModuleSource::new(
-        deno_core::ModuleType::JavaScript,
-        ModuleSourceCode::String(code.into()),
-        specifier,
-        None,
-    ))
+    Ok(ModuleSource { code })
 }

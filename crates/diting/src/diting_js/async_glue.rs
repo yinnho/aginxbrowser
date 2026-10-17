@@ -1,6 +1,6 @@
 //! # async_glue — 手写 async op 胶水（我们的 Vm 宿主侧）
 //!
-//! 批 10c 的 diting 半边：真四 async op 里的三个（`op_sleep`、
+//! 批 10c 的 diting 半边：真四 async op（`op_fetch_url`、`op_sleep`、
 //! `op_ws_open`、`op_ws_next_message`）在我们自己的宿主（diting_runtime
 //! 的 Vm + OpSet）上跑时，不走 `#[op2]` 宏——宏产的是 deno 形状；这里
 //! 逐句照 `diting_runtime/tests/async_glue.rs` 的模板手写：
@@ -12,9 +12,8 @@
 //! - JS 参先解码、state 后解码（decode-throw 永不持有 RefCell）；
 //! - 身体 future 经 [`spawn_async_op`] 灌进 OpDriver，完成序即投递序。
 //!
-//! `op_fetch_url` 的胶水不在这：它的身体把 `&OpState` 穿进 fetch 族
-//! 十来个自由函数，签名抽两遍不如跟着 10d 的整仓 state 翻转一起翻。
-//! 10d 装配对调后本模块成为唯一宿主，`#[op2]` 桩整体退役。
+//! 10d 翻转后本模块是这四个 op 的唯一宿主（`ops::our_decls()` 把
+//! `all_decls()` 并进同步表一起装进 `Deno.core.ops`）——`#[op2]` 桩已死。
 
 use diting_runtime::op_glue::{throw_error_one_byte_info, to_f64_option, to_i32_option, to_string};
 use diting_runtime::op_reg::{OpCtx, OpDecl, SlowFn, SlowFnImpl};
@@ -150,10 +149,61 @@ pub fn op_ws_next_message_decl() -> OpDecl {
     )
 }
 
-// Re-exported for the 10d assembly: the full decl list our host installs
-// (op_fetch_url's entry lands with the state flip).
+// ── op_fetch_url ──────────────────────────────────────────────────────
+
+/// `op_fetch_url(url, method, headers_json, body, origin, mode,
+/// credentials, referrer)` — resolves the settlement JSON payload; rejects
+/// with the error message when the walk fails (the fetch shim surfaces
+/// rejects as TypeError, same as the deno host did).
+fn op_fetch_url_impl(info: *const v8::FunctionCallbackInfo) -> usize {
+    let info = unsafe { &*info };
+    let parts: v8::FunctionCallbackInfoParts<'_> = info.get_parts();
+    let args = v8::FunctionCallbackArguments::from_function_callback_info_parts(info, &parts);
+    let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr(&parts.isolate) };
+    let mut scope_store = unsafe { v8::CallbackScope::new(info) };
+    let scope = unsafe { std::pin::Pin::new_unchecked(&mut scope_store) };
+    let mut scope = scope.init();
+    let promise_id = to_i32_option(&args.get(0)).unwrap_or_default();
+    let url = to_string(&mut scope, &args.get(1));
+    let method = to_string(&mut scope, &args.get(2));
+    let headers_json = to_string(&mut scope, &args.get(3));
+    let body = to_string(&mut scope, &args.get(4));
+    let origin = to_string(&mut scope, &args.get(5));
+    let mode = to_string(&mut scope, &args.get(6));
+    let credentials = to_string(&mut scope, &args.get(7));
+    // "policy\0init\0settle_key" bundle (see op_fetch_url_body).
+    let referrer = to_string(&mut scope, &args.get(8));
+    let opctx = unsafe { opctx_of(&args) };
+    let state = opctx.state.clone();
+    let fut = async move {
+        super::ops::op_fetch_url_body(
+            state, url, method, headers_json, body, origin, mode, credentials, referrer,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    };
+    spawn_async_op(isolate, promise_id, fut);
+    0
+}
+
+unsafe extern "C" fn op_fetch_url_entry(info: *const v8::FunctionCallbackInfo) {
+    op_fetch_url_impl(info);
+}
+
+pub fn op_fetch_url_decl() -> OpDecl {
+    async_decl(
+        "op_fetch_url",
+        8,
+        op_fetch_url_entry as _,
+        op_fetch_url_impl,
+    )
+}
+
+// Re-exported for the 10d assembly: the full async-four decl list our host
+// installs alongside the sync ops (ops::our_decls()).
 pub fn all_decls() -> Vec<OpDecl> {
     vec![
+        op_fetch_url_decl(),
         op_sleep_decl(),
         op_ws_open_decl(),
         op_ws_next_message_decl(),

@@ -19,28 +19,24 @@
         assert_eq!(title, serde_json::json!("Test Page"));
     }
 
-    /// Claim step 2 (docs/diting_runtime认领计划_20261017.md): the op
-    /// settlement tick is ours — js/core_base.js wraps deno_core's
-    /// __eventLoopTick at snapshot time with a per-triplet try/catch
-    /// (deno's loop lets one unknown promise id kill the whole remaining
-    /// batch — the #226/#240 delivery shape). Page JS can't call the tick
-    /// (the Deno global is deleted per page init and the promise ring is
-    /// closured), so we pin the claim marker the overlay writes — if
-    /// core_base.js ever silently stops landing in the snapshot, this
-    /// fires — and the real settlement path through the claimed tick
-    /// (setTimeout rides an async op whose promise resolves via the tick).
+    /// Claim step 10d (docs/diting_runtime认领计划_20261017.md): the settle
+    /// pipeline is OURS — Rust SettleQueue + `__diting_settle` + the promise
+    /// ring baked by the PRELUDE replaced js/core_base.js's tick overlay
+    /// (which died with the deno host). Page JS can't see any of it (the
+    /// Deno global is deleted per page init), so this pins the settlement
+    /// path end-to-end: setTimeout rides an async op whose promise resolves
+    /// through OUR loop, and the retired core_base claim marker stays
+    /// absent.
     #[tokio::test(flavor = "current_thread")]
     async fn claimed_event_loop_tick_face() {
         let mut rt = setup_runtime(r#"<body></body>"#);
         let result = rt
             .call_function_on_remote(
                 r#"async () => {
-                    const probe = globalThis.__diting_core_base;
                     await new Promise(r => setTimeout(r, 10));
                     return JSON.stringify({
-                        claimed: probe && probe.claimed === true,
-                        missingThrow: probe && probe.missingThrow,
-                        install: probe && probe.install,
+                        settled: true,
+                        retired: typeof globalThis.__diting_core_base === "undefined",
                     });
                 }"#,
                 None,
@@ -53,63 +49,12 @@
         let v: serde_json::Value =
             serde_json::from_str(result.value.unwrap().as_str().unwrap()).unwrap();
         assert_eq!(
-            v["claimed"], serde_json::json!(true),
-            "core_base.js claim marker absent — the tick overlay did not land in the snapshot"
+            v["settled"], serde_json::json!(true),
+            "the setTimeout settlement must resolve through our loop"
         );
-        let shape = v["missingThrow"].as_str().unwrap_or("");
-        assert!(
-            shape == "string" || shape == "error-msg" || shape == "none",
-            "missing-promise throw shape recorded as {shape:?} — absorb filter not derived from a known shape"
-        );
-        let install = v["install"].as_str().unwrap_or("");
-        assert!(
-            install == "defineProperty" || install == "assign" || install == "shell",
-            "tick install path recorded as {install:?} — unknown install branch"
-        );
-    }
-
-    /// Re-delivery v1 (same claim, js/core_base.js replay stash): a batch
-    /// interrupted mid-delivery (terminate landing mid-loop, or an internal
-    /// resolver throw) stays parked and the NEXT tick drains it before
-    /// delivering anything new — instead of deno's evaporate-the-tail
-    /// (#226/#240 shape). Pinned by parking a stale batch (bogus promise
-    /// ids, as if a terminate ate the previous tick) and forcing a real op
-    /// settlement (setTimeout): the drain must empty the stash, absorb the
-    /// missing ids without surfacing an error, and leave the settlement
-    /// path working.
-    #[tokio::test(flavor = "current_thread")]
-    async fn claimed_event_loop_tick_redelivery() {
-        let mut rt = setup_runtime(r#"<body></body>"#);
-        let result = rt
-            .call_function_on_remote(
-                r#"async () => {
-                    const probe = globalThis.__diting_core_base;
-                    // Park two stale batches — the shape a terminate-mid-tick
-                    // leaves behind (ids that resolve nowhere).
-                    probe.__forceReplay(999001, true, "gone1");
-                    probe.__forceReplay(999002, false, "gone2", 999003, true, null);
-                    const parked = probe.__replayLength();
-                    // Real settlement: the completion tick drains the stash
-                    // first (missing ids absorb), then delivers its own batch.
-                    await new Promise(r => setTimeout(r, 10));
-                    return JSON.stringify({
-                        parked: parked,
-                        drained: probe.__replayLength() === 0,
-                    });
-                }"#,
-                None,
-                &[],
-                true,
-                true,
-            )
-            .await
-            .unwrap();
-        let v: serde_json::Value =
-            serde_json::from_str(result.value.unwrap().as_str().unwrap()).unwrap();
-        assert_eq!(v["parked"], serde_json::json!(2), "both stale batches must register as parked");
         assert_eq!(
-            v["drained"], serde_json::json!(true),
-            "the next real settlement tick must drain the parked batches (missing ids absorbed, no error surfaced)"
+            v["retired"], serde_json::json!(true),
+            "__diting_core_base must not exist — core_base.js retired with the deno host"
         );
     }
 
@@ -18304,41 +18249,6 @@
         std::env::remove_var("AGINXBROWSER_STORAGE_DIR");
         crate::diting_js::ops::reset_local_storage_for_tests();
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// obscura#841 mechanism, pinned. deno_core's isolate-level
-    /// `promise_reject_callback` (runtime/bindings.rs) unconditionally looks
-    /// up the CURRENT context's CONTEXT_STATE_SLOT embedder data and bumps the
-    /// `Rc` found there — no null guard (`state_from_scope` ->
-    /// `clone_rc_raw` -> `Rc::increment_strong_count`). Only
-    /// `JsRuntime::new_inner` initializes that slot, and only for the main
-    /// context. A context created via raw `v8::Context::from_snapshot` —
-    /// obscura's `create_realm_context` path for frame realms — never gets
-    /// the slot set, so the first promise rejection fired while such a
-    /// context is entered refcounts NULL: fault at 0xfffffffffffffff0, the
-    /// `ldr x9, [x8, #-0x10]!` frame from #841. We run one main context per
-    /// JsRuntime, so the product never creates such a context; this test
-    /// documents the hazard for anyone adding multi-realm support. Manual
-    /// only: it segfaults the harness by design.
-    #[test]
-    #[ignore = "segfaults by design (obscura#841 probe); run explicitly with --ignored"]
-    fn raw_snapshot_context_promise_reject_segfaults() {
-        let mut rt = JsRuntime::new();
-        let context = {
-            deno_core::scope!(scope, rt.runtime);
-            let ctx = v8::Context::from_snapshot(scope, 1, Default::default())
-                .or_else(|| {
-                    v8::Context::from_snapshot(scope, 0, Default::default())
-                })
-                .expect("snapshot context to restore");
-            v8::Global::new(scope, ctx)
-        };
-        let isolate = rt.runtime.v8_isolate();
-        v8::scope_with_context!(cscope, isolate, &context);
-        let src = v8::String::new(cscope, "Promise.reject(1)").unwrap();
-        let script = v8::Script::compile(cscope, src, None).unwrap();
-        let _ = script.run(cscope);
-        panic!("unreachable: the rejection should have crashed the process");
     }
 
     /// obscura#828 lineage: innerText is rendered text, not textContent —

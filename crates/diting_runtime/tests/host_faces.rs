@@ -196,6 +196,8 @@ fn poll_event_loop_passes_the_caller_waker_to_op_bodies() {
             delivered: true,
             pending_ops: 0,
             pending_modules: false,
+            pending_rejections: false,
+            pending_background: false,
         },
         "completed, delivered, and idle — one wake, one pass"
     );

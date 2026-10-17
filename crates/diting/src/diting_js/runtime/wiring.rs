@@ -234,7 +234,7 @@ impl JsRuntime {
             }
             None => "delete globalThis.__diting_tz;".to_string(),
         };
-        let _ = self.runtime.execute_script("<set-tz>", source);
+        let _ = self.runtime.execute_script("<set-tz>", &source);
     }
 
     /// Pin or clear the page locale (`Emulation.setLocaleOverride`, #153).
@@ -250,6 +250,6 @@ impl JsRuntime {
             }
             None => "delete globalThis.__diting_locale;".to_string(),
         };
-        let _ = self.runtime.execute_script("<set-locale>", source);
+        let _ = self.runtime.execute_script("<set-locale>", &source);
     }
 }
