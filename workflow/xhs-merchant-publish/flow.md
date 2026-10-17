@@ -1,26 +1,54 @@
-# xhs-merchant-publish — 千帆/Ark 商品发布（骨架）
+# xhs-merchant-publish — 千帆/Ark publish_render 签名链
 
-> **STUB (2026-10-12).** 不提交商品。只保证：bare create → `preload recipe: xhs-sign` →
-> navigate → 探测 `_webmsxyw`。有 signer 落到 `saved.stub=STUB_OK`；没有则 throw，
-> 避免再打裸 `publish_render` / `batch_create_item` 吃 406。
+> **2026-10-17 接线。** 目标=证明签名链：从页内发一发 `publish_render` 探测
+> fetch，`xhs-sign` 门闩（waitSigner 12s + settle）放行后自动补
+> X-s/X-t/X-s-common，回执 **HTTP200** = 签名链通。**不提交商品**——
+> `batch_create_item` 刻意不接，真写上架须用户点头。
 
-## 已知坑（来自 2026-10-12 探测）
+## 判决表（flow 的四条出路）
 
-- Ark 页经常 **不起** `_webmsxyw`；旧 xhs-sign 吞 `x-s` 会导致必 406 —— 已在 recipe
-  里改成 signer 缺失时 passthrough（`__xsStats().passthrough`）。
-- `batch_create_item` 还可能回 `300015`（浏览器运行环境异常）或店 `deactivated`。
-- 登录：用 `workflow/xhs-qianfan-login`（千帆 App / beer-login CAS）。`xhs-login` 是 C 端，不要混用。cookie 过期会 `-13004`。
+| 出路 | 触发 | 含义 |
+|---|---|---|
+| `saved.result`（绿） | `pr_status:200` | 签名链通；附 seller/info jar 复查 |
+| throw 非预期回执 | 406/401/超时 | 缺签（406）或 jar 死（401/-13004） |
+| throw 门闩合成拒 | `signer-not-ready` | 请求从未上线（settle 契约未满足），jar 无恙 |
+| throw 环境杀 | `300015` | 154 面判决被翻案——立即停，jar 可能已中毒 |
 
-## 下一步（真正上架）
+探测体是 `'{}'`：回执规则载荷（code 200）或业务参数错（code≠200 非 300015）
+都证明签名层+环境层已过——签名链的证据不依赖业务参数正确性。
 
-1. 把 `publish_url` 换成真实发布页，等到 `has_signer:true`。
-2. 对照 Chrome HAR 补 `publish_render` → `batch_create_item`（body 来自摩卡报告）。
-3. 店状态 / 风控与签名分开处理。
+## 前置
+
+- **绿 jar**：先跑 `workflow/xhs-qianfan-login`（B 端 CAS QR 登录，落
+  `xhs-qf-stable` 账号）。jar 死会在 create 页被弹去 login——flow 的
+  wait_signer predicate 放行弹跳，signer 观测步报精确 url。
+- fleet 面 **Chrome/154**（A-154-lite，f124c1e）：145/155 面都会死
+  （145=300015 环境杀、155=SIT 路由墙）。persona_ua 与 fleet 同钉 154。
+
+## 已知坑
+
+- 签名器只铸在 create 页（itemark/qiankun），且可能只在 `window.proxy._webmsxyw`
+  不在 `window._webmsxyw`——recipe 会镜像，flow 两处都认。
+- 未签 `publish_render` = HTTP 406 + 毒 jar（-13004 + sec_poison_id）。
+  recipe 的门闩对未签 PR 合成拒（永不上线），这是双保险的另一层。
+- 引擎侧 `AGINXBROWSER_SIGNER_GATE`（8129 已挂）是第二道门：engine 层
+  持有 publish_render 直到页内签名器谓词真。
+- `xhs-login` 是 C 端，不要混用；登录一律走 `xhs-qianfan-login`。
 
 ## 用法
 
 ```bash
-# 已有商家会话
+# flow 自建会话（account=xhs-qf-stable, persona_ua=Chrome/154）
+curl -sS -X POST "$BASE/flow/run" -H 'content-type: application/json' \
+  -d '{"name":"xhs-merchant-publish"}'
+
+# 或挂已有会话
 curl -sS -X POST "$BASE/flow/run" -H 'content-type: application/json' \
   -d '{"name":"xhs-merchant-publish","session_id":"s_N"}'
 ```
+
+## 下一步（真写上架，待用户点头）
+
+1. 表单驱动：类目/标题/图片走页内 UI（HAR=回执真源，对照 Chrome 抓包）。
+2. `batch_create_item` 接线（body 真值来自 10-11 成功链 + 新 HAR）。
+3. 店状态（deactivated）与风控分面处理。

@@ -1,43 +1,86 @@
 {
+  "vars": {
+    "create_url": "https://ark.xiaohongshu.com/app-item/good/create",
+    "signer_timeout_ms": 60000,
+    "note": "publish_render 签名链：xhs-sign 门闩放行后从页内发探测 fetch（自动 X-s/X-t/X-s-common）。前置=绿 jar（先跑 xhs-qianfan-login）。batch_create_item 刻意不接——真写上架须用户点头。"
+  },
   "create": {
     "width": 1440,
-    "height": 900
-  },
-  "vars": {
-    "publish_url": "https://ark.xiaohongshu.com/app-system/home",
-    "signer_timeout_ms": 60000,
-    "note": "STUB — fill publish_render / batch_create_item after _webmsxyw is green"
+    "height": 900,
+    "account": "xhs-qf-stable",
+    "persona_ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
   },
   "steps": [
     {
+      "id": "sign",
       "op": "preload",
       "args": {
         "recipe": "xhs-sign"
       },
-      "note": "document-start xhs-sign (passthrough when _webmsxyw missing). Must run before navigate."
+      "note": "document-start xhs-sign v6：publish_render 门闩（waitSigner 12s+settle）、proxy._webmsxyw 镜像、未签 PR 合成拒（永不裸发 406）。必须在 navigate 前。"
     },
     {
+      "id": "nav_home",
       "op": "navigate",
       "args": {
-        "url": "{{publish_url}}"
+        "url": "https://ark.xiaohongshu.com/ark"
       },
-      "note": "Ark / 千帆 surface — AS signer often absent on bare home; publish page URL may need vars override."
+      "note": "jar 预检跳板：ark home。死 jar 只会被弹去 CAS 登录页（良性弹跳，无 product API 风暴）。"
     },
     {
+      "id": "jar_probe",
+      "op": "eval",
+      "args": {
+        "script": "(async function(){try{var r=await fetch('/api/edith/seller/info/v2',{credentials:'include'});var t=await r.text();var c=null;try{c=JSON.parse(t).code;}catch(e){}return JSON.stringify({seller_status:r.status,seller_code:c,url:location.href,body:t.slice(0,300)});}catch(e){return JSON.stringify({thrown:String(e),url:location.href});}})()",
+        "timeout_ms": 15000
+      },
+      "save": "jar",
+      "note": "预检（2026-10-17 教训：ark 会话 cookie ~40min 过期，拿死 jar 硬闯 create=401 风暴→弹跳链→毒印杀 root）。code 0 才准进 create。"
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "jar",
+          "is": "contains",
+          "value": "\"seller_code\":0"
+        },
+        "goto": "nav_create"
+      },
+      "note": "jar 绿才放行 create"
+    },
+    {
+      "id": "jar_dead",
+      "op": "eval",
+      "args": {
+        "script": "throw new Error('xhs-merchant-publish: jar 死（-13004/非0）— ' + JSON.stringify({{jar}}) + ' — 先跑 xhs-qianfan-login 重登；进 create 前必须绿 jar，否则弹跳链会毒印杀 root')"
+      },
+      "note": "fail loud：在此停住，不撞 create 毒墙"
+    },
+    {
+      "id": "nav_create",
+      "op": "navigate",
+      "args": {
+        "url": "{{create_url}}"
+      },
+      "note": "直接进 ark itemark 创建页（签名器只在此页铸）。jar 死会被弹去 login——下一步 predicate 放行弹跳以便精确报错。"
+    },
+    {
+      "id": "wait_signer",
       "op": "wait",
       "args": {
-        "predicate": "typeof window._webmsxyw === 'function' || document.readyState === 'complete'",
+        "predicate": "(typeof window._webmsxyw==='function') || (window.proxy && typeof window.proxy._webmsxyw==='function') || /website-login\\/error|customer\\.xiaohongshu\\.com\\/login|\\/login\\?/.test(location.href)",
         "timeout_ms": "{{signer_timeout_ms}}"
       },
-      "note": "soft wait — predicate stays true on readyState even without signer so the run reaches the branch"
+      "note": "等签名器（window 或 qiankun window.proxy 两处其一）；被弹去登录/error 页也算谓词真——把判决交给 signer 观测步，错误信息更准。"
     },
     {
       "op": "eval",
       "args": {
-        "script": "(function(){var s=(typeof window.__xsStats==='function')?window.__xsStats():{};return JSON.stringify({has_signer: typeof window._webmsxyw==='function', xs_installed:!!s.installed, xs_passthrough:s.passthrough||0, xs_signed:s.signed||0, url:location.href});})()"
+        "script": "(function(){var s=(typeof window.__xsStats==='function')?window.__xsStats():{};return JSON.stringify({has_signer:(typeof window._webmsxyw==='function')||(window.proxy&&typeof window.proxy._webmsxyw==='function'), xs_installed:!!s.installed, xs_signed:s.signed||0, xs_passthrough:s.passthrough||0, url:location.href});})()"
       },
       "save": "signer",
-      "note": "observability only — merchant create APIs must not run without has_signer"
+      "note": "观测：签名器在不在、xhs-sign 装没装、页面自己已签了多少发"
     },
     {
       "op": "branch",
@@ -47,25 +90,95 @@
           "is": "contains",
           "value": "\"has_signer\":true"
         },
-        "goto": "ready"
+        "goto": "pr_probe"
       },
-      "note": "no signer → takeover throw; with signer → stub ready marker (create APIs not wired yet)"
+      "note": "无签名器→接管报错。弹去 login 也会落到这里（has_signer:false + url 显示弹跳地址）"
     },
     {
       "op": "eval",
       "args": {
-        "script": "throw new Error('xhs-merchant-publish: _webmsxyw missing — open /live?session=… or re-import_curl; do not call publish_render unsigned (406)')"
+        "script": "throw new Error('xhs-merchant-publish: signer 未就绪 — ' + JSON.stringify({{signer}}) + ' — 若 url 是 login/error 则 jar 已死，先跑 xhs-qianfan-login 重登；勿手发 publish_render（未签=406+毒 jar）')"
       },
-      "note": "fail loud; human handoff"
+      "note": "fail loud；引用 signer 观测变量给出精确上下文"
     },
     {
-      "id": "ready",
+      "id": "pr_probe",
       "op": "eval",
       "args": {
-        "script": "'STUB_OK — wire publish_render + batch_create_item here (see flow.md)'"
+        "script": "(async function(){var t0=Date.now();try{var r=await fetch('/api/edith/product/publish_render',{method:'POST',headers:{'content-type':'application/json'},body:'{}',credentials:'include'});var txt=await r.text();var st=(typeof window.__xsStats==='function')?window.__xsStats():{};var code=null;try{code=JSON.parse(txt).code;}catch(e){}return JSON.stringify({pr_status:r.status,pr_code:code,ms:Date.now()-t0,body:txt.slice(0,1200),pr_last:st.pr_last||null,xs_signed:st.signed||0,xs_passthrough:st.passthrough||0,pr_held:st.pr_held||0,url:location.href});}catch(e){return JSON.stringify({thrown:String(e),pr_last:(typeof window.__xsStats==='function'?(window.__xsStats().pr_last||null):null)});}})()",
+        "timeout_ms": 30000
       },
-      "save": "stub",
-      "note": "skeleton marker — replace with real merchant create steps when signer path is proven"
+      "save": "pr",
+      "note": "签名探测：页内 fetch 走 xhs-sign 包装——门闩等签稳再放、自动补 X-s/X-t/X-s-common。体 '{}' 是探测体；回执规则载荷或业务参数错都证明签名链过（缺签=406、环境杀=300015 是两条独立败路）。"
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "pr",
+          "is": "contains",
+          "value": "signer-not-ready"
+        },
+        "goto": "gate_fail"
+      },
+      "note": "门闩合成拒（waitSigner 12s 内签名器没满足 settle 契约）——请求从未上线"
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "pr",
+          "is": "contains",
+          "value": "300015"
+        },
+        "goto": "env_kill"
+      },
+      "note": "环境杀残留（HTTP461/code300015）——154 面判决下不应出现，出现即翻案"
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "pr",
+          "is": "contains",
+          "value": "\"pr_status\":200"
+        },
+        "goto": "green"
+      },
+      "note": "HTTP200 落地=签名链通（业务 code 非 200 也在回执里，green 步全量报告）"
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "throw new Error('xhs-merchant-publish: publish_render 非预期回执 — ' + JSON.stringify({{pr}}))"
+      },
+      "note": "406/401/超时等其它败路：把回执原样带出"
+    },
+    {
+      "id": "gate_fail",
+      "op": "eval",
+      "args": {
+        "script": "throw new Error('xhs-merchant-publish: 门闩合成拒（签名器 settle 契约未满足，请求未上线）— ' + JSON.stringify({{pr}}))"
+      },
+      "note": "engine SIGNER_GATE 与 recipe 门闩双保险的 recipe 侧触发"
+    },
+    {
+      "id": "env_kill",
+      "op": "eval",
+      "args": {
+        "script": "throw new Error('xhs-merchant-publish: 300015 环境杀仍在（154 面判决被翻案）— ' + JSON.stringify({{pr}}))"
+      },
+      "note": "立即停：jar 可能已中毒，勿再发任何 edith 调用"
+    },
+    {
+      "id": "green",
+      "op": "eval",
+      "args": {
+        "script": "(async function(){var h=null;try{var r=await fetch('/api/edith/seller/info/v2',{credentials:'include'});var t=await r.text();var c=null;try{c=JSON.parse(t).code;}catch(e){}h={seller_status:r.status,seller_code:c};}catch(e){h={thrown:String(e)};}return JSON.stringify({publish_render:'HTTP200 签名链通', probe:{{pr}}, jar_probe:h, url:location.href});})()",
+        "timeout_ms": 15000
+      },
+      "save": "result",
+      "note": "绿灯报告：探测回执全文 + jar 健康复查（signed seller/info 打完 PR 之后仍绿=毒印律未触发）"
     }
   ]
 }
