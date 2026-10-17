@@ -20,6 +20,26 @@
       "note": "document-start xhs-sign v6：publish_render 门闩（waitSigner 12s+settle）、proxy._webmsxyw 镜像、未签 PR 合成拒（永不裸发 406）。必须在 navigate 前。"
     },
     {
+      "op": "eval",
+      "args": {
+        "script": "(function(){return JSON.stringify({url:location.href.slice(0,100)})})()"
+      },
+      "save": "where",
+      "note": "当前页探测——已在 ark 就跳过 nav_home（2026-10-17 二踩：每次 rerun 重导航 ark home=冷启动忙页 15-30s，紧随的 jar_probe eval 必饿死；暖页探测秒绿）。"
+    },
+    {
+      "op": "branch",
+      "args": {
+        "when": {
+          "var": "where",
+          "is": "contains",
+          "value": "ark.xiaohongshu.com"
+        },
+        "goto": "jar_probe"
+      },
+      "note": "已在 ark（home/create 皆可，seller/info 同源）直接预检"
+    },
+    {
       "id": "nav_home",
       "op": "navigate",
       "args": {
@@ -32,7 +52,7 @@
       "op": "eval",
       "args": {
         "script": "(async function(){try{var r=await fetch('/api/edith/seller/info/v2',{credentials:'include'});var t=await r.text();var c=null;try{c=JSON.parse(t).code;}catch(e){}return JSON.stringify({seller_status:r.status,seller_code:c,url:location.href,body:t.slice(0,300)});}catch(e){return JSON.stringify({thrown:String(e),url:location.href});}})()",
-        "timeout_ms": 15000
+        "timeout_ms": 30000
       },
       "save": "jar",
       "note": "预检（2026-10-17 教训：ark 会话 cookie ~40min 过期，拿死 jar 硬闯 create=401 风暴→弹跳链→毒印杀 root）。code 0 才准进 create。"
@@ -175,7 +195,7 @@
       "op": "eval",
       "args": {
         "script": "(async function(){var h=null;try{var r=await fetch('/api/edith/seller/info/v2',{credentials:'include'});var t=await r.text();var c=null;try{c=JSON.parse(t).code;}catch(e){}h={seller_status:r.status,seller_code:c};}catch(e){h={thrown:String(e)};}return JSON.stringify({publish_render:'HTTP200 签名链通', probe:{{pr}}, jar_probe:h, url:location.href});})()",
-        "timeout_ms": 15000
+        "timeout_ms": 25000
       },
       "save": "result",
       "note": "绿灯报告：探测回执全文 + jar 健康复查（signed seller/info 打完 PR 之后仍绿=毒印律未触发）"
