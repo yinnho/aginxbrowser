@@ -267,7 +267,7 @@ fn expand(func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
     let scope_prologue = if needs_scope {
         quote! {
             let mut scope_store =
-                unsafe { ::deno_core::v8::CallbackScope::new(info) };
+                unsafe { ::v8::CallbackScope::new(info) };
             let scope = unsafe { ::core::pin::Pin::new_unchecked(&mut scope_store) };
             let mut scope = scope.init();
         }
@@ -279,7 +279,7 @@ fn expand(func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
         quote! {}
     } else {
         quote! {
-            let args = ::deno_core::v8::FunctionCallbackArguments::
+            let args = ::v8::FunctionCallbackArguments::
                 from_function_callback_info_parts(info, &parts);
         }
     };
@@ -287,7 +287,7 @@ fn expand(func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
     let opctx_prologue = if has_state {
         quote! {
             let opctx: &'s _ = unsafe {
-                &*(::deno_core::v8::Local::<::deno_core::v8::External>::cast_unchecked(
+                &*(::v8::Local::<::v8::External>::cast_unchecked(
                     args.data(),
                 )
                 .value() as *const ::deno_core::_ops::OpCtx)
@@ -324,44 +324,25 @@ fn expand(func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
     Ok(quote! {
         #(#passthrough)*
         #[allow(non_camel_case_types)]
-        #vis fn #name() -> ::deno_core::_ops::OpDecl {
+        #vis fn #name() -> ::diting_runtime::op_reg::OpDecl {
             struct #name {
                 _unconstructable: ::core::marker::PhantomData<()>,
             }
             impl #name {
-                const DECL: ::deno_core::_ops::OpDecl =
-                    ::deno_core::_ops::OpDecl::new_internal_op2(
-                        {
-                            const LITERAL: &'static [u8] = #name_str.as_bytes();
-                            const STR: ::deno_core::v8::OneByteConst =
-                                ::deno_core::FastStaticString::create_external_onebyte_const(
-                                    LITERAL,
-                                );
-                            let s: &'static ::deno_core::v8::OneByteConst = &STR;
-                            (#name_str, ::deno_core::FastStaticString::new(s))
-                        },
-                        false,
-                        false,
-                        false,
+                const DECL: ::diting_runtime::op_reg::OpDecl =
+                    ::diting_runtime::op_reg::OpDecl::new(
+                        #name_str,
                         #arg_count as u8,
-                        false,
-                        false,
                         Self::v8_fn_ptr as _,
                         Self::slow_function_impl,
-                        ::deno_core::AccessorType::None,
-                        ::core::option::Option::None,
-                        ::core::option::Option::None,
-                        ::deno_core::OpMetadata {
-                            ..::deno_core::OpMetadata::default()
-                        },
                     );
                 fn slow_function_impl<'s>(
-                    info: *const ::deno_core::v8::FunctionCallbackInfo,
+                    info: *const ::v8::FunctionCallbackInfo,
                 ) -> usize {
                     let info: &'s _ = unsafe { &*info };
                     let _reentrancy_check_guard =
-                        ::deno_core::_ops::reentrancy_check(&Self::DECL);
-                    let parts: ::deno_core::v8::FunctionCallbackInfoParts<'s> =
+                        ::diting_runtime::op_reg::reentrancy_check(&Self::DECL);
+                    let parts: ::v8::FunctionCallbackInfoParts<'s> =
                         info.get_parts();
                     #scope_prologue
                     let mut rv = parts.return_value;
@@ -371,7 +352,7 @@ fn expand(func: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
                     #return_encode
                 }
                 extern "C" fn v8_fn_ptr(
-                    info: *const ::deno_core::v8::FunctionCallbackInfo,
+                    info: *const ::v8::FunctionCallbackInfo,
                 ) {
                     Self::slow_function_impl(info);
                 }
@@ -397,7 +378,7 @@ fn decode_js_arg(ident: &Ident, kind: &ArgKind, idx: Literal) -> proc_macro2::To
                         ::diting_runtime::op_glue::STRING_STACK_BUFFER_SIZE];
                 let #ident = if !#ident.is_string() {
                     let mut tc_store =
-                        ::deno_core::v8::TryCatch::new(&mut scope);
+                        ::v8::TryCatch::new(&mut scope);
                     let tc = unsafe {
                         ::core::pin::Pin::new_unchecked(&mut tc_store)
                     };
@@ -496,7 +477,7 @@ fn return_encode(kind: RetKind) -> proc_macro2::TokenStream {
             ) {
                 ::core::result::Result::Ok(v) => rv.set(v),
                 ::core::result::Result::Err(rv_err) => {
-                    ::deno_core::_ops::throw_error_js_error_class(
+                    ::diting_runtime::op_glue::throw_serde_v8_error(
                         &mut scope,
                         &rv_err,
                     );
@@ -517,7 +498,7 @@ fn return_encode(kind: RetKind) -> proc_macro2::TokenStream {
                 ) {
                     ::core::result::Result::Ok(v) => rv.set(v),
                     ::core::result::Result::Err(rv_err) => {
-                        ::deno_core::_ops::throw_error_js_error_class(
+                        ::diting_runtime::op_glue::throw_serde_v8_error(
                             &mut scope,
                             &rv_err,
                         );
@@ -544,7 +525,7 @@ fn return_encode(kind: RetKind) -> proc_macro2::TokenStream {
                 ) {
                     ::core::result::Result::Ok(v) => rv.set(v),
                     ::core::result::Result::Err(rv_err) => {
-                        ::deno_core::_ops::throw_error_js_error_class(
+                        ::diting_runtime::op_glue::throw_serde_v8_error(
                             &mut scope,
                             &rv_err,
                         );

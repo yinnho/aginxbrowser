@@ -1339,6 +1339,7 @@ dependencies = [
  "deno_core",
  "deno_error",
  "diting_ops",
+ "diting_runtime",
  "ecdsa",
  "encoding_rs",
  "fontique",
@@ -1398,6 +1399,9 @@ dependencies = [
 name = "diting_runtime"
 version = "0.1.0"
 dependencies = [
+ "diting_ops",
+ "serde",
+ "serde_v8",
  "v8",
 ]
 

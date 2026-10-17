@@ -177,6 +177,27 @@ pub fn throw_error_one_byte<'s, 'i>(scope: &mut v8::PinScope<'s, 'i>, message: &
     scope.throw_exception(exc);
 }
 
+/// The encode-failure throw: when `to_v8_fallible` fails (string/array over
+/// v8's length limit, serde serialization failure) the value never
+/// materialized, so a plain Error is thrown — NOT the class-built JS error
+/// machinery deno's `throw_error_js_error_class` routes through (that needs
+/// the host's exception state + JS builder callback, a host face claimed
+/// with the runtime-host swap). Deliberate divergence on a barely-observable
+/// path; noted in the campaign plan.
+pub fn throw_serde_v8_error<'s, 'i>(scope: &mut v8::PinScope<'s, 'i>, err: &serde_v8::Error) {
+    let msg = err.to_string();
+    let m = v8::String::new(scope, &msg).unwrap_or_else(|| {
+        v8::String::new_from_one_byte(
+            scope,
+            b"failed to encode op return value",
+            v8::NewStringType::Normal,
+        )
+        .unwrap()
+    });
+    let exc = v8::Exception::error(scope, m);
+    scope.throw_exception(exc);
+}
+
 //
 // Rust→V8 conversion traits (ops_rust_to_v8.rs subset)
 //

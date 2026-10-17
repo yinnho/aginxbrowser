@@ -285,6 +285,9 @@ pub struct Vm {
     context: v8::Global<v8::Context>,
     settle_fn: v8::Global<v8::Function>,
     queue: SettleQueue<Triplet>,
+    /// Installed ops, kept for the isolate's lifetime — the Externals in
+    /// the installed functions point into these boxes (op_reg's law).
+    ops: Option<crate::op_reg::OpSet>,
 }
 
 impl Default for Vm {
@@ -357,6 +360,7 @@ impl Vm {
             context,
             settle_fn,
             queue: SettleQueue::new(),
+            ops: None,
         })
     }
 
@@ -393,6 +397,28 @@ impl Vm {
             .expect("Vm::new installs the driver slot")
             .borrow()
             .pending_ops()
+    }
+
+    /// Install sync ops onto the context's globalThis and return the shared
+    /// state cell — hosts `put()` their state into it before first JS runs
+    /// (`op_state().borrow_mut().put(..)` face). The op set is owned by the
+    /// Vm for the isolate's lifetime (the Externals point into it).
+    /// Enter/exit discipline: same as eval_string.
+    pub fn install_ops(
+        &mut self,
+        decls: Vec<crate::op_reg::OpDecl>,
+    ) -> std::rc::Rc<std::cell::RefCell<crate::state::OpState>> {
+        let set = crate::op_reg::OpSet::new(decls);
+        let state = set.state();
+        unsafe { self.isolate.enter() };
+        {
+            v8::scope_with_context!(cs, &mut self.isolate, &self.context);
+            let global = cs.get_current_context().global(cs);
+            set.install_onto(cs, global);
+        }
+        unsafe { self.isolate.exit() };
+        self.ops = Some(set);
+        state
     }
 
     /// The watchdog arm: any JS currently running stops at the next
@@ -448,6 +474,7 @@ impl Vm {
             context,
             settle_fn,
             queue,
+            ..
         } = self;
         queue.deliver(BATCH_CAP, |batch| {
             deliver_batch(isolate, context, settle_fn, batch)

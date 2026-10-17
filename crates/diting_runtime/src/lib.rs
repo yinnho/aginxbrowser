@@ -53,8 +53,10 @@
 
 pub mod driver;
 pub mod op_glue;
+pub mod op_reg;
 pub mod settle;
 pub mod snapshot;
+pub mod state;
 pub mod vm;
 
 pub use driver::{AfterTicks, OpDriver};
