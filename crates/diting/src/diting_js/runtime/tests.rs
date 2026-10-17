@@ -21192,6 +21192,47 @@ fn window_named_access_tracks_mutations_and_assignment() {
     );
 }
 
+/// #48 third face (300015 winKeys, 10-17): Chrome resolves named access
+/// through a WindowProperties layer — window.q works, but the name never
+/// appears in getOwnPropertyNames(window) and never owns a window slot.
+/// Own enumerable getters on window leak every element id/name into the
+/// winKeys face (and never uninstall on untrack, so the face only grows).
+/// The named layer must sit one proto hop up: resolution unchanged, the
+/// enumeration face clean, and untrack shrinks the layer with the tree.
+#[test]
+fn window_named_access_invisible_to_enumeration() {
+    let mut rt = setup_runtime(
+        "<html><body><div id=\"hero\">H</div><svg><path id=\"glyph\"/></svg></body></html>",
+    );
+    let _out = rt.evaluate(r#"
+        const base = Object.getOwnPropertyNames(window).length;
+        document.body.appendChild(document.createElement('img')).id = 'shot';
+        const layer = Object.getPrototypeOf(window);
+        const resolves = typeof hero === 'object' && hero.tagName;      // resolution walks the proto chain
+        const removed = document.body.removeChild(document.getElementById('hero'));
+        globalThis.__out = JSON.stringify([
+            resolves,
+            Object.getOwnPropertyNames(window).includes('hero'),        // NEVER in the window face
+            Object.getOwnPropertyNames(window).length === base,          // appending a named element doesn't grow it
+            Object.getOwnPropertyDescriptor(window, 'hero') === undefined, // never owns a window slot
+            'glyph' in window,                                           // has-check walks the chain
+            Object.getOwnPropertyNames(layer).includes('glyph'),         // the named layer carries it…
+            removed.tagName,                                             // removal really happened
+            Object.getOwnPropertyNames(layer).includes('hero'),         // …and shrinks when the tree does
+            typeof window.hero,                                          // …and the access dies with it
+            window.shot && window.shot.tagName,                          // post-change install path resolves too
+            (window.hero2 = 7) === 7 && window.hero2,                    // assignment lands as the own window prop
+        ]);
+    "#).unwrap();
+    let v: serde_json::Value = serde_json::from_str(rt.evaluate("globalThis.__out").unwrap().as_str().unwrap()).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!(["DIV", false, true, true, true, true, "DIV", false, "undefined", "IMG", 7]),
+        "named access must stay resolvable while invisible to window enumeration, and track the live tree at the layer"
+    );
+}
+
+
 /// #57: `input.files = singleFile` — Chrome accepts a bare File as a
 /// one-entry selection; the silent no-op cost the xhs send batch a debug
 /// cycle. The wrapped FileList keeps length/item/index/iteration shape.

@@ -2454,6 +2454,25 @@ function __disconnectCustomElementsIn(root) {
 const _namedEls = new Map();     // name -> Set<nid>, insertion order
 const _namedGetters = new Map(); // name -> installed get fn (identity check)
 let _namedScanned = false;       // one lazy full scan for the parser-built tree
+// Chrome resolves named access through a WindowProperties layer between
+// window and Window.prototype: window.q works, but the name NEVER shows in
+// getOwnPropertyNames(window) — the winKeys face only counts real globals.
+// Own getters on globalThis leak every element id/name into that face, and
+// a getter is never uninstalled, so the face only grows across a page's
+// life. Park the getters one proto layer up: get/in/bare-identifier all
+// walk the chain, page own props still shadow, and gopn(window) stays
+// clean. (global_surface.js's relocate() reads getPrototypeOf(globalThis)
+// as P1 and lands the EventTarget trio there — that layer is this holder,
+// same proto depth the trio already occupied.)
+const _namedHolder = (function () {
+  try {
+    const P0 = Object.getPrototypeOf(globalThis);
+    if (!P0) return globalThis; // defensive: no proto layer to park on
+    const h = Object.create(P0);
+    Object.setPrototypeOf(globalThis, h);
+    return h;
+  } catch (e) { return globalThis; }
+})();
 function _namedNames(el) {
   if (!el || el.nodeType !== 1) return [];
   const out = [];
@@ -2471,29 +2490,23 @@ function _namedInstall(name) {
   // defineProperty (plus fresh get/set closures) is pure waste — id/name
   // rewrite storms re-track the same names constantly.
   const cur = _namedGetters.get(name);
-  if (cur) {
-    const d = Object.getOwnPropertyDescriptor(globalThis, name);
-    if (d && d.get === cur) return;
-  }
-  if (name in globalThis) {
-    // Real globals win over named access. Our own installed getter (the
-    // element was untracked and re-tracked) renews fine; anything else — a
-    // page var/assignment that took the slot — keeps the slot.
-    const d = Object.getOwnPropertyDescriptor(globalThis, name);
-    if (!d || !d.get || d.get !== _namedGetters.get(name)) return;
-  }
+  const d = Object.getOwnPropertyDescriptor(_namedHolder, name);
+  if (cur && d && d.get === cur) return;
+  // A foreign own slot on the holder (the relocated EventTarget trio,
+  // constructor, a page defineProperty on the layer, …) keeps the slot —
+  // real faces win over named access, Chrome's resolution order.
+  if (d && d.get !== cur) return;
   const get = () => _namedLookup(name);
   const set = (v) => {
-    // An explicit assignment shadows the named property from now on
-    // (Chrome: window[id] = x creates an own data prop that wins).
-    _namedGetters.delete(name);
+    // Assignment lands as an own data prop on window (Chrome: named props
+    // don't intercept [[Set]]), shadowing the named access from now on.
     try {
       Object.defineProperty(globalThis, name, { value: v, writable: true, configurable: true, enumerable: true });
     } catch (e) {}
   };
   _namedGetters.set(name, get);
   try {
-    Object.defineProperty(globalThis, name, { get, set, configurable: true, enumerable: true });
+    Object.defineProperty(_namedHolder, name, { get, set, configurable: true, enumerable: true });
   } catch (e) { _namedGetters.delete(name); }
 }
 function _namedTrack(el) {
@@ -2516,7 +2529,17 @@ function _namedTrack(el) {
 function _namedUntrackBy(nid, names) {
   for (const n of names) {
     const s = _namedEls.get(n);
-    if (s) { s.delete(nid); if (!s.size) _namedEls.delete(n); }
+    if (s) {
+      s.delete(nid);
+      if (!s.size) {
+        _namedEls.delete(n);
+        // Live-tree reflection: with no bearer left, pull the getter off
+        // the holder so the named layer shrinks with the DOM (own props
+        // on globalThis keep shadowing anything a page stored earlier).
+        _namedGetters.delete(n);
+        try { delete _namedHolder[n]; } catch (e) {}
+      }
+    }
   }
 }
 function _namedUntrack(el) {
