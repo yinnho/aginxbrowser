@@ -1662,7 +1662,7 @@
             r.u_proto = JSON.stringify(Object.getOwnPropertyNames(Object.getPrototypeOf(uad)));
             r.u_mobile = uad.mobile === false;
             r.u_mobile_proto = typeof Object.getOwnPropertyDescriptor(Object.getPrototypeOf(uad), 'mobile').get;
-            r.u_json_shape = (function(){ var j = uad.toJSON(); return j.mobile === false && typeof j.platform === 'string' && j.platform.length > 0 && j.brands.length === 3 && j.brands[0].brand === 'Google Chrome' && j.brands[0].version === j.brands[1].version; })();
+            r.u_json_shape = (function(){ var j = uad.toJSON(); return j.mobile === false && typeof j.platform === 'string' && j.platform.length > 0 && j.brands.length === 3 && j.brands[0].brand === 'Chromium' && j.brands[1].brand === 'Google Chrome' && j.brands[2].brand === 'Not A(Brand' && j.brands[0].version === '154' && j.brands[0].version === j.brands[1].version && j.brands[2].version === '99'; })();
             r.u_gev = typeof uad.getHighEntropyValues === 'function';
             r.u_instanceof = uad instanceof NavigatorUAData;
             r.u_enum = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(uad), 'brands').enumerable === true;
@@ -8629,14 +8629,15 @@
 
     #[test]
     fn test_stealth_webgl_chrome_truth_interface_shape() {
-        // (P8 #300015) The WebGL interface must match Chrome 155 byte-for-byte
+        // (P8 #300015) The WebGL interface must match Chrome 154 byte-for-byte
         // at the reflection level: the INSTANCE carries zero own properties,
-        // the PROTOTYPE carries exactly 443/792 own names (constants +
+        // the PROTOTYPE carries exactly 442/791 own names (constants +
         // methods + 6 accessors), constants are enumerable/non-writable/
         // non-configurable, and extension objects keep their constants on the
         // carrier prototype. The old shape leaked ~80 own props on the
         // instance and a 29-entry constant table — a counting detector's
-        // one-liner. Truth captured from Chrome 155.0.8059.41 (macOS).
+        // one-liner. Truth captured from real Chrome 154.0.8037.98 (macOS);
+        // 154 lacks makeXRCompatible (155 added it), hence -1 vs the 155 pin.
         let mut rt = setup_runtime(
             "<html><body><canvas id='c' width='320' height='200'></canvas></body></html>",
         );
@@ -8690,23 +8691,23 @@
         assert_eq!(v["instNames1"], 0, "GL1 instance must carry ZERO own props of any kind (only hidden _canvas)");
         assert_eq!(
             v["protoNames1"].as_i64().unwrap(),
-            443,
-            "GL1 prototype own-name count must be exactly Chrome's 443 (298 consts + 139 methods + 6 accessors)"
+            442,
+            "GL1 prototype own-name count must be exactly Chrome 154's 442 (298 consts + 138 methods + 6 accessors)"
         );
         assert_eq!(
             v["protoNames2"].as_i64().unwrap(),
-            792,
-            "GL2 prototype own-name count must be exactly Chrome's 792 (559 + 227 + 6)"
+            791,
+            "GL2 prototype own-name count must be exactly Chrome 154's 791 (559 + 226 + 6)"
         );
         assert_eq!(
             v["protoKeys1"].as_i64().unwrap(),
-            442,
-            "GL1 enumerable proto keys = 442 (constructor is non-enumerable)"
+            441,
+            "GL1 enumerable proto keys = 441 (constructor is non-enumerable)"
         );
         assert_eq!(
             v["protoKeys2"].as_i64().unwrap(),
-            791,
-            "GL2 enumerable proto keys = 791"
+            790,
+            "GL2 enumerable proto keys = 790"
         );
         assert_eq!(
             v["constDesc"], serde_json::json!([35633, false, true, false]),

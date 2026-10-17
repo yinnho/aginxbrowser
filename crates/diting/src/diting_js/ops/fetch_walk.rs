@@ -524,7 +524,7 @@ pub(crate) async fn fetch_url_walk(
         // (no UA, no Accept, no Fetch-Metadata / client-hint headers) and WAFs
         // that key on `sec-fetch-site: same-origin` (mcpservers.org /submit
         // 403s without it) rejected them. Honor explicit overrides.
-        const DEFAULT_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
+        const DEFAULT_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36";
         let ua_override = custom_headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))

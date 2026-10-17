@@ -21,7 +21,7 @@ use crate::diting_net::client::{Response, NetError, ResourceType};
 
 #[cfg(feature = "stealth")]
 pub const STEALTH_USER_AGENT: &str =
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36";
 
 /// The TLS fingerprint stealth builds present by default. `with_proxy_and_os`
 /// constructs the matching emulation and `/health` reports this string, so
@@ -112,20 +112,22 @@ fn fingerprint_family_version(name: &str) -> Option<(&'static str, u32)> {
 }
 
 /// The Chrome major the whole fleet claims (persona UA, GL tables, uad
-/// brands, sec-ch-ua). The TLS handshake preset itself stays chrome145
+/// brands, sec-ch-ua). 154 since the 2026-10-17 xhs SIT finding: the edge
+/// buckets UA-155 sessions into its customer.sit loop while 154 routes
+/// production. The TLS handshake preset itself stays chrome145
 /// *shaped* — wreq-util rc.31's ceiling: its BoringSSL name table predates
 /// the mldsa sigalgs, so the Chrome 150+ signature-algorithms delta is
-/// inexpressible on this dependency generation. Accepted A-155 residual;
+/// inexpressible on this dependency generation. Accepted residual;
 /// revisit on a wreq 0.16 migration. Mirrors `default_tls_chrome_major` in
 /// aginxbrowser/src/account.rs (kept separate: that side avoids the stealth
 /// feature gate).
 #[cfg(feature = "stealth")]
-pub const CLAIMED_CHROME_MAJOR: u32 = 155;
+pub const CLAIMED_CHROME_MAJOR: u32 = 154;
 
 /// Warn when the effective UA and the browser claim disagree on family or
 /// major version. With an explicit `tls_fingerprint`, coherence means the UA
 /// rides that fingerprint's family+major (operator chose the pair). With the
-/// default handshake, coherence means the fleet claim: Chrome/155 over the
+/// default handshake, coherence means the fleet claim: Chrome/154 over the
 /// chrome145-shaped preset — "Chrome/152" in the UA over the fleet claim is
 /// the kind of tell WAFs diff (taobao compat report ⑤). Returns true when a
 /// mismatch was logged; `None` fingerprint means the default handshake.

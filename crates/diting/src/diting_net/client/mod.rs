@@ -254,7 +254,7 @@ impl HttpClient {
             cookie_jar,
             user_agent: RwLock::new(
                 std::env::var("AGINXBROWSER_UA").unwrap_or_else(|_| {
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36".to_string()
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36".to_string()
                 }),
             ),
             accept_language: RwLock::new(
@@ -872,7 +872,7 @@ impl HttpClient {
             let (sec_ch_ua, platform) = derive_client_hints(&ua);
             let mut headers = HeaderMap::new();
             headers.insert(USER_AGENT, HeaderValue::from_str(&ua).unwrap_or_else(|_| {
-                HeaderValue::from_static("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36")
+                HeaderValue::from_static("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36")
             }));
             headers.insert(reqwest::header::ACCEPT, HeaderValue::from_static(default_accept));
             headers.insert(
@@ -1179,13 +1179,15 @@ impl Default for HttpClient {
 ///
 /// Returns `(sec_ch_ua_header, sec_ch_ua_platform_header)`.
 pub fn derive_client_hints(ua: &str) -> (String, String) {
-    // Major version: first \d+ after "Chrome/".
+    // Major version: first \d+ after "Chrome/". Fleet fallback claims 154:
+    // the xhs edge routes UA-155-shaped sessions into its SIT bucket
+    // (customer.sit.xiaohongshu.com loop) while 154 reaches production.
     let version = ua
         .split("Chrome/")
         .nth(1)
         .and_then(|s| s.split('.').next())
         .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(155);
+        .unwrap_or(154);
 
     let platform = if ua.contains("Macintosh") || ua.contains("Mac OS X") {
         "\"macOS\""
@@ -1197,21 +1199,46 @@ pub fn derive_client_hints(ua: &str) -> (String, String) {
         "\"Linux\""
     };
 
-    let sec_ch_ua = format!(
-        // fp-diff-1014 P1: the grease brand must match the JS face
-        // (NavigatorUAData) — Chrome 155's generation is "Not(A:Brand" v24.
-        // A-155 batch: the header order must ALSO match. Chromium
-        // (user_agent_utils.cc) builds [grease, Chromium, browser] then
-        // shuffles by seed = major % 6 over the 6 permutations; 155 % 6 = 5
-        // → {2,1,0} → [Google Chrome, Chromium, grease], which is exactly
-        // the JS brands order captured off real Chrome 155 (conn-uad-truth)
-        // and what upstream wreq-util v153/v154 tables hardcode for their
-        // majors. The old [Chromium, grease, GC] order was a detectable
-        // header-vs-JS-face tell.
-        "\"Google Chrome\";v=\"{}\", \"Chromium\";v=\"{}\", \"Not(A:Brand\";v=\"24\"",
-        version, version
-    );
-    (sec_ch_ua, platform.to_string())
+    (grease_brand_list(version), platform.to_string())
+}
+
+/// Chromium's UA-CH GREASE generator (user_agent_utils.cc), ported: the
+/// grease brand, its version, and the shuffle order are all derived from
+/// the major version — never random. Keeping the algorithm instead of a
+/// per-major literal makes the header match the JS face
+/// (bootstrap.js `__ditingBrandList`) for any major the fleet claims;
+/// 145 and 155 were both hardcoded wrong before this.
+/// 154 → `"Chromium";v="154", "Google Chrome";v="154", "Not A(Brand";v="99"`.
+fn grease_brand_list(version: u32) -> String {
+    const CHARS: [&str; 11] = [" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_"];
+    const VERS: [&str; 3] = ["8", "99", "24"];
+    const ORDERS: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let seed = version as usize;
+    let grease = format!("Not{}A{}Brand", CHARS[seed % 11], CHARS[(seed + 1) % 11]);
+    let grease_ver = VERS[seed % 3];
+    let vstr = version.to_string();
+    let pre_shuffled = [
+        (grease.as_str(), grease_ver),
+        ("Chromium", vstr.as_str()),
+        ("Google Chrome", vstr.as_str()),
+    ];
+    let order = ORDERS[seed % 6];
+    let mut shuffled: [(&str, &str); 3] = [("", ""); 3];
+    for (i, slot) in order.iter().enumerate() {
+        shuffled[*slot] = pre_shuffled[i];
+    }
+    let parts: Vec<String> = shuffled
+        .iter()
+        .map(|(brand, ver)| format!("\"{brand}\";v=\"{ver}\""))
+        .collect();
+    parts.join(", ")
 }
 
 #[derive(Debug, thiserror::Error)]

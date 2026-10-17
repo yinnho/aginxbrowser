@@ -187,7 +187,7 @@ pub struct Persona {
 }
 
 /// UA pool for a fresh persona: Windows and macOS Chrome 145 only. Both
-/// entries match the fleet-claimed chrome155 major on family and version
+/// entries match the fleet-claimed chrome154 major on family and version
 /// (zero `warn_on_ua_tls_mismatch` tells), and the TLS emulation OS follows
 /// the UA, so Win↔Mac is the free axis — hardware differentiation rides the
 /// fp_seed. Linux is excluded: the TLS/OS contract and the product default
@@ -197,23 +197,23 @@ fn persona_ua_pool() -> Vec<&'static str> {
     diting::diting_browser::profiles::PROFILES
         .iter()
         .filter(|p| {
-            p.user_agent.contains("Chrome/155.0.0.0")
+            p.user_agent.contains("Chrome/154.0.0.0")
                 && (p.user_agent.contains("Windows NT") || p.user_agent.contains("Macintosh"))
         })
         .map(|p| p.user_agent)
         .collect()
 }
 
-/// Product-default Mac Chrome/155 UA (profiles `DEFAULT_PROFILE_INDEX`).
-fn default_mac_chrome155_ua() -> &'static str {
+/// Product-default Mac Chrome/154 UA (profiles `DEFAULT_PROFILE_INDEX`).
+fn default_mac_chrome154_ua() -> &'static str {
     diting::diting_browser::profiles::PROFILES
         .iter()
         .find(|p| {
-            p.user_agent.contains("Macintosh") && p.user_agent.contains("Chrome/155.0.0.0")
+            p.user_agent.contains("Macintosh") && p.user_agent.contains("Chrome/154.0.0.0")
         })
         .map(|p| p.user_agent)
         .unwrap_or(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
         )
 }
 
@@ -240,17 +240,20 @@ fn chrome_major_from_ua(ua: &str) -> Option<u32> {
 }
 
 /// The Chrome major the whole fleet claims: persona UA, GL tables, uad
-/// brands, sec-ch-ua all say 155. Kept local so account code does not depend
+/// brands, sec-ch-ua all say 154. Kept local so account code does not depend
 /// on the stealth feature gate. The TLS handshake itself stays on the
 /// chrome145 *shape* — wreq-util rc.31's ceiling (rc.31's BoringSSL name
 /// table has no mldsa sigalgs, so the 150+ sigalgs delta is inexpressible);
-/// that residual is an accepted A-155 trade, revisit on a wreq 0.16 migration.
+/// that residual is an accepted trade, revisit on a wreq 0.16 migration.
+/// Why 154 and not newer: the xhs edge buckets UA-155 sessions into its SIT
+/// loop (customer.sit.xiaohongshu.com) while 154 routes production
+/// (2026-10-17 probe).
 fn default_tls_chrome_major() -> u32 {
-    155
+    154
 }
 
 /// Rewrite a UA whose Chrome major disagrees with the fleet-claimed major
-/// onto a same-OS Chrome/155 from the persona pool (Mac fallback). Returns
+/// onto a same-OS Chrome/154 from the persona pool (Mac fallback). Returns
 /// the original string when already aligned.
 fn coerce_ua_to_tls(ua: &str) -> String {
     if chrome_major_from_ua(ua) == Some(default_tls_chrome_major()) {
@@ -265,7 +268,7 @@ fn coerce_ua_to_tls(ua: &str) -> String {
         .find(|p| prefer_mac && p.contains("Macintosh"))
         .or_else(|| pool.iter().copied().find(|p| prefer_win && p.contains("Windows NT")))
         .or_else(|| pool.first().copied())
-        .unwrap_or_else(default_mac_chrome155_ua);
+        .unwrap_or_else(default_mac_chrome154_ua);
     tracing::warn!(
         "persona UA Chrome major mismatches TLS chrome{}; rewriting to coherent pool UA",
         default_tls_chrome_major()
@@ -276,7 +279,7 @@ fn coerce_ua_to_tls(ua: &str) -> String {
 /// Resolve the UA hint for a fresh account persona teach:
 /// 1. explicit `persona_ua` / import UA when non-empty (TLS-coerced)
 /// 2. else `AGINXBROWSER_UA` when set (TLS-coerced)
-/// 3. else Mac Chrome/155 when [`prefer_mac_persona`]
+/// 3. else Mac Chrome/154 when [`prefer_mac_persona`]
 /// 4. else `None` → Win/Mac pool lottery in [`draw_persona`]
 pub fn resolve_ua_hint(explicit: Option<&str>) -> Option<String> {
     if let Some(u) = explicit.map(str::trim).filter(|u| !u.is_empty()) {
@@ -289,14 +292,14 @@ pub fn resolve_ua_hint(explicit: Option<&str>) -> Option<String> {
         }
     }
     if prefer_mac_persona() {
-        return Some(default_mac_chrome155_ua().to_string());
+        return Some(default_mac_chrome154_ua().to_string());
     }
     None
 }
 
 /// Draw a fresh persona: random fp_seed (same uuid cut `Page::new` uses) and
 /// a UA — `ua_hint` after TLS coerce when given (an imported cURL's User-Agent
-/// is the human's device, but Chrome major must still match the fleet chrome155
+/// is the human's device, but Chrome major must still match the fleet chrome154
 /// handshake), else a pick from the Chrome-145 pool keyed off the seed. On
 /// Darwin (or `AGINXBROWSER_PERSONA_OS=mac`) the pool draw is Mac-only.
 fn draw_persona(ua_hint: Option<&str>) -> Persona {
@@ -352,7 +355,7 @@ fn teach_persona(record: &mut serde_json::Value, drawn: &Persona) -> Persona {
             if fixed == p.user_agent {
                 return p;
             }
-            // Normalize stored stale-major jars onto the fleet chrome155 once.
+            // Normalize stored stale-major jars onto the fleet chrome154 once.
             let normalized = Persona {
                 fp_seed: p.fp_seed,
                 user_agent: fixed,
@@ -1081,14 +1084,14 @@ mod tests {
     }
 
     // The pool is the persona's TLS-coherence contract: Chrome 145 only
-    // (zero mismatch with the fleet-claimed chrome155), both desktop OSes
+    // (zero mismatch with the fleet-claimed chrome154), both desktop OSes
     // present so Win/Mac is the differentiation axis — never Linux/X11.
     #[test]
-    fn persona_pool_is_chrome155_win_and_mac() {
+    fn persona_pool_is_chrome154_win_and_mac() {
         let pool = persona_ua_pool();
         assert!(pool.len() >= 2, "pool: {pool:?}");
         for ua in &pool {
-            assert!(ua.contains("Chrome/155.0.0.0"), "out of family: {ua}");
+            assert!(ua.contains("Chrome/154.0.0.0"), "out of family: {ua}");
             assert!(
                 !ua.contains("Linux") && !ua.contains("X11"),
                 "Linux must stay out of persona pool: {ua}"
@@ -1106,9 +1109,9 @@ mod tests {
     fn coerce_ua_rewrites_chrome_major_mismatch() {
         let bad = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36";
         let fixed = coerce_ua_to_tls(bad);
-        assert!(fixed.contains("Chrome/155.0.0.0"), "got {fixed}");
+        assert!(fixed.contains("Chrome/154.0.0.0"), "got {fixed}");
         assert!(fixed.contains("Macintosh"), "got {fixed}");
-        let good = default_mac_chrome155_ua();
+        let good = default_mac_chrome154_ua();
         assert_eq!(coerce_ua_to_tls(good), good);
     }
 
@@ -1119,9 +1122,9 @@ mod tests {
     #[test]
     fn draw_persona_honors_hint_then_pool() {
         let real = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
-        // Out-of-family Chrome major is rewritten onto fleet chrome155 same-OS.
+        // Out-of-family Chrome major is rewritten onto fleet chrome154 same-OS.
         let drawn = draw_persona(Some(real)).user_agent;
-        assert!(drawn.contains("Chrome/155.0.0.0"), "got {drawn}");
+        assert!(drawn.contains("Chrome/154.0.0.0"), "got {drawn}");
         assert!(drawn.contains("Windows NT"), "got {drawn}");
         // Empty hints fall through to the pool — membership, not two random
         // draws agreeing (the pool holds two UAs, so that's a coin flip).
@@ -1170,7 +1173,7 @@ mod tests {
     // outcomes without the global store (OnceLock-pinned, see above).
     #[test]
     fn teach_persona_inserts_normalizes_and_keeps() {
-        let drawn = draw_persona(Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/155.0.0.0"));
+        let drawn = draw_persona(Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/154.0.0.0"));
         // Absent → insert drawn.
         let mut rec = serde_json::json!({"version": 1});
         assert_eq!(teach_persona(&mut rec, &drawn).fp_seed, drawn.fp_seed);
@@ -1187,7 +1190,7 @@ mod tests {
         });
         let normalized = teach_persona(&mut stale, &drawn);
         assert_eq!(normalized.fp_seed, 42);
-        assert!(normalized.user_agent.contains("Chrome/155.0.0.0"), "got {}", normalized.user_agent);
+        assert!(normalized.user_agent.contains("Chrome/154.0.0.0"), "got {}", normalized.user_agent);
         assert_eq!(stale["persona"]["fp_seed"], 42);
         // Partial persona → drawn (a half persona is "no persona yet").
         let mut partial = serde_json::json!({"persona": {"fp_seed": 9}});
