@@ -52,6 +52,7 @@
 //!   poll 自动重投，无需特殊处理。
 
 pub mod driver;
+pub mod modules;
 pub mod op_glue;
 pub mod op_reg;
 pub mod settle;
@@ -60,6 +61,9 @@ pub mod state;
 pub mod vm;
 
 pub use driver::{AfterTicks, OpDriver};
+pub use modules::{
+    ModuleEvalError, ModuleId, ModuleLoadResponse, ModuleLoader, ModuleLoaderError, ModuleSource,
+};
 pub use settle::{SettleQueue, Stats};
 pub use snapshot::{SnapshotError, SIDECAR_VERSION};
 pub use vm::{create_snapshot, LoopError, Triplet, Vm};

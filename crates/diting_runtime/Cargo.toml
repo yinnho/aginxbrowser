@@ -21,6 +21,9 @@ v8 = { version = "=150.4.0", default-features = false, features = ["simdutf"] }
 # after deno_core retires, unlike deno_core itself.
 serde = "1"
 serde_v8 = "0.320"
+# The module machinery's specifier type — deno_core aliases it the same way
+# (`pub type ModuleSpecifier = Url`); after the retirement url remains ours.
+url = "2"
 
 [dev-dependencies]
 # Integration tests define #[diting_op] ops and install them into a bare Vm.

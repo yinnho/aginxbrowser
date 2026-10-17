@@ -27,7 +27,21 @@ use std::task::{Context, Poll, Wake, Waker};
 /// this to decide "poll again now" vs "sleep until the reactor says so".
 /// Poll-driven embedders (our current loop) can ignore it: they re-drive
 /// every pass anyway.
-struct WakeFlag(AtomicBool);
+pub(crate) struct WakeFlag(AtomicBool);
+
+impl WakeFlag {
+    pub(crate) fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    pub(crate) fn take(&self) -> bool {
+        self.0.swap(false, Ordering::AcqRel)
+    }
+
+    pub(crate) fn waker(self: &Arc<Self>) -> Waker {
+        Waker::from(self.clone())
+    }
+}
 
 impl Wake for WakeFlag {
     fn wake(self: Arc<Self>) {

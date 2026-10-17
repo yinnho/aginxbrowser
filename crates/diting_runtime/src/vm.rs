@@ -18,13 +18,19 @@
 //! shell baked once, restored per instance) are wired in. See
 //! [`crate::driver`], [`crate::snapshot`], and the PRELUDE below.
 
-use crate::driver::{AfterTicks, OpDriver};
+use crate::driver::{AfterTicks, OpDriver, WakeFlag};
+use crate::modules::dynamic;
+use crate::modules::eval::ModuleEvalError;
+use crate::modules::load::RecursiveLoad;
+use crate::modules::map::{initialize_import_meta_object_callback, ModuleMap, ModuleSlot};
+use crate::modules::{ModuleError, ModuleId, ModuleLoader};
 use crate::settle::SettleQueue;
 use crate::snapshot::{self, SnapshotError};
 use std::cell::RefCell;
 use std::future::Future;
 use std::rc::Rc;
 use std::sync::Once;
+use std::task::{Context, Poll};
 
 /// Triplets per delivery batch. deno_core ships the whole completed-ops vec
 /// in one `__eventLoopTick` call; we settle per-triplet (the JS claim layer
@@ -288,6 +294,10 @@ pub struct Vm {
     /// Installed ops, kept for the isolate's lifetime — the Externals in
     /// the installed functions point into these boxes (op_reg's law).
     ops: Option<crate::op_reg::OpSet>,
+    /// The poll-driven default waker for module-load futures: a flag the
+    /// host can read advisory ("a module future woke"). A reactor-driven
+    /// host (10d) passes its real waker to [`Vm::poll_modules`] instead.
+    module_wake: std::sync::Arc<WakeFlag>,
 }
 
 impl Default for Vm {
@@ -361,6 +371,7 @@ impl Vm {
             settle_fn,
             queue: SettleQueue::new(),
             ops: None,
+            module_wake: std::sync::Arc::new(WakeFlag::new()),
         })
     }
 
@@ -421,6 +432,155 @@ impl Vm {
         state
     }
 
+    /// Install the module machinery: the map goes in the isolate slot,
+    /// V8's module host callbacks get registered. Must run before any
+    /// module face; scripts and ops work without it (a Vm that never sees
+    /// ESM never pays for it). The slot is how the extern-C and
+    /// builder-shape callbacks reach the map — same trick as the driver
+    /// slot, one map per Vm (single-context isolate; deno_core needs a
+    /// per-realm annex, we don't).
+    pub fn install_modules(&mut self, loader: Rc<dyn ModuleLoader>) {
+        let map = Rc::new(ModuleMap::new(loader));
+        self.isolate.set_slot::<ModuleSlot>(map);
+        self.isolate
+            .set_host_import_module_dynamically_callback(dynamic::import_module_dynamically);
+        self.isolate
+            .set_host_initialize_import_meta_object_callback(
+                initialize_import_meta_object_callback,
+            );
+    }
+
+    /// Load a side ESM module whose ROOT source is given inline (the
+    /// page's module code; its imports fetch through the loader). Drives
+    /// the graph to completion — the embedder awaits this before
+    /// evaluation; no event-loop pumping happens inside (no JS runs during
+    /// a load). Returns the root's [`ModuleId`], instantiated and ready
+    /// for [`Vm::mod_evaluate`].
+    pub async fn load_side_es_module_from_code(
+        &mut self,
+        name: &str,
+        code: String,
+    ) -> Result<ModuleId, ModuleEvalError> {
+        let map = self
+            .isolate
+            .get_slot::<ModuleSlot>()
+            .cloned()
+            .expect("Vm::install_modules runs before module loads");
+        let mut load = RecursiveLoad::new_side(map.clone(), name, Some(code));
+        let Vm {
+            isolate, context, ..
+        } = self;
+        // `context` destructures as &mut Global<Context>, which has no
+        // Handle impl — reborrow to the shared reference the macro wants.
+        let context: &v8::Global<v8::Context> = context;
+        let map = map.clone();
+        std::future::poll_fn(move |cx| {
+            loop {
+                match load.poll_next(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Some(Err(e))) => {
+                        return Poll::Ready(Err(ModuleEvalError::Threw(e.message().to_string())))
+                    }
+                    Poll::Ready(Some(Ok((url, code)))) => {
+                        // Enter/exit per registration — see eval_string;
+                        // awaits between passes mean the TLS slot cannot be
+                        // held across the whole drive.
+                        unsafe { isolate.enter() };
+                        let r = {
+                            v8::scope_with_context!(cs, isolate, context);
+                            load.register(cs, &url, &code)
+                        };
+                        unsafe { isolate.exit() };
+                        if let Err(e) = r {
+                            let e = module_error_to_eval(isolate, context, e);
+                            return Poll::Ready(Err(e));
+                        }
+                    }
+                    Poll::Ready(None) => {
+                        let root = load.root_module_id().expect("root registered before Done");
+                        unsafe { isolate.enter() };
+                        let r = {
+                            v8::scope_with_context!(cs, isolate, context);
+                            map.instantiate_module(cs, root)
+                        };
+                        unsafe { isolate.exit() };
+                        return match r {
+                            Ok(()) => Poll::Ready(Ok(root)),
+                            Err(e) => {
+                                let e = module_error_to_eval(isolate, context, e);
+                                Poll::Ready(Err(e))
+                            }
+                        };
+                    }
+                }
+            }
+        })
+        .await
+    }
+
+    /// Evaluate an instantiated module. The returned future borrows
+    /// NOTHING (the map is an Rc, the completion rides a oneshot) — the
+    /// host pumps the event loop while awaiting it, exactly deno_core's
+    /// `mod_evaluate` shape.
+    pub fn mod_evaluate(&mut self, id: ModuleId) -> crate::modules::eval::ModEvaluateFuture {
+        let map = self
+            .isolate
+            .get_slot::<ModuleSlot>()
+            .cloned()
+            .expect("Vm::install_modules runs before module evaluation");
+        unsafe { self.isolate.enter() };
+        let fut = {
+            v8::scope_with_context!(cs, &mut self.isolate, &self.context);
+            map.mod_evaluate(cs, id)
+        };
+        unsafe { self.isolate.exit() };
+        fut
+    }
+
+    /// True while a static module evaluation (TLA) is in flight — the
+    /// host loop's keep-pumping condition.
+    pub fn has_pending_module_evaluation(&self) -> bool {
+        self.isolate
+            .get_slot::<ModuleSlot>()
+            .map(|m| m.has_pending_module_evaluation())
+            .unwrap_or(false)
+    }
+
+    /// True while any dynamic import is unresolved (loading, evaluating,
+    /// or waiting on TLA).
+    pub fn has_pending_dynamic_imports(&self) -> bool {
+        self.isolate
+            .get_slot::<ModuleSlot>()
+            .map(|m| m.has_pending_dynamic_imports())
+            .unwrap_or(false)
+    }
+
+    /// One module-progress pass with the CALLER's waker — the face a
+    /// reactor-driven host drives (its loop waker lands in every module
+    /// future; module-side wakeups wake the loop). The poll-driven
+    /// [`Vm::poll`] wraps this with an advisory flag waker.
+    pub fn poll_modules(&mut self, cx: &mut Context<'_>) -> Result<(), LoopError> {
+        let Some(map) = self.isolate.get_slot::<ModuleSlot>().cloned() else {
+            return Ok(());
+        };
+        unsafe { self.isolate.enter() };
+        let r = {
+            v8::scope_with_context!(cs, &mut self.isolate, &self.context);
+            map.poll_progress(cx, cs)
+        };
+        unsafe { self.isolate.exit() };
+        r.map_err(|e| match e {
+            ModuleEvalError::Terminated => LoopError::Terminated,
+            ModuleEvalError::Threw(m) => LoopError::TickThrew(m),
+        })
+    }
+
+    /// Advisory: a module-load future woke since the last take (the
+    /// poll-driven default waker's flag).
+    pub fn take_module_wake(&mut self) -> bool {
+        self.module_wake.take()
+    }
+
     /// The watchdog arm: any JS currently running stops at the next
     /// checkpoint (uncatchable). Triplets already queued are untouched —
     /// parking is the queue's job. The interrupt itself is one-shot
@@ -456,6 +616,14 @@ impl Vm {
                 .expect("Vm::new installs the driver slot")
                 .clone();
             driver.borrow_mut().drive(&mut self.queue);
+        }
+        // Module progress (dynamic imports) rides between the Rust drive
+        // and JS delivery: its loads are Rust-side futures like ops, its
+        // settlements land in JS like triplets.
+        {
+            let waker = self.module_wake.waker();
+            let mut cx = Context::from_waker(&waker);
+            self.poll_modules(&mut cx)?;
         }
         // Enter/exit discipline — see eval_string. The early-return on a
         // parked batch must NOT skip the exit, so the drain moves inside.
@@ -509,6 +677,28 @@ impl Vm {
         let result = eval_string_impl(isolate, context, source);
         unsafe { isolate.exit() };
         result
+    }
+}
+
+/// A module-machinery failure → the host's message-shaped error face.
+/// Live exceptions string-ify (`String(v)` law, same as eval_string);
+/// termination stays termination.
+fn module_error_to_eval(
+    isolate: &mut v8::OwnedIsolate,
+    context: &v8::Global<v8::Context>,
+    error: ModuleError,
+) -> ModuleEvalError {
+    match error {
+        ModuleError::Terminated => ModuleEvalError::Terminated,
+        ModuleError::Loader(e) => ModuleEvalError::Threw(e.message().to_string()),
+        ModuleError::Exception(exception) => {
+            v8::scope_with_context!(cs, isolate, context);
+            let exception = v8::Local::new(cs, exception);
+            let message = exception
+                .to_string(cs)
+                .unwrap_or_else(|| v8::String::new(cs, "<exception>").unwrap());
+            ModuleEvalError::Threw(message.to_rust_string_lossy(cs))
+        }
     }
 }
 
