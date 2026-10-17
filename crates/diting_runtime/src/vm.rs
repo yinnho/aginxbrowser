@@ -683,6 +683,49 @@ impl Vm {
         self.isolate.cancel_terminate_execution();
     }
 
+    /// Cross-thread terminate/cancel handle (the watchdog family's face —
+    /// v8-native `IsolateHandle`, same type deno handed out through
+    /// `v8_isolate().thread_safe_handle()`).
+    pub fn isolate_handle(&self) -> v8::IsolateHandle {
+        self.isolate.thread_safe_handle()
+    }
+
+    /// Evaluate a named script and keep the result VALUE (the embedder's
+    /// execute_script — deno's shape). The name rides the script origin, so
+    /// it surfaces in Error.stack for failing scripts; `eval_string` keeps
+    /// frames origin-less for the driver/test surface. Terminations and
+    /// exceptions map like every other entry face.
+    pub fn execute_script(
+        &mut self,
+        name: &str,
+        source: &str,
+    ) -> Result<v8::Global<v8::Value>, LoopError> {
+        let Vm {
+            isolate, context, ..
+        } = self;
+        // Enter/exit discipline — see eval_string.
+        unsafe { isolate.enter() };
+        let result = execute_script_impl(isolate, context, name, source);
+        unsafe { isolate.exit() };
+        result
+    }
+
+    /// A handle scope entered on the vm's context — the `deno_core::scope!`
+    /// shape the host uses to convert Globals (v8_to_json class of work).
+    /// The closure's current context is the vm's; every Local it makes dies
+    /// at the boundary, so return data or Globals, not Locals.
+    pub fn with_scope<R>(&mut self, f: impl FnOnce(&mut v8::PinScope<'_, '_>) -> R) -> R {
+        let isolate = &mut self.isolate;
+        // Enter/exit discipline — see eval_string.
+        unsafe { isolate.enter() };
+        let out = {
+            v8::scope_with_context!(cs, isolate, &self.context);
+            f(cs)
+        };
+        unsafe { isolate.exit() };
+        out
+    }
+
     /// One loop pass: drive async op futures (completions enter the
     /// queue), deliver queued settlements into JS, then drain microtasks
     /// (promise continuations queued by this round's resolves).
@@ -794,8 +837,7 @@ fn eval_string_impl(
     isolate: &mut v8::OwnedIsolate,
     context: &v8::Global<v8::Context>,
     source: &str,
-) -> Result<String, LoopError> {
-    v8::scope_with_context!(cs, isolate, context);
+) -> Result<String, LoopError> {    v8::scope_with_context!(cs, isolate, context);
     v8::tc_scope!(let tc, cs);
     let src = v8::String::new(tc, source).expect("script source fits");
     let value = match v8::Script::compile(tc, src, None).and_then(|script| script.run(tc)) {
@@ -824,6 +866,46 @@ fn eval_string_impl(
         .try_cast::<v8::String>()
         .expect("String() returns string");
     Ok(s.to_rust_string_lossy(tc))
+}
+
+/// [`Vm::execute_script`]'s body: same entry mapping as
+/// `eval_string_impl`, but the value survives as a Global and the script
+/// carries the caller's name in its origin.
+fn execute_script_impl(
+    isolate: &mut v8::OwnedIsolate,
+    context: &v8::Global<v8::Context>,
+    name: &str,
+    source: &str,
+) -> Result<v8::Global<v8::Value>, LoopError> {
+    v8::scope_with_context!(cs, isolate, context);
+    v8::tc_scope!(let tc, cs);
+    let src = v8::String::new(tc, source).expect("script source fits");
+    let name_s = v8::String::new(tc, name).expect("script name fits");
+    let origin = v8::ScriptOrigin::new(
+        tc,
+        name_s.into(),
+        0,
+        0,
+        false,
+        -1,
+        None,
+        false,
+        false,
+        false,
+        None,
+    );
+    let value = match v8::Script::compile(tc, src, Some(&origin)).and_then(|s| s.run(tc)) {
+        Some(v) => v,
+        None if tc.has_terminated() => return Err(LoopError::Terminated),
+        None => {
+            let msg = match tc.message() {
+                Some(m) => m.get(tc).to_rust_string_lossy(tc),
+                None => "<no message>".into(),
+            };
+            return Err(LoopError::TickThrew(msg));
+        }
+    };
+    Ok(v8::Global::new(tc, value))
 }
 
 /// Deliver one batch: per-triplet `__diting_settle(id, ok, payload)` calls.
