@@ -15,6 +15,12 @@ pub struct WatchdogToken {
     pair: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     join: Option<std::thread::JoinHandle<()>>,
     fired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Set at the top of cancel_and_join, BEFORE the mutex: the post-fire
+    /// grace poll in the watchdog thread reads this, not the mutex flag,
+    /// because the mutex stays in the watchdog thread's hands through the
+    /// grace — polling it would deadlock stop()'s lock for the whole grace.
+    /// "Owner came back" is exactly what the grace wants to detect.
+    resurfaced: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Debug knob (AGINXBROWSER_WATCHDOG_STACK_DUMP=1): a sampler thread that
     /// requests a stack-dump interrupt every 250ms while this watchdog is
     /// armed, so the FIRST sample lands mid-spin — long before any terminate
@@ -172,6 +178,8 @@ pub fn spawn_watchdog(
     };
     let pair_c = pair.clone();
     let fired_c = fired.clone();
+    let resurfaced = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let resurfaced_c = resurfaced.clone();
     let join = std::thread::spawn(move || {
         let (lock, cvar) = &*pair_c;
         let mut cancelled = lock.lock().unwrap();
@@ -192,6 +200,27 @@ pub fn spawn_watchdog(
                     stale.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 watchdog_terminate(&handle);
+                // Post-fire grace: did the shot land? A terminate only takes
+                // effect at a V8 stack check; a TurboFan-optimized loop that
+                // calls a builtin (e.g. Array.prototype.fill) has none —
+                // rusty_v8 #2088, re-hammering every 10ms for 10s still never
+                // lands. The resurface signal is the owner calling stop()/
+                // dropping the token (resurfaced is set before the mutex);
+                // if that never comes, the isolate is spinning forever and
+                // nothing at our layer can reach it. Say so loudly instead
+                // of dying silent — 100ms polls so a normal recovery exits
+                // the grace (and the join) promptly.
+                for _ in 0..30 {
+                    if resurfaced_c.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                eprintln!(
+                    "[watchdog] terminate fired but the isolate never resurfaced within 3s — \
+                     optimized-loop termination hole (rusty_v8 #2088 shape); this thread spins \
+                     forever and cannot be recovered, session is a zombie"
+                );
                 return;
             }
             let (guard, _) = cvar.wait_timeout(cancelled, remaining).unwrap();
@@ -201,7 +230,7 @@ pub fn spawn_watchdog(
             }
         }
     });
-    WatchdogToken { pair, join: Some(join), fired, sampler_stop }
+    WatchdogToken { pair, join: Some(join), fired, resurfaced, sampler_stop }
 }
 
 impl Drop for WatchdogToken {
@@ -237,6 +266,10 @@ impl WatchdogToken {
     /// guarantees the sampler stops AFTER the watchdog can no longer fire, so
     /// its last in-flight request can at worst dump a healthy stack once.
     fn cancel_and_join(&mut self) {
+        // Before the mutex: the post-fire grace poll in the watchdog thread
+        // reads this flag, and the mutex is in that thread's hands until the
+        // grace ends.
+        self.resurfaced.store(true, std::sync::atomic::Ordering::Relaxed);
         {
             let (lock, cvar) = &*self.pair;
             *lock.lock().unwrap() = true;
