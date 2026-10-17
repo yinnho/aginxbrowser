@@ -10,14 +10,17 @@
 //!
 //! What this slice deliberately does NOT have yet: the immediates/close
 //! phases (diting uses neither — no setImmediate, no close callbacks
-//! anywhere in the tree) and the snapshot-backed persistence face. The op
-//! driver (batch 3) and the ring promise table (batch 4, replacing the
-//! original Map seed — same settle law, deno_core's ring shape learned
-//! and one deliberate divergence: Missing-absorb instead of deno's throw)
-//! are wired in. See [`crate::driver`] and the PRELUDE below.
+//! anywhere in the tree). The op driver (batch 3), the ring promise table
+//! (batch 4, replacing the original Map seed — same settle law,
+//! deno_core's ring shape learned and one deliberate divergence:
+//! Missing-absorb instead of deno's throw), and the snapshot face
+//! (batch 5: [`create_snapshot`] / [`Vm::from_snapshot`] — the dormant
+//! shell baked once, restored per instance) are wired in. See
+//! [`crate::driver`], [`crate::snapshot`], and the PRELUDE below.
 
 use crate::driver::{AfterTicks, OpDriver};
 use crate::settle::SettleQueue;
+use crate::snapshot::{self, SnapshotError};
 use std::cell::RefCell;
 use std::future::Future;
 use std::rc::Rc;
@@ -162,13 +165,16 @@ type DriverSlot = Rc<RefCell<OpDriver>>;
 
 /// `__diting_spawn(id, ticks, payload)` — the JS→Rust op entry.
 ///
+/// `pub(crate)` because [`crate::snapshot::EXTERNAL_REFERENCES`] pins this
+/// exact function pointer into every blob; the two are one contract.
+///
 /// SAFETY: V8 invokes this under the API-callback contract (valid
 /// FunctionCallbackInfo pointer, an open handle scope, on the isolate's
 /// thread). We only touch the isolate through the recovered reference and
 /// never outlive the call. No panics across this boundary — a panic inside
 /// `extern "C"` is UB (abort), so a missing slot is a silent no-op: the
 /// promise would hang, and every driver test would fail loudly anyway.
-unsafe extern "C" fn spawn_callback(info: *const v8::FunctionCallbackInfo) {
+pub(crate) unsafe extern "C" fn spawn_callback(info: *const v8::FunctionCallbackInfo) {
     let info = unsafe { &*info };
     let parts = info.get_parts();
     let args = v8::FunctionCallbackArguments::from_function_callback_info_parts(info, &parts);
@@ -198,6 +204,80 @@ unsafe extern "C" fn spawn_callback(info: *const v8::FunctionCallbackInfo) {
     }
 }
 
+/// Bake the JS face into a context: run the PRELUDE, install the raw
+/// `__diting_spawn` callback. Both the fresh-vm path ([`Vm::build`]) and
+/// the snapshot creator ([`create_snapshot`]) go through this one
+/// function — the baked shell and the live one can never drift apart.
+fn install_faces(isolate: &mut v8::OwnedIsolate, context: &v8::Global<v8::Context>) {
+    v8::scope_with_context!(cs, isolate, context);
+    let src = v8::String::new(cs, PRELUDE).expect("prelude source fits");
+    let script = v8::Script::compile(cs, src, None).expect("prelude compiles");
+    script.run(cs).expect("prelude runs");
+
+    // The native op entry: a raw callback function, no template
+    // machinery needed.
+    let global = cs.get_current_context().global(cs);
+    let spawn_name = v8::String::new(cs, "__diting_spawn").unwrap();
+    let spawn_fn =
+        v8::Function::new_raw(cs, spawn_callback).expect("__diting_spawn template builds");
+    spawn_fn.set_name(spawn_name);
+    global.set(cs, spawn_name.into(), spawn_fn.into());
+}
+
+/// Bake the dormant shell into our container format (batch 5). The
+/// creator runs the same [`install_faces`] a fresh [`Vm`] runs, so the
+/// blob IS a fresh vm's heap: promise table empty, faces installed, the
+/// spawn callback pinned through [`crate::snapshot::external_references`]
+/// — V8 stores snapshotted raw callbacks by INDEX into that table, so
+/// every restore must pass the SAME table (append-only, order
+/// load-bearing).
+///
+/// Snapshotted raw functions are exactly why the exclusivity discipline
+/// exists: creation is a whole-isolate operation (the v8 crate runs its
+/// own snapshot tests under a process-wide write lock). Within this
+/// crate, that means snapshot tests live in their own test binary — the
+/// creator here and a live isolate elsewhere in the same process at the
+/// same moment is not a supported mix.
+///
+/// Panics (never returns None silently): a failed bake is a build bug,
+/// and half a snapshot is worse than none.
+pub fn create_snapshot() -> Vec<u8> {
+    ensure_v8();
+    let mut isolate = v8::Isolate::snapshot_creator(Some(snapshot::external_references()), None);
+    // Face-identical wiring: the prelude never CALLS the op face at bake
+    // time, but the driver slot goes in anyway — if that ever changes,
+    // tests get a loud hang instead of the callback's silent no-op drop.
+    isolate.set_slot::<DriverSlot>(Rc::new(RefCell::new(OpDriver::new())));
+
+    let context = {
+        v8::scope!(let scope, &mut isolate);
+        let context = v8::Context::new(scope, Default::default());
+        v8::Global::new(scope, context)
+    };
+    install_faces(&mut isolate, &context);
+    // The context we just dressed becomes THE context a restore revives:
+    // set_default_context marks it as the blob's default context, and
+    // Context::new on a snapshot-backed isolate returns exactly that.
+    {
+        v8::scope_with_context!(cs, &mut isolate, &context);
+        let local = cs.get_current_context();
+        cs.set_default_context(local);
+    }
+    // The Global must not survive into the bake: the serializer walks the
+    // isolate's global-handle table and fatals on any handle it cannot
+    // serialize (CheckGlobalAndEternalHandles — the v8 crate's own test
+    // never creates one). Dropping it disposes the persistent handle; the
+    // context itself lives on through set_default_context's bookkeeping.
+    drop(context);
+
+    // create_blob consumes the isolate and must not run inside any handle
+    // scope — both scopes above are closed here.
+    let startup_data = isolate
+        .create_blob(v8::FunctionCodeHandling::Keep)
+        .expect("snapshot blob builds");
+    snapshot::serialize(&startup_data, &snapshot::sidecar_v1())
+}
+
 /// A bare V8 isolate driven by our loop. Single-threaded by design, like
 /// everything that lives next to an isolate.
 pub struct Vm {
@@ -215,11 +295,34 @@ impl Default for Vm {
 
 impl Vm {
     pub fn new() -> Self {
+        // A fresh isolate cannot fail to build — only the restore path has
+        // error shapes, and those belong to from_snapshot.
+        Self::build(None).expect("fresh isolate creation is infallible")
+    }
+
+    /// Revive a dormant shell baked by [`create_snapshot`]. The container
+    /// is validated first ([`crate::snapshot::deconstruct`]); a v8 blob
+    /// that is valid V8 but not OUR shell (no `__diting_settle` face)
+    /// panics loudly — that is a wrong-blob bug, not a runtime condition.
+    pub fn from_snapshot(bytes: &[u8]) -> Result<Self, SnapshotError> {
+        Self::build(Some(bytes))
+    }
+
+    fn build(snapshot: Option<&[u8]>) -> Result<Self, SnapshotError> {
         ensure_v8();
-        let mut isolate = v8::Isolate::new(Default::default());
+        let mut isolate = match snapshot {
+            None => v8::Isolate::new(Default::default()),
+            Some(bytes) => {
+                let parts = snapshot::deconstruct(bytes)?;
+                let params = v8::Isolate::create_params()
+                    .snapshot_blob(v8::StartupData::from(parts.v8_blob.to_vec()))
+                    .external_references(snapshot::external_references());
+                v8::Isolate::new(params)
+            }
+        };
         // Microtasks run exactly when the loop drains them — never
         // implicitly at some V8-internal checkpoint. The loop owns the
-        // schedule.
+        // schedule. (Runtime policy, not heap state — set on both paths.)
         isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
         // The op driver goes in before any JS runs — __diting_spawn finds
         // it through this slot.
@@ -227,38 +330,34 @@ impl Vm {
 
         let context = {
             v8::scope!(let scope, &mut isolate);
+            // On a snapshot-backed isolate this returns the blob's default
+            // context — the dressed shell. On a fresh isolate it is a new
+            // context the prelude dresses below.
             let context = v8::Context::new(scope, Default::default());
             v8::Global::new(scope, context)
         };
+        if snapshot.is_none() {
+            // Restores already carry the faces in the blob.
+            install_faces(&mut isolate, &context);
+        }
         let settle_fn = {
             v8::scope_with_context!(cs, &mut isolate, &context);
-            let src = v8::String::new(cs, PRELUDE).expect("prelude source fits");
-            let script = v8::Script::compile(cs, src, None).expect("prelude compiles");
-            script.run(cs).expect("prelude runs");
-
-            // The native op entry: a raw callback function, no template
-            // machinery needed.
-            let global = cs.get_current_context().global(cs);
-            let spawn_name = v8::String::new(cs, "__diting_spawn").unwrap();
-            let spawn_fn =
-                v8::Function::new_raw(cs, spawn_callback).expect("__diting_spawn template builds");
-            spawn_fn.set_name(spawn_name);
-            global.set(cs, spawn_name.into(), spawn_fn.into());
-
             let name = v8::String::new(cs, "__diting_settle").unwrap();
-            let settle_fn = global
+            let settle_fn = cs
+                .get_current_context()
+                .global(cs)
                 .get(cs, name.into())
                 .and_then(|f| f.try_cast::<v8::Function>().ok())
-                .expect("prelude installs __diting_settle");
+                .expect("context has __diting_settle — without it this is not our shell");
             v8::Global::new(cs, settle_fn)
         };
 
-        Self {
+        Ok(Self {
             isolate,
             context,
             settle_fn,
             queue: SettleQueue::new(),
-        }
+        })
     }
 
     /// A completed op enters the pipeline. Settlement happens on the next
@@ -332,9 +431,15 @@ impl Vm {
                 .clone();
             driver.borrow_mut().drive(&mut self.queue);
         }
-        let delivered = self.deliver_round()?;
-        self.drain_microtasks();
-        Ok(delivered)
+        // Enter/exit discipline — see eval_string. The early-return on a
+        // parked batch must NOT skip the exit, so the drain moves inside.
+        unsafe { self.isolate.enter() };
+        let delivered = self.deliver_round();
+        if delivered.is_ok() {
+            self.drain_microtasks();
+        }
+        unsafe { self.isolate.exit() };
+        delivered
     }
 
     fn deliver_round(&mut self) -> Result<bool, LoopError> {
@@ -366,36 +471,54 @@ impl Vm {
         let Vm {
             isolate, context, ..
         } = self;
-        v8::scope_with_context!(cs, isolate, &*context);
-        v8::tc_scope!(let tc, cs);
-        let src = v8::String::new(tc, source).expect("script source fits");
-        let value = match v8::Script::compile(tc, src, None).and_then(|script| script.run(tc)) {
-            Some(v) => v,
-            None if tc.has_terminated() => return Err(LoopError::Terminated),
-            None => {
-                let msg = match tc.message() {
-                    Some(m) => m.get(tc).to_rust_string_lossy(tc),
-                    None => "<no message>".into(),
-                };
-                return Err(LoopError::TickThrew(msg));
-            }
-        };
-        // String(value) coercion through the global constructor.
-        let key = v8::String::new(tc, "String").unwrap();
-        let string_fn = tc
-            .get_current_context()
-            .global(tc)
-            .get(tc, key.into())
-            .and_then(|f| f.try_cast::<v8::Function>().ok())
-            .expect("String global exists");
-        let coerced = string_fn
-            .call(tc, v8::undefined(tc).into(), &[value])
-            .expect("String() of a primitive does not throw");
-        let s = coerced
-            .try_cast::<v8::String>()
-            .expect("String() returns string");
-        Ok(s.to_rust_string_lossy(tc))
+        // Enter/exit discipline: in this v8 crate an OwnedIsolate is
+        // ENTERED at construction and stays the thread's current isolate
+        // until dropped — the NEWEST live isolate wins the TLS slot. With
+        // more than one Vm alive (one blob, many restores — the dormant
+        // shell shape), flipping the entry back before our scopes open is
+        // on us; ContextScope::new checks TLS current, not ownership.
+        // Balanced around the whole call, callbacks included.
+        unsafe { isolate.enter() };
+        let result = eval_string_impl(isolate, context, source);
+        unsafe { isolate.exit() };
+        result
     }
+}
+
+fn eval_string_impl(
+    isolate: &mut v8::OwnedIsolate,
+    context: &v8::Global<v8::Context>,
+    source: &str,
+) -> Result<String, LoopError> {
+    v8::scope_with_context!(cs, isolate, context);
+    v8::tc_scope!(let tc, cs);
+    let src = v8::String::new(tc, source).expect("script source fits");
+    let value = match v8::Script::compile(tc, src, None).and_then(|script| script.run(tc)) {
+        Some(v) => v,
+        None if tc.has_terminated() => return Err(LoopError::Terminated),
+        None => {
+            let msg = match tc.message() {
+                Some(m) => m.get(tc).to_rust_string_lossy(tc),
+                None => "<no message>".into(),
+            };
+            return Err(LoopError::TickThrew(msg));
+        }
+    };
+    // String(value) coercion through the global constructor.
+    let key = v8::String::new(tc, "String").unwrap();
+    let string_fn = tc
+        .get_current_context()
+        .global(tc)
+        .get(tc, key.into())
+        .and_then(|f| f.try_cast::<v8::Function>().ok())
+        .expect("String global exists");
+    let coerced = string_fn
+        .call(tc, v8::undefined(tc).into(), &[value])
+        .expect("String() of a primitive does not throw");
+    let s = coerced
+        .try_cast::<v8::String>()
+        .expect("String() returns string");
+    Ok(s.to_rust_string_lossy(tc))
 }
 
 /// Deliver one batch: per-triplet `__diting_settle(id, ok, payload)` calls.

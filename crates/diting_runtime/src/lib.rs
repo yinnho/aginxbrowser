@@ -33,7 +33,12 @@
 //!    分叉：resolve miss 吸收而不是 deno 的 throw（停泊重投法不允许
 //!    一个 stale settle 毒死整批）。immediates/close 相（diting 现役
 //!    零消费，先不建）。
-//! 5. 自有快照格式（[v8 data][sidecar][ulen] 三段式，sidecar 自有）。
+//! 5. **自有快照格式**（`snapshot`，已落）：`[v8 blob][sidecar][u64
+//!    v8-len]` 三段式容器，尾长定宽 u64（musl 32 位可移植，与 deno 的
+//!    usize 刻意分叉）、sidecar 版本字先行（v1 仅版本字，随真运行态逐
+//!    字段长）；快照里钉裸回调必须 EXTERNAL_REFERENCES 表两端一致
+//!    （append-only、序即契约）。dormant shell 钉测独立测试二进制——
+//!    v8 crate 自家快照测试就进程级独占跑，法条照学。
 //! 6. op 注册面（40 ops 从 `#[op2]` 迁出）+ diting 换装 + 删 deno_core。
 //!
 //! ## 法条（与 js/core_base.js v1 同一条法，两层各自实现）
@@ -42,14 +47,16 @@
 //!   tick 结算过——JS 侧 Missing-absorb 层把重复投递折叠成 no-op）。
 //! - 后续投递轮先排空停泊批次，oldest first；结算序即完成序。
 //! - 停泊 3 次无进展 = 毒丸，丢弃并计数（`Stats`），错误照常上抛——
-//!   内部 bug 必须露脸，绝不空转。
+//!   内部 bug 必须露脸，绝���空转。
 //! - terminate 打断一切 catch——停泊态就是中断现场，cancel 后下一轮
 //!   poll 自动重投，无需特殊处理。
 
 pub mod driver;
 pub mod settle;
+pub mod snapshot;
 pub mod vm;
 
 pub use driver::{AfterTicks, OpDriver};
 pub use settle::{SettleQueue, Stats};
-pub use vm::{LoopError, Triplet, Vm};
+pub use snapshot::{SnapshotError, SIDECAR_VERSION};
+pub use vm::{create_snapshot, LoopError, Triplet, Vm};
