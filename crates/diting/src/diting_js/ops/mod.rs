@@ -641,7 +641,7 @@ fn propagate_script_start_state(
     started.borrow_mut().extend(additions);
 }
 
-#[op2(fast)]
+#[diting_op]
 fn op_script_mark_started(state: &OpState, nid: u32) -> bool {
     let shared = state.borrow::<SharedState>().clone();
     let state = shared.borrow();
@@ -658,7 +658,7 @@ fn op_script_mark_started(state: &OpState, nid: u32) -> bool {
 
 /// Atomically claim an executable script. A false result means the node was
 /// created inert by an HTML-string API or has already been prepared once.
-#[op2(fast)]
+#[diting_op]
 fn op_script_try_start(state: &OpState, nid: u32) -> bool {
     let shared = state.borrow::<SharedState>().clone();
     let state = shared.borrow();
@@ -678,14 +678,14 @@ fn op_script_try_start(state: &OpState, nid: u32) -> bool {
 /// The page-level http_client's active_requests() counter never sees these —
 /// they ride the op-level client cache — so without this bracket the settle
 /// loop's fast path would strand scripts slower than its 500ms budget.
-#[op2(fast)]
+#[diting_op]
 fn op_dyn_script_fetch_begin(state: &OpState) {
     let shared = state.borrow::<SharedState>().clone();
     let state = shared.borrow();
     state.dynamic_script_fetches.set(state.dynamic_script_fetches.get() + 1);
 }
 
-#[op2(fast)]
+#[diting_op]
 fn op_dyn_script_fetch_end(state: &OpState) {
     let shared = state.borrow::<SharedState>().clone();
     let state = shared.borrow();
@@ -696,7 +696,7 @@ fn op_dyn_script_fetch_end(state: &OpState) {
 /// table. The JS-side `__blobObjs` map is unreachable from the module
 /// loader (which resolves outside the realm), so `import("blob:…")` and
 /// `<script type=module src="blob:…">` resolve through this mirror.
-#[op2(fast)]
+#[diting_op]
 fn op_blob_register(
     state: &OpState,
     #[string] id: String,
@@ -708,7 +708,7 @@ fn op_blob_register(
 }
 
 /// Drop a mirrored blob registration (`URL.revokeObjectURL`).
-#[op2(fast)]
+#[diting_op]
 fn op_blob_revoke(state: &OpState, #[string] id: String) {
     let shared = state.borrow::<SharedState>().clone();
     shared.borrow().blob_store.borrow_mut().remove(&id);
@@ -718,7 +718,7 @@ fn op_blob_revoke(state: &OpState, #[string] id: String) {
 /// Returns the root's node id, or -2 when the host already has a shadow root
 /// (JS maps that to the spec's NotSupportedError) and -1 for any other failure
 /// (missing DOM, non-element host, bad mode).
-#[op2(fast)]
+#[diting_op]
 fn op_shadow_attach(state: &OpState, host_nid: u32, #[string] mode: String) -> i32 {
     let gs = state.borrow::<SharedState>().clone();
     let gs = gs.borrow();
@@ -738,7 +738,7 @@ fn op_shadow_attach(state: &OpState, host_nid: u32, #[string] mode: String) -> i
     }
 }
 
-#[op2]
+#[diting_op]
 #[string]
 fn op_dom(state: &OpState, #[string] cmd: String, #[string] arg1: String, #[string] arg2: String) -> String {
     // Anti-panic boundary: a panic in a DOM op would unwind through deno_core
@@ -3197,7 +3197,7 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
 ];
 
 
-#[op2(fast)]
+#[diting_op]
 fn op_console_msg(state: &OpState, #[string] level: &str, #[string] msg: &str) {
     match level {
         "warn" => tracing::warn!(target: "diting::console", "{}", msg),
@@ -3223,7 +3223,7 @@ fn op_console_msg(state: &OpState, #[string] level: &str, #[string] msg: &str) {
 /// session_console shows what the page asked. Returns
 /// `{"accept":bool,"value":string|null}`; value is only meaningful for
 /// prompt, where the JS wrapper falls back to the call's default argument.
-#[op2]
+#[diting_op]
 #[string]
 fn op_dialog(state: &OpState, #[string] kind: &str, #[string] message: &str) -> String {
     let shared = state.borrow::<SharedState>().clone();
@@ -3561,7 +3561,7 @@ fn push_fetch_settlement(
 /// Probe-and-take one mirrored completion. `""` = not completed (or already
 /// evicted); a payload starting with NUL is a rejection notice, anything else
 /// is the op's JSON result verbatim.
-#[op2]
+#[diting_op]
 #[string]
 fn op_fetch_take(state: &mut OpState, #[string] key: String) -> String {
     state
@@ -3952,7 +3952,7 @@ fn record_failed_fetch(state: &OpState, f: &FetchFailure) {
 ///   network error — rare on this legacy path.
 const SYNC_XHR_TIMEOUT_MS: u64 = 120_000;
 
-#[op2]
+#[diting_op]
 #[string]
 fn op_fetch_url_sync(
     state: &OpState,
@@ -4059,7 +4059,7 @@ fn op_fetch_url_sync(
 /// unparsable input yields 0×0 and the JS side keeps its old fallback, so
 /// the load/error contract (#41: transport status decides) is untouched —
 /// this only fills in real numbers when they're available.
-#[op2]
+#[diting_op]
 #[string]
 fn op_image_info(#[string] body_base64: String) -> String {
     let bytes = BASE64.decode(body_base64.as_bytes()).unwrap_or_default();
@@ -4067,7 +4067,7 @@ fn op_image_info(#[string] body_base64: String) -> String {
     serde_json::json!({ "width": w, "height": h }).to_string()
 }
 
-#[op2]
+#[diting_op]
 #[string]
 fn op_get_cookies(state: &OpState) -> String {
     let gs = state.borrow::<SharedState>().clone();
@@ -4083,7 +4083,7 @@ fn op_get_cookies(state: &OpState) -> String {
     jar.get_js_visible_cookies(&url)
 }
 
-#[op2(fast)]
+#[diting_op]
 fn op_set_cookie(state: &OpState, #[string] cookie_str: &str) {
     let gs = state.borrow::<SharedState>().clone();
     let gs = gs.borrow();
@@ -4162,7 +4162,7 @@ fn storage_load_locked(origin: &str) {
         .insert(origin.to_string(), entries);
 }
 
-#[op2]
+#[diting_op]
 #[string]
 fn op_storage_read(#[string] origin: &str) -> String {
     storage_load_locked(origin);
@@ -4171,7 +4171,7 @@ fn op_storage_read(#[string] origin: &str) -> String {
     serde_json::to_string(&entries.unwrap_or(&HashMap::new())).unwrap_or_else(|_| "{}".to_string())
 }
 
-#[op2(fast)]
+#[diting_op]
 fn op_storage_write(#[string] origin: &str, #[string] json: &str) {
     let Ok(entries) = serde_json::from_str::<HashMap<String, String>>(json) else {
         return;
@@ -4247,7 +4247,7 @@ pub(crate) fn reset_local_storage_for_tests() {
     LOCAL_STORAGE_LOADED.lock().unwrap().clear();
 }
 
-#[op2(fast)]
+#[diting_op]
 fn op_navigate(state: &OpState, #[string] url: &str, #[string] method: &str, #[string] body: &str) {
     let gs = state.borrow::<SharedState>().clone();
     let mut gs = gs.borrow_mut();
@@ -4264,7 +4264,7 @@ fn op_navigate(state: &OpState, #[string] url: &str, #[string] method: &str, #[s
 /// boundary — obscura#1105). `target` is an absolute index into the page's
 /// real session history; the pump (`Page::process_pending_navigation`) moves
 /// the cursor and refetches the entry's document.
-#[op2(fast)]
+#[diting_op]
 fn op_history_jump_to(state: &OpState, target: i32) {
     let gs = state.borrow::<SharedState>().clone();
     let mut gs = gs.borrow_mut();
@@ -4286,7 +4286,7 @@ async fn op_sleep(#[number] millis: u64) {
 // Records a binding call from page JS. The CDP layer drains this queue
 // after every dispatch and emits one `Runtime.bindingCalled` event per
 // entry, that's how puppeteer's `page.exposeFunction` callbacks fire.
-#[op2(fast)]
+#[diting_op]
 fn op_binding_called(state: &OpState, #[string] name: &str, #[string] payload: &str) {
     let gs = state.borrow::<SharedState>().clone();
     let mut gs = gs.borrow_mut();
@@ -4489,7 +4489,7 @@ fn op_url_resolve(#[string] href: &str, #[string] base: &str) -> String {
 /// Parse and merge an inline document import map (upstream 34373c3). Returns
 /// "" on success or the parse/merge error message, so the bootstrap caller can
 /// surface it as a script error event without a rejected-op round-trip.
-#[op2]
+#[diting_op]
 #[string]
 fn op_add_import_map(
     state: &OpState,
@@ -4554,7 +4554,7 @@ fn op_url_encode_query(#[string] query: &str, #[string] label: &str, special: bo
 /// reads 0 — geometry measurement without the layout engine is meaningless
 /// anyway.
 #[cfg(feature = "screenshot")]
-#[op2(fast)]
+#[diting_op]
 fn op_svg_path_len(state: &OpState, #[smi] nid: u32) -> f64 {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         svg_measure(state, nid).map(|m| m.total() as f64).unwrap_or(0.0)
@@ -4563,7 +4563,7 @@ fn op_svg_path_len(state: &OpState, #[smi] nid: u32) -> f64 {
 }
 
 #[cfg(not(feature = "screenshot"))]
-#[op2(fast)]
+#[diting_op]
 fn op_svg_path_len(_: &OpState, #[smi] _: u32) -> f64 {
     0.0
 }
@@ -4572,7 +4572,7 @@ fn op_svg_path_len(_: &OpState, #[smi] _: u32) -> f64 {
 /// side splits and wraps it in an SVGPoint). Negative/overlong targets
 /// clamp to the endpoints, Chrome's contract.
 #[cfg(feature = "screenshot")]
-#[op2]
+#[diting_op]
 #[string]
 fn op_svg_path_point(state: &OpState, #[smi] nid: u32, target: f64) -> String {
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -4586,7 +4586,7 @@ fn op_svg_path_point(state: &OpState, #[smi] nid: u32, target: f64) -> String {
 }
 
 #[cfg(not(feature = "screenshot"))]
-#[op2]
+#[diting_op]
 #[string]
 fn op_svg_path_point(_: &OpState, #[smi] _: u32, _: f64) -> String {
     "0\u{0}0".to_string()

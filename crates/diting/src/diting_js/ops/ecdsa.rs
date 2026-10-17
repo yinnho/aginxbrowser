@@ -69,7 +69,7 @@ macro_rules! ecdsa_key_flat {
 
 /// Generate an ECDSA keypair. Returns the flat key payload (all four sections
 /// populated — the public and private CryptoKey views in the JS shim share it).
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_subtle_ecdsa_generate(
     #[string] curve: &str,
@@ -86,7 +86,7 @@ pub(crate) fn op_subtle_ecdsa_generate(
 /// Import a private ECDSA key from either PKCS#8 DER (`is_scalar` false) or a
 /// raw big-endian scalar (`is_scalar` true, 32/48 bytes). Returns the full
 /// flat payload (public parts derived from the private key).
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_subtle_ecdsa_import_private(
     #[string] curve: &str,
@@ -107,7 +107,7 @@ pub(crate) fn op_subtle_ecdsa_import_private(
 
 /// Import a public ECDSA key from either SPKI DER or a raw uncompressed SEC1
 /// point. Returns the flat payload with only the public sections set.
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_subtle_ecdsa_import_public(
     #[string] curve: &str,
@@ -133,7 +133,7 @@ pub(crate) fn op_subtle_ecdsa_import_public(
 
 /// ECDSA sign. `pkcs8` is the private key's PKCS#8 DER; output is the P1363
 /// raw signature (64 bytes for P-256, 96 for P-384).
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_subtle_ecdsa_sign(
     #[string] curve: &str,
@@ -155,7 +155,7 @@ pub(crate) fn op_subtle_ecdsa_sign(
 /// ECDSA verify. `sec1` is the public key's uncompressed SEC1 point,
 /// `signature` a P1363 raw signature. Malformed keys or signatures return
 /// `false` (the WebCrypto behavior), not an error.
-#[op2(fast)]
+#[diting_op]
 pub(crate) fn op_subtle_ecdsa_verify(
     #[string] curve: &str,
     #[string] hash: &str,
@@ -183,7 +183,7 @@ pub(crate) fn op_subtle_ecdsa_verify(
 /// private key's raw big-endian scalar, `peer_sec1` the peer public key's
 /// uncompressed SEC1 point — the two halves the JS shim already carries in
 /// every EC key's material.
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_subtle_ecdh_derive_bits(
     #[string] curve: &str,

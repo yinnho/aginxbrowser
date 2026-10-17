@@ -17,6 +17,7 @@ use std::task::{Context, Poll};
 
 use deno_core::op2;
 use deno_core::OpState;
+use diting_ops::diting_op;
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -740,7 +741,7 @@ fn finish_event(gs: &mut super::ops::JsState, id: u32, ev: WsInbound) -> String 
     json
 }
 
-#[op2(fast)]
+#[diting_op]
 pub(crate) fn op_ws_send(state: &OpState, id: u32, #[string] kind: &str, #[string] payload: &str) {
     let gs_rc = state.borrow::<SharedState>().clone();
     let gs = gs_rc.borrow();
@@ -759,7 +760,7 @@ pub(crate) fn op_ws_send(state: &OpState, id: u32, #[string] kind: &str, #[strin
     let _ = sock.outbound_tx.send(msg);
 }
 
-#[op2(fast)]
+#[diting_op]
 pub(crate) fn op_ws_close(state: &OpState, id: u32, code: u16, #[string] reason: &str) {
     let gs_rc = state.borrow::<SharedState>().clone();
     let gs = gs_rc.borrow();

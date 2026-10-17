@@ -104,7 +104,7 @@ fn private_from_components(
 
 /// Generate an RSA keypair. `bits` is the modulus length; `e` the public
 /// exponent as big-endian bytes. Returns the full ten-section payload.
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_subtle_rsa_generate(
     bits: u32,
@@ -119,7 +119,7 @@ pub(crate) fn op_subtle_rsa_generate(
 
 /// Import a public key from (n, e) big-endian integers (JWK path). Returns
 /// the payload with only the public sections set.
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_subtle_rsa_import_public(
     #[buffer] n: &[u8],
@@ -132,7 +132,7 @@ pub(crate) fn op_subtle_rsa_import_public(
 }
 
 /// Import a public key from SPKI DER. Returns the public-only payload.
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_subtle_rsa_import_spki(
     #[buffer] spki: &[u8],
@@ -145,7 +145,7 @@ pub(crate) fn op_subtle_rsa_import_spki(
 /// Import a private key from (n, e, d, p, q) big-endian integers (JWK path —
 /// dp/dq/qi are recomputed per RFC 8017 so exported JWKs round-trip). Returns
 /// the full payload.
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_subtle_rsa_import_private(
     #[buffer] n: &[u8],
@@ -166,7 +166,7 @@ pub(crate) fn op_subtle_rsa_import_private(
 }
 
 /// Import a private key from PKCS#8 DER. Returns the full payload.
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_subtle_rsa_import_pkcs8(
     #[buffer] pkcs8: &[u8],
@@ -182,7 +182,7 @@ pub(crate) fn op_subtle_rsa_import_pkcs8(
 /// full private components. Any crypto failure (corrupt ciphertext, label
 /// mismatch, wrong length) surfaces as the WebCrypto OperationError with an
 /// empty message, matching Chrome.
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_subtle_rsa_oaep(
     encrypt: bool,

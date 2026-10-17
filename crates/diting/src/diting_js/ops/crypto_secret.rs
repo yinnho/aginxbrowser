@@ -11,7 +11,7 @@ use super::*;
 /// algorithm name (`SHA-1` / `SHA-256` / `SHA-384` / `SHA-512`); unknown
 /// names fall through to SHA-256 to match the previous JS fallback. Returns
 /// the raw digest bytes so the JS shim can hand them back as an ArrayBuffer.
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_subtle_digest(#[string] algorithm: &str, #[buffer] data: &[u8]) -> Vec<u8> {
     use sha1::Digest as _;
@@ -45,7 +45,7 @@ pub(crate) fn crypto_err(msg: impl std::fmt::Display) -> deno_error::JsErrorBox 
 /// HMAC sign. `hash` is a normalized SubtleCrypto hash name; any key length is
 /// accepted (HMAC pads or hashes the key per RFC 2104). Returns the MAC bytes;
 /// the shim does the constant-time-insensitive compare for `verify`.
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_subtle_hmac(
     #[string] hash: &str,
@@ -73,7 +73,7 @@ pub(crate) fn op_subtle_hmac(
 /// appended, which is exactly RustCrypto's combined form, so this maps 1:1.
 /// Restricted to a 96-bit IV and 128-bit tag (the WebCrypto defaults and the
 /// overwhelming majority of real usage); the shim rejects other tag lengths.
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_subtle_aes_gcm(
     encrypt: bool,
@@ -118,7 +118,7 @@ pub(crate) fn op_subtle_aes_gcm(
 
 /// AES-CBC encrypt/decrypt with PKCS#7 padding (the only padding WebCrypto
 /// AES-CBC uses) and a 16-byte IV.
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_subtle_aes_cbc(
     encrypt: bool,
@@ -158,7 +158,7 @@ pub(crate) fn op_subtle_aes_cbc(
 /// AES-CTR. Encrypt and decrypt are the same keystream XOR. `counter_length` is
 /// the WebCrypto counter width in bits; it selects the RustCrypto CTR flavor so
 /// only the low `counter_length` bits of the 16-byte block increment.
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_subtle_aes_ctr(
     #[buffer] key: &[u8],
@@ -210,7 +210,7 @@ pub(crate) fn op_subtle_aes_ctr(
 /// KEKs are accepted here (the JS layer rejects 192 before reaching the op).
 /// Failures surface as OperationError with an empty message, matching
 /// Chrome's corrupt-unwrap face.
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_subtle_aes_kw(
     encrypt: bool,
@@ -334,7 +334,7 @@ pub(crate) fn pbkdf2_derive(
 }
 
 /// PBKDF2 key derivation. `length` is the derived-bits output in bytes.
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_subtle_pbkdf2(
     #[string] hash: &str,
@@ -349,7 +349,7 @@ pub(crate) fn op_subtle_pbkdf2(
 /// HKDF key derivation. `length` is the output length in bytes. An empty salt
 /// behaves as RFC 5869 specifies (HMAC zero-pads it to the block size, which is
 /// what browsers do).
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_subtle_hkdf(
     #[string] hash: &str,
@@ -390,7 +390,7 @@ pub(crate) fn op_subtle_hkdf(
 /// `crypto.randomUUID`, and `generateKey`, replacing the old Math.random shim
 /// (which was neither uniform across typed-array widths nor cryptographically
 /// random, and was a fingerprinting tell).
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_random_bytes(len: u32) -> Result<Vec<u8>, deno_error::JsErrorBox> {
     // Output-length cap (obscura #910 family): the HMAC generateKey path

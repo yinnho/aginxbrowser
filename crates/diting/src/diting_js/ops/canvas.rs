@@ -216,7 +216,7 @@ pub(crate) fn canvas_png_encode(width: u32, height: u32, rgba: &[u8]) -> Result<
     Ok(out)
 }
 
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_canvas_png(
     width: u32,
@@ -623,7 +623,7 @@ pub(crate) fn canvas_jpeg_encode(
     Ok(out)
 }
 
-#[op2]
+#[diting_op]
 #[buffer]
 pub(crate) fn op_canvas_jpeg(
     width: u32,
@@ -642,7 +642,7 @@ pub(crate) fn op_canvas_jpeg(
 /// both), so a canvas that just drew reaches the next frame instead of a
 /// cached empty box.
 #[cfg(feature = "screenshot")]
-#[op2(fast)]
+#[diting_op]
 pub(crate) fn op_canvas_store(
     state: &OpState,
     nid: u32,
@@ -708,7 +708,7 @@ pub(crate) fn canvas_text_tile(
 }
 
 #[cfg(feature = "screenshot")]
-#[op2]
+#[diting_op]
 #[serde]
 pub(crate) fn op_canvas_text(
     #[string] text: &str,
