@@ -134,6 +134,9 @@ precomputed-hash = "0.1"
 
 # --- V8 / JS runtime (inlined obscura-js) ---
 deno_core = "0.411"
+# Claim campaign: #[diting_op] glue helpers live here (op_glue, verbatim
+# deno_core 0.411 copies). deno_core itself retires in step 6.
+diting_runtime = { path = "../diting_runtime" }
 # Our op glue generator — replaces #[op2] one op family at a time (claim
 # step 4; docs/diting_runtime认领计划_20261017.md).
 diting_ops = { path = "../diting_ops" }

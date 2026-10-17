@@ -52,6 +52,7 @@
 //!   poll 自动重投，无需特殊处理。
 
 pub mod driver;
+pub mod op_glue;
 pub mod settle;
 pub mod snapshot;
 pub mod vm;

@@ -392,9 +392,9 @@ fn decode_js_arg(ident: &Ident, kind: &ArgKind, idx: Literal) -> proc_macro2::To
             quote! {
                 let #ident = args.get(#idx as i32);
                 let mut #temp: [::core::mem::MaybeUninit<u8>;
-                    ::deno_core::_ops::STRING_STACK_BUFFER_SIZE] =
+                    ::diting_runtime::op_glue::STRING_STACK_BUFFER_SIZE] =
                     [::core::mem::MaybeUninit::uninit();
-                        ::deno_core::_ops::STRING_STACK_BUFFER_SIZE];
+                        ::diting_runtime::op_glue::STRING_STACK_BUFFER_SIZE];
                 let #ident = if !#ident.is_string() {
                     let mut tc_store =
                         ::deno_core::v8::TryCatch::new(&mut scope);
@@ -412,7 +412,7 @@ fn decode_js_arg(ident: &Ident, kind: &ArgKind, idx: Literal) -> proc_macro2::To
                 } else {
                     #ident
                 };
-                let #ident = &::deno_core::_ops::to_str(
+                let #ident = &::diting_runtime::op_glue::to_str(
                     &mut scope,
                     &#ident,
                     &mut #temp,
@@ -421,17 +421,17 @@ fn decode_js_arg(ident: &Ident, kind: &ArgKind, idx: Literal) -> proc_macro2::To
         }
         ArgKind::StrOwn => quote! {
             let #ident = args.get(#idx as i32);
-            let #ident = ::deno_core::_ops::to_string(&mut scope, &#ident);
+            let #ident = ::diting_runtime::op_glue::to_string(&mut scope, &#ident);
         },
         ArgKind::Buffer => {
             let temp = Ident::new(&format!("{ident}_temp"), ident.span());
             quote! {
                 let #ident = args.get(#idx as i32);
                 let #temp =
-                    match unsafe { ::deno_core::_ops::to_v8_slice::<u8>(#ident) } {
+                    match unsafe { ::diting_runtime::op_glue::to_v8_slice::<u8>(#ident) } {
                         ::core::result::Result::Ok(v) => v,
                         ::core::result::Result::Err(e) => {
-                            ::deno_core::_ops::throw_error_one_byte_info(&info, e);
+                            ::diting_runtime::op_glue::throw_error_one_byte_info(&info, e);
                             return 1;
                         }
                     };
@@ -471,9 +471,9 @@ fn option_decode(
     quote! {
         let #ident = args.get(#idx as i32);
         let ::core::option::Option::Some(#ident) =
-            ::deno_core::_ops::#helper(&#ident)
+            ::diting_runtime::op_glue::#helper(&#ident)
         else {
-            ::deno_core::_ops::throw_error_one_byte_info(&info, #msg);
+            ::diting_runtime::op_glue::throw_error_one_byte_info(&info, #msg);
             return 1;
         };
         #cast_line
@@ -484,13 +484,13 @@ fn return_encode(kind: RetKind) -> proc_macro2::TokenStream {
     match kind {
         RetKind::Unit => quote! { return 0; },
         RetKind::Bool | RetKind::F64 | RetKind::I32 => quote! {
-            ::deno_core::_ops::RustToV8RetVal::to_v8_rv(result, &mut rv);
+            ::diting_runtime::op_glue::RustToV8RetVal::to_v8_rv(result, &mut rv);
             return 0;
         },
         // Infallible-typed but allocating returns encode the WHOLE value
         // fallibly (to_v8_fallible's Err is the encode failure itself).
         RetKind::Str | RetKind::BufferVec => quote! {
-            match ::deno_core::_ops::RustToV8Fallible::to_v8_fallible(
+            match ::diting_runtime::op_glue::RustToV8Fallible::to_v8_fallible(
                 result,
                 &mut scope,
             ) {
@@ -511,7 +511,7 @@ fn return_encode(kind: RetKind) -> proc_macro2::TokenStream {
         // dropped here (first divergence beyond the two in the module doc).
         RetKind::ResultStr | RetKind::ResultBuffer => {
             let inner = quote! {
-                match ::deno_core::_ops::RustToV8Fallible::to_v8_fallible(
+                match ::diting_runtime::op_glue::RustToV8Fallible::to_v8_fallible(
                     result,
                     &mut scope,
                 ) {
@@ -529,15 +529,15 @@ fn return_encode(kind: RetKind) -> proc_macro2::TokenStream {
         }
         RetKind::ResultBool => {
             let inner = quote! {
-                ::deno_core::_ops::RustToV8RetVal::to_v8_rv(result, &mut rv);
+                ::diting_runtime::op_glue::RustToV8RetVal::to_v8_rv(result, &mut rv);
             };
             result_match(inner)
         }
         RetKind::ResultSerde => {
             let inner = quote! {
-                match ::deno_core::_ops::RustToV8Fallible::to_v8_fallible(
-                    ::deno_core::_ops::RustToV8Marker::<
-                        ::deno_core::_ops::SerdeMarker,
+                match ::diting_runtime::op_glue::RustToV8Fallible::to_v8_fallible(
+                    ::diting_runtime::op_glue::RustToV8Marker::<
+                        ::diting_runtime::op_glue::SerdeMarker,
                         _,
                     >::from(result),
                     &mut scope,
