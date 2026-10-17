@@ -142,6 +142,7 @@
     // The fixture is on loopback, so this runs under the env lock with
     // AGINXBROWSER_ALLOW_PRIVATE_NETWORK set, then restores it.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the env guard must span the fixture — that's the serialization
     async fn stealth_client_decodes_gzip_response() {
         let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
         std::env::set_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK", "1");
@@ -156,6 +157,7 @@
 
     // The stealth path must enforce the same SSRF rules as the reqwest path.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the env guard must span the fetch — that's the serialization
     async fn stealth_fetch_rejects_loopback() {
         let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
         std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
@@ -188,6 +190,7 @@
     //   cargo test --features stealth probe_blocklist_gate_live -- --ignored
     #[tokio::test]
     #[ignore = "live network (obscura#995 probe); run explicitly with --ignored"]
+    #[allow(clippy::await_holding_lock)] // the env guard must span both live halves — that's the serialization
     async fn probe_blocklist_gate_live() {
         // Same host for both halves. www.google-analytics.com is in the PGL
         // but 301s to www.google.com, which is unreachable from several

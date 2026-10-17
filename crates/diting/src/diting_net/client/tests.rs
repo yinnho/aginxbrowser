@@ -738,6 +738,7 @@ async fn legacy_tls_retries_connect_stage_post() {
 /// connect failure.
 #[cfg(feature = "stealth")]
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // the env guard must span the bind — that's the serialization
 async fn legacy_tls_keeps_post_error_after_the_request_left() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -860,6 +861,7 @@ async fn scripted_fetch_fallback_keeps_post_error_after_send() {
 /// denials from ever reaching the legacy stack.
 #[cfg(feature = "stealth")]
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // the env guard must span the fetch — that's the serialization
 async fn legacy_tls_never_retries_ssrf_gate_rejections() {
     let _env = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
     std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
@@ -1000,7 +1002,7 @@ async fn scripted_stealth_hop_routes_flagged_client_with_identity() {
         "the hop must carry the client's synced UA, echo: {echo}"
     );
     assert!(
-        echoed(&echo, "x-agx-probe").iter().any(|v| *v == "stealth-hop"),
+        echoed(&echo, "x-agx-probe").contains(&"stealth-hop"),
         "the hop must carry the scripted header, echo: {echo}"
     );
     assert_eq!(
