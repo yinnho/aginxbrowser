@@ -26,7 +26,7 @@ static ISOLATE_LOCK: Mutex<()> = Mutex::new(());
 #[test]
 fn dormant_shell_restores_and_drives() {
     let _g = ISOLATE_LOCK.lock().unwrap();
-    let blob = create_snapshot();
+    let blob = create_snapshot(&[]);
 
     let mut vm = Vm::from_snapshot(&blob).unwrap();
 
@@ -111,7 +111,7 @@ fn dormant_shell_restores_and_drives() {
 #[test]
 fn one_blob_powers_two_independent_vms() {
     let _g = ISOLATE_LOCK.lock().unwrap();
-    let blob = create_snapshot();
+    let blob = create_snapshot(&[]);
     let mut a = Vm::from_snapshot(&blob).unwrap();
     let mut b = Vm::from_snapshot(&blob).unwrap();
 
@@ -164,4 +164,39 @@ fn from_snapshot_rejects_broken_containers() {
         Vm::from_snapshot(&bytes),
         Err(diting_runtime::snapshot::SnapshotError::BadVersion { found: 999, .. })
     ));
+}
+
+/// Embedder scripts bake into the blob (10d-1): what the script list
+/// declares — global bindings AND script-lexical state — revives with the
+/// shell, and coexists with the prelude faces installed before it.
+#[test]
+fn embedder_scripts_bake_into_the_blob() {
+    let _g = ISOLATE_LOCK.lock().unwrap();
+    let blob = create_snapshot(&[
+        (
+            "shim.js",
+            "globalThis.__diting_shim_calls = 0; \
+             const LEXICAL = 'lex-val'; \
+             globalThis.__diting_read_lexical = function () { return LEXICAL; };",
+        ),
+        (
+            "consumer.js",
+            // Runs at bake time AFTER shim.js — top-level order is the
+            // list order, same law as diting's SNAPSHOT_SCRIPTS.
+            "globalThis.__diting_shim_calls += 1; \
+             globalThis.__diting_baked_read = __diting_read_lexical();",
+        ),
+    ]);
+    let mut vm = Vm::from_snapshot(&blob).unwrap();
+    assert_eq!(vm.eval_string("globalThis.__diting_shim_calls").unwrap(), "1");
+    assert_eq!(vm.eval_string("globalThis.__diting_baked_read").unwrap(), "lex-val");
+    assert_eq!(
+        vm.eval_string("__diting_read_lexical()").unwrap(),
+        "lex-val",
+        "script-lexical bindings (const closure state) survive the bake"
+    );
+    // The prelude faces still live on the same heap — script baking did
+    // not displace the shell wiring.
+    assert_eq!(vm.eval_string("typeof __diting_settle").unwrap(), "function");
+    assert_eq!(vm.eval_string("__diting_tableCounts()").unwrap(), "0,0");
 }

@@ -308,7 +308,7 @@ fn install_faces(isolate: &mut v8::OwnedIsolate, context: &v8::Global<v8::Contex
 ///
 /// Panics (never returns None silently): a failed bake is a build bug,
 /// and half a snapshot is worse than none.
-pub fn create_snapshot() -> Vec<u8> {
+pub fn create_snapshot(scripts: &[(&str, &str)]) -> Vec<u8> {
     ensure_v8();
     let mut isolate = v8::Isolate::snapshot_creator(Some(snapshot::external_references()), None);
     // Face-identical wiring: the prelude never CALLS the op face at bake
@@ -322,6 +322,33 @@ pub fn create_snapshot() -> Vec<u8> {
         v8::Global::new(scope, context)
     };
     install_faces(&mut isolate, &context);
+    // Embedder scripts bake AFTER the faces — they see the prelude's
+    // bindings at compile time, and everything they declare (const/let
+    // lexical state included) lands in the blob. The tuple name rides only
+    // the panic message; the compiled script itself carries no origin, so
+    // baked frames surface as "<anonymous>" in Error.stack — diting's
+    // brand-leak law (300015 env probes); embedders with their own law
+    // pass their own list shape through unchanged.
+    {
+        v8::scope_with_context!(cs, &mut isolate, &context);
+        v8::tc_scope!(let tc, cs);
+        for (name, src) in scripts {
+            let s = v8::String::new(tc, src).expect("script source fits");
+            match v8::Script::compile(tc, s, None).and_then(|script| script.run(tc)) {
+                Some(_) => {}
+                None if tc.has_terminated() => {
+                    panic!("{name} terminated during snapshot creation")
+                }
+                None => {
+                    let msg = tc
+                        .message()
+                        .map(|m| m.get(tc).to_rust_string_lossy(tc))
+                        .unwrap_or_else(|| "<no message>".into());
+                    panic!("{name} failed during snapshot creation: {msg}");
+                }
+            }
+        }
+    }
     // The context we just dressed becomes THE context a restore revives:
     // set_default_context marks it as the blob's default context, and
     // Context::new on a snapshot-backed isolate returns exactly that.
