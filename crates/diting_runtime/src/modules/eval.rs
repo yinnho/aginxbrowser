@@ -24,8 +24,8 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
-use super::map::ModuleMap;
 use super::ModuleId;
+use super::map::ModuleMap;
 
 /// Why a module evaluation failed. `Threw` carries the exception's
 /// message (the host's error face is message-shaped today); `Terminated`

@@ -19,8 +19,8 @@ use crate::settle::SettleQueue;
 use crate::vm::Triplet;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
 /// A future woke us since the last check — a reactor-driven embedder uses
@@ -104,7 +104,16 @@ impl OpDriver {
     /// the queue and survives to the revive.
     pub fn drive(&mut self, queue: &mut SettleQueue<Triplet>) -> usize {
         let waker = Waker::from(self.woken.clone());
-        let mut cx = Context::from_waker(&waker);
+        self.drive_with(queue, &waker)
+    }
+
+    /// The reactor face (10d): futures receive the CALLER's waker, so a
+    /// tokio timer or network read that the op body is parked on wakes the
+    /// host's event-loop task directly — the parked loop needs no polling
+    /// cadence of its own. The advisory flag stays untouched here; a
+    /// reactor host never reads it.
+    pub fn drive_with(&mut self, queue: &mut SettleQueue<Triplet>, waker: &Waker) -> usize {
+        let mut cx = Context::from_waker(waker);
         let mut completed = 0;
         let mut i = 0;
         while i < self.futures.len() {

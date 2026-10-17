@@ -302,8 +302,8 @@ mod tests {
         q.push(2u32);
         q.push(3);
         let mut calls = 0;
-        assert!(q
-            .deliver(1, |b| {
+        assert!(
+            q.deliver(1, |b| {
                 calls += 1;
                 r.batches.push(b.to_vec());
                 if calls == 2 {
@@ -312,7 +312,8 @@ mod tests {
                     Ok(())
                 }
             })
-            .is_err());
+            .is_err()
+        );
 
         // Round 3: parked [2] must deliver before fresh [3].
         r.fail = false;

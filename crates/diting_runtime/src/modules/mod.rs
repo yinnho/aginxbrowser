@@ -108,7 +108,7 @@ pub trait ModuleLoader {
     /// module's URL when one is known (graph loads pass it; root loads
     /// don't) — for diagnostics; policy gates key off the specifier.
     fn load(&self, specifier: &ModuleSpecifier, maybe_referrer: Option<&str>)
-        -> ModuleLoadResponse;
+    -> ModuleLoadResponse;
 }
 
 /// Why a module op failed. `Exception` carries a live V8 exception

@@ -22,7 +22,7 @@ use crate::driver::{AfterTicks, OpDriver, WakeFlag};
 use crate::modules::dynamic;
 use crate::modules::eval::ModuleEvalError;
 use crate::modules::load::RecursiveLoad;
-use crate::modules::map::{initialize_import_meta_object_callback, ModuleMap, ModuleSlot};
+use crate::modules::map::{ModuleMap, ModuleSlot, initialize_import_meta_object_callback};
 use crate::modules::{ModuleError, ModuleId, ModuleLoader};
 use crate::settle::SettleQueue;
 use crate::snapshot::{self, SnapshotError};
@@ -173,6 +173,26 @@ pub enum LoopError {
     Terminated,
     /// The settlement call itself threw (not a termination interrupt).
     TickThrew(String),
+}
+
+/// What one [`Vm::poll_event_loop`] pass found — the reactor host's idle
+/// signal. `idle()` is deno's run_event_loop-resolution law in our shape:
+/// nothing in flight means the loop's work is done (timers are op_sleep
+/// promises here, so `pending_ops` IS the timer face).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LoopActivity {
+    /// Settlements reached JS this pass.
+    pub delivered: bool,
+    /// Async ops without a completion yet.
+    pub pending_ops: usize,
+    /// A module evaluation or dynamic import is still in flight.
+    pub pending_modules: bool,
+}
+
+impl LoopActivity {
+    pub fn idle(&self) -> bool {
+        self.pending_ops == 0 && !self.pending_modules
+    }
 }
 
 /// The driver lives in an isolate slot behind Rc<RefCell>: raw V8 function
@@ -567,7 +587,7 @@ impl Vm {
                 match load.poll_next(cx) {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Some(Err(e))) => {
-                        return Poll::Ready(Err(ModuleEvalError::Threw(e.message().to_string())))
+                        return Poll::Ready(Err(ModuleEvalError::Threw(e.message().to_string())));
                     }
                     Poll::Ready(Some(Ok((url, code)))) => {
                         // Enter/exit per registration — see eval_string;
@@ -767,6 +787,41 @@ impl Vm {
         delivered
     }
 
+    /// The reactor face (10d): one pass driven by the CALLER's waker. Op
+    /// bodies parked on tokio (timers, network) receive `cx`'s waker through
+    /// `drive_with`, so the reactor wakes this loop directly — a parked
+    /// host task needs no polling cadence of its own. Module machinery
+    /// gets the same waker. Everything else is a `poll` pass.
+    ///
+    /// The host parks in its own `poll_fn` on `LoopActivity::idle() ==
+    /// false`; a wake means "call me again".
+    pub fn poll_event_loop(&mut self, cx: &mut Context<'_>) -> Result<LoopActivity, LoopError> {
+        {
+            let driver = self
+                .isolate
+                .get_slot::<DriverSlot>()
+                .expect("Vm::new installs the driver slot")
+                .clone();
+            driver.borrow_mut().drive_with(&mut self.queue, cx.waker());
+        }
+        self.poll_modules(cx)?;
+        // Enter/exit discipline — see eval_string. The early-return on a
+        // parked batch must NOT skip the exit, so the drain moves inside.
+        unsafe { self.isolate.enter() };
+        let delivered = self.deliver_round();
+        if delivered.is_ok() {
+            self.drain_microtasks();
+        }
+        unsafe { self.isolate.exit() };
+        let delivered = delivered?;
+        Ok(LoopActivity {
+            delivered,
+            pending_ops: self.pending_ops(),
+            pending_modules: self.has_pending_module_evaluation()
+                || self.has_pending_dynamic_imports(),
+        })
+    }
+
     fn deliver_round(&mut self) -> Result<bool, LoopError> {
         let Vm {
             isolate,
@@ -837,7 +892,8 @@ fn eval_string_impl(
     isolate: &mut v8::OwnedIsolate,
     context: &v8::Global<v8::Context>,
     source: &str,
-) -> Result<String, LoopError> {    v8::scope_with_context!(cs, isolate, context);
+) -> Result<String, LoopError> {
+    v8::scope_with_context!(cs, isolate, context);
     v8::tc_scope!(let tc, cs);
     let src = v8::String::new(tc, source).expect("script source fits");
     let value = match v8::Script::compile(tc, src, None).and_then(|script| script.run(tc)) {

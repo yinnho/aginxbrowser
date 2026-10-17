@@ -10,9 +10,9 @@
 //! API 面（put/borrow/borrow_mut/try_*）与 deno_core::OpState 对齐，
 //! op 体里 `state.borrow::<T>()` 的写法零改动。
 
-use std::any::type_name;
 use std::any::Any;
 use std::any::TypeId;
+use std::any::type_name;
 use std::collections::BTreeMap;
 
 #[derive(Default)]

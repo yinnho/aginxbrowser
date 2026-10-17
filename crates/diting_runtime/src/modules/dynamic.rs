@@ -28,7 +28,7 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use super::load::RecursiveLoad;
-use super::map::{module_map_from_scope, DynImportEvaluation, ModuleMap};
+use super::map::{DynImportEvaluation, ModuleMap, module_map_from_scope};
 use super::{ModuleError, ModuleEvalError, ModuleId, ModuleLoaderError};
 
 /// The host callback V8 invokes for `import(specifier)`.

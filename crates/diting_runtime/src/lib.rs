@@ -65,5 +65,7 @@ pub use modules::{
     ModuleEvalError, ModuleId, ModuleLoadResponse, ModuleLoader, ModuleLoaderError, ModuleSource,
 };
 pub use settle::{SettleQueue, Stats};
-pub use snapshot::{SnapshotError, SIDECAR_VERSION};
-pub use vm::{create_snapshot, AsyncOpOutcome, LoopError, spawn_async_op, Triplet, Vm};
+pub use snapshot::{SIDECAR_VERSION, SnapshotError};
+pub use vm::{
+    AsyncOpOutcome, LoopActivity, LoopError, Triplet, Vm, create_snapshot, spawn_async_op,
+};

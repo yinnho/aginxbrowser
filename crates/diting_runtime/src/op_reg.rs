@@ -147,18 +147,12 @@ impl OpSet {
             f.set_name(name);
             if ctx.decl.is_async {
                 let global = scope.get_current_context().global(scope);
-                let wrap_key = v8::String::new(scope, "__diting_wrap_async")
-                    .expect("wrap face name fits");
+                let wrap_key =
+                    v8::String::new(scope, "__diting_wrap_async").expect("wrap face name fits");
                 let wrapped = global
                     .get(scope, wrap_key.into())
                     .and_then(|f| f.try_cast::<v8::Function>().ok())
-                    .and_then(|wrap| {
-                        wrap.call(
-                            scope,
-                            v8::undefined(scope).into(),
-                            &[f.into()],
-                        )
-                    });
+                    .and_then(|wrap| wrap.call(scope, v8::undefined(scope).into(), &[f.into()]));
                 match wrapped {
                     Some(wrapped) => {
                         target.set(scope, name.into(), wrapped);
