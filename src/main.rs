@@ -635,7 +635,9 @@ fn health_body() -> serde_json::Value {
         "status": "ok",
         "engine": "diting",
         "version": env!("CARGO_PKG_VERSION"),
-        "commit": option_env!("AGINXBROWSER_BUILD_COMMIT").unwrap_or("unknown"),
+        // Baked by diting's build.rs (single source; its rustc-env never
+        // crosses crate boundaries, so this must ride diting's const).
+        "commit": diting::BUILD_COMMIT,
         // The JS kernel the UA string only implies (#102): the actual V8
         // executing scripts, so "which engine is this really" doesn't
         // depend on the persona a session happened to carry.

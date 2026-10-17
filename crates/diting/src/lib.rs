@@ -22,3 +22,11 @@ pub mod diting_layout;
 // docs/engine/render.md §18.
 #[cfg(feature = "screenshot")]
 pub mod diting_fonts;
+
+/// Source revision the engine was built from (build.rs git rev-parse;
+/// AGINXBROWSER_BUILD_COMMIT overrides for the .git-less 86quan tree).
+/// Lives HERE because our build script's `rustc-env` only reaches this
+/// crate's compilation — dependent crates' `option_env!` never see it
+/// (the local /health "unknown" face). The .git/HEAD rerun pins keep it
+/// fresh per commit.
+pub const BUILD_COMMIT: &str = env!("AGINXBROWSER_BUILD_COMMIT");
