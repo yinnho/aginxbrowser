@@ -12,7 +12,7 @@ use deno_core::ModuleLoadOptions;
 use deno_core::ModuleLoadReferrer;
 use deno_core::ModuleSource;
 use deno_core::ModuleSourceCode;
-use deno_core::ModuleSpecifier;
+use url::Url as ModuleSpecifier;
 
 use crate::diting_js::import_map::ImportMap;
 

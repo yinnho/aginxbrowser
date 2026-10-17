@@ -997,7 +997,7 @@ impl JsRuntime {
 
     pub async fn load_module(&mut self, url: &str, budget_ms: u64) -> Result<(), String> {
         let budget = tokio::time::Duration::from_millis(budget_ms);
-        let specifier = deno_core::ModuleSpecifier::parse(url)
+        let specifier = url::Url::parse(url)
             .map_err(|e| format!("Invalid module URL {}: {}", url, e))?;
 
         // Fetch the module source. The old impl registered an empty string
@@ -1157,10 +1157,10 @@ impl JsRuntime {
         budget_ms: u64,
     ) -> Result<(), String> {
         let budget = tokio::time::Duration::from_millis(budget_ms);
-        let specifier = deno_core::ModuleSpecifier::parse(
+        let specifier = url::Url::parse(
             &format!("{}#inline-module-{}", base_url, self.object_counter),
         )
-        .unwrap_or_else(|_| deno_core::ModuleSpecifier::parse("about:blank").unwrap());
+        .unwrap_or_else(|_| url::Url::parse("about:blank").unwrap());
 
         self.object_counter += 1;
 

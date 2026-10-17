@@ -4,11 +4,11 @@
 //! document import maps"), following the engine-claim absorption policy: the
 //! algorithm is upstream's (multiple-map merge, resolved-rule freezing,
 //! prefix/backtracking checks), adapted to diting naming. Zero parley/taffy —
-//! pure `deno_core::ModuleSpecifier` + serde_json.
+//! pure `url::Url` (was deno_core::ModuleSpecifier — same type underneath) + serde_json.
 
 use std::collections::HashMap;
 
-use deno_core::ModuleSpecifier;
+use url::Url as ModuleSpecifier;
 
 #[derive(Default)]
 pub(crate) struct ImportMap {
@@ -325,7 +325,7 @@ mod tests {
         )
         .unwrap();
         let referrer =
-            deno_core::ModuleSpecifier::parse("https://example.test/app/main.js").unwrap();
+            url::Url::parse("https://example.test/app/main.js").unwrap();
 
         assert_eq!(
             map.resolve("pkg", &referrer).unwrap().as_str(),
@@ -363,7 +363,7 @@ mod tests {
         .unwrap();
 
         let nested =
-            deno_core::ModuleSpecifier::parse("https://example.test/feature/nested/main.js")
+            url::Url::parse("https://example.test/feature/nested/main.js")
                 .unwrap();
         assert_eq!(
             map.resolve("shared", &nested).unwrap().as_str(),
@@ -383,7 +383,7 @@ mod tests {
         )
         .unwrap();
         let referrer =
-            deno_core::ModuleSpecifier::parse("https://example.test/app/main.js").unwrap();
+            url::Url::parse("https://example.test/app/main.js").unwrap();
 
         assert_eq!(
             map.resolve("fixed", &referrer).unwrap().as_str(),
@@ -411,7 +411,7 @@ mod tests {
     fn later_prefix_rules_cannot_capture_an_already_resolved_specifier() {
         let mut map = ImportMap::default();
         let referrer =
-            deno_core::ModuleSpecifier::parse("https://example.test/app/main.js").unwrap();
+            url::Url::parse("https://example.test/app/main.js").unwrap();
         assert_eq!(
             map.resolve("./pkg/item.js", &referrer).unwrap().as_str(),
             "https://example.test/app/pkg/item.js",
@@ -443,7 +443,7 @@ mod tests {
         )
         .unwrap();
         let referrer =
-            deno_core::ModuleSpecifier::parse("https://example.test/app/feature/main.js").unwrap();
+            url::Url::parse("https://example.test/app/feature/main.js").unwrap();
         assert_eq!(
             map.resolve("pkg", &referrer).unwrap().as_str(),
             "https://example.test/scoped.js",
