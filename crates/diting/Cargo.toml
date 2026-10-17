@@ -132,19 +132,20 @@ servo_arc = "0.4"
 cssparser = "0.37"
 precomputed-hash = "0.1"
 
-# --- V8 / JS runtime (inlined obscura-js) ---
-deno_core = "0.411"
-# Claim campaign: #[diting_op] glue helpers live here (op_glue, verbatim
-# deno_core 0.411 copies). deno_core itself retires in step 6.
+# --- V8 / JS runtime (claimed: diting_runtime, engine = v8 crate) ---
+# Claim step 6 (docs/diting_runtime认领计划_20261017.md): deno_core is
+# gone — the runtime layer (event loop, op settle pipeline, promise ring,
+# snapshot container, foreground platform) is ours. serde_v8 stays as a
+# leaf utility (V8Slice/serde bridging); it reaches the same v8 crate
+# through the deno_v8 facade.
 diting_runtime = { path = "../diting_runtime" }
 # Our op glue generator — replaces #[op2] one op family at a time (claim
 # step 4; docs/diting_runtime认领计划_20261017.md).
 diting_ops = { path = "../diting_ops" }
-# Claim step 1 (docs/diting_runtime认领计划_20261017.md): direct pin on the
-# engine-bindings crate deno_core renames twice (crates.io "v8" <- deno_v8 as
-# "rusty_v8" <- deno_core as "v8"). Exact-pinned so engine bumps are our call
-# (fingerprint self-consistency); default-features off — deno_core still
-# supplies the feature union until step 6, so this edge adds nothing.
+# Claim step 1 (docs/diting_runtime认领计划_20261017.md): direct pin on
+# the engine-bindings crate (crates.io "v8"; deno_core's chain renames
+# it deno_v8 -> rusty_v8, same crate underneath). Exact-pinned so engine
+# bumps are our call (fingerprint self-consistency).
 v8 = { version = "=150.4.0", default-features = false }
 deno_error = "0.7"
 base64 = "0.22"
