@@ -21192,6 +21192,43 @@ fn window_named_access_tracks_mutations_and_assignment() {
     );
 }
 
+/// #48 fourth face (2026-10-18 sweep): named access onto an iframe yields
+/// the nested browsing context's WindowProxy, never the element — Chrome's
+/// `window.ff === frames[0]` for BOTH id and name paths (HTML spec named
+/// property access; moli's 2026-10 same-origin named-child cluster is the
+/// neighboring face). window.frames === window, so frames['n'] must land on
+/// the same object, and the winKeys invisibility contract holds for it too.
+#[test]
+fn window_named_access_iframe_yields_content_window() {
+    let mut rt = setup_runtime(
+        "<html><body><iframe id=\"ifr\" name=\"fr\" src=\"about:blank\"></iframe></body></html>",
+    );
+    let out = rt.evaluate(r#"
+        (function () { try {
+        const el = document.querySelector('iframe[name=fr]');
+        const w = el.contentWindow;
+        globalThis.__out = JSON.stringify([
+            window.fr === w,
+            window.ifr === w,                    // id path coerces the same way
+            window.fr === el,                    // the element itself must NOT leak through
+            String(window.fr).slice(0, 7) === '[object',
+            window.frames !== undefined && window.frames['fr'] === window.fr,
+            Object.getOwnPropertyNames(window).includes('fr'),
+            Object.getOwnPropertyNames(Object.getPrototypeOf(window)).includes('fr'),
+        ]);
+        return globalThis.__out;
+        } catch (e) { return 'ERR ' + e.name + ': ' + e.message; } })()
+    "#).unwrap();
+    let s = out.as_str().unwrap();
+    assert!(!s.starts_with("ERR"), "iframe named access probe threw: {}", s);
+    let v: serde_json::Value = serde_json::from_str(s).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!([true, true, false, true, true, false, false]),
+        "iframe named access must expose the content window (id and name alike), never the element"
+    );
+}
+
 /// #48 third face (300015 winKeys, 10-17): Chrome resolves named access
 /// through a WindowProperties layer — window.q works, but the name never
 /// appears in getOwnPropertyNames(window) and never owns a window slot.
@@ -21227,8 +21264,8 @@ fn window_named_access_invisible_to_enumeration() {
     let v: serde_json::Value = serde_json::from_str(rt.evaluate("globalThis.__out").unwrap().as_str().unwrap()).unwrap();
     assert_eq!(
         v,
-        serde_json::json!(["DIV", false, true, true, true, true, "DIV", false, "undefined", "IMG", 7]),
-        "named access must stay resolvable while invisible to window enumeration, and track the live tree at the layer"
+        serde_json::json!(["DIV", false, true, true, true, false, "DIV", false, "undefined", "IMG", 7]),
+        "named access must stay resolvable while invisible to window AND layer enumeration (Chrome's WindowProperties is empty to gopn)"
     );
 }
 

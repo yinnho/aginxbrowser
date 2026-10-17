@@ -2464,13 +2464,29 @@ let _namedScanned = false;       // one lazy full scan for the parser-built tree
 // clean. (global_surface.js's relocate() reads getPrototypeOf(globalThis)
 // as P1 and lands the EventTarget trio there — that layer is this holder,
 // same proto depth the trio already occupied.)
+// Chrome's WindowProperties layer is also EMPTY to its own enumeration
+// (gopn at the layer = 0 entries — verified 10-17): resolution is pure
+// interception, not own descriptors. A raw holder would leak every
+// installed name to a proto-walking fingerprint (ark-class VMs walk the
+// chain), so the layer window actually wears is a gate that hides ONLY the
+// named installs — ownKeys and gOPD return them as absent, everything else
+// (the relocated EventTarget trio, page defineProperty on the layer)
+// passes through untouched. get/has/defineProperty forward raw, so
+// resolution, `in`, and foreign relocations behave exactly as before.
 const _namedHolder = (function () {
   try {
     const P0 = Object.getPrototypeOf(globalThis);
     if (!P0) return globalThis; // defensive: no proto layer to park on
     const h = Object.create(P0);
-    Object.setPrototypeOf(globalThis, h);
-    return h;
+    const gate = new Proxy(h, {
+      ownKeys(t) { return Reflect.ownKeys(t).filter((k) => !_namedGetters.has(k)); },
+      getOwnPropertyDescriptor(t, k) {
+        if (_namedGetters.has(k)) return undefined;
+        return Reflect.getOwnPropertyDescriptor(t, k);
+      },
+    });
+    Object.setPrototypeOf(globalThis, gate);
+    return h; // installs/uninstalls address the raw target
   } catch (e) { return globalThis; }
 })();
 function _namedNames(el) {
@@ -2558,8 +2574,21 @@ function _namedLookup(name) {
     if (!s.size) _namedEls.delete(name);
     return undefined;
   };
+  // HTML spec named property access: an iframe (via id OR name) exposes its
+  // nested browsing context — the WindowProxy, never the element itself.
+  // window.frames === window, so frames['x'] lands here too (#48 face;
+  // moli's 2026-10 cross-origin named-child cluster is the same surface).
+  const unbox = (el) => {
+    if (el && el.tagName === 'IFRAME') {
+      try {
+        const w = el.contentWindow;
+        if (w) return w;
+      } catch (e) {}
+    }
+    return el;
+  };
   let el = pick();
-  if (el) return el;
+  if (el) return unbox(el);
   if (!_namedScanned) {
     // Parser-built trees never pass through the mutation hooks, so the
     // first named miss pays one full scan. Later inserts/removals/attr
@@ -2568,7 +2597,7 @@ function _namedLookup(name) {
     try { _namedScanIn(globalThis.document); } catch (e) {}
     el = pick();
   }
-  return el;
+  return unbox(el);
 }
 // #48: Chrome resolves bare identifiers and window[id] to id/name elements
 // BEFORE any script runs — there is no "first touch" moment. The scan above
