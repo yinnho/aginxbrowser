@@ -582,6 +582,24 @@ impl Vm {
                 v8::Isolate::new(params)
             }
         };
+        // deno_core setup.rs `isolate_ptr_to_key` law: transmute the
+        // repr(transparent) UnsafeRawIsolatePtr to the usize the platform's
+        // post_task will hand back as the isolate key.
+        let fg_key = {
+            const _: () = assert!(
+                std::mem::size_of::<v8::UnsafeRawIsolatePtr>()
+                    == std::mem::size_of::<usize>()
+            );
+            // SAFETY: pointer-sized transparent wrapper, asserted above.
+            unsafe { std::mem::transmute::<v8::UnsafeRawIsolatePtr, usize>(isolate.as_raw_isolate_ptr()) }
+        };
+        // Register BEFORE any other V8 call. Everything below — context
+        // deserialization included — allocates, and allocating can trip GC
+        // observers that post foreground tasks; an unregistered isolate's
+        // posts are dropped, so a late registration is a silent-drop window
+        // (deno #35408: registration must be unconditional from isolate
+        // birth; a missing entry may only ever mean shutdown deregistered).
+        let fg = crate::foreground::register(fg_key);
         // Microtasks run exactly when the loop drains them — never
         // implicitly at some V8-internal checkpoint. The loop owns the
         // schedule. (Runtime policy, not heap state — set on both paths.)
@@ -617,19 +635,6 @@ impl Vm {
                 .expect("context has __diting_settle — without it this is not our shell");
             v8::Global::new(cs, settle_fn)
         };
-        // deno_core setup.rs `isolate_ptr_to_key` law: transmute the
-        // repr(transparent) UnsafeRawIsolatePtr to the usize the platform's
-        // post_task will hand back as the isolate key.
-        let fg_key = {
-            const _: () = assert!(
-                std::mem::size_of::<v8::UnsafeRawIsolatePtr>()
-                    == std::mem::size_of::<usize>()
-            );
-            // SAFETY: pointer-sized transparent wrapper, asserted above.
-            unsafe { std::mem::transmute::<v8::UnsafeRawIsolatePtr, usize>(isolate.as_raw_isolate_ptr()) }
-        };
-        let fg = crate::foreground::register(fg_key);
-
         Ok(Self {
             isolate,
             context,
