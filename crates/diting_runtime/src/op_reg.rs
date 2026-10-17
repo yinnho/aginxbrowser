@@ -117,6 +117,12 @@ impl OpSet {
     /// Learned statement-for-statement from deno_core's
     /// `op_ctx_plain_function` — constructor Throw, side-effect face from
     /// the decl, `fn.length` = arg_count, name set on the function.
+    ///
+    /// `is_async` decls ship wrapped: the `__diting_wrap_async` stub
+    /// (vm PRELUDE) allocates the ring-table promise, prepends its id,
+    /// and returns the promise — deno_core's `setUpAsyncStub` law. The
+    /// raw wrapper underneath receives `(promise_id, user args...)` and
+    /// never touches a V8 scope for promise machinery.
     pub fn install_onto<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
@@ -139,7 +145,34 @@ impl OpSet {
                 .expect("op function builds");
             let name = v8::String::new(scope, ctx.decl.name).expect("op name fits");
             f.set_name(name);
-            target.set(scope, name.into(), f.into());
+            if ctx.decl.is_async {
+                let global = scope.get_current_context().global(scope);
+                let wrap_key = v8::String::new(scope, "__diting_wrap_async")
+                    .expect("wrap face name fits");
+                let wrapped = global
+                    .get(scope, wrap_key.into())
+                    .and_then(|f| f.try_cast::<v8::Function>().ok())
+                    .and_then(|wrap| {
+                        wrap.call(
+                            scope,
+                            v8::undefined(scope).into(),
+                            &[f.into()],
+                        )
+                    });
+                match wrapped {
+                    Some(wrapped) => {
+                        target.set(scope, name.into(), wrapped);
+                    }
+                    None => {
+                        // Not our shell (no stub face): install the raw fn
+                        // anyway — calls then return undefined instead of a
+                        // promise, loud in any test that exercises the op.
+                        target.set(scope, name.into(), f.into());
+                    }
+                }
+            } else {
+                target.set(scope, name.into(), f.into());
+            }
         }
     }
 }

@@ -114,6 +114,20 @@ globalThis.__diting_op_sleep = function (ticks, payload) {
   globalThis.__diting_spawn(r.id, ticks, String(payload));
   return r.promise;
 };
+// The async-op stub (batch 10c): install wraps every async op's raw fn
+// in this trampoline — allocate the ring-table promise, prepend its id,
+// hand off to Rust, return the promise. deno_core's setUpAsyncStub law:
+// async wrappers never build promises on the Rust side, so no op callback
+// ever needs to call JS.
+globalThis.__diting_wrap_async = function (raw) {
+  return function () {
+    const r = __diting_register();
+    const withId = [r.id];
+    for (let i = 0; i < arguments.length; i++) withId.push(arguments[i]);
+    raw.apply(null, withId);
+    return r.promise;
+  };
+};
 // Test taps — deno exposes the same pair for wraparound testing.
 globalThis.__diting_setNextId = function (n) { nextPromiseId = n; };
 globalThis.__diting_tableCounts = function () {
@@ -208,6 +222,53 @@ pub(crate) unsafe extern "C" fn spawn_callback(info: *const v8::FunctionCallback
             },
         });
     }
+}
+
+/// The normalized completion of an async op body: `Ok` resolves the
+/// promise with the payload string, `Err` rejects it with the message.
+/// The `#[string]` / `JsErrorBox` return faces of the async four collapse
+/// to this at their hand-written glue.
+pub type AsyncOpOutcome = Result<String, String>;
+
+/// The shared body of a hand-written async op (campaign batch 10c):
+/// park the body future on the isolate's op driver against a promise id
+/// the JS async stub already allocated in the ring table. The stub
+/// (installed by [`crate::op_reg::OpSet::install_onto`] over the raw
+/// wrapper — deno_core's `setUpAsyncStub` law, confirmed by
+/// cargo-expanding its slow stub) allocates the promise, prepends the
+/// id, and returns the promise; the raw wrapper decodes
+/// `(promise_id, user args...)` and lands here. No V8 scope is needed:
+/// the promise never gets built on the Rust side, settlement rides the
+/// pipeline every driver completion rides — [`Vm::poll`] drives →
+/// completion triplet → `__diting_settle` → the ring entry resolves or
+/// rejects.
+///
+/// Returns false when the isolate has no driver slot (not our shell);
+/// the raw wrapper then just returns — the stub's promise would hang,
+/// loud in every test that exercises an async op.
+pub fn spawn_async_op(
+    isolate: &v8::Isolate,
+    promise_id: i32,
+    fut: impl Future<Output = AsyncOpOutcome> + 'static,
+) -> bool {
+    let Some(driver) = isolate.get_slot::<DriverSlot>() else {
+        return false;
+    };
+    driver.borrow_mut().spawn(async move {
+        match fut.await {
+            Ok(payload) => Triplet {
+                promise_id,
+                ok: true,
+                payload,
+            },
+            Err(message) => Triplet {
+                promise_id,
+                ok: false,
+                payload: message,
+            },
+        }
+    });
+    true
 }
 
 /// Bake the JS face into a context: run the PRELUDE, install the raw

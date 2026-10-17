@@ -4271,8 +4271,10 @@ fn op_history_jump_to(state: &OpState, target: i32) {
     gs.pending_history_jump = Some(target);
 }
 
-#[op2(async(deferred), fast)]
-async fn op_sleep(#[number] millis: u64) {
+/// Free body of `op_sleep` — the hand glue (`diting_js::async_glue`) calls
+/// this directly off our Vm host; the #[op2] wrapper below is the deno-host
+/// shim until 10d's assembly swap retires it.
+pub(crate) async fn op_sleep_body(millis: u64) {
     // Reactor-less contexts (plain #[test] isolates): a tokio timer would
     // panic mid-poll inside v8, which aborts the whole test binary. Resolve
     // at the next event-loop checkpoint instead — production always runs
@@ -4281,6 +4283,11 @@ async fn op_sleep(#[number] millis: u64) {
         return;
     }
     tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
+}
+
+#[op2(async(deferred), fast)]
+async fn op_sleep(#[number] millis: u64) {
+    op_sleep_body(millis).await;
 }
 
 // Records a binding call from page JS. The CDP layer drains this queue

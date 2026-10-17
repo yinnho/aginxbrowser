@@ -444,15 +444,17 @@ fn ws_error_json(message: &str) -> String {
     serde_json::Value::Object(obj).to_string()
 }
 
+/// Free body of `op_ws_open` — the hand glue (`diting_js::async_glue`) calls
+/// this with the SharedState cell directly; the #[op2] wrapper below stays
+/// as the deno-host shim until 10d retires it.
+///
 /// Returns Err(the JSON error payload) when the open must fail. JS surfaces
 /// every failure as error + close(1006) events — the constructor itself only
 /// throws for malformed URLs, which bootstrap validates first.
-#[op2(async(deferred), fast)]
-#[string]
-pub(crate) async fn op_ws_open(
-    state: Rc<RefCell<OpState>>,
-    #[string] url: String,
-    #[string] protocols_json: String,
+pub(crate) async fn op_ws_open_body(
+    gs_cell: SharedState,
+    url: String,
+    protocols_json: String,
 ) -> String {
     if tokio::runtime::Handle::try_current().is_err() {
         return ws_error_json("no async runtime (bare test isolate)");
@@ -485,8 +487,7 @@ pub(crate) async fn op_ws_open(
     // setBlockedURLs parity with fetch: a page pattern-blocked from a URL
     // shouldn't reach it over a side channel either.
     {
-        let gs_rc = state.borrow().borrow::<SharedState>().clone();
-        let gs = gs_rc.borrow();
+        let gs = gs_cell.borrow();
         if let Some(pattern) = gs
             .blocked_urls
             .iter()
@@ -502,8 +503,7 @@ pub(crate) async fn op_ws_open(
     let protocols: Vec<String> = serde_json::from_str::<Vec<String>>(&protocols_json).unwrap_or_default();
 
     let (http_client, cookie_header, origin) = {
-        let gs_rc = state.borrow().borrow::<SharedState>().clone();
-        let gs = gs_rc.borrow();
+        let gs = gs_cell.borrow();
         if gs.ws_registry.sockets.len() >= WS_SOCKET_CAP {
             return ws_error_json("too many open WebSocket connections");
         }
@@ -583,8 +583,7 @@ pub(crate) async fn op_ws_open(
     };
 
     let id = {
-        let gs_rc = state.borrow().borrow::<SharedState>().clone();
-        let mut gs = gs_rc.borrow_mut();
+        let mut gs = gs_cell.borrow_mut();
         gs.ws_registry.next_id += 1;
         let id = gs.ws_registry.next_id;
         let (out_tx, out_rx) = mpsc::unbounded_channel();
@@ -605,6 +604,19 @@ pub(crate) async fn op_ws_open(
     let mut obj = serde_json::Map::new();
     obj.insert("id".into(), (id as u64).into());
     serde_json::Value::Object(obj).to_string()
+}
+
+/// The deno-host shim for [`op_ws_open_body`] — extracts the SharedState
+/// cell from deno's OpState once up front, then awaits the free body.
+#[op2(async(deferred), fast)]
+#[string]
+pub(crate) async fn op_ws_open(
+    state: Rc<RefCell<OpState>>,
+    #[string] url: String,
+    #[string] protocols_json: String,
+) -> String {
+    let gs_cell = state.borrow().borrow::<SharedState>().clone();
+    op_ws_open_body(gs_cell, url, protocols_json).await
 }
 
 fn translated_cookie_header(ws_url: &url::Url, jar: &Option<Arc<crate::diting_net::cookies::CookieJar>>) -> String {
@@ -655,16 +667,16 @@ enum Taken {
     Pending,
 }
 
-#[op2(async(deferred), fast)]
-#[string]
-pub(crate) async fn op_ws_next_message(state: Rc<RefCell<OpState>>, #[number] id: u64) -> String {
+/// Free body of `op_ws_next_message` — the hand glue (`diting_js::async_glue`)
+/// calls this with the SharedState cell directly; the #[op2] wrapper below is
+/// the deno-host shim until 10d retires it.
+pub(crate) async fn op_ws_next_message_body(gs_cell: SharedState, id: u64) -> String {
     if tokio::runtime::Handle::try_current().is_err() {
         return WsInbound::Close(1006, String::new()).to_json();
     }
     let id = u32::try_from(id).unwrap_or(0);
     std::future::poll_fn(move |cx| {
-        let gs_rc = state.borrow().borrow::<SharedState>().clone();
-        let mut gs = gs_rc.borrow_mut();
+        let mut gs = gs_cell.borrow_mut();
         // Extract the event under one borrow scope; the delivery side effects
         // (network-log push, registry removal) need their own `&mut JsState`.
         let taken = {
@@ -691,6 +703,14 @@ pub(crate) async fn op_ws_next_message(state: Rc<RefCell<OpState>>, #[number] id
         }
     })
     .await
+}
+
+/// The deno-host shim for [`op_ws_next_message_body`].
+#[op2(async(deferred), fast)]
+#[string]
+pub(crate) async fn op_ws_next_message(state: Rc<RefCell<OpState>>, #[number] id: u64) -> String {
+    let gs_cell = state.borrow().borrow::<SharedState>().clone();
+    op_ws_next_message_body(gs_cell, id).await
 }
 
 /// Side effects on delivery: the 101 goes into the script-initiated network
