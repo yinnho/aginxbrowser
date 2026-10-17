@@ -254,7 +254,7 @@ impl HttpClient {
             cookie_jar,
             user_agent: RwLock::new(
                 std::env::var("AGINXBROWSER_UA").unwrap_or_else(|_| {
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36".to_string()
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36".to_string()
                 }),
             ),
             accept_language: RwLock::new(
@@ -872,7 +872,7 @@ impl HttpClient {
             let (sec_ch_ua, platform) = derive_client_hints(&ua);
             let mut headers = HeaderMap::new();
             headers.insert(USER_AGENT, HeaderValue::from_str(&ua).unwrap_or_else(|_| {
-                HeaderValue::from_static("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36")
+                HeaderValue::from_static("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36")
             }));
             headers.insert(reqwest::header::ACCEPT, HeaderValue::from_static(default_accept));
             headers.insert(
@@ -1185,7 +1185,7 @@ pub fn derive_client_hints(ua: &str) -> (String, String) {
         .nth(1)
         .and_then(|s| s.split('.').next())
         .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(145);
+        .unwrap_or(155);
 
     let platform = if ua.contains("Macintosh") || ua.contains("Mac OS X") {
         "\"macOS\""
@@ -1199,10 +1199,16 @@ pub fn derive_client_hints(ua: &str) -> (String, String) {
 
     let sec_ch_ua = format!(
         // fp-diff-1014 P1: the grease brand must match the JS face
-        // (NavigatorUAData) — Chrome 155's generation is "Not(A:Brand" v24;
-        // the header previously said "Not;A=Brand" while JS said
-        // "Not=A?Brand", three-way incoherent with the same UA.
-        "\"Chromium\";v=\"{}\", \"Not(A:Brand\";v=\"24\", \"Google Chrome\";v=\"{}\"",
+        // (NavigatorUAData) — Chrome 155's generation is "Not(A:Brand" v24.
+        // A-155 batch: the header order must ALSO match. Chromium
+        // (user_agent_utils.cc) builds [grease, Chromium, browser] then
+        // shuffles by seed = major % 6 over the 6 permutations; 155 % 6 = 5
+        // → {2,1,0} → [Google Chrome, Chromium, grease], which is exactly
+        // the JS brands order captured off real Chrome 155 (conn-uad-truth)
+        // and what upstream wreq-util v153/v154 tables hardcode for their
+        // majors. The old [Chromium, grease, GC] order was a detectable
+        // header-vs-JS-face tell.
+        "\"Google Chrome\";v=\"{}\", \"Chromium\";v=\"{}\", \"Not(A:Brand\";v=\"24\"",
         version, version
     );
     (sec_ch_ua, platform.to_string())

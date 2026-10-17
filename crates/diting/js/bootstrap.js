@@ -7481,13 +7481,13 @@ function __ditingUADataPlatformFromUA() {
   if (ua.indexOf("Android") !== -1) return "Android";
   return "Linux";
 }
-// Chrome major from the UA. The profile pool ships 143–146, and UA-CH brands
-// hardcoding 145 made brand majors disagree with the UA on three of four
-// profiles — a one-line cross-check. Also feeds the fullVersionList build
+// Chrome major from the UA. The profile pool ships one fleet major (155),
+// and UA-CH brands hardcoding a different major made brand majors disagree
+// with the UA — a one-line cross-check. Also feeds the fullVersionList build
 // numbers (real Chrome reports four-part builds there, never x.0.0.0).
 function __ditingChromeMajorFromUA() {
   const m = String(globalThis.__diting_ua || "").match(/Chrome\/(\d+)/);
-  return m ? m[1] : "145";
+  return m ? m[1] : "155";
 }
 // Plausible stable-build numbers per shipped major, extrapolated from the
 // ~155/milestone build cadence (155 → 8059 measured). Used ONLY by
@@ -8260,7 +8260,7 @@ const __navStore = {
   get appVersion() { return this.userAgent.replace('Mozilla/', ''); },
   get platform() { return globalThis.__diting_platform_override || __ditingPlatformFromUA(); },
   product: "Gecko",
-  get userAgent() { return globalThis.__diting_ua || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"; },
+  get userAgent() { return globalThis.__diting_ua || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"; },
   get language() { return __ditingLangList()[0]; },
   get languages() { return __ditingLangList().slice(); },
   onLine: true,

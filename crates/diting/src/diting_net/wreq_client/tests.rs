@@ -52,7 +52,7 @@
     fn ua_browser_version_parses_family_and_major() {
         assert_eq!(
             ua_browser_version(crate::diting_net::STEALTH_USER_AGENT),
-            Some(("chrome", 145))
+            Some(("chrome", 155))
         );
         assert_eq!(ua_browser_version(CHROME152_UA), Some(("chrome", 152)));
         assert_eq!(ua_browser_version(EDGE126_UA), Some(("edge", 126)));

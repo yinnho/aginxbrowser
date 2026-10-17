@@ -524,12 +524,12 @@ pub(crate) async fn fetch_url_walk(
         // (no UA, no Accept, no Fetch-Metadata / client-hint headers) and WAFs
         // that key on `sec-fetch-site: same-origin` (mcpservers.org /submit
         // 403s without it) rejected them. Honor explicit overrides.
-        const DEFAULT_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
+        const DEFAULT_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
         let ua_override = custom_headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
             .map(|(_, v)| v.clone());
-        // Scripted hops used to hardcode this macOS-Chrome145 UA while the
+        // Scripted hops used to hardcode this macOS-Chrome UA while the
         // document hop carried the context persona's (import_curl sessions
         // and per-account personas ride their own) — one more identity
         // mismatch for WAFs to key on. Prefer the context client's UA;

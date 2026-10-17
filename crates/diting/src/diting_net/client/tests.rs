@@ -14,6 +14,20 @@ fn derive_client_hints_chrome_version() {
 }
 
 #[test]
+fn derive_client_hints_fleet_major_is_exact_155_face() {
+    // A-155 pin: at the fleet major the header must be the exact
+    // Chrome-155 string, grease name AND order — Chromium shuffles
+    // [grease, Chromium, browser] by seed = major % 6; 155 → [GC,
+    // Chromium, "Not(A:Brand" v24], same order as the JS brands face.
+    let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
+    let (ch_ua, _) = derive_client_hints(ua);
+    assert_eq!(
+        ch_ua,
+        r#""Google Chrome";v="155", "Chromium";v="155", "Not(A:Brand";v="24""#
+    );
+}
+
+#[test]
 fn derive_client_hints_windows() {
     let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
     let (ch_ua, platform) = derive_client_hints(ua);
@@ -37,10 +51,10 @@ fn derive_client_hints_android() {
 
 #[test]
 fn derive_client_hints_defaults_when_no_version() {
-    // No Chrome/ token → falls back to 145.
+    // No Chrome/ token → falls back to the fleet major (155).
     let ua = "Mozilla/5.0 (Macintosh) Gecko Firefox/120.0";
     let (ch_ua, _) = derive_client_hints(ua);
-    assert!(ch_ua.contains(r#""Chromium";v="145""#));
+    assert!(ch_ua.contains(r#""Chromium";v="155""#));
 }
 
 // Env- and flag-sensitive (1f7486c pattern): the lock serializes tests

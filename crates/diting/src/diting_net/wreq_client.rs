@@ -21,7 +21,7 @@ use crate::diting_net::client::{Response, NetError, ResourceType};
 
 #[cfg(feature = "stealth")]
 pub const STEALTH_USER_AGENT: &str =
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
 
 /// The TLS fingerprint stealth builds present by default. `with_proxy_and_os`
 /// constructs the matching emulation and `/health` reports this string, so
@@ -111,12 +111,24 @@ fn fingerprint_family_version(name: &str) -> Option<(&'static str, u32)> {
     Some((family, major))
 }
 
-/// Warn when the effective UA and the TLS emulation disagree on browser
-/// family or major version. An AGINXBROWSER_UA override rides the stealth
-/// transport's default Chrome145 handshake, and "Chrome/152" in the UA over
-/// a chrome/145 JA3+HTTP/2 setting is the kind of tell WAFs diff (taobao
-/// compat report ⑤). Returns true when a mismatch was logged; `None`
-/// fingerprint means the default Chrome145 handshake.
+/// The Chrome major the whole fleet claims (persona UA, GL tables, uad
+/// brands, sec-ch-ua). The TLS handshake preset itself stays chrome145
+/// *shaped* — wreq-util rc.31's ceiling: its BoringSSL name table predates
+/// the mldsa sigalgs, so the Chrome 150+ signature-algorithms delta is
+/// inexpressible on this dependency generation. Accepted A-155 residual;
+/// revisit on a wreq 0.16 migration. Mirrors `default_tls_chrome_major` in
+/// aginxbrowser/src/account.rs (kept separate: that side avoids the stealth
+/// feature gate).
+#[cfg(feature = "stealth")]
+pub const CLAIMED_CHROME_MAJOR: u32 = 155;
+
+/// Warn when the effective UA and the browser claim disagree on family or
+/// major version. With an explicit `tls_fingerprint`, coherence means the UA
+/// rides that fingerprint's family+major (operator chose the pair). With the
+/// default handshake, coherence means the fleet claim: Chrome/155 over the
+/// chrome145-shaped preset — "Chrome/152" in the UA over the fleet claim is
+/// the kind of tell WAFs diff (taobao compat report ⑤). Returns true when a
+/// mismatch was logged; `None` fingerprint means the default handshake.
 #[cfg(feature = "stealth")]
 pub fn warn_on_ua_tls_mismatch(ua: &str, tls_fingerprint: Option<&str>) -> bool {
     let Some((ua_family, ua_major)) = ua_browser_version(ua) else {
@@ -127,7 +139,7 @@ pub fn warn_on_ua_tls_mismatch(ua: &str, tls_fingerprint: Option<&str>) -> bool 
             Some(v) => v,
             None => return false,
         },
-        None => ("chrome", 145),
+        None => ("chrome", CLAIMED_CHROME_MAJOR),
     };
     if ua_family != tls_family || ua_major != tls_major {
         tracing::warn!(
