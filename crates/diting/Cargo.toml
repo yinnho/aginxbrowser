@@ -156,7 +156,7 @@ sha2 = "0.11"
 hmac = "0.13"
 aes = "0.8"
 aes-gcm = "0.10"
-cbc = { version = "0.1", features = ["alloc"] }
+cbc = { version = "0.2", features = ["alloc"] }
 ctr = "0.9"
 pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
 hkdf = "0.13"
