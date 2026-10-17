@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use deno_core::op2;
+use diting_ops::diting_op;
 use deno_core::OpState;
 use deno_core::Extension;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -4342,7 +4343,7 @@ fn url_components(u: &url::Url) -> serde_json::Value {
 /// Parse `href` (optionally resolved against `base`) with the WHATWG-compliant
 /// `url` crate. Returns the component JSON, or `{"ok":false}` when the input is
 /// not a valid URL (the JS side turns that into a TypeError, per spec).
-#[op2]
+#[diting_op]
 #[string]
 fn op_url_parse(#[string] href: &str, #[string] base: &str) -> String {
     // The url crate can panic on a few pathological inputs (internal range
@@ -4418,7 +4419,7 @@ fn url_set_inner(href: &str, part: &str, value: &str) -> Option<serde_json::Valu
     Some(url_components(&u))
 }
 
-#[op2]
+#[diting_op]
 #[string]
 fn op_url_set(#[string] href: &str, #[string] part: &str, #[string] value: &str) -> String {
     // Some url-crate setters panic on pathological inputs (the url-setters WPT
@@ -4471,7 +4472,7 @@ fn set_host_port(u: &mut url::Url, value: &str) {
 /// absolute URL (no component breakdown). Used by the hot `a.href`/`area.href`
 /// getter, which only needs the resolved string, so it avoids building and
 /// re-parsing the full component JSON. Returns "" when the input is invalid.
-#[op2]
+#[diting_op]
 #[string]
 fn op_url_resolve(#[string] href: &str, #[string] base: &str) -> String {
     std::panic::catch_unwind(|| {
@@ -4513,7 +4514,7 @@ fn op_add_import_map(
 
 /// Canonical (lowercased) WHATWG name for a TextDecoder label, or "" if the
 /// label is unknown (the JS constructor turns "" into a RangeError).
-#[op2]
+#[diting_op]
 #[string]
 fn op_encoding_for_label(#[string] label: &str) -> String {
     crate::diting_net::label_name(label).unwrap_or_default()
@@ -4522,7 +4523,7 @@ fn op_encoding_for_label(#[string] label: &str) -> String {
 /// Decode bytes with a legacy/explicit encoding via encoding_rs. Returns
 /// {"ok":true,"v":<string>} or {"ok":false} (unknown label, or a fatal decode
 /// error). The UTF-8 non-fatal common case is handled in JS without this op.
-#[op2]
+#[diting_op]
 #[string]
 fn op_text_decode(#[string] label: &str, #[buffer] bytes: &[u8], fatal: bool, ignore_bom: bool) -> String {
     match crate::diting_net::decode_with_label(label, bytes, fatal, ignore_bom) {
@@ -4537,7 +4538,7 @@ fn op_text_decode(#[string] label: &str, #[buffer] bytes: &[u8], fatal: bool, ig
 /// scheme (adds `'` to the percent-encode set). Returns the encoded query, or
 /// the input unchanged if the label is unknown. Only called by the JS anchor
 /// path when the document is non-UTF-8, so the UTF-8 hot path never reaches it.
-#[op2]
+#[diting_op]
 #[string]
 fn op_url_encode_query(#[string] query: &str, #[string] label: &str, special: bool) -> String {
     crate::diting_net::url_encode_query(query, label, special).unwrap_or_else(|| query.to_string())
@@ -4617,7 +4618,7 @@ fn svg_measure(
 /// Date.now()-based value is a timing-entropy tell on the jsvmp environment
 /// scan path. Quantized to 0.1ms steps — epoch-ms times ten stays well under
 /// 2^53, so the f64 rounding is exact (finer quantization would not be).
-#[op2(fast)]
+#[diting_op]
 fn op_clock_ms() -> f64 {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

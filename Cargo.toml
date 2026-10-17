@@ -12,7 +12,7 @@ keywords = ["browser", "mcp", "web-scraping", "headless", "automation"]
 categories = ["web-programming", "network-programming", "command-line-utilities", "development-tools"]
 
 [workspace]
-members = ["crates/diting", "crates/diting_runtime"]
+members = ["crates/diting", "crates/diting_ops", "crates/diting_runtime"]
 resolver = "2"
 
 [features]

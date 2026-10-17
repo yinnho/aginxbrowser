@@ -134,6 +134,9 @@ precomputed-hash = "0.1"
 
 # --- V8 / JS runtime (inlined obscura-js) ---
 deno_core = "0.411"
+# Our op glue generator — replaces #[op2] one op family at a time (claim
+# step 4; docs/diting_runtime认领计划_20261017.md).
+diting_ops = { path = "../diting_ops" }
 # Claim step 1 (docs/diting_runtime认领计划_20261017.md): direct pin on the
 # engine-bindings crate deno_core renames twice (crates.io "v8" <- deno_v8 as
 # "rusty_v8" <- deno_core as "v8"). Exact-pinned so engine bumps are our call

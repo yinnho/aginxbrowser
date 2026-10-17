@@ -1338,6 +1338,7 @@ dependencies = [
  "ctr",
  "deno_core",
  "deno_error",
+ "diting_ops",
  "ecdsa",
  "encoding_rs",
  "fontique",
@@ -1382,6 +1383,15 @@ dependencies = [
  "webpki-roots 0.26.11",
  "wreq",
  "wreq-util",
+]
+
+[[package]]
+name = "diting_ops"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

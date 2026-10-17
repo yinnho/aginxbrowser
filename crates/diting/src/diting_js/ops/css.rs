@@ -6,7 +6,7 @@ use super::*;
 // SSR shell among them) take fallback render branches that diverged from the
 // server HTML — React hydration then failed with #418 and discarded the SSR
 // DOM (#203). Route to the same evaluator the @supports cascade uses.
-#[op2(fast)]
+#[diting_op]
 pub(crate) fn op_css_supports(#[string] condition: &str) -> bool {
     crate::diting_css::supports_condition_applies(condition)
 }
