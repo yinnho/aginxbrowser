@@ -21229,6 +21229,92 @@ fn window_named_access_iframe_yields_content_window() {
     );
 }
 
+/// 2026-10-18 sweep follow-up (moli ba5cd6f): a browsing context only exists
+/// while the iframe is connected — never-connected AND removed elements read
+/// null from both contentWindow and contentDocument. The lazy synthetic
+/// `_IframeWindow`/`_IframeDoc` pair used to leak for disconnected elements.
+#[test]
+fn disconnected_iframes_have_no_browsing_context() {
+    let mut rt = setup_runtime("<html><body><p>x</p></body></html>");
+    let out = rt.evaluate(r#"
+        (function () { try {
+        const f = document.createElement('iframe');
+        const before = [f.contentWindow === null, f.contentDocument === null];
+        document.body.appendChild(f);
+        const connected = [!!f.contentWindow, !!f.contentDocument];
+        f.remove();
+        const after = [f.contentWindow === null, f.contentDocument === null];
+        globalThis.__out = JSON.stringify([before, connected, after]);
+        return globalThis.__out;
+        } catch (e) { return 'ERR ' + e.name + ': ' + e.message; } })()
+    "#).unwrap();
+    let s = out.as_str().unwrap();
+    assert!(!s.starts_with("ERR"), "disconnected iframe probe threw: {}", s);
+    let v: serde_json::Value = serde_json::from_str(s).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!([[true, true], [true, true], [true, true]]),
+        "iframe browsing context exists only while connected — null before insertion and after removal"
+    );
+}
+
+/// 2026-10-18 sweep (moli ca22988): navigator.languages is a frozen array and
+/// the same object on every read while the locale is unchanged (HTML spec
+/// returns a frozen array; Chrome hands back the cached instance).
+#[test]
+fn navigator_languages_frozen_and_stable() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    let out = rt.evaluate(r#"
+        (function () { try {
+        globalThis.__out = JSON.stringify([
+            Object.isFrozen(navigator.languages),
+            navigator.languages === navigator.languages,
+            Array.isArray(navigator.languages),
+        ]);
+        return globalThis.__out;
+        } catch (e) { return 'ERR ' + e.name + ': ' + e.message; } })()
+    "#).unwrap();
+    let s = out.as_str().unwrap();
+    assert!(!s.starts_with("ERR"), "languages probe threw: {}", s);
+    let v: serde_json::Value = serde_json::from_str(s).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!([true, true, true]),
+        "languages must be a frozen array, identical across reads"
+    );
+}
+
+/// 2026-10-18 sweep (moli 785d6da): WebIDL converts Blob arguments left to
+/// right — every part's union conversion (ToString side effects included)
+/// fires before the options dictionary is read, and each bag member getter
+/// fires exactly once. Chrome pins part-toString > endings > type; the old
+/// `x != null ? String(x)` shape read each getter twice.
+#[test]
+fn blob_constructor_conversion_order_and_single_getters() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    let out = rt.evaluate(r#"
+        (function () { try {
+        const log = [];
+        const part = { toString() { log.push('part'); return 'x'; } };
+        const bag = {
+            get endings() { log.push('endings'); return 'native'; },
+            get type() { log.push('type'); return 'TEXT/PLAIN'; },
+        };
+        const b = new Blob(['a\r\nb', part], bag);
+        globalThis.__out = JSON.stringify([log.join('>'), b.size, b.type]);
+        return globalThis.__out;
+        } catch (e) { return 'ERR ' + e.name + ': ' + e.message; } })()
+    "#).unwrap();
+    let s = out.as_str().unwrap();
+    assert!(!s.starts_with("ERR"), "blob order probe threw: {}", s);
+    let v: serde_json::Value = serde_json::from_str(s).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!(["part>endings>type", 4, "text/plain"]),
+        "parts convert before the bag (native \\r\\n folded), each bag getter fires once, type lowercases"
+    );
+}
+
 /// #48 third face (300015 winKeys, 10-17): Chrome resolves named access
 /// through a WindowProperties layer — window.q works, but the name never
 /// appears in getOwnPropertyNames(window) and never owns a window slot.

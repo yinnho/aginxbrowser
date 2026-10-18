@@ -4929,6 +4929,10 @@ class Element extends Node {
   }
   get contentDocument() {
     if (this.localName !== 'iframe') return undefined;
+    // A browsing context only exists while the iframe is connected —
+    // never-connected and removed elements both read null (Chrome truth
+    // 10-18; moli ba5cd6f deleted the same synthetic surfaces).
+    if (!this.isConnected) return null;
     if (this._iframeDoc) {
       // A srcdoc document inherits the parent's origin: always same-origin.
       const pageOrigin = (function(){ try { return new URL(_domParse("document_url")).origin; } catch(e) { return ''; } })();
@@ -4952,6 +4956,7 @@ class Element extends Node {
   }
   get contentWindow() {
     if (this.localName !== 'iframe') return undefined;
+    if (!this.isConnected) return null; // same gate as contentDocument
     if (!this._iframeWin) {
       this.contentDocument; // side effect: creates _iframeDoc + _iframeWin
     }
@@ -8292,6 +8297,10 @@ class NavigatorUAData {
   toJSON() { return {brands:this.brands,mobile:this.mobile,platform:this.platform}; }
 }
 globalThis.NavigatorUAData = NavigatorUAData;
+// languages is a frozen array and Chrome hands back the same object while
+// the locale is unchanged (moli ca22988 same face). Module-scope cache —
+// never on __navStore, whose own names feed the prototype setup walk.
+let __navLangsKey = null, __navLangsVal = null;
 const __navStore = {
   vendorSub: "",
   productSub: "20030107",
@@ -8333,7 +8342,15 @@ const __navStore = {
   product: "Gecko",
   get userAgent() { return globalThis.__diting_ua || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"; },
   get language() { return __ditingLangList()[0]; },
-  get languages() { return __ditingLangList().slice(); },
+  get languages() {
+    const list = __ditingLangList();
+    const key = list.join(',');
+    if (__navLangsKey !== key) {
+      __navLangsKey = key;
+      __navLangsVal = Object.freeze(list.slice());
+    }
+    return __navLangsVal;
+  },
   onLine: true,
   // (#78) Chrome's NavigatorAutomationInformation always defines webdriver
   // and reads false on a normal session — `undefined` is the odd one out and
@@ -11166,32 +11183,42 @@ _markNative(AbortSignal.any);
 _markNative(globalThis.AbortController);
 // Normalize one Blob part to bytes. `native` newline normalization applies to
 // string parts when the Blob/File `endings` option is "native".
-function _blobPartToBytes(p, native) {
-  if (p == null) return new Uint8Array(0);
-  if (typeof Blob === "function" && p instanceof Blob) return p._bytes || new Uint8Array(0);
-  if (p instanceof ArrayBuffer) return new Uint8Array(p.slice(0));
-  if (ArrayBuffer.isView(p)) return new Uint8Array(p.buffer.slice(p.byteOffset, p.byteOffset + p.byteLength));
-  let s = String(p);
-  if (native) s = s.replace(/\r\n|\r|\n/g, "\n");
-  return new TextEncoder().encode(s);
+function _blobPartConvert(p) {
+  if (p == null) return { bytes: new Uint8Array(0) };
+  if (typeof Blob === "function" && p instanceof Blob) return { bytes: p._bytes || new Uint8Array(0) };
+  if (p instanceof ArrayBuffer) return { bytes: new Uint8Array(p.slice(0)) };
+  if (ArrayBuffer.isView(p)) return { bytes: new Uint8Array(p.buffer.slice(p.byteOffset, p.byteOffset + p.byteLength)) };
+  return { str: String(p) };
 }
 function _bytesToBinaryString(bytes) { let s = ""; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); return s; }
 if (typeof Blob === "undefined") globalThis.Blob = class Blob {
   constructor(parts, opts) {
     opts = opts || {};
-    const endings = opts.endings != null ? String(opts.endings) : "transparent";
+    // WebIDL converts arguments left to right: every part's union conversion
+    // (ToString side effects included) fires before the options dictionary
+    // is touched — Chrome pins part-toString > endings > type — and each bag
+    // getter must fire exactly once (`x != null ? String(x)` reads twice).
+    const conv = [];
+    if (parts != null) {
+      if (typeof parts === "string" || typeof parts[Symbol.iterator] !== "function") throw new TypeError("Failed to construct 'Blob': The provided value cannot be converted to a sequence.");
+      for (const p of parts) conv.push(_blobPartConvert(p));
+    }
+    const endingsRaw = opts.endings;
+    const endings = endingsRaw != null ? String(endingsRaw) : "transparent";
     if (endings !== "transparent" && endings !== "native") throw new TypeError("Failed to construct 'Blob': The provided value '" + endings + "' is not a valid enum value of type EndingType.");
     const native = endings === "native";
     const chunks = []; let total = 0;
-    if (parts != null) {
-      if (typeof parts === "string" || typeof parts[Symbol.iterator] !== "function") throw new TypeError("Failed to construct 'Blob': The provided value cannot be converted to a sequence.");
-      for (const p of parts) { const b = _blobPartToBytes(p, native); chunks.push(b); total += b.length; }
+    const enc = new TextEncoder();
+    for (const c of conv) {
+      const b = c.bytes != null ? c.bytes : enc.encode(native ? c.str.replace(/\r\n|\r|\n/g, "\n") : c.str);
+      chunks.push(b); total += b.length;
     }
     const data = new Uint8Array(total); let off = 0;
     for (const c of chunks) { data.set(c, off); off += c.length; }
     this._bytes = data;
     this.size = total;
-    const t = opts.type != null ? String(opts.type) : "";
+    const typeRaw = opts.type;
+    const t = typeRaw != null ? String(typeRaw) : "";
     this.type = /^[\x20-\x7e]*$/.test(t) ? t.toLowerCase() : "";
     __hideOwn(this);
   }
