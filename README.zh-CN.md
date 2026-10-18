@@ -242,12 +242,14 @@ curl -sS -X POST http://127.0.0.1:8089/session/create \
 ```
 aginxbrowser/
 ├── ARCHITECTURE.md       # 分层立法（权威）
-├── Cargo.toml            # Workspace 根（members = crates/diting）
+├── Cargo.toml            # Workspace 根（members = crates/diting{,_ops,_runtime}）
 ├── crates/
-│   └── diting/           # 引擎 crate：DOM/CSS/layout/paint/JS/net/Page
-│       ├── build.rs      # V8 snapshot 生成
-│       ├── js/           # bootstrap.js 及配套脚本
-│       └── src/          # diting_{dom,css,net,js,layout,fonts,browser}
+│   ├── diting/           # 引擎 crate：DOM/CSS/layout/paint/JS/net/Page
+│   │   ├── build.rs      # V8 snapshot 生成
+│   │   ├── js/           # bootstrap.js 及配套脚本
+│   │   └── src/          # diting_{dom,css,net,js,layout,fonts,browser}
+│   ├── diting_ops/       # #[diting_op] 胶水生成（引擎配套）
+│   └── diting_runtime/   # 自有 JS 事件循环 / op 结算
 ├── workflow/             # Flow + recipe 资产（丢目录即部署，无需重编）
 ├── README.md
 ├── docs/

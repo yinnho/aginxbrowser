@@ -4,10 +4,12 @@
 > A change that moves code across a layer boundary updates this file first — in
 > the same commit — or it does not land.
 >
-> Audit basis: 2026-10-13, v0.5.42, commit ed21908 (server domain-split + evaluate_remote* rename).
-> Prior program note: the 2026-09 upgrade (P0–P3) is largely executed inside the
-> product crate; the four-crate end state in §4 remains aspirational and is
-> **soft-deferred** (see §6). God-file ratchet: 1500 **production** lines
+> Audit basis: 2026-10-19, v0.6.0, commit f3bcf08 (god-file baselines + bootstrap
+> `crypto_subtle` split). Prior program note: the 2026-09 upgrade (P0–P3) is
+> largely executed inside the product crate; the four-crate *product* end state
+> in §4 (core / authoring / thin bin) remains aspirational and **soft-deferred**
+> (see §6). Engine workspace already ships `diting` + companion crates
+> `diting_ops` / `diting_runtime`. God-file ratchet: 1500 **production** lines
 > (`scripts/audit_layers.py`); `#[cfg(test)]` items and `tests.rs` do not count —
 > do not split colocated tests (or production modules) just to dodge the cap.
 
@@ -97,9 +99,10 @@ exception table is empty):
 - **Feature surface is small and documented** (three gates, none accidental).
 - **Tests are colocated.** Prefer keeping large `tests.rs` next to the code they
   pin; the god-file ratchet counts **production** lines only (`5f3cbed`).
-- **Workspace started.** `crates/diting` is the engine package; the product
-  binary remains `aginxbrowser` at the workspace root. Further splits
-  (`core` / `authoring` / thin bin) are the §4 *end state* — soft-deferred.
+- **Workspace started.** Engine packages: `crates/diting`, `crates/diting_ops`,
+  `crates/diting_runtime`; the product binary remains `aginxbrowser` at the
+  workspace root. Further *product* splits (`core` / `authoring` / thin bin)
+  are the §4 *end state* — soft-deferred.
 
 ### 3.2 The four debts — status
 
@@ -112,7 +115,7 @@ exception table is empty):
 
 **Active product cohesion watch (not a 2026-09 D-row):** `src/server/` was
 split by job (`browser` / `fetch` / `outputs` / `search`); the old grandfather
-entry on `server/mod.rs` is retired. `src/flow/mod.rs` (~1463 prod) is one
+entry on `server/mod.rs` is retired. `src/flow/mod.rs` (~1486 prod) is one
 interpreter near the cap; do not carve it for the ratchet alone.
 
 **`screenshot.rs`:** ~600 production / ~900 test lines. Eye-side HTML→PNG path;
@@ -122,14 +125,18 @@ must stay separate (different damage signatures / caches).
 
 ## 4. Target layout — Cargo workspace
 
-> **Progress (2026-10):** `crates/diting` exists and owns the engine.
-> Root `Cargo.toml` is already a workspace (`members = ["crates/diting"]`).
-> The diagram below is the *end state*. After MCP/CDP removal, extracting
-> `core` / `authoring` / thin bin is **soft-deferred**: highest ROI is keeping
-> legislation true, domain-splitting `server/` when edited, and carving engine
-> seams only when a change already forces one. Revisit full crate packaging if
-> a second binary/face or external library consumers appear. Prefer feature-gating
-> authoring (D4 outcome) over workspace surgery when binary size matters.
+> **Progress (2026-10):** Engine workspace members are
+> `crates/diting`, `crates/diting_ops`, and `crates/diting_runtime`
+> (`Cargo.toml` `[workspace].members`). `diting` owns the page pipeline;
+> `diting_ops` is the `#[diting_op]` glue generator; `diting_runtime` is the
+> owned JS event-loop / op-settlement layer (deno_core retirement campaign).
+> The diagram below still shows the *product* end state (`core` / `authoring` /
+> thin bin). After MCP/CDP removal, extracting those product crates is
+> **soft-deferred**: highest ROI is keeping legislation true, domain-splitting
+> `server/` when edited, and carving engine seams only when a change already
+> forces one. Revisit full product crate packaging if a second binary/face or
+> external library consumers appear. Prefer feature-gating authoring (D4
+> outcome) over workspace surgery when binary size matters.
 
 ```
 aginxbrowser/                    # workspace root
@@ -137,6 +144,8 @@ aginxbrowser/                    # workspace root
 ├── Cargo.toml                   # [workspace] members + shared release profile
 ├── crates/
 │   ├── diting/                  # the engine (foundation) — EXISTS
+│   ├── diting_ops/              # #[diting_op] glue (engine companion) — EXISTS
+│   ├── diting_runtime/          # owned JS runtime / settle loop — EXISTS
 │   ├── core/                    # aginxbrowser-core: eyes + hands — deferred
 │   ├── authoring/               # aginxbrowser-authoring: mouth — deferred
 │   └── aginxbrowser/            # the binary + faces — deferred (bin still at root)
@@ -149,6 +158,8 @@ aginxbrowser/                    # workspace root
 | Crate | Package | Responsibility | Status |
 |-------|---------|----------------|--------|
 | diting | `diting` | Render and drive a page: network → DOM → CSS → layout → paint; V8 runtime; the `Page` API. | **Shipped** |
+| diting_ops | `diting_ops` | `#[diting_op]` op-glue generator (replacing `#[op2]` family by family). | **Shipped** (engine companion) |
+| diting_runtime | `diting_runtime` | Owned JS event loop, op-settlement pipeline, promise table (deno_core retirement). | **Shipped** (engine companion) |
 | core | `aginxbrowser-core` | Everything an agent does with a page short of authoring: sessions & interaction contracts, flows, accounts, fetch/search/download/cache, robots/rate/sanitize governance. | Deferred (code lives in root `src/` today) |
 | authoring | `aginxbrowser-authoring` | Turn pages and documents into artifacts: PDF/PNG page pump, video, PPTX/DOCX, docgen. | Deferred (same crate; feature-gate is the cheaper D4 lever) |
 | aginxbrowser | `aginxbrowser` (bin) | Door: HTTP routers, CLI, doctor — assembly and parameter structs only. | Bin at workspace root today |
@@ -157,7 +168,7 @@ aginxbrowser/                    # workspace root
 
 | Today | Home now | Deferred crate (if P1 resumes) |
 |---|---|---|
-| `crates/diting` (`diting_*` + `js/bootstrap.js`) | diting | unchanged |
+| `crates/diting` (`diting_*` + `js/bootstrap.js` + companions) | diting (+ `diting_ops` / `diting_runtime`) | unchanged |
 | `screenshot_reference` / bridge cross-check | product (`src/`) | stays out of engine |
 | `session/` | product | core `session/` |
 | `server/` `search/` `download` `store` `robots` `rate` `sanitize` `har` `captcha` `curl_import` `cookie` `verdict` `risk_markers` | product | core `acquire/` / `governance/` |
@@ -247,25 +258,26 @@ reintroduce MCP/CDP; host auto-mount of recipes.
    silent growth; it is not a mandate to shatter a cohesive module that sits
    three lines under or over the number.
 
-## Appendix A — line-count snapshot (2026-10-13, ed21908)
+## Appendix A — line-count snapshot (2026-10-19, f3bcf08)
 
 Counts are **production lines** from `scripts/audit_layers.py` unless noted
 (total = all lines including tests).
 
-**Faces:** `main.rs` ~918 prod · `routers/sessions.rs` ~1191 ·
+**Faces:** `main.rs` ~925 prod · `routers/sessions.rs` ~1236 ·
 `routers/acquisition.rs` ~669 · `routers/outputs.rs` ~404.
 
-**Product (selected):** `server/{browser,fetch,outputs,search}.rs` (façade) · `flow/mod.rs` 1463 ·
-`session/interact.rs` 1348 · `session/manager/actor.rs` 1131 · `search/mod.rs`
-1073 · `screenshot.rs` 600 prod / 1497 total · `video.rs` 887 prod ·
+**Product (selected):** `server/{browser,fetch,outputs,search}.rs` (façade) · `flow/mod.rs` 1486 ·
+`session/interact.rs` 1348 · `session/manager/actor.rs` 1148 · `search/mod.rs`
+1025 · `screenshot.rs` 600 prod / 1497 total · `video.rs` 887 prod ·
 `pages.rs` 673 prod · `render.rs` 482 prod.
 
-**Engine (grandfathered / large):** `js/bootstrap.js` 19094 ·
-`diting_layout/mod.rs` 9253 · `diting_css/mod.rs` 7402 ·
-`diting_js/ops/mod.rs` 5846 · `diting_layout/paint.rs` 2720 ·
-`diting_layout/fork_deltas.rs` 2257 · `diting_js/runtime.rs` 1743 ·
-`diting_browser/page/mod.rs` 1090 · `page/navigate.rs` 911 ·
-`page/scripts.rs` 752 · `page/tests.rs` 3528 (tests; excluded from ratchet).
+**Engine (grandfathered / large):** `js/bootstrap.js` 17447 (post-`crypto_subtle`
+split; companion `js/crypto_subtle.js` 778) · `diting_layout/mod.rs` 9306 ·
+`diting_css/mod.rs` 6627 · `diting_js/ops/mod.rs` 4703 ·
+`diting_layout/paint.rs` 2739 · `diting_layout/fork_deltas.rs` 2257 ·
+`diting_js/runtime.rs` 1678 · `diting_browser/page/mod.rs` 1127 ·
+`page/navigate.rs` 911 · `page/scripts.rs` 762 · `page/tests.rs` 3557
+(tests; excluded from ratchet).
 
 **Workflow (deployable data):** ~44 workflow dirs · 36 `flow.json` · 7 `recipe.js`.
 
@@ -274,4 +286,4 @@ screenshot`). Attribute density on HEAD is higher (`#[test]` / `#[tokio::test]`
 well above that); treat CI’s latest full-suite run as the source of truth rather
 than freezing a stale number here.
 
-**Version:** crate `0.5.42`.
+**Version:** crate `0.6.0`.

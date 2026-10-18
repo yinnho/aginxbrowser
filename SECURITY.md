@@ -1,6 +1,7 @@
 # Security Policy — aginxbrowser
 
-aginxbrowser is a single-binary Rust browser engine and MCP/HTTP service. By
+aginxbrowser is a single-binary Rust browser engine and HTTP service (REST API).
+MCP and CDP faces were removed and are not part of the product surface. By
 design it fetches and executes content from arbitrary, untrusted origins, so
 the trust boundary it must hold is: **page content is data, never
 instructions** — for the engine, for the host process, and for the agent

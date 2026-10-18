@@ -245,12 +245,14 @@ Every capability is one POST away — no SDK, no protocol adapter.
 ```
 aginxbrowser/
 ├── ARCHITECTURE.md       # Layering legislation (authoritative)
-├── Cargo.toml            # Workspace root (members = crates/diting)
+├── Cargo.toml            # Workspace root (members = crates/diting{,_ops,_runtime})
 ├── crates/
-│   └── diting/           # Engine crate: DOM/CSS/layout/paint/JS/net/Page
-│       ├── build.rs      # V8 snapshot generation
-│       ├── js/           # bootstrap.js + companion scripts
-│       └── src/          # diting_{dom,css,net,js,layout,fonts,browser}
+│   ├── diting/           # Engine crate: DOM/CSS/layout/paint/JS/net/Page
+│   │   ├── build.rs      # V8 snapshot generation
+│   │   ├── js/           # bootstrap.js + companion scripts
+│   │   └── src/          # diting_{dom,css,net,js,layout,fonts,browser}
+│   ├── diting_ops/       # #[diting_op] glue generator (engine companion)
+│   └── diting_runtime/   # Owned JS event loop / op settlement
 ├── workflow/             # Flow + recipe assets (drop-in, no rebuild)
 ├── README.md
 ├── docs/
