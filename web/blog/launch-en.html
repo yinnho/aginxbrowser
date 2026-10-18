@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cloudflare just shipped an agent browser — and admitted the three things it can't do · AginxBrowser</title>
-<meta name="description" content="Kitesurf validated that agents need their own browser — then openly listed three things it can't do: real TLS fingerprinting, persistent authenticated sessions, and MCP-native tooling. Those are exactly what AginxBrowser was built for.">
+<meta name="description" content="Kitesurf validated that agents need their own browser — then openly listed hard gaps: real TLS fingerprinting and persistent authenticated sessions. AginxBrowser was built for those — plus a plain HTTP API agents call directly (no Chromium, no CDP wrap).">
 <meta property="og:title" content="Cloudflare just shipped an agent browser — and admitted the three things it can't do">
 <meta property="og:description" content="Kitesurf validated the direction and conceded the three hardest mountains. AginxBrowser holds them.">
 <link rel="canonical" href="https://browser.aginx.net/blog/launch-en.html">
@@ -45,7 +45,7 @@
     <li>Scraping services like Firecrawl are read-only: no login, no pagination, no clicking.</li>
   </ul>
   <p>Agents don't need any one of these. Agents need all five at once: <strong>see, read, find, act, and just run.</strong></p>
-  <p>AginxBrowser does exactly that. A single Rust binary with an embedded V8, no Chromium. systemd-guarded, HTTP API + MCP, one line to wire into Claude Code.</p>
+  <p>AginxBrowser does exactly that. A single Rust binary with an embedded V8, no Chromium. systemd-guarded plain HTTP API — agents and skills (Claude Code, Cursor, …) call routes directly.</p>
   <p class="tagline">Humans have Chrome. Agents have AginxBrowser.</p>
   <p>Here's the interesting part: Kitesurf and AginxBrowser are <strong>from the same lineage</strong> — both started from the obscura Rust headless engine, both use Blitz for HTML/CSS. The difference is the bet each made: <strong>Kitesurf built the lightest, cheapest browser it could. We built the one that does the things nobody else can.</strong></p>
 
@@ -61,9 +61,9 @@
   <p>AginxBrowser keeps a persistent session with 8-minute idle keep-alive. Inject cookies to start logged-in (<code>session_create(cookies=...)</code>), then export them when you're done (<code>session_cookies</code>). Login → paginate → act → act again; the chain never breaks.</p>
   <p>One-shot engines can't do "log in first, then run a series of operations." This one can.</p>
 
-  <h3>3. MCP-native, not CDP wrapped</h3>
-  <p>Kitesurf's core is Chrome DevTools Protocol; wiring it into MCP means wrapping it with <code>chrome-devtools-mcp</code>.</p>
-  <p>AginxBrowser's 13 tools are MCP first-class citizens. One line into Claude Code, Cursor, or Claude Desktop — no DevTools protocol to learn first. Agents just pick it up and go.</p>
+  <h3>3. HTTP-native for agents, not CDP wrapped</h3>
+  <p>Kitesurf's core is Chrome DevTools Protocol; wiring it into an agent stack usually means another CDP wrap (for example <code>chrome-devtools-mcp</code>).</p>
+  <p>AginxBrowser's surface is a plain HTTP API — fetch, search, screenshot, sessions — from one Rust binary. Drop in <code>SKILL.md</code> so Claude Code / Cursor reach for those routes; no DevTools protocol to learn first.</p>
 
   <h2>What it's for</h2>
   <p>Not a demo — these are real things people do with an agent browser:</p>
@@ -85,8 +85,10 @@
 
   <h2>One line to plug in</h2>
   <p>Kitesurf validated the direction and conceded the three hardest mountains. AginxBrowser holds them.</p>
-  <pre><code>claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp</code></pre>
-  <p>Use the hosted instance at <strong>browser.aginx.net</strong> — or self-host from <strong>github.com/yinnho/aginxbrowser</strong>.</p>
+  <pre><code>curl -fsSL https://browser.aginx.net/install.sh -o install.sh && less install.sh && bash install.sh
+# then: aginxbrowser &amp;&amp; curl http://127.0.0.1:8089/health
+# agents: install SKILL.md from the repo (skills.sh / local skill dir)</code></pre>
+  <p>Use the hosted instance at <strong>browser.aginx.net</strong> — or self-host from <strong>github.com/yinnho/aginxbrowser</strong> (<a href="https://github.com/yinnho/aginxbrowser/releases/tag/v0.6.0">v0.6.0</a>).</p>
 
   <div class="related">📚 Read this in <a href="/blog/launch-zh.html">中文</a> · More from the blog at <a href="/blog/">/blog</a>.</div>
 

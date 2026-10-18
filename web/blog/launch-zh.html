@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cloudflare 刚做了个 Agent 浏览器，却在博客里公开承认了三件干不了的事 · AginxBrowser</title>
-<meta name="description" content="Kitesurf 验证了「Agent 需要自己的浏览器」这个判断，却也公开承认了三件它干不了的事——恰好是 AginxBrowser 从第一天就在啃的：真实 TLS 指纹、有状态长会话、MCP 原生。">
+<meta name="description" content="Kitesurf 验证了「Agent 需要自己的浏览器」这个判断，却也公开承认了硬缺口——真实 TLS 指纹、有状态长会话。AginxBrowser 从第一天就在啃这些，再加上 Agent 直接调用的纯 HTTP API（无 Chromium、无 CDP 套壳）。">
 <meta property="og:title" content="Cloudflare 刚做了个 Agent 浏览器，却在博客里公开承认了三件干不了的事">
 <meta property="og:description" content="Kitesurf 验证了方向，Cloudflare 把最难的三个山头让了出来。AginxBrowser 就守在这三个山头上。">
 <link rel="canonical" href="https://browser.aginx.net/blog/launch-zh.html">
@@ -115,7 +115,7 @@ footer { border-top: 1px solid var(--border); padding: 24px; text-align: center;
     <li>Firecrawl 这类抓取服务只读不会动，不能登录、不能翻页、不能点。</li>
   </ul>
   <p>Agent 要的不是其中某一个。Agent 要的是五件事都齐：<strong>看得见、读得懂、找得到、操得了、跑得动。</strong></p>
-  <p>AginxBrowser 就是干这个的。一个 Rust 二进制，内置 V8，不依赖 Chromium。systemd 守护，HTTP API + MCP，Claude Code 一行接入。</p>
+  <p>AginxBrowser 就是干这个的。一个 Rust 二进制，内置 V8，不依赖 Chromium。systemd 守护的纯 HTTP API——Agent 与 skills（Claude Code、Cursor 等）直接打路由。</p>
   <p class="tagline">人有 Chrome，Agent 有 AginxBrowser。</p>
   <p>有意思的是，它和 Kitesurf <strong>同源</strong>——都从一个叫 obscura 的 Rust 无头引擎起家，都用 Blitz 做 HTML/CSS。区别在于：<strong>Kitesurf 选了「做最轻、最便宜的那个」，我们选了「做最难、别人干不了的那三个」。</strong></p>
 
@@ -131,9 +131,9 @@ footer { border-top: 1px solid var(--border); padding: 24px; text-align: center;
   <p>AginxBrowser 有持久化会话，8 分钟空闲保活。你可以注入 cookie 直接以登录态开局（<code>session_create(cookies=...)</code>），操作完再把 cookie 导出来复用（<code>session_cookies</code>）。登录 → 翻页 → 操作 → 再操作，整条链不断。</p>
   <p>一次性引擎做不了「先登录，再做一串操作」。这个能。</p>
 
-  <h3>三、MCP 原生，不是 CDP 套壳</h3>
-  <p>Kitesurf 主打 Chrome DevTools Protocol，要接 MCP 得再套一层 <code>chrome-devtools-mcp</code>。</p>
-  <p>AginxBrowser 的 13 个工具本身就是 MCP 一等公民。Claude Code、Cursor、Claude Desktop 一行接入，不用先去学一套 DevTools 协议。Agent 拿来就能用。</p>
+  <h3>三、对 Agent 原生的 HTTP，不是 CDP 套壳</h3>
+  <p>Kitesurf 主打 Chrome DevTools Protocol，要进 Agent 栈通常还得再套一层 CDP（例如 <code>chrome-devtools-mcp</code>）。</p>
+  <p>AginxBrowser 的对外表面就是纯 HTTP API——fetch / search / screenshot / session，一个 Rust 二进制。装上仓库里的 <code>SKILL.md</code>，Claude Code / Cursor 会主动打这些路由，不用先学 DevTools 协议。</p>
 
   <h2>拿来干什么</h2>
   <p>不是 demo，是真有人在用 agent 浏览器干的事：</p>
@@ -155,7 +155,9 @@ footer { border-top: 1px solid var(--border); padding: 24px; text-align: center;
 
   <h2>一行接入</h2>
   <p>Kitesurf 验证了方向，Cloudflare 把最难的三个山头让了出来。AginxBrowser 就守在这三个山头上。</p>
-  <pre><code>claude mcp add aginxbrowser --transport http https://browser.aginx.net/mcp</code></pre>
+  <pre><code>curl -fsSL https://browser.aginx.net/install.sh -o install.sh && less install.sh && bash install.sh
+# then: aginxbrowser &amp;&amp; curl http://127.0.0.1:8089/health
+# agents: 从仓库安装 SKILL.md（skills.sh / 本地 skill 目录）</code></pre>
   <p>托管实例直接用：<strong>browser.aginx.net</strong> · 开源自部署：<strong>github.com/yinnho/aginxbrowser</strong></p>
 
   <div class="cta">
