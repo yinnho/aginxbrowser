@@ -7,6 +7,7 @@
 **Agent 的浏览器。看 live web，读它，操作它，记住它。**
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/yinnho/aginxbrowser)](https://github.com/yinnho/aginxbrowser/releases/latest)
 [![skills.sh](https://skills.sh/b/yinnho/aginxbrowser)](https://skills.sh/yinnho/aginxbrowser)
 [![X](https://img.shields.io/badge/X-%40aginxbrowser-black?logo=x)](https://x.com/aginxbrowser)
 
@@ -18,7 +19,7 @@
 
 <video src="https://github.com/yinnho/aginxbrowser/releases/download/v0.5.3/aginxbrowser-vs-competitors-2026-09.mp4" controls muted width="720"></video>
 
-*与同类产品的实测对比（2026-09）：出文本快 7.6 倍、内存省约 10 倍，现场翻页验证。*
+*历史片段，素材来自 [v0.5.3](https://github.com/yinnho/aginxbrowser/releases/tag/v0.5.3) 发布资产（当前产品版本为 [v0.6.0](https://github.com/yinnho/aginxbrowser/releases/tag/v0.6.0)）。与同类产品的实测对比（2026-09）：出文本快 7.6 倍、内存省约 10 倍，现场翻页验证。*
 
 *下面这些真实页面，都是 AginxBrowser 的 diting 引擎渲染的（无 Chromium）——Wikipedia、本仓库、Rust 官网。想亲自截图？[看这里](docs/API.md#screenshot)*
 
@@ -26,7 +27,7 @@
 
 ## 为什么 Agent 需要专属浏览器
 
-同一批 20 个页面、同一网络环境下对着 headless Chrome 实测（[bench](bench/README.md)，2026-08-28）：出可用文本**快 7.6 倍**（p50 532 ms vs 4 053 ms），**内存省约 10 倍**（整个进程 227 MB vs Chrome 每页 ~2.1 GB），Chrome `--dump-dom` 40 次加载 5 次连 DOM 都没出来，我们 0 次硬失败。Agent 的总成本 = 浏览器效率 × 模型效率，这是浏览器那一半。
+同一批 20 个页面、同一网络环境下对着 headless Chrome 实测（[bench](bench/README.md)，2026-08-28）：出可用文本**快 7.6 倍**（p50 532 ms vs 4 053 ms），**内存省约 10 倍**（整个进程 227 MB vs Chrome 每页 ~2.1 GB），Chrome `--dump-dom` 40 次加载 5 次连 DOM 都没出来，我们 0 次硬失败。v0.5.21（2026-09-29）弱网日复测仍保住倍率——p50 5.4×，整轮 468 MB vs 每页 1.75 GB——两份 raw TSV 都在仓库里（那是历史测量；当前产品版本是 [v0.6.0](https://github.com/yinnho/aginxbrowser/releases/tag/v0.6.0)）。Agent 的总成本 = 浏览器效率 × 模型效率，这是浏览器那一半。
 
 现有的"浏览器自动化"方案都是为人或为一次性抓取设计的，不是为 Agent：
 
@@ -56,13 +57,13 @@
 
 Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操得了、记得住。** 一个二进制全包，systemd 守护，零依赖启动即服务。
 
-**核心优势：不依赖 Chromium。** AginxBrowser 内联了完整的浏览器引擎（V8 + Rust HTTP 栈 + 自有的 diting CSS/布局/绘制渲染引擎，以 Blitz/Stylo/Taffy 谱系为参照实现），不需要 Puppeteer、不需要 Chrome、不需要 Docker。一个 Rust 二进制挂 systemd，就是 agent 的浏览器基础设施。
+**核心优势：不依赖 Chromium。** AginxBrowser 内联了完整的浏览器引擎（V8 + Rust HTTP 栈 + 自有的 diting CSS/布局/绘制渲染引擎，以 Blitz/Stylo/Taffy 谱系为参照实现）。从 **v0.6.0** 起 JS 事件循环落在自有的 `diting_runtime` crate（`deno_core` 已退役）。不需要 Puppeteer、不需要 Chrome、不需要 Docker。一个 Rust 二进制挂 systemd，就是 agent 的浏览器基础设施。
 
 ## 两件事：无状态渲染器干不了
 
 刚冒出来的「agent 浏览器」大多是**无状态、无指纹**的一���性渲染引擎——抓公开页很轻，碰上 Cloudflare 或要登录的站就死。AginxBrowser 走相反的路：
 
-- **🔐 真实 TLS 指纹** — stealth 模式用 BoringSSL 复刻 Chrome145 / Firefox133 / Safari / Edge 的完整 TLS 握手（不是只改 UA），可按请求切换；Cloudflare Turnstile 挑战页自动等 `cf_clearance`。无指纹引擎碰反爬就是 403，我们穿过去。
+- **🔐 真实 TLS 指纹** — stealth 模式用 BoringSSL 复刻 Chrome / Firefox / Safari / Edge 的 TLS 握手（JA3 预设名如 `chrome145`、`firefox133`——不是只改 UA），可按请求切换。舰队默认 User-Agent 为 **Chrome/154**；默认 TLS 形状仍是 `chrome145` 预设。Cloudflare Turnstile 挑战页自动等 `cf_clearance`。无指纹引擎碰反爬就是 403，我们穿过去。
 - **🤝 有状态交互 Session** — 登录态可注入可导出（`session_create(cookies=...)` ↔ `session_cookies`），跨翻页、跨多步流程不断；`persistent: true` 连闲置过期和服务重启都能扛过去，同一个 session_id 复活时还带着登录态。一次性引擎抓完即弃，做不了「登录 → 操作 → 再操作」。
 
 > 参照：Cloudflare 的 Kitesurf 明确不做真实 TLS 指纹协商、不做持久认证会话——反爬与登录正是 AginxBrowser 的地盘。
@@ -95,7 +96,7 @@ Agent 是照着浏览器说的话行事的，所以响应里要写清楚实际�
 - **截图渲染**：`/screenshot` 端点（`--features screenshot`），JS 渲染后的 DOM 用自有的 diting 引擎出 PNG——纯 CPU，无 Chromium，agent 的视觉输入
 - **时间线视频**：`/video` 端点把页面的动画渲成 MP4。约定���简单：页面脚本把时间线注册进 `window.__timelines`（GSAP 风格，带 `duration()` 和 `pause(t)` 就行），引擎每帧 seek 到 `t=i/fps`、画视口、RGBA 直接 pipe 给 ffmpeg 编 H.264/yuv420p。确定性是构造出来的——像素值里没有墙钟，同一页面渲两遍出同一个 MP4。服务器上要有 ffmpeg
 - **页集（PDF/PNG/PPTX/DOCX）**：`/pdf` 端点把渲好的页面切页打包——打印模式按顶层块边界分页（默认 96dpi A4，断点尽量落在块边，文字不拦腰截断），幻灯片模式每个选择器匹配自成一张页、按元素定高（HTML 写个 deck、一页一个 `.slide`，导出就是真能用的 deck）。图基 PDF：每页 JPEG 走 DCTDecode，PDF 1.4 手写打包器，零新依赖。PPTX 把同一叠页每页打一张幻灯片；DOCX 每页一个按页定尺寸的 section——两个 OOXML 容器都是手写的（stored-ZIP 打包器、时间戳写死），字节级确定性，零新依赖
-- **TLS 指纹伪装**：stealth 模式模拟 Chrome145/Firefox133/Safari/Edge，可按请求切换
+- **TLS 指纹伪装**：stealth 模式模拟 Chrome/Firefox/Safari/Edge 的 TLS 形状（默认预设 `chrome145`；舰队 UA 为 Chrome/154），可按请求切换
 - **Firecrawl 兼容**：`/v1/scrape` 端点，现有 Firecrawl 客户端改 base URL 即可迁移
 - **DNS 重绑定防护**：内置 SSRF 防护 + 解析后 IP 校验
 
@@ -153,8 +154,11 @@ npx skills add yinnho/aginxbrowser
 
 ```text
 把 aginxbrowser 装成你的 web 访问层：
-1. 装到本机并确认健康：
-   brew install yinnho/aginxbrowser/aginxbrowser
+1. 装 v0.6.0 到本机并确认健康：
+   # 首选——当前 release 二进制（install.sh 自动选平台）：
+   curl -fsSL https://browser.aginx.net/install.sh -o install.sh && less install.sh && bash install.sh
+   # 可选 Homebrew（tap 可能落后于 GitHub releases——装完用 `aginxbrowser --version` 核对）：
+   #   brew trust yinnho/aginxbrowser && brew install yinnho/aginxbrowser/aginxbrowser
    aginxbrowser doctor   # 然后启动：aginxbrowser（监听 0.0.0.0:8089）
    curl http://127.0.0.1:8089/health
 2. 以后 web 任务走 http://127.0.0.1:8089，别裸 curl：
@@ -167,12 +171,8 @@ npx skills add yinnho/aginxbrowser
 自己部署：
 
 ```bash
-# macOS / Linux 用 Homebrew
-brew install yinnho/aginxbrowser/aginxbrowser
-aginxbrowser doctor   # 特性 + 字体 + 出口自检
-
-# 或预编译二进制（平台识别 + sha256 校验 + 镜像回退 + doctor 自检）
-# macOS / Linux / Windows（git-bash；Windows 预编译从 v0.3.1 起，v0.4.0 起带全 stealth+screenshot）
+# 当前 release v0.6.0 预编译二进制（平台识别 + sha256 校验 + 镜像回退）
+# macOS / Linux / Windows（git-bash）。资产：https://github.com/yinnho/aginxbrowser/releases/tag/v0.6.0
 # 稳妥起见：下载 -> 看一眼 -> 再跑（不要盲跑网络脚本）
 curl -fsSL https://browser.aginx.net/install.sh -o install.sh
 less install.sh && bash install.sh
@@ -180,6 +180,11 @@ less install.sh && bash install.sh
 #   curl -fsSL https://browser.aginx.net/install.sh | sh
 # GitHub 慢/被墙？AGINXBROWSER_GH_PROXY=https://ghfast.top/ bash install.sh
 aginxbrowser doctor   # 特性 + 字体 + 出口自检
+
+# 可选：Homebrew（7+ 需先 trust）。tap 可能落后于 GitHub releases——
+# 装完用 `aginxbrowser --version` 核对。
+# brew trust yinnho/aginxbrowser
+# brew install yinnho/aginxbrowser/aginxbrowser
 
 # 或源码构建（--features stealth,screenshot，不带会掉这两项能力）
 cargo build --release --features stealth,screenshot
@@ -313,7 +318,7 @@ cargo build --release --features stealth,screenshot
 |------|------|------|
 | `AGINXBROWSER_BIND` | `0.0.0.0:8089` | 监听地址 |
 | `AGINXBROWSER_STEALTH` | 启用 | `0` 关闭 stealth（诊断用） |
-| `AGINXBROWSER_UA` | Linux Chrome145 | 伪装 UA |
+| `AGINXBROWSER_UA` | macOS Chrome/154 | 伪装 UA（TLS 默认预设仍为 `chrome145`） |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language 头 |
 | `AGINXBROWSER_PROXY` | 无 | 可选回退代理。被墙源引擎（维基百科/Bing News/Hugging Face/RubyGems）先直连、失败才走此代理——海外部署无需配置；单次请求也可传 `use_proxy:true` 走代理。浏览器/session 导航到已知被墙域名（wikipedia.org、github.com 等）会自动走代理。引擎故意无视标准 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`（给别的工具设���问题），启动时见到会打警告 |
 | `AGINXBROWSER_NAV_CHAIN_LIMIT` | `10` | JS 导航链上限：页面经 `location`/表单连跳多少个文档后导航中止。计数含最初文档（10 = 首文档 + 9 跳）。合法长链（跨提供商 SSO 跳转）可调高；HTTP 3xx 重定向单独算额度（20，按 Fetch spec/浏览器对齐） |

@@ -7,6 +7,7 @@ English | [中文](README.zh-CN.md)
 **The Browser for AI Agents. See the live web. Read it. Act on it. Remember it.**
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/yinnho/aginxbrowser)](https://github.com/yinnho/aginxbrowser/releases/latest)
 [![skills.sh](https://skills.sh/b/yinnho/aginxbrowser)](https://skills.sh/yinnho/aginxbrowser)
 [![X](https://img.shields.io/badge/X-%40aginxbrowser-black?logo=x)](https://x.com/aginxbrowser)
 
@@ -18,7 +19,7 @@ One binary, zero dependencies, instant service. The HTTP API is the whole interf
 
 <video src="https://github.com/yinnho/aginxbrowser/releases/download/v0.5.3/lightpanda-star-story.mp4" controls muted width="720"></video>
 
-*The star that got our attention: Pierre Tachoire, co-founder of [Lightpanda](https://lightpanda.com) — the headless browser our [bench](bench/README.md) measures against — starred the repo. 90 seconds on why that mattered to us.*
+*Historical clip from the [v0.5.3](https://github.com/yinnho/aginxbrowser/releases/tag/v0.5.3) release assets (current product is [v0.6.0](https://github.com/yinnho/aginxbrowser/releases/tag/v0.6.0)). The star that got our attention: Pierre Tachoire, co-founder of [Lightpanda](https://lightpanda.com) — the headless browser our [bench](bench/README.md) measures against — starred the repo. 90 seconds on why that mattered to us.*
 
 *Real pages rendered by AginxBrowser's diting engine (no Chromium) — Wikipedia, this repo, Rust. [Screenshot it yourself →](docs/API.md#screenshot)*
 
@@ -26,7 +27,7 @@ One binary, zero dependencies, instant service. The HTTP API is the whole interf
 
 ## Why Agents Need Their Own Browser
 
-Measured against headless Chrome on the same 20 pages, same network ([bench](bench/README.md), 2026-08-28): **7.6× faster** to agent-usable text (p50 532 ms vs 4 053 ms), **~10× less memory** (227 MB for the whole process vs ~2.1 GB per Chrome page), and 0 hard failures where Chrome's `--dump-dom` produced no DOM on 5 of 40 loads. Re-run on v0.5.21 (2026-09-29) on a degraded-network day held the ratio — 5.4× p50, 468 MB whole-run vs 1.75 GB per page — both raw TSVs are committed. An agent's total cost is browser efficiency × model efficiency — this is the browser half.
+Measured against headless Chrome on the same 20 pages, same network ([bench](bench/README.md), 2026-08-28): **7.6× faster** to agent-usable text (p50 532 ms vs 4 053 ms), **~10× less memory** (227 MB for the whole process vs ~2.1 GB per Chrome page), and 0 hard failures where Chrome's `--dump-dom` produced no DOM on 5 of 40 loads. Re-run on v0.5.21 (2026-09-29) on a degraded-network day held the ratio — 5.4× p50, 468 MB whole-run vs 1.75 GB per page — both raw TSVs are committed (those runs are historical; the current release is [v0.6.0](https://github.com/yinnho/aginxbrowser/releases/tag/v0.6.0)). An agent's total cost is browser efficiency × model efficiency — this is the browser half.
 
 Existing "browser automation" was built for humans or for one-shot scraping — not for agents:
 
@@ -56,13 +57,13 @@ Same-tier engines, not the tools in the table above. Cells are capabilities, not
 
 An agent needs five things from a browser: **see, read, find, act, remember.** One binary covers them all — systemd-friendly, zero dependencies.
 
-**Core advantage: no Chromium.** AginxBrowser inlines a full browser engine (V8 + Rust HTTP stack + the diting CSS/layout/paint rendering engine, with the Blitz/Stylo/Taffy lineage as its reference implementation). No Puppeteer, no Chrome, no Docker. One Rust binary under systemd is your agent browsing infrastructure.
+**Core advantage: no Chromium.** AginxBrowser inlines a full browser engine (V8 + Rust HTTP stack + the diting CSS/layout/paint rendering engine, with the Blitz/Stylo/Taffy lineage as its reference implementation). From **v0.6.0** the JS event loop lives in the owned `diting_runtime` crate (`deno_core` retired). No Puppeteer, no Chrome, no Docker. One Rust binary under systemd is your agent browsing infrastructure.
 
 ## Two Things Stateless Renderers Can't Do
 
 Most new "agent browsers" are stateless, fingerprint-less one-shot renderers — fine for public pages, dead on arrival against Cloudflare or login flows. AginxBrowser goes the opposite way:
 
-- **🔐 Real TLS fingerprints** — stealth mode replicates the complete Chrome145 / Firefox133 / Safari / Edge TLS handshakes via BoringSSL (not just a UA string), switchable per request; Cloudflare Turnstile challenges wait automatically for `cf_clearance`. Fingerprint-less engines eat 403s — we get through.
+- **🔐 Real TLS fingerprints** — stealth mode replicates Chrome / Firefox / Safari / Edge TLS handshakes via BoringSSL (JA3 preset names such as `chrome145`, `firefox133` — not just a UA string), switchable per request. The fleet User-Agent defaults to **Chrome/154**; the default TLS shape stays the `chrome145` preset. Cloudflare Turnstile challenges wait automatically for `cf_clearance`. Fingerprint-less engines eat 403s — we get through.
 - **🤝 Stateful interactive sessions** — login state injectable and exportable (`session_create(cookies=...)` ↔ `session_cookies`), surviving pagination and multi-step flows; `persistent: true` even survives idle eviction and server restarts — the same session id comes back logged in. One-shot engines throw state away.
 
 > Reference point: Cloudflare's Kitesurf explicitly ships neither real TLS-fingerprint negotiation nor persistent auth sessions — anti-bot and login territory is exactly where AginxBrowser plays.
@@ -95,7 +96,7 @@ The [local cache](#capabilities) builds on the same idea: search hits come back 
 - **Screenshot rendering**: `/screenshot` endpoint (opt-in `--features screenshot`) paints the JS-rendered DOM with the diting rendering engine — pure CPU, no Chromium — to PNG. Vision input for agents
 - **Timeline video**: `/video` renders a page's animation timelines to MP4 — the page's scripts register GSAP-style timelines in `window.__timelines` (`duration()` + `pause(t)`), each frame seeks to `t=i/fps` and paints the viewport, and the frames pipe into ffmpeg (H.264, yuv420p). Deterministic by construction: no wall clock in the pixel values, same render twice = same MP4. Needs ffmpeg on PATH
 - **Page set (PDF/PNG/PPTX/DOCX)**: `/pdf` cuts a rendered page into pages and packages them — print mode paginates at top-level block boundaries (default A4 @96dpi, no half-cut text where a break can land on a block edge), slides mode makes one page per CSS-selector match sized to the element (an HTML deck with one `.slide` per page exports as a real deck). Image-based PDF: per-page JPEG via DCTDecode, hand-rolled PDF 1.4 writer, zero new dependencies. PPTX packages the same pages as one slide per page; DOCX as one page-sized section per page — both hand-rolled OOXML (stored-ZIP writer, fixed timestamps), byte-deterministic, zero new dependencies
-- **TLS fingerprint spoofing**: stealth mode impersonates Chrome145/Firefox133/Safari/Edge, switchable per request
+- **TLS fingerprint spoofing**: stealth mode impersonates Chrome/Firefox/Safari/Edge TLS shapes (default preset `chrome145`; fleet UA Chrome/154), switchable per request
 - **Firecrawl compatible**: `/v1/scrape` endpoint — existing Firecrawl clients migrate by changing the base URL
 - **DNS rebinding protection**: built-in SSRF guard + post-resolution IP validation
 
@@ -154,9 +155,11 @@ npx skills add yinnho/aginxbrowser
 
 ```text
 Set up aginxbrowser as your web access layer:
-1. Install it locally and verify it is healthy:
-   brew trust yinnho/aginxbrowser   # Homebrew 7+ tap-trust gate; older brew skips this
-   brew install yinnho/aginxbrowser/aginxbrowser
+1. Install v0.6.0 locally and verify it is healthy:
+   # Preferred — current release binary (install.sh picks the platform):
+   curl -fsSL https://browser.aginx.net/install.sh -o install.sh && less install.sh && bash install.sh
+   # Optional Homebrew (tap may lag behind GitHub releases — check `aginxbrowser --version`):
+   #   brew trust yinnho/aginxbrowser && brew install yinnho/aginxbrowser/aginxbrowser
    aginxbrowser doctor   # then start: aginxbrowser (listens on 0.0.0.0:8089)
    curl http://127.0.0.1:8089/health
 2. From now on, route web tasks through http://127.0.0.1:8089 instead of raw curl:
@@ -169,13 +172,8 @@ Set up aginxbrowser as your web access layer:
 Self-hosting:
 
 ```bash
-# macOS / Linux via Homebrew (7+ needs the trust line first)
-brew trust yinnho/aginxbrowser
-brew install yinnho/aginxbrowser/aginxbrowser
-aginxbrowser doctor   # features + fonts + egress self-check
-
-# Or the prebuilt binary (platform detect + sha256 + mirror fallback + doctor self-check)
-# macOS / Linux / Windows (git-bash; prebuilt Windows ships from v0.3.1, full `stealth`+`screenshot` feature set from v0.4.0)
+# Prebuilt binary for current release v0.6.0 (platform detect + sha256 + mirror fallback)
+# macOS / Linux / Windows (git-bash). Assets: https://github.com/yinnho/aginxbrowser/releases/tag/v0.6.0
 # Cautious: download -> inspect -> run (never blind-run network scripts)
 curl -fsSL https://browser.aginx.net/install.sh -o install.sh
 less install.sh && bash install.sh
@@ -183,6 +181,11 @@ less install.sh && bash install.sh
 #   curl -fsSL https://browser.aginx.net/install.sh | sh
 # GitHub slow/blocked? AGINXBROWSER_GH_PROXY=https://ghfast.top/ bash install.sh
 aginxbrowser doctor   # features + fonts + egress self-check
+
+# Optional: Homebrew (7+ needs the trust line first). The tap can lag behind
+# GitHub releases — confirm with `aginxbrowser --version` after install.
+# brew trust yinnho/aginxbrowser
+# brew install yinnho/aginxbrowser/aginxbrowser
 
 # Or build from source (--features stealth,screenshot or you lose both)
 cargo build --release --features stealth,screenshot
@@ -316,7 +319,7 @@ If your network can't reach the rusty_v8 CDN (build hangs with zero progress aft
 |------|------|------|
 | `AGINXBROWSER_BIND` | `0.0.0.0:8089` | Listen address |
 | `AGINXBROWSER_STEALTH` | enabled | `0` disables stealth (for diagnostics) |
-| `AGINXBROWSER_UA` | Linux Chrome145 | Spoofed User-Agent |
+| `AGINXBROWSER_UA` | macOS Chrome/154 | Spoofed User-Agent (TLS default preset stays `chrome145`) |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language header |
 | `AGINXBROWSER_PROXY` | none | Optional fallback proxy. Blocked-source engines (Wikipedia, Bing News, Hugging Face, RubyGems) connect directly first and fall through to this proxy only when the direct attempt fails — overseas deployments need no proxy at all; per-request `use_proxy:true` also routes fetch/search through it. Browser/session navigations to known-blocked domains (wikipedia.org, github.com, …) route through it automatically. Standard `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` are deliberately ignored by the engine (set them for other tools freely); startup logs a warning when it sees one |
 | `AGINXBROWSER_NAV_CHAIN_LIMIT` | `10` | JS navigation-chain cap: documents a page may chain via `location`/form hops before navigation aborts. The count includes the requested document (10 = initial doc + 9 hops). Raise for legit long chains (SSO handover across providers); HTTP 3xx redirects are budgeted separately (20, per Fetch spec / browser parity) |
