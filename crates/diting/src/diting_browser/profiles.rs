@@ -101,10 +101,12 @@ pub static PROFILES: &[BrowserProfile] = &[
     },
 ];
 
-/// Product default: the stable macOS Chrome 145 persona this service has
-/// always presented when no override is set (index 6 in the pool). Upstream's
-/// `select_profile` defaults to `PROFILES[0]` (Windows); flipping our default
-/// would change the UA every un-pinned deployment sends, so we pin ours.
+/// Product default: the stable macOS Chrome/154 persona this service has
+/// always presented when no override is set (index 6 in the pool). UA major
+/// is 154; TLS fingerprint name remains chrome145 (wreq-util shape).
+/// Upstream's `select_profile` defaults to `PROFILES[0]` (Windows); flipping
+/// our default would change the UA every un-pinned deployment sends, so we
+/// pin ours.
 pub const DEFAULT_PROFILE_INDEX: usize = 6;
 
 pub fn random_profile() -> &'static BrowserProfile {

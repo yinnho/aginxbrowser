@@ -186,13 +186,15 @@ pub struct Persona {
     pub user_agent: String,
 }
 
-/// UA pool for a fresh persona: Windows and macOS Chrome 145 only. Both
-/// entries match the fleet-claimed chrome154 major on family and version
-/// (zero `warn_on_ua_tls_mismatch` tells), and the TLS emulation OS follows
-/// the UA, so Win↔Mac is the free axis — hardware differentiation rides the
-/// fp_seed. Linux is excluded: the TLS/OS contract and the product default
-/// are Win↔Mac; X11 jars on a Mac host are out of family. Drawn from the
-/// profiles pool (not hardcoded) so a pool refresh follows along.
+/// UA pool for a fresh persona: Windows and macOS Chrome/154 only.
+/// Fleet story: UA string (and GL/uad/sec-ch-ua) claims Chrome 154; the TLS
+/// handshake still uses wreq-util's chrome145 *shape* (JA3 preset name, not
+/// the UA major). Pool entries match Chrome/154 so `warn_on_ua_tls_mismatch`
+/// stays quiet. TLS emulation OS follows the UA, so Win↔Mac is the free
+/// axis — hardware differentiation rides the fp_seed. Linux is excluded:
+/// the TLS/OS contract and the product default are Win↔Mac; X11 jars on a
+/// Mac host are out of family. Drawn from the profiles pool (not hardcoded)
+/// so a pool refresh follows along.
 fn persona_ua_pool() -> Vec<&'static str> {
     diting::diting_browser::profiles::PROFILES
         .iter()
@@ -239,15 +241,16 @@ fn chrome_major_from_ua(ua: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// The Chrome major the whole fleet claims: persona UA, GL tables, uad
-/// brands, sec-ch-ua all say 154. Kept local so account code does not depend
-/// on the stealth feature gate. The TLS handshake itself stays on the
-/// chrome145 *shape* — wreq-util rc.31's ceiling (rc.31's BoringSSL name
-/// table has no mldsa sigalgs, so the 150+ sigalgs delta is inexpressible);
-/// that residual is an accepted trade, revisit on a wreq 0.16 migration.
-/// Why 154 and not newer: the xhs edge buckets UA-155 sessions into its SIT
-/// loop (customer.sit.xiaohongshu.com) while 154 routes production
-/// (2026-10-17 probe).
+/// The Chrome major the whole fleet claims in the *UA string* (and GL / uad
+/// / sec-ch-ua): 154. Not the TLS fingerprint name — that stays
+/// `chrome145` (wreq-util Profile::Chrome145 JA3 shape). Kept local so
+/// account code does not depend on the stealth feature gate. The chrome145
+/// shape is wreq-util rc.31's ceiling (rc.31's BoringSSL name table has no
+/// mldsa sigalgs, so the 150+ sigalgs delta is inexpressible); accepted
+/// residual, revisit on a wreq 0.16 migration. Why UA 154 and not 155: the
+/// xhs edge buckets UA-155 sessions into its SIT loop
+/// (customer.sit.xiaohongshu.com) while 154 routes production
+/// (2026-10-17 probe). Do not bump the UA to 155 without revisiting that.
 fn default_tls_chrome_major() -> u32 {
     154
 }
@@ -270,15 +273,15 @@ fn coerce_ua_to_tls(ua: &str) -> String {
         .or_else(|| pool.first().copied())
         .unwrap_or_else(default_mac_chrome154_ua);
     tracing::warn!(
-        "persona UA Chrome major mismatches TLS chrome{}; rewriting to coherent pool UA",
+        "persona UA Chrome major mismatches fleet Chrome{} (TLS shape stays chrome145); rewriting to coherent pool UA",
         default_tls_chrome_major()
     );
     pick.to_string()
 }
 
 /// Resolve the UA hint for a fresh account persona teach:
-/// 1. explicit `persona_ua` / import UA when non-empty (TLS-coerced)
-/// 2. else `AGINXBROWSER_UA` when set (TLS-coerced)
+/// 1. explicit `persona_ua` / import UA when non-empty (fleet-major coerced to 154)
+/// 2. else `AGINXBROWSER_UA` when set (same coerce; TLS shape stays chrome145)
 /// 3. else Mac Chrome/154 when [`prefer_mac_persona`]
 /// 4. else `None` → Win/Mac pool lottery in [`draw_persona`]
 pub fn resolve_ua_hint(explicit: Option<&str>) -> Option<String> {
@@ -298,10 +301,11 @@ pub fn resolve_ua_hint(explicit: Option<&str>) -> Option<String> {
 }
 
 /// Draw a fresh persona: random fp_seed (same uuid cut `Page::new` uses) and
-/// a UA — `ua_hint` after TLS coerce when given (an imported cURL's User-Agent
-/// is the human's device, but Chrome major must still match the fleet chrome154
-/// handshake), else a pick from the Chrome-145 pool keyed off the seed. On
-/// Darwin (or `AGINXBROWSER_PERSONA_OS=mac`) the pool draw is Mac-only.
+/// a UA — `ua_hint` after fleet-major coerce when given (an imported cURL's
+/// User-Agent is the human's device, but Chrome major must still be 154 to
+/// match the fleet claim; TLS JA3 stays chrome145-shaped), else a pick from
+/// the Chrome/154 Win+Mac pool keyed off the seed. On Darwin (or
+/// `AGINXBROWSER_PERSONA_OS=mac`) the pool draw is Mac-only.
 fn draw_persona(ua_hint: Option<&str>) -> Persona {
     let fp_seed = u64::from_be_bytes(uuid::Uuid::new_v4().into_bytes()[..8].try_into().unwrap());
     let pool = persona_ua_pool();
@@ -1083,9 +1087,9 @@ mod tests {
         assert!(!resolve_use_proxy(&serde_json::json!({}), false));
     }
 
-    // The pool is the persona's TLS-coherence contract: Chrome 145 only
-    // (zero mismatch with the fleet-claimed chrome154), both desktop OSes
-    // present so Win/Mac is the differentiation axis — never Linux/X11.
+    // The pool is the persona's fleet-UA contract: Chrome/154 only (matches
+    // the claimed major; TLS handshake shape stays chrome145), both desktop
+    // OSes present so Win/Mac is the differentiation axis — never Linux/X11.
     #[test]
     fn persona_pool_is_chrome154_win_and_mac() {
         let pool = persona_ua_pool();
