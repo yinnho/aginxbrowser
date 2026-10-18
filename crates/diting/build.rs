@@ -30,15 +30,19 @@ const SNAPSHOT_SCRIPTS: &[(&str, &str)] = &[
     // precede xhr.js, whose send() rides __ditingFetchShim.
     ("fetch.js", include_str!("js/fetch.js")),
     // Ratchet splits (pure moves): the audio/speechSynthesis faces, the
-    // Worker family, media_source, iframe_realm, range_selection and
-    // indexeddb left bootstrap.js wholesale. All only declare bindings at
-    // top level and touch bootstrap helpers at call time.
+    // Worker family, media_source, iframe_realm, range_selection,
+    // indexeddb and crypto_subtle left bootstrap.js wholesale. All only
+    // declare bindings at top level and touch bootstrap helpers at call time.
     ("audio.js", include_str!("js/audio.js")),
     ("worker.js", include_str!("js/worker.js")),
     ("media_source.js", include_str!("js/media_source.js")),
     ("iframe_realm.js", include_str!("js/iframe_realm.js")),
     ("range_selection.js", include_str!("js/range_selection.js")),
     ("indexeddb.js", include_str!("js/indexeddb.js")),
+    // Ratchet split: crypto.subtle / CryptoKey left bootstrap.js wholesale.
+    // Touches _OPS and __diting_clone_hooks only at call time; basic
+    // getRandomValues/randomUUID stay in bootstrap.
+    ("crypto_subtle.js", include_str!("js/crypto_subtle.js")),
     // #236 absorption split: the XHR family moved out of bootstrap.js
     // wholesale — consumes the fetch shim closure and the initiator-hint
     // var fetch.js defined, both at class-definition and at send() time.

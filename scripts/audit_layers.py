@@ -79,7 +79,7 @@ GOD_FILE_CAP = 1500
 # production lines must leave this table (retire). Removing a file without
 # removing its entry also fails (stale ratchet).
 GOD_FILE_GRANDFATHER = {
-    "crates/diting/js/bootstrap.js": 17551,  # #236: XMLHttpRequest split to js/xhr.js; EventTarget base stays
+    "crates/diting/js/bootstrap.js": 17447,  # crypto.subtle split to js/crypto_subtle.js; getRandomValues stays
     "crates/diting/src/diting_layout/mod.rs": 9253,
     "crates/diting/src/diting_css/mod.rs": 6601,
     "crates/diting/src/diting_js/ops/mod.rs": 4683,
