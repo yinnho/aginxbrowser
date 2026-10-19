@@ -1,10 +1,10 @@
 (() => {
-  // v11: v10 + WASM probe/cache/blacklist; slower poll (hang guard). Live verify showed mnsv2/xy18
+  // v12: v11 + bounds-check WASM ptrs; retry once after OOB blacklist. Live verify showed mnsv2/xy18
   // mounts but page/probe still hit www _webmsxyw → XYW_~668 (gate soft-
   // blocked). library-launcher fy() is: mnsv2(a,md5(a),md5(path)) → x3,
   // pack {x0..x5} → custom-b64 → XYS_. Embed that for ark resign + keep
   // page x-s-common (fU). Native mnsv2 alias still missing.
-  const XS_VER = 11;
+  const XS_VER = 12;
   let prev = null;
   try { if (typeof window.__xsStats === 'function') prev = window.__xsStats(); } catch (e) {}
   if (prev && prev.ver >= XS_VER) return 'already';
@@ -175,14 +175,20 @@
                 u8 = new Uint8Array(str.length);
                 for (let i = 0; i < str.length; i++) u8[i] = str.charCodeAt(i) & 0xff;
               }
-              const p = wasm.malloc(u8.length + 1);
+              const p = wasm.malloc(u8.length + 1) >>> 0;
               if (!p) throw new Error('malloc0');
-              const he = new Uint8Array(wasm.memory.buffer, p, u8.length + 1);
+              // Re-read .buffer after every malloc (grow detaches old views).
+              const buf = wasm.memory.buffer;
+              if (p + u8.length + 1 > buf.byteLength) throw new Error('malloc-oob');
+              const he = new Uint8Array(buf, p, u8.length + 1);
               he.set(u8); he[u8.length] = 0;
               return p;
             };
-            const r = wasm.xy(write(a), write(b), write(d));
-            const bytes = new Uint8Array(wasm.memory.buffer, (r >>> 0), 16);
+            const pa = write(a), pb = write(b), pd = write(d);
+            const r = wasm.xy(pa, pb, pd) >>> 0;
+            const buf2 = wasm.memory.buffer;
+            if (!r || r + 16 > buf2.byteLength) throw new Error('ret-oob:' + r + '/' + buf2.byteLength);
+            const bytes = new Uint8Array(buf2, r, 16);
             const hex = bytesToHex(bytes, 16);
             if (/^0+$/.test(hex)) throw new Error('zero-digest');
             return hex;
@@ -425,12 +431,23 @@
       else if (typeof data === 'string') a += data;
       const b = xsMd5([a].join(''));
       const d = xsMd5(String(path || ''));
-      // Prefer xy18; crypto-stub often returns zeros and 406s.
-      if (mns.__xsBridge === 'crypto-stub') {
+      // Prefer xy18; crypto-stub / OOB WASM often fails — retry once after cache clear.
+      let fn = mns;
+      if (fn.__xsBridge === 'crypto-stub') {
         const up = installMnsv2Bridge();
         if (!up || up.__xsBridge !== 'xy18') return null;
+        fn = up;
       }
-      const x3 = (resolveMnsv2() || mns)(a, b, d);
+      let x3;
+      try { x3 = fn(a, b, d); }
+      catch (e1) {
+        _wasmMnsCache = false;
+        try {
+          const up2 = installMnsv2Bridge();
+          if (!up2 || up2.__xsBridge !== 'xy18') return null;
+          x3 = up2(a, b, d);
+        } catch (e2) { return null; }
+      }
       if (x3 == null || x3 === '') return null;
       const x3s = String(x3);
       if (/^0+$/.test(x3s)) return null;
@@ -910,5 +927,5 @@
       _markNative(FM.fetch);
     }
   } catch (e) {}
-  return 'patched-v11-wasm-guard';
+  return 'patched-v12-wasm-oob';
 })()
