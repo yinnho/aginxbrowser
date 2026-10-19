@@ -1,11 +1,13 @@
 (() => {
+  // v20: poll bridgeProxyFp until facade mounts (itemark late).
+  // v19.1: poll bridgeProxyFp until facade mounts (itemark late).
   // v19: qiankun proxy AS facade getV18 (~1024/4.4.4) vs top FPJS (~2928).
   // Bridge facade.getV18 → top; do NOT copy VERSION (sdk stays rE 4.x).
   // v18: font-metric collectors (x29 fonts). Layout swallowed _ditingFontBox
   // so FPJS offsetWidth probes matched every named face to generic baseline.
   // measureText missed families inside 72px Arial shorthand. Do NOT invent ssk.
   // v17: RTC ICE + OAC graph. Warm PD_MIN 2000 + spaced getV18 retries.
-  const XS_VER = 19;
+  const XS_VER = 20;
   let prev = null;
   try { if (typeof window.__xsStats === 'function') prev = window.__xsStats(); } catch (e) {}
   if (prev && prev.ver >= XS_VER) return 'already';
@@ -678,8 +680,10 @@
     setTimeout(capturePageFyFU, 4000);
     setTimeout(() => { bridgeProxyFp(); noteFp(); tickWarmFp(); }, 2000);
     setTimeout(() => { bridgeProxyFp(); noteFp(); tickWarmFp(); }, 6000);
-    const warmIv = setInterval(tickWarmFp, 100);
-    setTimeout(() => { try { clearInterval(warmIv); } catch (e) {} }, 20000);
+    // Proxy AS facade often mounts with itemark AFTER the 6s bridge tick —
+    // poll bridge until it lands (or 45s).
+    const warmIv = setInterval(() => { bridgeProxyFp(); tickWarmFp(); }, 100);
+    setTimeout(() => { try { clearInterval(warmIv); } catch (e) {} }, 45000);
   } catch (e) {}
 
   // --- ark fy-replica (library-launcher fy without x6/x7 SSK; webSsk often empty) ---
