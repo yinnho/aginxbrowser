@@ -1,10 +1,9 @@
 (() => {
-  // v12: v11 + bounds-check WASM ptrs; retry once after OOB blacklist. Live verify showed mnsv2/xy18
-  // mounts but page/probe still hit www _webmsxyw → XYW_~668 (gate soft-
-  // blocked). library-launcher fy() is: mnsv2(a,md5(a),md5(path)) → x3,
-  // pack {x0..x5} → custom-b64 → XYS_. Embed that for ark resign + keep
-  // page x-s-common (fU). Native mnsv2 alias still missing.
-  const XS_VER = 13;
+  // v14: call page webpack 69850 fy/fU (not invent signer). mnsv2 bridge uses
+  // stackAlloc+copy+stackRestore (malloc ABI OOBs after 1–N calls). Prefer
+  // page fy for XYS_; await page fU for x-s-common. webSsk/x6/x7 still empty
+  // → XYS_~184 (Chrome ~408); fU common ~588 (Chrome ~2108).
+  const XS_VER = 14;
   let prev = null;
   try { if (typeof window.__xsStats === 'function') prev = window.__xsStats(); } catch (e) {}
   if (prev && prev.ver >= XS_VER) return 'already';
@@ -12,7 +11,7 @@
     ver: XS_VER, installed: 1, mirrored: 0, arkified: 0, swallowed: 0,
     passthrough: 0, passthrough_coherent: 0, common_stripped: 0, signed: 0,
     pr_held: 0, pr_blocked: 0, fuse: 0, replayed: 0, dropped: 0,
-    mns_mirrored: 0, mns_bridged: 0, xyw_blocked: 0, ark_xys: 0,
+    mns_mirrored: 0, mns_bridged: 0, xyw_blocked: 0, ark_xys: 0, page_fy: 0, page_fu: 0,
   };
   const bump = (k) => { stats[k] = (stats[k] || 0) + 1; };
   // Last publish_render decision + wire outcome (closure-only, surfaced via
@@ -113,23 +112,48 @@
           // One-shot probe: if digest is zeros or throws, blacklist this Instance.
           try {
             const enc = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
-            const write = (s) => {
+            const toU8 = (s) => {
               const str = String(s == null ? '' : s);
-              let u8;
-              if (enc) u8 = enc.encode(str);
-              else { u8 = new Uint8Array(str.length); for (let j = 0; j < str.length; j++) u8[j] = str.charCodeAt(j) & 0xff; }
-              const ptr = ex.malloc(u8.length + 1);
-              const he = new Uint8Array(ex.memory.buffer, ptr, u8.length + 1);
-              he.set(u8); he[u8.length] = 0;
-              return ptr;
+              if (enc) return enc.encode(str);
+              const u8 = new Uint8Array(str.length);
+              for (let j = 0; j < str.length; j++) u8[j] = str.charCodeAt(j) & 0xff;
+              return u8;
             };
-            const r = xy(write('xs'), write('bridge'), write('probe'));
-            const bytes = new Uint8Array(ex.memory.buffer, r >>> 0, 16);
+            let bytes;
+            if (typeof ex.stackSave === 'function' && typeof ex.stackAlloc === 'function' && typeof ex.stackRestore === 'function') {
+              const sp = ex.stackSave();
+              try {
+                const write = (s) => {
+                  const u8 = toU8(s);
+                  const need = (u8.length + 1 + 15) & ~15;
+                  const ptr = ex.stackAlloc(need) >>> 0;
+                  const view = new Uint8Array(ex.memory.buffer);
+                  view.set(u8, ptr); view[ptr + u8.length] = 0;
+                  return ptr;
+                };
+                const r = xy(write('xs'), write('bridge'), write('probe')) >>> 0;
+                const view = new Uint8Array(ex.memory.buffer);
+                bytes = Uint8Array.from(view.subarray(r, r + 16));
+              } finally { try { ex.stackRestore(sp); } catch (e0) {} }
+            } else {
+              const write = (s) => {
+                const u8 = toU8(s);
+                const ptr = ex.malloc(u8.length + 1);
+                const he = new Uint8Array(ex.memory.buffer, ptr, u8.length + 1);
+                he.set(u8); he[u8.length] = 0;
+                return ptr;
+              };
+              const r = xy(write('xs'), write('bridge'), write('probe'));
+              bytes = new Uint8Array(ex.memory.buffer, r >>> 0, 16);
+            }
             let nz = false;
             for (let j = 0; j < 16; j++) if (bytes[j]) { nz = true; break; }
             if (!nz) { _wasmMnsCache = false; return null; }
           } catch (e) { _wasmMnsCache = false; return null; }
-          _wasmMnsCache = { xy: xy, malloc: ex.malloc, memory: ex.memory };
+          _wasmMnsCache = {
+            xy: xy, malloc: ex.malloc, memory: ex.memory, free: ex.free,
+            stackSave: ex.stackSave, stackAlloc: ex.stackAlloc, stackRestore: ex.stackRestore,
+          };
           return _wasmMnsCache;
         }
       }
@@ -160,43 +184,64 @@
       if (cur && !cur.__xsBridge) return cur; // native won
       // Upgrade path: crypto-stub (or missing) → xy18 when WASM Instance appears.
       // Do NOT early-return on existing __xsBridge=crypto-stub.
-      if (cur && cur.__xsBridge === 'xy18') return cur;
+      if (cur && (cur.__xsBridge === 'xy18' || cur.__xsBridge === 'xy18-stack')) return cur;
       let bridge = null;
       const wasm = findWasmMnsExport();
       if (wasm) {
         const enc = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
+        // Prefer stackAlloc (VM-like). Copy digest before stackRestore. malloc OOBs after reuse.
+        const hasStack = typeof wasm.stackSave === 'function' && typeof wasm.stackAlloc === 'function'
+          && typeof wasm.stackRestore === 'function';
         bridge = function mnsv2(a, b, d) {
           try {
-            const write = (s) => {
+            const toU8 = (s) => {
               const str = String(s == null ? '' : s);
-              let u8;
-              if (enc) u8 = enc.encode(str);
-              else {
-                u8 = new Uint8Array(str.length);
-                for (let i = 0; i < str.length; i++) u8[i] = str.charCodeAt(i) & 0xff;
-              }
-              const p = wasm.malloc(u8.length + 1) >>> 0;
-              if (!p) throw new Error('malloc0');
-              // Re-read .buffer after every malloc (grow detaches old views).
-              const buf = wasm.memory.buffer;
-              if (p + u8.length + 1 > buf.byteLength) throw new Error('malloc-oob');
-              const he = new Uint8Array(buf, p, u8.length + 1);
-              he.set(u8); he[u8.length] = 0;
-              return p;
+              if (enc) return enc.encode(str);
+              const u8 = new Uint8Array(str.length);
+              for (let i = 0; i < str.length; i++) u8[i] = str.charCodeAt(i) & 0xff;
+              return u8;
             };
-            const pa = write(a), pb = write(b), pd = write(d);
-            const r = wasm.xy(pa, pb, pd) >>> 0;
-            const buf2 = wasm.memory.buffer;
-            if (!r || r + 16 > buf2.byteLength) throw new Error('ret-oob:' + r + '/' + buf2.byteLength);
-            const bytes = new Uint8Array(buf2, r, 16);
-            const hex = bytesToHex(bytes, 16);
+            let hex;
+            if (hasStack) {
+              const sp = wasm.stackSave();
+              try {
+                const write = (s) => {
+                  const u8 = toU8(s);
+                  const need = (u8.length + 1 + 15) & ~15;
+                  const p = wasm.stackAlloc(need) >>> 0;
+                  const view = new Uint8Array(wasm.memory.buffer);
+                  view.set(u8, p); view[p + u8.length] = 0;
+                  return p;
+                };
+                const r = wasm.xy(write(a), write(b), write(d)) >>> 0;
+                const view = new Uint8Array(wasm.memory.buffer);
+                if (!r || r + 16 > view.length) throw new Error('ret-oob:' + r);
+                const copy = Uint8Array.from(view.subarray(r, r + 16));
+                hex = bytesToHex(copy, 16);
+              } finally { try { wasm.stackRestore(sp); } catch (e0) {} }
+            } else {
+              const write = (s) => {
+                const u8 = toU8(s);
+                const p = wasm.malloc(u8.length + 1) >>> 0;
+                if (!p) throw new Error('malloc0');
+                const buf = wasm.memory.buffer;
+                if (p + u8.length + 1 > buf.byteLength) throw new Error('malloc-oob');
+                const he = new Uint8Array(buf, p, u8.length + 1);
+                he.set(u8); he[u8.length] = 0;
+                return p;
+              };
+              const pa = write(a), pb = write(b), pd = write(d);
+              const r = wasm.xy(pa, pb, pd) >>> 0;
+              const buf2 = wasm.memory.buffer;
+              if (!r || r + 16 > buf2.byteLength) throw new Error('ret-oob:' + r);
+              hex = bytesToHex(new Uint8Array(buf2, r, 16), 16);
+            }
             if (/^0+$/.test(hex)) throw new Error('zero-digest');
             return hex;
           } catch (e) {
             _wasmMnsCache = false;
             try {
               if (window.mnsv2 && window.mnsv2.__xsBridge === 'xy18') {
-                // Demote so callers do not keep hitting a poisoned Instance.
                 delete window.mnsv2;
                 try { if (window.proxy && window.proxy.mnsv2 && window.proxy.mnsv2.__xsBridge === 'xy18') delete window.proxy.mnsv2; } catch (e3) {}
               }
@@ -246,7 +291,9 @@
     mirrorSigner();
     mirrorMnsv2();
     try {
-      if (!(window.mnsv2 && window.mnsv2.__xsBridge === 'xy18')) installMnsv2Bridge();
+      const br = window.mnsv2 && window.mnsv2.__xsBridge;
+      if (!(br === 'xy18' || br === 'xy18-stack' || (window.mnsv2 && !window.mnsv2.__xsBridge))) installMnsv2Bridge();
+      capturePageFyFU();
     } catch (e) {}
   }, 1000);
   setTimeout(() => { try { clearInterval(mirrorTimer); } catch (e) {} }, 120000);
@@ -291,6 +338,69 @@
     } catch (e) {}
     return s;
   };
+
+  // --- page webpack fy/fU (module 69850) ---
+  let _pageFy = null, _pageFU = null, _pageCapTried = 0;
+  const capturePageFyFU = () => {
+    try {
+      if (typeof _pageFy === 'function' && typeof _pageFU === 'function') return true;
+      if (_pageCapTried > 8) return false;
+      _pageCapTried++;
+      const chunk = (window.proxy && window.proxy.webpackChunkitemark)
+        || window.webpackChunkitemark;
+      if (!chunk || typeof chunk.push !== 'function') return false;
+      let req = null;
+      chunk.push([['__xs_pagefy_' + Date.now()], {}, function (r) { req = r; }]);
+      if (typeof req !== 'function' || !req.m || !req.m[69850]) return false;
+      let src = Function.prototype.toString.call(req.m[69850]);
+      const idx = src.lastIndexOf('}');
+      if (idx < 0) return false;
+      src = src.slice(0, idx)
+        + ';try{if(typeof fy==="function"){e.__xsFy=fy;e.__xsFU=fU;}}catch(__e){}'
+        + src.slice(idx);
+      const fn = (0, eval)('(' + src + ')');
+      const mod = { exports: {} };
+      fn(mod, mod.exports, req);
+      if (typeof mod.exports.__xsFy === 'function') _pageFy = mod.exports.__xsFy;
+      if (typeof mod.exports.__xsFU === 'function') _pageFU = mod.exports.__xsFU;
+      try {
+        if (_pageFy) { window.__pageFy = _pageFy; if (window.proxy) window.proxy.__pageFy = _pageFy; }
+        if (_pageFU) { window.__pageFU = _pageFU; if (window.proxy) window.proxy.__pageFU = _pageFU; }
+      } catch (e2) {}
+      return typeof _pageFy === 'function';
+    } catch (e) { return false; }
+  };
+  const signPageFy = (path, data) => {
+    try {
+      if (typeof _pageFy !== 'function') capturePageFyFU();
+      if (typeof _pageFy !== 'function') return null;
+      // Ensure mnsv2 before page fy (fy calls window.mnsv2).
+      installMnsv2Bridge();
+      const xs = _pageFy(path, data);
+      if (!xs || String(xs).slice(0, 4) !== 'XYS_') return null;
+      bump('ark_xys');
+      bump('page_fy');
+      return { 'X-s': String(xs), 'X-t': String(Date.now()) };
+    } catch (e) { return null; }
+  };
+  const mintPageCommon = (path, data) => {
+    try {
+      if (typeof _pageFU !== 'function') capturePageFyFU();
+      if (typeof _pageFU !== 'function') return Promise.resolve(null);
+      const e = { url: String(path || ''), headers: {}, data: data };
+      const f = {
+        platform: (window.xsecplatform || (window.proxy && window.proxy.xsecplatform) || 'PC'),
+        configInit: true, xsIgnore: [], autoReload: false, disableMns: true,
+      };
+      return Promise.resolve(_pageFU(f, e)).then(() => {
+        const cm = e.headers['X-S-Common'] || e.headers['X-s-common'] || e.headers['x-s-common'];
+        if (cm != null && cm !== '') { bump('page_fu'); return String(cm); }
+        return null;
+      }).catch(() => null);
+    } catch (e) { return Promise.resolve(null); }
+  };
+  // opportunistic capture once DOM/chunk ready
+  try { setTimeout(capturePageFyFU, 1500); setTimeout(capturePageFyFU, 4000); } catch (e) {}
 
   // --- ark fy-replica (library-launcher fy without x6/x7 SSK; webSsk often empty) ---
   const XS_ALPH = 'ZmserbBoHQtNP+wOcza/LpngG8yJq42KWYj0DSfdikx3VT16IlUAFM97hECvuRX5';
@@ -483,8 +593,10 @@
       let data = b;
       if (typeof b === 'string') { try { data = JSON.parse(b); } catch (e) {} }
       if (b == null || b instanceof FormData || b instanceof ArrayBuffer || b instanceof Blob) data = undefined;
-      // Ark: mint XYS_ via mnsv2 fy-replica (never www XYW_).
+      // Ark: prefer real page fy (webpack 69850); fall back to fy-replica.
       if (isArkHost()) {
+        const page = signPageFy(path, data);
+        if (page && page['X-s']) return page;
         const xys = signArkXyS(path, data);
         if (xys && xys['X-s']) return xys;
       }
@@ -895,7 +1007,21 @@
       if (!gated && !has && (!isApiUrl(us) || !sameOrigin(us))) return F.call(this, u, o);
       if (gated) {
         bump('pr_held');
-        return waitSigner(GATE_WAIT_MS, true).then(() => apply(sign(us, body), true));
+        return waitSigner(GATE_WAIT_MS, true).then(() => {
+          const sg0 = sign(us, body);
+          if (!sg0) return apply(null, true);
+          const fam0 = sgFamily(sg0);
+          if (fam0.prefix === 'XYS_' && !commonFromSg(sg0)) {
+            let path0 = String(us || '').replace(/^(https?:)?\/\/[^/]+/, '');
+            let data0 = body;
+            if (typeof body === 'string') { try { data0 = JSON.parse(body); } catch (e) {} }
+            return mintPageCommon(path0, data0).then((cm0) => {
+              if (cm0) sg0['X-s-common'] = cm0;
+              return apply(sg0, true);
+            });
+          }
+          return apply(sg0, true);
+        });
       }
       // If page already set x-s and signer ready — passthrough without waiting/resign
       if (has && typeof (mirrorSigner() || resolveSigner()) === 'function') {
@@ -934,5 +1060,5 @@
       _markNative(FM.fetch);
     }
   } catch (e) {}
-  return 'patched-v13-demote-oob';
+  return 'patched-v14-page-fy-fu';
 })()

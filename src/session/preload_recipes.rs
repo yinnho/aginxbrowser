@@ -220,6 +220,8 @@ mod tests {
             "mns_bridged",
             "mnsv2",
             "signArkXyS",
+            "signPageFy",
+            "mintPageCommon",
             "ark_xys",
             "xyw_blocked",
             "isXywPoison",
