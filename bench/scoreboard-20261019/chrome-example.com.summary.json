@@ -1,0 +1,8 @@
+{
+  "engine": "chrome-headless",
+  "url": "https://example.com",
+  "elapsed_ms": 1617.3,
+  "dom_chars": 1991,
+  "returncode": 0,
+  "ok": true
+}

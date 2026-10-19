@@ -1,0 +1,21 @@
+{
+  "metric": "session_snapshot_example_com",
+  "method": "create(empty) -> navigate -> snapshot(json) -> snapshot(text) -> snapshot(json warm)",
+  "session_id": "s_1",
+  "create_ms": 8.6,
+  "navigate_ms": 2634.6,
+  "navigate_http": 200,
+  "navigate_url": "https://example.com/",
+  "snapshot_json_ms": 6.2,
+  "snapshot_text_ms": 2.1,
+  "snapshot_json_warm_ms": 1.6,
+  "element_count": 1,
+  "snapshot_top_keys": [
+    "elements",
+    "title",
+    "url",
+    "viewport"
+  ],
+  "text_preview": "url=https://example.com/\ntitle=Example Domain\nviewport=2560x1360\n\n- link \"Learn more\" [ref=e0]\n",
+  "ok": true
+}

@@ -1,0 +1,60 @@
+{
+  "peak_rss_mb": 58.3,
+  "rows": [
+    {
+      "engine": "aginxbrowser",
+      "url": "https://example.com",
+      "elapsed_ms": 586.9,
+      "http_code": 200,
+      "api_ok": true,
+      "tier": "http",
+      "chars": 156,
+      "response_bytes": 338,
+      "error": null
+    },
+    {
+      "engine": "aginxbrowser",
+      "url": "https://www.rust-lang.org/",
+      "elapsed_ms": 2178.6,
+      "http_code": 200,
+      "api_ok": true,
+      "tier": "http",
+      "chars": 4916,
+      "response_bytes": 5674,
+      "error": null
+    },
+    {
+      "engine": "aginxbrowser",
+      "url": "https://www.python.org/",
+      "elapsed_ms": 2725.1,
+      "http_code": 200,
+      "api_ok": true,
+      "tier": "http",
+      "chars": 7762,
+      "response_bytes": 8204,
+      "error": null
+    },
+    {
+      "engine": "aginxbrowser",
+      "url": "https://nodejs.org/en",
+      "elapsed_ms": 8273.3,
+      "http_code": 200,
+      "api_ok": true,
+      "tier": "http",
+      "chars": 4929,
+      "response_bytes": 5346,
+      "error": null
+    },
+    {
+      "engine": "aginxbrowser",
+      "url": "https://doc.rust-lang.org/book/title-page.html",
+      "elapsed_ms": 801.4,
+      "http_code": 200,
+      "api_ok": true,
+      "tier": "http",
+      "chars": 1573,
+      "response_bytes": 1880,
+      "error": null
+    }
+  ]
+}

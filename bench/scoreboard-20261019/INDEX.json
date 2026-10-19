@@ -1,0 +1,78 @@
+{
+  "date_local": "2026-10-19 Asia/Shanghai",
+  "wall_clock": "2026-10-19 09:44–09:49 Asia/Shanghai",
+  "host": {
+    "os": "macOS",
+    "arch": "arm64",
+    "product_version": "27.0.1",
+    "mem_gb": 32
+  },
+  "aginx_version": "0.6.0",
+  "aginx_commit_reported": "0c302d9",
+  "aginx_commit_repo": "0c302d9",
+  "aginx_binary": "local target/debug (cargo build --features stealth + AGINXBROWSER_BUILD_COMMIT=0c302d9), NOT Homebrew cellar, NOT release profile",
+  "aginx_stealth": true,
+  "aginx_tls_default": "chrome145",
+  "aginx_ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+  "v8": "15.0.245.2-rusty",
+  "port": 18091,
+  "cache_ttl_secs": 0,
+  "peers": {
+    "lightpanda": {
+      "status": "not_run",
+      "reason": "binary not installed on bench machine",
+      "install": "https://github.com/lightpanda-io/browser/releases",
+      "site": "https://lightpanda.io"
+    },
+    "obscura": {
+      "status": "not_run",
+      "reason": "standalone binary not installed on bench machine",
+      "install": "https://github.com/vercel-labs/agent-browser (Obscura via --engine obscura / CDP); standalone not installed here",
+      "note": "Framing only — Aginx HTTP snapshot/refs target similar agent DX; no invented Obscura timings"
+    }
+  },
+  "metrics": {
+    "cold_start_first_health_ms": 2025.2,
+    "warm_health_ms_median": 0.47,
+    "example_com_fetch_ms": 586.9,
+    "example_com_tier": "http",
+    "example_com_chrome_dump_dom_ms": 1617.3,
+    "example_com_curl_ms": 726.4,
+    "shortset_aginx_median_ms": 2178.6,
+    "shortset_aginx_n": 5,
+    "shortset_curl_ok_median_ms": 752.9,
+    "shortset_curl_ok_n": 4,
+    "peak_rss_mb_during_shortset": 58.3,
+    "session_create_ms": 8.6,
+    "navigate_example_com_ms": 2634.6,
+    "snapshot_json_ms": 6.2,
+    "snapshot_text_ms": 2.1,
+    "snapshot_json_warm_ms": 1.6,
+    "snapshot_element_count": 1
+  },
+  "receipts": {
+    "cold_start": "cold-start.summary.json",
+    "health_warm": "health-warm.summary.json",
+    "aginx_fetch_shortset": "aginx-fetch-shortset.summary.json",
+    "curl_fetch_shortset": "curl-fetch-shortset.summary.json",
+    "chrome_example": "chrome-example.com.summary.json",
+    "snapshot": "aginx-snapshot-example.com.summary.json",
+    "peers": "peers-not-run.json",
+    "server_log": "server.log",
+    "server_snap_log": "server-snap.log"
+  },
+  "shortset_urls": [
+    "https://example.com",
+    "https://www.rust-lang.org/",
+    "https://www.python.org/",
+    "https://nodejs.org/en",
+    "https://doc.rust-lang.org/book/title-page.html"
+  ],
+  "caveats": [
+    "dev/debug profile binary — absolute ms are higher than a --release build would show; ratios vs curl/Chrome on same machine still informative",
+    "network RTT from Asia/Shanghai exit included in all wall times",
+    "Lightpanda and Obscura not installed — columns marked not_run, no invented timings",
+    "historical full 20-page harness remains in bench/README.md (2026-08-28 / 2026-09-29); this scoreboard is a tip micro-bench",
+    "first snapshot probe with create(url) folded navigate into snapshot (~3.2s); re-run separated navigate vs snapshot (see aginx-snapshot-example.com.summary.json method field)"
+  ]
+}

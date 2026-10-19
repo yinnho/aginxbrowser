@@ -1,0 +1,14 @@
+{
+  "lightpanda": {
+    "status": "not_run",
+    "reason": "binary not installed on bench machine",
+    "install": "https://github.com/lightpanda-io/browser/releases",
+    "site": "https://lightpanda.io"
+  },
+  "obscura": {
+    "status": "not_run",
+    "reason": "standalone binary not installed on bench machine",
+    "install": "https://github.com/vercel-labs/agent-browser (Obscura via --engine obscura / CDP); standalone not installed here",
+    "note": "Framing only — Aginx HTTP snapshot/refs target similar agent DX; no invented Obscura timings"
+  }
+}

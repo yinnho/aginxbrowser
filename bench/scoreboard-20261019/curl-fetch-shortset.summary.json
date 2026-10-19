@@ -1,0 +1,44 @@
+{
+  "rows": [
+    {
+      "engine": "curl",
+      "url": "https://example.com",
+      "http_code": "200",
+      "elapsed_ms": 726.4,
+      "bytes": 577,
+      "ok": true
+    },
+    {
+      "engine": "curl",
+      "url": "https://www.rust-lang.org/",
+      "http_code": "200",
+      "elapsed_ms": 4094.3,
+      "bytes": 18594,
+      "ok": true
+    },
+    {
+      "engine": "curl",
+      "url": "https://www.python.org/",
+      "http_code": "200",
+      "elapsed_ms": 247.3,
+      "bytes": 11119,
+      "ok": true
+    },
+    {
+      "engine": "curl",
+      "url": "https://nodejs.org/en",
+      "http_code": "000",
+      "elapsed_ms": 30016.6,
+      "bytes": 11119,
+      "ok": false
+    },
+    {
+      "engine": "curl",
+      "url": "https://doc.rust-lang.org/book/title-page.html",
+      "http_code": "200",
+      "elapsed_ms": 779.4,
+      "bytes": 22496,
+      "ok": true
+    }
+  ]
+}

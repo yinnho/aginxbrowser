@@ -1,0 +1,22 @@
+{
+  "samples": [
+    {
+      "i": 0,
+      "elapsed_ms": 0.61,
+      "http_code": 200,
+      "bytes": 311
+    },
+    {
+      "i": 1,
+      "elapsed_ms": 0.47,
+      "http_code": 200,
+      "bytes": 311
+    },
+    {
+      "i": 2,
+      "elapsed_ms": 0.44,
+      "http_code": 200,
+      "bytes": 311
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "metric": "cold_start_first_health",
+  "spawn_ms": 3.6,
+  "first_health_ms": 2025.2,
+  "ok": true,
+  "error": null,
+  "health": {
+    "capabilities": {
+      "captcha_solver": false,
+      "screenshot": false,
+      "stealth": true
+    },
+    "commit": "0c302d9",
+    "engine": "diting",
+    "status": "ok",
+    "tls": "chrome145",
+    "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+    "v8": "15.0.245.2-rusty",
+    "version": "0.6.0"
+  },
+  "binary": "/Users/sophiehe/Documents/aginx/aginxbrowser/target/debug/aginxbrowser",
+  "profile": "dev (cargo build --features stealth)",
+  "commit_expected": "0c302d9",
+  "commit_reported": "0c302d9",
+  "stealth": true,
+  "tls": "chrome145",
+  "version": "0.6.0"
+}
