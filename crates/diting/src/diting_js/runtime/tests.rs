@@ -21388,6 +21388,48 @@ fn window_named_access_invisible_to_enumeration() {
     );
 }
 
+/// Chrome: `window instanceof EventTarget` is true — Window.prototype
+/// inherits EventTarget.prototype, with an empty WindowProperties layer
+/// between window and Window.prototype. The named-access gate used to
+/// orphan Window.prototype (holder → bare Object), leaving instanceof
+/// EventTarget false — a face ark/itemark shield VMs hash (300015).
+#[test]
+fn window_instanceof_event_target_via_prototype_chain() {
+    let mut rt = setup_runtime("<html><body><div id=\"q\">x</div></body></html>");
+    let v = rt
+        .evaluate(
+            r#"(() => {
+                let reachesWP = false, reachesET = false;
+                let x = window;
+                for (let i = 0; i < 8 && x; i++) {
+                  if (x === Window.prototype) reachesWP = true;
+                  if (x === EventTarget.prototype) reachesET = true;
+                  x = Object.getPrototypeOf(x);
+                }
+                const layer = Object.getPrototypeOf(window);
+                const layerOwn = Object.getOwnPropertyNames(layer);
+                return [
+                  window instanceof EventTarget,
+                  window instanceof Window,
+                  Object.getPrototypeOf(Window.prototype) === EventTarget.prototype,
+                  reachesWP,
+                  reachesET,
+                  typeof window.addEventListener,
+                  layerOwn.includes('addEventListener'),
+                  layerOwn.includes('q'),
+                  typeof q === 'object' && q.tagName,
+                  (() => { window._webmsxyw = function () {}; return Object.getOwnPropertyNames(window).includes('_webmsxyw'); })()
+                ].join('|');
+            })()"#,
+        )
+        .unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!("true|true|true|true|true|function|false|false|DIV|true"),
+        "window must sit on EventTarget through Window.prototype; named gate stays empty"
+    );
+}
+
 
 /// #57: `input.files = singleFile` — Chrome accepts a bare File as a
 /// one-entry selection; the silent no-op cost the xhs send batch a debug

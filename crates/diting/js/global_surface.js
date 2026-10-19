@@ -17,37 +17,26 @@ const SKIP = (n) => { try { return n in globalThis; } catch (e) { return true; }
 // matches Chrome while every existing call site keeps resolving.
 (function relocate() {
   try {
-    const P1 = Object.getPrototypeOf(globalThis);
+    // Chrome: window → (WindowProperties) → Window.prototype → EventTarget.prototype.
+    // Do NOT park addEventListener/removeEventListener/dispatchEvent as own
+    // props on the named-access gate (WindowProperties stand-in) — that layer
+    // is empty in Chrome, and owning them there left `window instanceof
+    // EventTarget` false after the gate was inserted (300015 face). Drop any
+    // window-own copies; the EventTarget.prototype link (bootstrap rewire)
+    // supplies them. constructor stays on Window.prototype.
     ['addEventListener', 'removeEventListener', 'dispatchEvent'].forEach((k) => {
       const d = Object.getOwnPropertyDescriptor(globalThis, k);
       if (!d || typeof d.value !== 'function') return;
-      delete globalThis[k];
-      try {
-        Object.defineProperty(P1, k, { value: d.value, writable: true, enumerable: true, configurable: true });
-      } catch (e) {}
+      try { delete globalThis[k]; } catch (e) {}
     });
-    // self.constructor === Window must survive the own-prop delete (Ember
-    // gate, upstream 9dfc67a): Chrome keeps `constructor` on Window.prototype,
-    // so point the proto layer's slot at the real Window class.
-    if (!SKIP('constructor')) {
-      try { Object.defineProperty(P1, 'constructor', { value: globalThis.Window, writable: true, configurable: true }); } catch (e) {}
-    } else {
-      try { delete globalThis.constructor; } catch (e) {}
-      try { Object.defineProperty(P1, 'constructor', { value: globalThis.Window, writable: true, configurable: true }); } catch (e) {}
-    }
-    // iframe windows get the trio through their own proto layer, not as
-    // copied own props (Chrome iframes don't own them either).
+    try { delete globalThis.constructor; } catch (e) {}
     try {
-      // _IframeWindow is a top-level class binding — lexical, not a
-      // globalThis own prop — so it must be read as a bare identifier.
-      const IP = (typeof _IframeWindow === 'function') && _IframeWindow.prototype;
-      if (IP && typeof IP.addEventListener !== 'function' && P1) {
-        ['addEventListener', 'removeEventListener', 'dispatchEvent'].forEach((k) => {
-          const fn = Object.getOwnPropertyDescriptor(P1, k);
-          if (fn && fn.value) Object.defineProperty(IP, k, { value: fn.value, writable: true, enumerable: true, configurable: true });
-        });
-      }
+      Object.defineProperty(Window.prototype, 'constructor', {
+        value: globalThis.Window, writable: true, configurable: true,
+      });
     } catch (e) {}
+    // iframe windows inherit Window.prototype → EventTarget.prototype, so
+    // they pick up AEL through the chain (Chrome iframe face). No own copy.
   } catch (e) {}
 })();
 

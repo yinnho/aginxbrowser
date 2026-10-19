@@ -13158,6 +13158,28 @@ Object.setPrototypeOf(Node.prototype, _EventTarget.prototype);
 // are never own names of the first prototype.
 Object.setPrototypeOf(NetworkInformation.prototype, _EventTarget.prototype);
 globalThis.EventTarget = _EventTarget;
+// Chrome Window chain: window → WindowProperties → Window.prototype →
+// EventTarget.prototype → Object.prototype. Our named-access gate stands in
+// for WindowProperties. It was inserted early (before Window/EventTarget
+// existed) with its target inheriting a bare Object — so Window.prototype
+// was orphaned, `window instanceof EventTarget` stayed false, and ark/itemark
+// shield VMs that hash that face refuse the XYS_+common path (300015).
+// Rewire now that EventTarget exists; keep the gate empty like Chrome's
+// WindowProperties (AEL resolves through EventTarget.prototype).
+try {
+  Object.setPrototypeOf(Window.prototype, _EventTarget.prototype);
+  if (_namedHolder && _namedHolder !== globalThis) {
+    Object.setPrototypeOf(_namedHolder, Window.prototype);
+    ['addEventListener', 'removeEventListener', 'dispatchEvent', 'constructor'].forEach((k) => {
+      try { delete _namedHolder[k]; } catch (e) {}
+    });
+  }
+  try {
+    Object.defineProperty(Window.prototype, 'constructor', {
+      value: Window, writable: true, configurable: true,
+    });
+  } catch (e) {}
+} catch (e) {}
 globalThis.HTMLCollection = class HTMLCollection extends Array {
   item(i) {
     i = i >>> 0;
