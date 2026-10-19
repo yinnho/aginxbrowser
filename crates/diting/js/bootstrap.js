@@ -16568,25 +16568,53 @@ globalThis.__diting_init = function() {
       try { Object.defineProperty(impl, 'name', { value: key }); } catch(e) {}
       try { Object.defineProperty(obj, key, { value: impl, writable: true, enumerable: false, configurable: true }); } catch(e) {}
     };
+    // Also strip engine `_` slots on Performance / Document. Chrome keeps
+    // those as internal slots (absent from gopn); our __hideOwn only clears
+    // enumerable. ark signV2Init/WASM probes that enumerate performance see
+    // `_noise`/`_marks`/… and document `_nid` — a face skew next to the
+    // mnsv2 install path (library-launcher fy → window.mnsv2 → XYS_).
+    const _isEngineSlotObj = (o) => {
+      try {
+        // performance is an instance of internal `_Performance`, NOT the
+        // public Performance ctor — instanceof Performance is false here.
+        if (o === globalThis.performance) return true;
+        if (o === globalThis.document) return true;
+      } catch (e) {}
+      return false;
+    };
+    const _stripEngineSlots = (names) => names.filter((n) => {
+      if (typeof n !== 'string' || n.charCodeAt(0) !== 95) return true;
+      return false;
+    });
     _patch(Object, 'getOwnPropertyNames', function(o) {
       const names = _gopn(o);
-      if (o !== globalThis) return names;
-      return names.filter(n => !_isInternal(n));
+      if (o === globalThis) return names.filter(n => !_isInternal(n));
+      if (_isEngineSlotObj(o)) return _stripEngineSlots(names);
+      return names;
     });
     _patch(Reflect, 'ownKeys', function(o) {
       const names = _ownKeys(o);
-      if (o !== globalThis) return names;
-      return names.filter(n => !_isInternal(n));
+      if (o === globalThis) return names.filter(n => !_isInternal(n));
+      if (_isEngineSlotObj(o)) return _stripEngineSlots(names);
+      return names;
     });
     _patch(Object, 'keys', function(o) {
       const names = _keys(o);
-      if (o !== globalThis) return names;
-      return names.filter(n => !_isInternal(n));
+      if (o === globalThis) return names.filter(n => !_isInternal(n));
+      if (_isEngineSlotObj(o)) return _stripEngineSlots(names);
+      return names;
     });
     _patch(Object, 'getOwnPropertyDescriptors', function(o) {
       const all = _gopds(o);
-      if (o !== globalThis) return all;
-      for (const n of _gopn(all)) { if (_isInternal(n)) delete all[n]; }
+      if (o === globalThis) {
+        for (const n of _gopn(all)) { if (_isInternal(n)) delete all[n]; }
+        return all;
+      }
+      if (_isEngineSlotObj(o)) {
+        for (const n of _gopn(all)) {
+          if (typeof n === 'string' && n.charCodeAt(0) === 95) delete all[n];
+        }
+      }
       return all;
     });
     globalThis.__diting_gopn_patched = true;

@@ -1,10 +1,11 @@
 (() => {
-  // v6: same fingerprint shape as v5 + functional fixes (CORS auto-sign
-  // guard, gate snapshot vs XHR reuse, FormData PR block, page-x-s replay,
-  // array-header rebuild, deferred-common restore, fail-closed waitSigner).
-  // 300015 "risk plugin" probes enumerate window keys and diff
-  // Function.prototype.toString — v4 leaked the whole recipe source there.
-  const XS_VER = 6;
+  // v7: v6 + ark mnsv2/XYS_ gate. Chrome ark publish_render needs
+  // window.mnsv2 → XYS_~408 + x-s-common (library-launcher fy+fU). When
+  // mnsv2 is missing, fy throws, page keeps only x-s-common, and v6
+  // resigned with www _webmsxyw (XYW_~668, no common) → stripped common →
+  // 300015. v7: mirror mnsv2; wait for it on ark PR; never resign PR with
+  // XYW_/no-common when page had common (soft-block instead of poison).
+  const XS_VER = 7;
   let prev = null;
   try { if (typeof window.__xsStats === 'function') prev = window.__xsStats(); } catch (e) {}
   if (prev && prev.ver >= XS_VER) return 'already';
@@ -12,6 +13,7 @@
     ver: XS_VER, installed: 1, mirrored: 0, arkified: 0, swallowed: 0,
     passthrough: 0, passthrough_coherent: 0, common_stripped: 0, signed: 0,
     pr_held: 0, pr_blocked: 0, fuse: 0, replayed: 0, dropped: 0,
+    mns_mirrored: 0, xyw_blocked: 0,
   };
   const bump = (k) => { stats[k] = (stats[k] || 0) + 1; };
   // Last publish_render decision + wire outcome (closure-only, surfaced via
@@ -32,13 +34,19 @@
     try { Object.defineProperty(o, k, { value: v, writable: true, configurable: true }); }
     catch (e) { try { o[k] = v; } catch (e2) {} }
   };
-  // Qiankun/single-spa (ark itemark) may put the AS signer on window.proxy
-  // only — window._webmsxyw stays undefined. Resolve lazily at sign time and
-  // mirror onto window so page code that looks at window._webmsxyw also wins.
+  // Qiankun/single-spa (ark itemark) may put AS signer / mnsv2 on window.proxy
+  // only. Resolve lazily and mirror onto window so page + recipe both win.
   const resolveSigner = () => {
     try {
       if (typeof window._webmsxyw === 'function') return window._webmsxyw;
       if (window.proxy && typeof window.proxy._webmsxyw === 'function') return window.proxy._webmsxyw;
+    } catch (e) {}
+    return null;
+  };
+  const resolveMnsv2 = () => {
+    try {
+      if (typeof window.mnsv2 === 'function') return window.mnsv2;
+      if (window.proxy && typeof window.proxy.mnsv2 === 'function') return window.proxy.mnsv2;
     } catch (e) {}
     return null;
   };
@@ -52,8 +60,35 @@
       return window._webmsxyw;
     } catch (e) { return null; }
   };
+  const mirrorMnsv2 = () => {
+    try {
+      if (typeof window.mnsv2 === 'function') return window.mnsv2;
+      const s = resolveMnsv2();
+      if (!s) return null;
+      window.mnsv2 = s;
+      try { if (window.proxy && typeof window.proxy.mnsv2 !== 'function') window.proxy.mnsv2 = s; } catch (e2) {}
+      bump('mns_mirrored');
+      return window.mnsv2;
+    } catch (e) { return null; }
+  };
+  const isArkHost = () => {
+    try { return /^ark\./i.test(location.hostname); } catch (e) { return false; }
+  };
+  // www-family XYW_ has no x-s-common; ark Chrome family is XYS_ + common.
+  const sgFamily = (sg) => {
+    try {
+      const xs = String((sg && (sg['X-s'] || sg['x-s'])) || '');
+      const cm = sg && (sg['X-s-common'] || sg['x-s-common']);
+      return { prefix: xs.slice(0, 4), xsLen: xs.length, hasCommon: !!(cm != null && cm !== '') };
+    } catch (e) { return { prefix: '', xsLen: 0, hasCommon: false }; }
+  };
+  const isXywPoison = (sg) => {
+    const f = sgFamily(sg);
+    return f.prefix === 'XYW_' || (f.xsLen > 0 && !f.hasCommon && f.xsLen > 500);
+  };
   mirrorSigner();
-  const mirrorTimer = setInterval(mirrorSigner, 200);
+  mirrorMnsv2();
+  const mirrorTimer = setInterval(() => { mirrorSigner(); mirrorMnsv2(); }, 200);
   setTimeout(() => { try { clearInterval(mirrorTimer); } catch (e) {} }, 60000);
   // Only production xhs hosts — never sit/SSO ticket hosts (signing those
   // with the itemark AS signer can bounce the jar into customer.sit).
@@ -133,6 +168,9 @@
     const ready = () => {
       const fn = noteSigner();
       if (!fn) return null;
+      // Ark create: hold until mnsv2 is up so page fy() can mint XYS_+common.
+      // Without it, resign falls to www XYW_ and 300015s.
+      if (needSettle && isArkHost() && !resolveMnsv2() && !mirrorMnsv2()) return null;
       if (needSettle) {
         if (Date.now() - signerSeenAt < SETTLE_MS) return null;
         // If nothing else has been signed yet, keep holding until settle*1.5 or a sign lands.
@@ -276,6 +314,27 @@
             // ELSE resign (same-origin unsigned APIs, or anything the page signed;
             // cross-origin unsigned must stay untouched — extra x-s = preflight break).
             if (sg && (!cross || hasPageXs)) {
+              // Ark poison path: page had x-s-common (fU ok) but fy failed (no
+              // mnsv2), so we must not attach www XYW_ and strip common.
+              if (snap.pr && (hasPageCommon || isArkHost()) && isXywPoison(sg)) {
+                bump('xyw_blocked');
+                notePr('blocked', { reason: 'xyw-no-mnsv2', pageCommon: hasPageCommon, fam: sgFamily(sg) });
+                bump('pr_blocked');
+                try {
+                  Object.defineProperty(self, 'readyState', { value: 4, configurable: true });
+                  Object.defineProperty(self, 'status', { value: 200, configurable: true });
+                  Object.defineProperty(self, 'responseText', {
+                    value: JSON.stringify({ code: -1, success: false, msg: 'xs-gate:awaiting-mnsv2-xys' }),
+                    configurable: true
+                  });
+                  setTimeout(() => { try {
+                    self.dispatchEvent(new Event('readystatechange'));
+                    self.dispatchEvent(new Event('load'));
+                    self.dispatchEvent(new Event('loadend'));
+                  } catch (e) {} }, 0);
+                  return;
+                } catch (e) { return; }
+              }
               S.call(self, 'X-s', String(sg['X-s']));
               S.call(self, 'X-t', String(sg['X-t']));
               const cm = commonFromSg(sg);
@@ -285,7 +344,7 @@
                 bump('common_stripped');
                 // intentionally omit page x-s-common — never pair stale common with new X-s/X-t
               }
-              notePr('resign', { signerCommon: !!cm, pageCommon: hasPageCommon });
+              notePr('resign', { signerCommon: !!cm, pageCommon: hasPageCommon, fam: sgFamily(sg) });
               self.addEventListener('loadend', function () {
                 try { if (stats.pr_last) { stats.pr_last.status = self.status; } } catch (e) {}
               });
@@ -394,6 +453,15 @@
           return F.call(this, u, o);
         }
         // ELSE resign: strip x-s-common unless signer returns it atomically
+        if (gated && (hasCommon || isArkHost()) && isXywPoison(sg)) {
+          notePr('blocked', { via: 'fetch', reason: 'xyw-no-mnsv2', pageCommon: hasCommon, fam: sgFamily(sg) });
+          bump('xyw_blocked');
+          bump('pr_blocked');
+          return Promise.resolve(new Response(
+            JSON.stringify({ code: -1, success: false, msg: 'xs-gate:awaiting-mnsv2-xys' }),
+            { status: 200, headers: { 'content-type': 'application/json' } }
+          ));
+        }
         const cm = commonFromSg(sg);
         let nh;
         if (!h || Array.isArray(h)) {
@@ -485,5 +553,5 @@
       _markNative(FM.fetch);
     }
   } catch (e) {}
-  return 'patched-v5-fingerprint-clean';
+  return 'patched-v7-mnsv2-xys-gate';
 })()
