@@ -2455,24 +2455,25 @@ const _namedEls = new Map();     // name -> Set<nid>, insertion order
 const _namedGetters = new Map(); // name -> installed get fn (identity check)
 let _namedScanned = false;       // one lazy full scan for the parser-built tree
 // Chrome resolves named access through a WindowProperties layer between
-// window and Window.prototype: window.q works, but the name NEVER shows in
+// Window.prototype and EventTarget.prototype (final chain after rewire
+// below): window.q works, but the name NEVER shows in
 // getOwnPropertyNames(window) — the winKeys face only counts real globals.
 // Own getters on globalThis leak every element id/name into that face, and
 // a getter is never uninstalled, so the face only grows across a page's
-// life. Park the getters one proto layer up: get/in/bare-identifier all
+// life. Park the getters on a proto layer: get/in/bare-identifier all
 // walk the chain, page own props still shadow, and gopn(window) stays
-// clean. (global_surface.js's relocate() reads getPrototypeOf(globalThis)
-// as P1 and lands the EventTarget trio there — that layer is this holder,
-// same proto depth the trio already occupied.)
+// clean. Early install inserts the gate under globalThis temporarily
+// (Window/EventTarget do not exist yet); the EventTarget rewire later
+// moves it to Chrome order: window → Window.prototype → gate → ET.
 // Chrome's WindowProperties layer is also EMPTY to its own enumeration
 // (gopn at the layer = 0 entries — verified 10-17): resolution is pure
 // interception, not own descriptors. A raw holder would leak every
 // installed name to a proto-walking fingerprint (ark-class VMs walk the
-// chain), so the layer window actually wears is a gate that hides ONLY the
-// named installs — ownKeys and gOPD return them as absent, everything else
-// (the relocated EventTarget trio, page defineProperty on the layer)
-// passes through untouched. get/has/defineProperty forward raw, so
-// resolution, `in`, and foreign relocations behave exactly as before.
+// chain), so the layer is a gate that hides ONLY the named installs —
+// ownKeys and gOPD return them as absent, everything else (page
+// defineProperty on the layer) passes through untouched. get/has/
+// defineProperty forward raw, so resolution, `in`, and foreign
+// relocations behave exactly as before.
 const _namedHolder = (function () {
   try {
     const P0 = Object.getPrototypeOf(globalThis);
@@ -13124,29 +13125,46 @@ for (const _proto of [Document.prototype, DocumentFragment.prototype]) {
 // (the audio contexts; Chrome truth: tmp-agent/chrome-audio-truth.json).
 const _EventTarget = { EventTarget: class EventTarget {} }.EventTarget;
 const _etBag = new WeakMap();
-function _etLs(t) { let b = _etBag.get(t); if (!b) { b = {}; _etBag.set(t, b); } return b; }
+// Bootstrap is "use strict": bare `addEventListener(...)` (classic page
+// scripts, Qianfan SPA) arrives with this === undefined. WeakMap keys must
+// be objects — coerce nullish this to the Window global (Chrome classic-script
+// bare call lands on window). Method calls keep their receiver.
+function _etSelf(t) { return (t === undefined || t === null) ? globalThis : t; }
+function _etLs(t) { t = _etSelf(t); let b = _etBag.get(t); if (!b) { b = {}; _etBag.set(t, b); } return b; }
 _EventTarget.prototype.addEventListener = function addEventListener(type, cb) {
   __listenerGate(cb);
-  const l = _etLs(this); (l[type] || (l[type] = [])).push(cb);
+  const self = _etSelf(this);
+  const l = _etLs(self); (l[type] || (l[type] = [])).push(cb);
 };
 // Chrome's own order: addEventListener, dispatchEvent, removeEventListener, when.
 _EventTarget.prototype.dispatchEvent = function dispatchEvent(ev) {
-  const l = (_etLs(this)[ev.type]) || [];
-  for (const f of l.slice()) { try { _invokeListener(f, this, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } }
+  if (!ev) return true;
+  const self = _etSelf(this);
+  // DOM: dispatch re-pins target to the host (window arm used to live only
+  // on the own/gate AEL that 52df046 removed — without this, e.target stays
+  // null and AWSC/slider + window_dispatch_pins_target_family break).
+  try {
+    ev.target = self;
+    ev.currentTarget = self;
+    ev.eventPhase = 2;
+  } catch (e) {}
+  const l = (_etLs(self)[ev.type]) || [];
+  for (const f of l.slice()) { try { _invokeListener(f, self, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } }
   // Event handler IDL attributes (on*) fire during dispatch too — Chrome
   // runs them for every EventTarget subclass (conn.onchange, node.onclick),
   // not just for "real" DOM events (300015 P6, was conn-only before the
   // EventTarget relink).
-  const h = this["on" + ev.type];
-  if (typeof h === "function") { try { _invokeListener(h, this, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } }
-  return true;
+  const h = self["on" + ev.type];
+  if (typeof h === "function") { try { _invokeListener(h, self, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } }
+  return !ev.defaultPrevented;
 };
 _EventTarget.prototype.removeEventListener = function removeEventListener(type, cb) {
-  const l = _etLs(this)[type]; if (l) { const i = l.indexOf(cb); if (i >= 0) l.splice(i, 1); }
+  const self = _etSelf(this);
+  const l = _etLs(self)[type]; if (l) { const i = l.indexOf(cb); if (i >= 0) l.splice(i, 1); }
 };
 // Chrome's promise-returning one-shot listener (EventTarget.when).
 _EventTarget.prototype.when = function when(type) {
-  const self = this;
+  const self = _etSelf(this);
   return new Promise(function (resolve) {
     const h = function (ev) { self.removeEventListener(type, h); resolve(ev); };
     self.addEventListener(type, h);
@@ -13158,21 +13176,27 @@ Object.setPrototypeOf(Node.prototype, _EventTarget.prototype);
 // are never own names of the first prototype.
 Object.setPrototypeOf(NetworkInformation.prototype, _EventTarget.prototype);
 globalThis.EventTarget = _EventTarget;
-// Chrome Window chain: window → WindowProperties → Window.prototype →
-// EventTarget.prototype → Object.prototype. Our named-access gate stands in
-// for WindowProperties. It was inserted early (before Window/EventTarget
-// existed) with its target inheriting a bare Object — so Window.prototype
-// was orphaned, `window instanceof EventTarget` stayed false, and ark/itemark
-// shield VMs that hash that face refuse the XYS_+common path (300015).
-// Rewire now that EventTarget exists; keep the gate empty like Chrome's
-// WindowProperties (AEL resolves through EventTarget.prototype).
+// Chrome Window chain (verified face): window → Window.prototype →
+// WindowProperties → EventTarget.prototype → Object.prototype, with
+// Object.getPrototypeOf(window) === Window.prototype. Our named-access gate
+// stands in for WindowProperties. It was inserted early (before
+// Window/EventTarget existed) directly under globalThis; 52df046 rewired
+// holder → Window.prototype (fixoring instanceof EventTarget) but left the
+// gate BETWEEN window and Window.prototype — getPrototypeOf(window) !==
+// Window.prototype, which blanked the Qianfan login SPA (WeakMap key errors
+// in sellercustomer). Rewire to Chrome order now that EventTarget exists;
+// keep the gate empty (AEL resolves through EventTarget.prototype).
 try {
-  Object.setPrototypeOf(Window.prototype, _EventTarget.prototype);
-  if (_namedHolder && _namedHolder !== globalThis) {
-    Object.setPrototypeOf(_namedHolder, Window.prototype);
+  const _namedGate = Object.getPrototypeOf(globalThis);
+  Object.setPrototypeOf(globalThis, Window.prototype);
+  if (_namedHolder && _namedHolder !== globalThis && _namedGate && _namedGate !== globalThis) {
+    Object.setPrototypeOf(Window.prototype, _namedGate);
+    Object.setPrototypeOf(_namedHolder, _EventTarget.prototype);
     ['addEventListener', 'removeEventListener', 'dispatchEvent', 'constructor'].forEach((k) => {
       try { delete _namedHolder[k]; } catch (e) {}
     });
+  } else {
+    Object.setPrototypeOf(Window.prototype, _EventTarget.prototype);
   }
   try {
     Object.defineProperty(Window.prototype, 'constructor', {

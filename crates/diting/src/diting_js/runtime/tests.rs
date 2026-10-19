@@ -21349,12 +21349,12 @@ fn blob_constructor_conversion_order_and_single_getters() {
 }
 
 /// #48 third face (300015 winKeys, 10-17): Chrome resolves named access
-/// through a WindowProperties layer — window.q works, but the name never
-/// appears in getOwnPropertyNames(window) and never owns a window slot.
-/// Own enumerable getters on window leak every element id/name into the
-/// winKeys face (and never uninstall on untrack, so the face only grows).
-/// The named layer must sit one proto hop up: resolution unchanged, the
-/// enumeration face clean, and untrack shrinks the layer with the tree.
+/// through a WindowProperties layer (under Window.prototype) — window.q
+/// works, but the name never appears in getOwnPropertyNames(window) and
+/// never owns a window slot. Own enumerable getters on window leak every
+/// element id/name into the winKeys face (and never uninstall on untrack,
+/// so the face only grows). The named layer sits under Window.prototype:
+/// resolution unchanged, enumeration face clean, untrack shrinks with tree.
 #[test]
 fn window_named_access_invisible_to_enumeration() {
     let mut rt = setup_runtime(
@@ -21388,11 +21388,12 @@ fn window_named_access_invisible_to_enumeration() {
     );
 }
 
-/// Chrome: `window instanceof EventTarget` is true — Window.prototype
-/// inherits EventTarget.prototype, with an empty WindowProperties layer
-/// between window and Window.prototype. The named-access gate used to
-/// orphan Window.prototype (holder → bare Object), leaving instanceof
-/// EventTarget false — a face ark/itemark shield VMs hash (300015).
+/// Chrome: `window instanceof EventTarget` is true and
+/// `Object.getPrototypeOf(window) === Window.prototype`. Chain is
+/// window → Window.prototype → WindowProperties (named gate) →
+/// EventTarget.prototype. 52df046 fixed instanceof by linking ET but left
+/// the gate between window and Window.prototype (login SPA WeakMap crash);
+/// gate must sit under Window.prototype, empty like Chrome.
 #[test]
 fn window_instanceof_event_target_via_prototype_chain() {
     let mut rt = setup_runtime("<html><body><div id=\"q\">x</div></body></html>");
@@ -21406,17 +21407,23 @@ fn window_instanceof_event_target_via_prototype_chain() {
                   if (x === EventTarget.prototype) reachesET = true;
                   x = Object.getPrototypeOf(x);
                 }
-                const layer = Object.getPrototypeOf(window);
-                const layerOwn = Object.getOwnPropertyNames(layer);
+                const wp = Object.getPrototypeOf(window);
+                const afterWp = Object.getPrototypeOf(Window.prototype);
+                const afterNamed = Object.getPrototypeOf(afterWp);
+                const wpOwn = Object.getOwnPropertyNames(wp);
+                const namedOwn = Object.getOwnPropertyNames(afterWp);
                 return [
                   window instanceof EventTarget,
                   window instanceof Window,
-                  Object.getPrototypeOf(Window.prototype) === EventTarget.prototype,
+                  wp === Window.prototype,
+                  afterWp !== EventTarget.prototype,
+                  afterNamed === EventTarget.prototype,
                   reachesWP,
                   reachesET,
                   typeof window.addEventListener,
-                  layerOwn.includes('addEventListener'),
-                  layerOwn.includes('q'),
+                  wpOwn.includes('addEventListener'),
+                  namedOwn.includes('addEventListener'),
+                  namedOwn.includes('q'),
                   typeof q === 'object' && q.tagName,
                   (() => { window._webmsxyw = function () {}; return Object.getOwnPropertyNames(window).includes('_webmsxyw'); })()
                 ].join('|');
@@ -21425,8 +21432,8 @@ fn window_instanceof_event_target_via_prototype_chain() {
         .unwrap();
     assert_eq!(
         v,
-        serde_json::json!("true|true|true|true|true|function|false|false|DIV|true"),
-        "window must sit on EventTarget through Window.prototype; named gate stays empty"
+        serde_json::json!("true|true|true|true|true|true|true|function|false|false|false|DIV|true"),
+        "window→Window.prototype→named→EventTarget; getPrototypeOf(window)===Window.prototype; gate empty"
     );
 }
 

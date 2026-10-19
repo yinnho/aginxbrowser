@@ -17,13 +17,11 @@ const SKIP = (n) => { try { return n in globalThis; } catch (e) { return true; }
 // matches Chrome while every existing call site keeps resolving.
 (function relocate() {
   try {
-    // Chrome: window → (WindowProperties) → Window.prototype → EventTarget.prototype.
+    // Chrome: window → Window.prototype → (WindowProperties) → EventTarget.prototype.
     // Do NOT park addEventListener/removeEventListener/dispatchEvent as own
     // props on the named-access gate (WindowProperties stand-in) — that layer
-    // is empty in Chrome, and owning them there left `window instanceof
-    // EventTarget` false after the gate was inserted (300015 face). Drop any
-    // window-own copies; the EventTarget.prototype link (bootstrap rewire)
-    // supplies them. constructor stays on Window.prototype.
+    // is empty in Chrome. Drop any window-own copies; the EventTarget.prototype
+    // link (bootstrap rewire) supplies them. constructor stays on Window.prototype.
     ['addEventListener', 'removeEventListener', 'dispatchEvent'].forEach((k) => {
       const d = Object.getOwnPropertyDescriptor(globalThis, k);
       if (!d || typeof d.value !== 'function') return;
