@@ -420,7 +420,7 @@ impl StealthHttpClient {
             extra_headers: RwLock::new(HashMap::new()),
             user_agent: RwLock::new(
                 std::env::var("AGINXBROWSER_UA").unwrap_or_else(|_| {
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36".to_string()
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36".to_string()
                 }),
             ),
             accept_language: RwLock::new(
@@ -569,7 +569,11 @@ impl StealthHttpClient {
             // match sec-ch-ua-platform; Chinese sites expect zh-CN).
             let ua = self.user_agent.read().await.clone();
             let lang = self.accept_language.read().await.clone();
-            let (_, platform) = crate::diting_net::client::derive_client_hints(&ua);
+            // Emulation (wreq-util Chrome145) bakes Sec-Ch-Ua v=145 into the
+            // profile. Fleet UA is Chrome/154 — override brands to match UA,
+            // same as the plain client path. Leaving the bake-in is a WAF tell
+            // (UA 154 + CH 145), measured on httpbin 2026-10-19.
+            let (sec_ch_ua, platform) = crate::diting_net::client::derive_client_hints(&ua);
             // Request-local scripted headers (the fetch()/XHR escape hatch)
             // mirror what the primary reqwest attempt was sending and win
             // over both the transport defaults and extra_headers, so the
@@ -595,9 +599,17 @@ impl StealthHttpClient {
             if !request_local("accept-language") && !extra.contains_key("Accept-Language") {
                 req = req.header("Accept-Language", &lang);
             }
-            // Only set Sec-Ch-Ua-Platform automatically if not overridden.
-            // Some engines (e.g. Google with GSA UA) explicitly set this to ""
-            // in extra_headers to suppress it.
+            // Override Sec-Ch-Ua / Mobile / Platform when not scripted.
+            // Some engines (e.g. Google with GSA UA) set platform to "" in
+            // extra_headers to suppress it — honour that.
+            if !request_local("sec-ch-ua") && !extra.contains_key("Sec-Ch-Ua") {
+                req = req.header("Sec-Ch-Ua", &sec_ch_ua);
+            }
+            if !request_local("sec-ch-ua-mobile")
+                && !extra.contains_key("Sec-Ch-Ua-Mobile")
+            {
+                req = req.header("Sec-Ch-Ua-Mobile", "?0");
+            }
             if !request_local("sec-ch-ua-platform")
                 && !extra.contains_key("Sec-Ch-Ua-Platform")
             {
