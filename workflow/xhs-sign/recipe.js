@@ -1,10 +1,10 @@
 (() => {
-  // v10: v9 + upgrade crypto-stub→xy18; reject zero x3. Live verify showed mnsv2/xy18
+  // v11: v10 + WASM probe/cache/blacklist; slower poll (hang guard). Live verify showed mnsv2/xy18
   // mounts but page/probe still hit www _webmsxyw → XYW_~668 (gate soft-
   // blocked). library-launcher fy() is: mnsv2(a,md5(a),md5(path)) → x3,
   // pack {x0..x5} → custom-b64 → XYS_. Embed that for ark resign + keep
   // page x-s-common (fU). Native mnsv2 alias still missing.
-  const XS_VER = 10;
+  const XS_VER = 11;
   let prev = null;
   try { if (typeof window.__xsStats === 'function') prev = window.__xsStats(); } catch (e) {}
   if (prev && prev.ver >= XS_VER) return 'already';
@@ -84,8 +84,11 @@
     }
     return s;
   };
+  let _wasmMnsCache = null; // {xy,malloc,memory} | false (probed fail)
   const findWasmMnsExport = () => {
     try {
+      if (_wasmMnsCache === false) return null;
+      if (_wasmMnsCache) return _wasmMnsCache;
       if (typeof WebAssembly === 'undefined' || !WebAssembly.Instance) return null;
       const names = Object.getOwnPropertyNames(window);
       for (let i = 0; i < names.length; i++) {
@@ -106,7 +109,29 @@
             }
           }
         }
-        if (xy) return { xy: xy, malloc: ex.malloc, memory: ex.memory };
+        if (xy) {
+          // One-shot probe: if digest is zeros or throws, blacklist this Instance.
+          try {
+            const enc = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
+            const write = (s) => {
+              const str = String(s == null ? '' : s);
+              let u8;
+              if (enc) u8 = enc.encode(str);
+              else { u8 = new Uint8Array(str.length); for (let j = 0; j < str.length; j++) u8[j] = str.charCodeAt(j) & 0xff; }
+              const ptr = ex.malloc(u8.length + 1);
+              const he = new Uint8Array(ex.memory.buffer, ptr, u8.length + 1);
+              he.set(u8); he[u8.length] = 0;
+              return ptr;
+            };
+            const r = xy(write('xs'), write('bridge'), write('probe'));
+            const bytes = new Uint8Array(ex.memory.buffer, r >>> 0, 16);
+            let nz = false;
+            for (let j = 0; j < 16; j++) if (bytes[j]) { nz = true; break; }
+            if (!nz) { _wasmMnsCache = false; return null; }
+          } catch (e) { _wasmMnsCache = false; return null; }
+          _wasmMnsCache = { xy: xy, malloc: ex.malloc, memory: ex.memory };
+          return _wasmMnsCache;
+        }
       }
     } catch (e) {}
     return null;
@@ -141,22 +166,30 @@
       if (wasm) {
         const enc = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
         bridge = function mnsv2(a, b, d) {
-          const write = (s) => {
-            const str = String(s == null ? '' : s);
-            let u8;
-            if (enc) u8 = enc.encode(str);
-            else {
-              u8 = new Uint8Array(str.length);
-              for (let i = 0; i < str.length; i++) u8[i] = str.charCodeAt(i) & 0xff;
-            }
-            const p = wasm.malloc(u8.length + 1);
-            const he = new Uint8Array(wasm.memory.buffer, p, u8.length + 1);
-            he.set(u8); he[u8.length] = 0;
-            return p;
-          };
-          const r = wasm.xy(write(a), write(b), write(d));
-          const bytes = new Uint8Array(wasm.memory.buffer, r >>> 0, 32);
-          return bytesToHex(bytes, 16);
+          try {
+            const write = (s) => {
+              const str = String(s == null ? '' : s);
+              let u8;
+              if (enc) u8 = enc.encode(str);
+              else {
+                u8 = new Uint8Array(str.length);
+                for (let i = 0; i < str.length; i++) u8[i] = str.charCodeAt(i) & 0xff;
+              }
+              const p = wasm.malloc(u8.length + 1);
+              if (!p) throw new Error('malloc0');
+              const he = new Uint8Array(wasm.memory.buffer, p, u8.length + 1);
+              he.set(u8); he[u8.length] = 0;
+              return p;
+            };
+            const r = wasm.xy(write(a), write(b), write(d));
+            const bytes = new Uint8Array(wasm.memory.buffer, (r >>> 0), 16);
+            const hex = bytesToHex(bytes, 16);
+            if (/^0+$/.test(hex)) throw new Error('zero-digest');
+            return hex;
+          } catch (e) {
+            _wasmMnsCache = false;
+            throw e;
+          }
         };
         bridge.__xsBridge = 'xy18';
       }
@@ -199,9 +232,10 @@
   const mirrorTimer = setInterval(() => {
     mirrorSigner();
     mirrorMnsv2();
-    // Always tick bridge so crypto-stub can upgrade to xy18 when WASM lands.
-    installMnsv2Bridge();
-  }, 200);
+    try {
+      if (!(window.mnsv2 && window.mnsv2.__xsBridge === 'xy18')) installMnsv2Bridge();
+    } catch (e) {}
+  }, 1000);
   setTimeout(() => { try { clearInterval(mirrorTimer); } catch (e) {} }, 120000);
   // Only production xhs hosts — never sit/SSO ticket hosts (signing those
   // with the itemark AS signer can bounce the jar into customer.sit).
@@ -876,5 +910,5 @@
       _markNative(FM.fetch);
     }
   } catch (e) {}
-  return 'patched-v10-xy18-upgrade';
+  return 'patched-v11-wasm-guard';
 })()
