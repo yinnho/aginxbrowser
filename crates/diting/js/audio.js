@@ -17,8 +17,26 @@ function _audioParam(value, min, max) {
     cancelAndHoldAtTime() { return this; },
   };
 }
-const _audioNodeBase = { connect(){}, disconnect(){}, addEventListener(){}, removeEventListener(){},
-  channelCount: 2, channelCountMode: 'max', channelInterpretation: 'speakers', numberOfInputs: 1, numberOfOutputs: 1 };
+const _audioNodeBase = {
+  connect(dest) {
+    try {
+      const ctx = this.context;
+      if (ctx) {
+        const b = _ctxBag(ctx);
+        b.__graph = true;
+        b.__nodes = b.__nodes || [];
+        b.__nodes.push(this);
+        if (dest === ctx.destination || (dest && dest === _ctxBag(ctx).destination)) {
+          b.__toDest = true;
+        }
+      }
+    } catch (e) {}
+    return dest || this;
+  },
+  disconnect(){},
+  addEventListener(){}, removeEventListener(){},
+  channelCount: 2, channelCountMode: 'max', channelInterpretation: 'speakers', numberOfInputs: 1, numberOfOutputs: 1
+};
 // Every AudioNode exposes `.context` back to its AudioContext — fingerprint
 // probes read `analyser.context.sampleRate`.
 function _audioNode(ctx, extra) { return Object.assign({ context: ctx }, _audioNodeBase, extra); }
@@ -187,13 +205,37 @@ globalThis.OfflineAudioContext = class OfflineAudioContext extends BaseAudioCont
     const b = _ctxBag(this);
     const buf = this.createBuffer(b.numberOfChannels, b.length, b.sampleRate);
     // Chrome truth (headless+headed probe 10-15): an empty graph renders
-    // SILENCE - nonzero:0, sum:0 across the whole buffer. The old
-    // identity-seeded pseudo-signal here was an anti-detector guess that
-    // had the polarity backwards: the shield's probe is exactly
-    // `new OfflineAudioContext(1,44100,44100)` with nothing connected, and
-    // our shaped waveform was the mismatch. createBuffer hands back zeroed
-    // Float32Arrays, so the empty render is already correct. (A graph with
-    // real sources still renders zeros in this engine - separate ledger.)
+    // SILENCE - nonzero:0, sum:0. A graph with oscillator→compressor→dest
+    // (classic audio FP) must be NON-zero — previously always silence and
+    // shrank AntiSpam profileData vs Chrome.
+    if (b.__graph || b.__toDest) {
+      try {
+        const ch0 = buf.getChannelData(0);
+        const sr = b.sampleRate || 44100;
+        // Deterministic triangle-ish + compressor-ish envelope from persona.
+        const freq = 10000;
+        const thr = _fp('compThreshold');
+        const ratio = Math.max(1, _fp('compRatio'));
+        for (let i = 0; i < ch0.length; i++) {
+          const t = i / sr;
+          let s = 2 * Math.abs(2 * ((t * freq) % 1) - 1) - 1; // triangle [-1,1]
+          s *= 0.25 + 0.15 * _fpRand(800 + (i & 255));
+          // soft-knee-ish fold toward threshold
+          const a = Math.abs(s);
+          const db = a > 1e-8 ? (20 * Math.log(a) / Math.LN10) : -100;
+          if (db > thr) {
+            const over = db - thr;
+            const outDb = thr + over / ratio;
+            const outA = Math.pow(10, outDb / 20);
+            s = Math.sign(s) * outA;
+          }
+          ch0[i] = s;
+        }
+        for (let c = 1; c < buf.numberOfChannels; c++) {
+          buf.getChannelData(c).set(ch0);
+        }
+      } catch (e) {}
+    }
     const self = this;
     return Promise.resolve().then(() => {
       _ctxSetState(self, 'closed');

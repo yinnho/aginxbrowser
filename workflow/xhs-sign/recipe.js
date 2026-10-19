@@ -1,13 +1,13 @@
 (() => {
+  // v17: real collector depth for profileData gap (do NOT invent ssk).
   // v16: shield/webprofile must NOT be fy-resigned to XYS_.
-  // Chrome burdock shield uses short native x-s (~44)+common; engine was
-  // sending XYS_~188 on as/webprofile+cpk. Live diff (s_2, 5cff707):
-  //   Chrome as/webprofile: sdk 4.3.5 svn2 platform Mac OS pdLen~2176-2224 no cpk → {st}
-  //   Engine cold as/webprofile: sdk 4.4.4 svn2 Mac OS pdLen 464 +cpk → {st} (no ssk)
-  //   Engine warmer: pdLen 1696 +cpk → still {st} only — no inventing ssk.
-  //   burdock: engine pd 2848 vs Chrome 3040; same topKeys; no pdLen field either side.
-  // Also: single delayed getV18 retry (not tight loop) when first pd < 1500.
-  const XS_VER = 16;
+  // Live gaps vs Chrome: as pdLen engine ~464-1696 vs Chrome 2176-2224;
+  // burdock 2848 vs 3040; XYS_~184 missing x6/x7 (webSsk empty; Chrome
+  // captures also never returned ext.ssk). Engine RTC had 0 ICE candidates
+  // and OAC graphs rendered silence — both fixed in diting audio/RTC.
+  // Warm: PD_MIN 2000, up to 2 spaced getV18 retries (re-call can reset;
+  // prefer fewer longer waits over tight loops).
+  const XS_VER = 17;
   let prev = null;
   try { if (typeof window.__xsStats === 'function') prev = window.__xsStats(); } catch (e) {}
   if (prev && prev.ver >= XS_VER) return 'already';
@@ -489,28 +489,35 @@
   // opportunistic capture once DOM/chunk ready
   // Single delayed getV18 retry: cold first paint is ~464 hex; Chrome as ~
   // 2200. Tight re-call loops reset collectors and stall at ~400-800.
-  const PD_MIN = 1500;
+  const PD_MIN = 2000;
   const wrapGetV18 = (fp) => {
     if (!fp || typeof fp.getV18 !== 'function' || fp.getV18.__xsWarm) return;
     const orig = fp.getV18.bind(fp);
     const wrapped = function (cb) {
       if (typeof cb !== 'function') return orig.apply(fp, arguments);
-      orig(function () {
-        const args = [].slice.call(arguments);
-        const pd = args.length === 2 ? args[1] : args[0];
-        const len = pd != null ? String(pd).length : 0;
-        if (len >= PD_MIN) {
-          bump('fp_v18_warm');
-          return cb.apply(this, args);
-        }
-        bump('fp_v18_delay');
-        setTimeout(() => {
-          orig(function () {
-            bump('fp_v18_warm');
-            cb.apply(this, arguments);
-          });
-        }, 4500);
-      });
+      let bestArgs = null;
+      let bestLen = -1;
+      let tries = 0;
+      const finish = (args) => {
+        bump('fp_v18_warm');
+        cb.apply(this, args);
+      };
+      const attempt = () => {
+        orig(function () {
+          const args = [].slice.call(arguments);
+          const pd = args.length === 2 ? args[1] : args[0];
+          const len = pd != null ? String(pd).length : 0;
+          if (len > bestLen) { bestLen = len; bestArgs = args; }
+          tries++;
+          if (len >= PD_MIN || tries >= 3) {
+            return finish(bestArgs || args);
+          }
+          bump('fp_v18_delay');
+          // Spaced retries: 5s then 8s. Tight loops reset collectors.
+          setTimeout(attempt, tries === 1 ? 5000 : 8000);
+        });
+      };
+      attempt();
     };
     wrapped.__xsWarm = 1;
     try { fp.getV18 = wrapped; } catch (e) {}
