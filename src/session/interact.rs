@@ -113,6 +113,43 @@ const STATE_SCRIPT: &str = r#"
             });
         }
     } catch (e) {}
+    function computeRole(el) {
+        var explicit = el.getAttribute('role');
+        if (explicit) return explicit;
+        var tag = el.tagName.toLowerCase();
+        if (tag === 'a') return 'link';
+        if (tag === 'button') return 'button';
+        if (tag === 'select') return 'combobox';
+        if (tag === 'textarea') return 'textbox';
+        if (tag === 'input') {
+            var t = (el.getAttribute('type') || 'text').toLowerCase();
+            if (t === 'checkbox') return 'checkbox';
+            if (t === 'radio') return 'radio';
+            if (t === 'submit' || t === 'button' || t === 'reset' || t === 'image') return 'button';
+            if (t === 'file') return 'button';
+            if (t === 'range') return 'slider';
+            if (t === 'number') return 'spinbutton';
+            return 'textbox';
+        }
+        return 'generic';
+    }
+    function computeName(el, text) {
+        var al = el.getAttribute('aria-label');
+        if (al) return al.trim().substring(0, 100);
+        var tag = el.tagName.toLowerCase();
+        var ph = el.getAttribute('placeholder') || '';
+        var title = el.getAttribute('title') || '';
+        var alt = el.getAttribute('alt') || '';
+        if (tag === 'input') {
+            var t = (el.getAttribute('type') || 'text').toLowerCase();
+            if (t === 'submit' || t === 'button' || t === 'reset') {
+                return (el.getAttribute('value') || text || '').trim().substring(0, 100);
+            }
+            return (ph || title || el.getAttribute('name') || '').trim().substring(0, 100);
+        }
+        if (tag === 'img') return (alt || title || '').trim().substring(0, 100);
+        return (text || ph || title || '').trim().substring(0, 100);
+    }
     var elements = [];
     var indexMap = {};
     var idx = 0;
@@ -121,10 +158,13 @@ const STATE_SCRIPT: &str = r#"
         var style = el.offsetWidth === 0 && el.offsetHeight === 0;
         if (style) continue;
         var box = el.getBoundingClientRect();
+        var text = (el.innerText || '').trim().substring(0, 100);
         var info = {
             index: idx,
             tag: el.tagName.toLowerCase(),
-            text: (el.innerText || '').trim().substring(0, 100),
+            text: text,
+            role: computeRole(el),
+            name: computeName(el, text),
             x: Math.round(box.x), y: Math.round(box.y),
             w: Math.round(box.width), h: Math.round(box.height),
             attrs: {}
@@ -142,11 +182,17 @@ const STATE_SCRIPT: &str = r#"
             if (el.tagName === 'INPUT' && (elType === 'checkbox' || elType === 'radio') && el.checked) {
                 info.attrs.checked = 'checked';
             }
-            if (el.disabled) info.attrs.disabled = 'disabled';
+            if (el.disabled) {
+                info.attrs.disabled = 'disabled';
+                info.disabled = true;
+            }
             if (el.tagName === 'SELECT' && el.selectedIndex >= 0 && el.options[el.selectedIndex]) {
                 var opt = el.options[el.selectedIndex];
                 var optVal = opt.getAttribute('value') !== null ? opt.getAttribute('value') : (opt.textContent || '');
                 info.attrs.selected = optVal.trim().substring(0, 40);
+            }
+            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') {
+                info.value = String(el.value || '').substring(0, 200);
             }
         } catch (e) {}
         if (el._nid !== undefined) {
@@ -162,21 +208,22 @@ const STATE_SCRIPT: &str = r#"
 })()
 "#;
 
-pub(super) fn extract_indexed_state(
+/// Run [`STATE_SCRIPT`], rebuild `element_map` from `window.__session_element_map`,
+/// and return the parsed JSON. Shared by compact `/state` text and `/snapshot` JSON.
+pub(super) fn collect_interactive_raw(
     page: &mut Page,
     element_map: &mut HashMap<usize, u64>,
-) -> Result<String, String> {
+) -> Result<Value, String> {
     let val = page.evaluate(STATE_SCRIPT);
     let json_str = match val.as_str() {
         Some(s) => s.to_string(),
         None => return Err("state extraction returned non-string".into()),
     };
 
-    // Parse the JSON to extract element_map, then format as compact text.
     let parsed: Value =
         serde_json::from_str(&json_str).map_err(|e| format!("state parse error: {}", e))?;
 
-    // Build element_map from the JS-side indexMap.
+    element_map.clear();
     let map_val = page.evaluate("JSON.stringify(window.__session_element_map)");
     if let Some(map_str) = map_val.as_str() {
         if let Ok(map_obj) = serde_json::from_str::<HashMap<String, u64>>(map_str) {
@@ -187,6 +234,15 @@ pub(super) fn extract_indexed_state(
             }
         }
     }
+
+    Ok(parsed)
+}
+
+pub(super) fn extract_indexed_state(
+    page: &mut Page,
+    element_map: &mut HashMap<usize, u64>,
+) -> Result<String, String> {
+    let parsed = collect_interactive_raw(page, element_map)?;
 
     // Format compact text output.
     let url = parsed.get("url").and_then(|v| v.as_str()).unwrap_or("");
@@ -262,6 +318,7 @@ pub(super) fn extract_indexed_state(
 
     Ok(out)
 }
+
 
 // ---------------------------------------------------------------------------
 // Click / Input by index

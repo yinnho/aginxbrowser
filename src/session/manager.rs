@@ -17,6 +17,7 @@ use super::interact::{
     DOM_MEDIA_SCRIPT, click_by_index, click_xy, drag_xy, extract_indexed_state, input_by_index,
     merge_dom_candidates, set_files_by_selector,
 };
+use super::snapshot::extract_snapshot;
 use super::record::{RecordedAction, inject_storage_js};
 use super::state::{
     BrowserSession, DormantSession, NavFrameShared, SessionError, SnapshotStore, SESSION_COUNTER,

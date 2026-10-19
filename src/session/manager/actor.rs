@@ -542,6 +542,21 @@ pub(super) fn session_thread(
                             let _ = reply.send(result);
                         }
 
+                        SessionCommand::Snapshot { reply } => {
+                            element_map.clear();
+                            let result = extract_snapshot(&mut page, &mut element_map)
+                                .map_err(|e| match &last_nav_error {
+                                    Some(nav) => format!(
+                                        "{} — the last navigation did not complete, \
+                                         the session is on the fallback page \
+                                         (snapshot extraction: {})",
+                                        nav, e
+                                    ),
+                                    None => e,
+                                });
+                            let _ = reply.send(result);
+                        }
+
                         SessionCommand::Click { index, reply } => {
                             // A click that changes the page is a page walk and
                             // spends the budget; one that only toggles state

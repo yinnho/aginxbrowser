@@ -1450,6 +1450,67 @@
         assert!(mgr.close_and_wait(&sid).await);
     }
 
+    /// /snapshot returns actionable refs that share the /state element_map.
+    #[tokio::test]
+    async fn snapshot_assigns_refs_usable_like_state_index() {
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            None,
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        mgr.send(&sid, |reply| SessionCommand::SetContent {
+            html: r#"<html><head><title>Login</title></head><body>
+                <a href="/home">Home</a>
+                <input id="email" type="email" placeholder="Email" />
+                <button id="go">Sign In</button>
+            </body></html>"#
+                .to_string(),
+            reply,
+        })
+        .await
+        .unwrap();
+
+        let snap = mgr
+            .send(&sid, |reply| SessionCommand::Snapshot { reply })
+            .await
+            .unwrap();
+        assert_eq!(snap["title"].as_str(), Some("Login"));
+        let elements = snap["elements"].as_array().expect("elements array");
+        assert!(
+            elements.len() >= 3,
+            "expected link/input/button, got: {snap}"
+        );
+
+        let button = elements
+            .iter()
+            .find(|e| e["role"] == "button" && e["name"] == "Sign In")
+            .unwrap_or_else(|| panic!("Sign In button missing in {snap}"));
+        let rf = button["ref"].as_str().expect("ref string");
+        let idx = button["index"].as_u64().expect("index") as usize;
+        assert_eq!(rf, format!("e{idx}"));
+        assert_eq!(button["tag"].as_str(), Some("button"));
+
+        // Click by the same index the snapshot bound — proves the map was rebuilt.
+        let clicked = mgr
+            .send(&sid, |reply| SessionCommand::Click {
+                index: idx,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert!(clicked.clicked, "click via snapshot index failed: {clicked:?}");
+
+        assert!(mgr.close_and_wait(&sid).await);
+    }
+
     // A session created without a url (and one whose initial navigation
     // fails) must still own a live JS context, like a real browser's blank
     // tab. Until 2026-09-15 a never-navigated Page kept `js: None` and every

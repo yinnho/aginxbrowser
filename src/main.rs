@@ -109,7 +109,7 @@ use routers::sessions::{
     session_dialog_handler, session_drag_handler, session_eval_handler, session_export_handler,
     session_har_handler, session_input_handler, session_list_handler, session_navigate_handler,
     session_network_handler, session_preload_handler, session_screenshot_handler, session_scroll_handler,
-    session_set_files_handler, session_state_handler, session_storage_handler,
+    session_set_files_handler, session_snapshot_handler, session_state_handler, session_storage_handler,
     session_verdict_handler, session_viewport_handler, session_wait_handler, sessions_handler,
 };
 
@@ -384,6 +384,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/:id/navigate", post(session_navigate_handler))
         .route("/session/:id/preload", post(session_preload_handler))
         .route("/session/:id/state", post(session_state_handler))
+        .route(
+            "/session/:id/snapshot",
+            get(session_snapshot_handler).post(session_snapshot_handler),
+        )
         .route("/session/:id/cookies", get(session_cookies_handler))
         .route("/session/:id/cookie_trace", get(session_cookie_trace_handler))
         .route("/session/:id/storage", get(session_storage_handler))

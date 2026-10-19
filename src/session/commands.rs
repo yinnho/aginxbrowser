@@ -26,6 +26,11 @@ pub enum SessionCommand {
     State {
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Structured interactive snapshot (role/name/ref JSON). Rebuilds the
+    /// same element_map `/state` does so `ref=eN` works with Click/Input.
+    Snapshot {
+        reply: oneshot::Sender<Result<serde_json::Value, String>>,
+    },
     Click {
         index: usize,
         reply: oneshot::Sender<Result<SessionClickResponse, String>>,

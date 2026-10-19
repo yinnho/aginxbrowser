@@ -754,15 +754,54 @@ viewport=1280x800
 
 索引号 `[N]` 用于 `click` / `input` 操作。`rect=[x,y,w,h]` 是元素相对当前视口的坐标（y 随滚动变化）——用它判断元素是否在视口内、需要先 `scroll` 再 `click`。
 
+### GET|POST /session/{id}/snapshot
+
+面向 agent 的交互快照（Obscura / Playwright-a11y 风格）：role、name、可行动的 `ref=eN`。与 `/state` 共用同一套元素映射，因此 `ref` 可直接传给 `click` / `input`。需要结构化 JSON 时优先用本接口，而不是 `/state` 的紧凑文本。
+
+**Query：**
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| format | `json` | `json`（结构化）或 `text` / `a11y`（每行一个元素：`- role "name" [ref=eN]`） |
+
+**JSON 响应（默认）：**
+
+```json
+{
+  "url": "https://example.com/login",
+  "title": "Login",
+  "viewport": {"w": 1280, "h": 800},
+  "elements": [
+    {"ref": "e0", "index": 0, "role": "link", "name": "Home", "tag": "a",
+     "bbox": {"x": 24, "y": 16, "w": 52, "h": 19}, "href": "/home"},
+    {"ref": "e1", "index": 1, "role": "textbox", "name": "Email", "tag": "input",
+     "bbox": {"x": 24, "y": 60, "w": 232, "h": 22}, "type": "email", "placeholder": "Email"},
+    {"ref": "e3", "index": 3, "role": "button", "name": "Sign In", "tag": "button",
+     "bbox": {"x": 24, "y": 140, "w": 88, "h": 28}}
+  ]
+}
+```
+
+`ref` 是当前快照里的 `e` + `index`。导航或 DOM 大变后请重新 `/snapshot`——过期 ref 与过期 `/state` 索引一样会失败（映射缺失，或点击侧的 detached/disabled 复核）。
+
+```bash
+curl -sS "http://127.0.0.1:8089/session/$SID/snapshot" | jq .
+curl -sS "http://127.0.0.1:8089/session/$SID/snapshot?format=text"
+curl -sS -X POST "http://127.0.0.1:8089/session/$SID/click" \
+  -H 'content-type: application/json' -d '{"ref":"e3"}'
+```
+
 ### POST /session/{id}/click
 
-按索引点击交互元素。
+按索引或快照 `ref` 点击交互元素。
+
 
 **请求字段：**
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| index | usize | ✅ | 元素索引（从 `/state` 获取） |
+| index | usize | index/ref 二选一 | 元素索引（来自 `/state` 或 `/snapshot`） |
+| ref | string | index/ref 二选一 | 快照 ref（如 `e3`）；两者都传时必须一致 |
 
 **响应：**
 
@@ -772,13 +811,14 @@ viewport=1280x800
 
 ### POST /session/{id}/input
 
-按索引在输入框中填入文本。
+按索引或快照 `ref` 在输入框中填入文本。
 
 **请求字段：**
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| index | usize | ✅ | 元素索引 |
+| index | usize | index/ref 二选一 | 元素索引（来自 `/state` 或 `/snapshot`） |
+| ref | string | index/ref 二选一 | 快照 ref（如 `e1`）；两者都传时必须一致 |
 | text | string | ✅ | 要输入的文本 |
 
 **响应：**

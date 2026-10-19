@@ -89,16 +89,50 @@ pub struct SessionCreateResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct SessionClickRequest {
-    pub index: usize,
+    /// Interactive index from `/state` or `/snapshot`. Optional when `ref` is set.
+    #[serde(default)]
+    pub index: Option<usize>,
+    /// Actionable ref from `/snapshot` (`e12`). Optional when `index` is set.
+    #[serde(default, rename = "ref")]
+    pub element_ref: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct SessionInputRequest {
-    pub index: usize,
+    /// Interactive index from `/state` or `/snapshot`. Optional when `ref` is set.
+    #[serde(default)]
+    pub index: Option<usize>,
+    /// Actionable ref from `/snapshot` (`e12`). Optional when `index` is set.
+    #[serde(default, rename = "ref")]
+    pub element_ref: Option<String>,
     pub text: String,
     /// "full" types per-character with keydown/keypress/input/keyup cycles.
     #[serde(default)]
     pub events: Option<String>,
+}
+
+/// Resolve `index` and/or `ref=eN` from a click/input body into one interactive index.
+fn resolve_element_index(
+    index: Option<usize>,
+    element_ref: Option<&str>,
+) -> Result<usize, AppError> {
+    match (index, element_ref.map(str::trim).filter(|s| !s.is_empty())) {
+        (Some(i), Some(r)) => {
+            let ri = session::snapshot::parse_element_ref(r)
+                .map_err(AppError::BadRequest)?;
+            if ri != i {
+                return Err(AppError::BadRequest(format!(
+                    "index ({i}) and ref ({r}) disagree — pass one, or make them match"
+                )));
+            }
+            Ok(i)
+        }
+        (Some(i), None) => Ok(i),
+        (None, Some(r)) => session::snapshot::parse_element_ref(r).map_err(AppError::BadRequest),
+        (None, None) => Err(AppError::BadRequest(
+            "provide index (from /state) or ref (from /snapshot, e.g. e3)".into(),
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -576,6 +610,62 @@ pub(crate) async fn session_state_handler(
     ))
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub(crate) struct SessionSnapshotQuery {
+    /// `json` (default) or `text` (compact a11y-ish lines with `[ref=eN]`).
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+/// Agent-friendly interactive snapshot: role / name / actionable `ref=eN`
+/// (Obscura / Playwright-a11y style). Refs bind the same element_map as
+/// `/state`, so `POST .../click {"ref":"e3"}` works after a snapshot.
+/// Read-only for idle TTL (same as `/state`).
+pub(crate) async fn session_snapshot_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<SessionSnapshotQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    {
+        let mgr = session::SESSIONS.lock().await;
+        if let Some(url) = mgr.dormant_url(&id) {
+            let body = serde_json::json!({
+                "session_id": id,
+                "url": url,
+                "dormant": true,
+                "hint": "registered at boot without page JS — navigate/eval/click revives it",
+            });
+            return Ok((
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                body.to_string(),
+            ));
+        }
+    }
+    let snap = session::send_command_readonly(&id, |reply| session::SessionCommand::Snapshot {
+        reply,
+    })
+    .await
+    .map_err(session_err)?;
+
+    let format = q.format.as_deref().unwrap_or("json").to_ascii_lowercase();
+    if format == "text" || format == "a11y" {
+        let text = session::snapshot::format_snapshot_text(&snap);
+        return Ok((
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            text,
+        ));
+    }
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        snap.to_string(),
+    ))
+}
+
 /// Snapshot the session's localStorage/sessionStorage (round-trips with
 /// session/create's `storage` field).
 pub(crate) async fn session_storage_handler(
@@ -881,8 +971,9 @@ pub(crate) async fn session_click_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(req): Json<SessionClickRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    let index = resolve_element_index(req.index, req.element_ref.as_deref())?;
     let resp = session::send_command(&id, |reply| session::SessionCommand::Click {
-        index: req.index,
+        index,
         reply,
     })
     .await
@@ -968,8 +1059,9 @@ pub(crate) async fn session_input_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(req): Json<SessionInputRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    let index = resolve_element_index(req.index, req.element_ref.as_deref())?;
     let filled = session::send_command(&id, |reply| session::SessionCommand::Input {
-        index: req.index,
+        index,
         text: req.text,
         full_events: req.events.as_deref() == Some("full"),
         reply,

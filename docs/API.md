@@ -1046,15 +1046,54 @@ viewport=1280x800
 
 Index numbers `[N]` feed `click` / `input` operations. `rect=[x,y,w,h]` is the element's position relative to the current viewport (y changes with scrolling) — use it to judge whether an element is in view and needs a `scroll` before `click`.
 
+### GET|POST /session/{id}/snapshot
+
+Agent-friendly interactive snapshot (Obscura / Playwright-a11y style): role, name, and actionable `ref=eN` ids. Rebuilds the same element map as `/state`, so refs feed `click` / `input` directly. Prefer this over `/state` when the agent wants structured JSON instead of compact HTML-ish text.
+
+**Query:**
+
+| Field | Default | Description |
+|------|---------|-------------|
+| format | `json` | `json` (structured) or `text` / `a11y` (one line per element: `- role "name" [ref=eN]`) |
+
+**JSON response (default):**
+
+```json
+{
+  "url": "https://example.com/login",
+  "title": "Login",
+  "viewport": {"w": 1280, "h": 800},
+  "elements": [
+    {"ref": "e0", "index": 0, "role": "link", "name": "Home", "tag": "a",
+     "bbox": {"x": 24, "y": 16, "w": 52, "h": 19}, "href": "/home"},
+    {"ref": "e1", "index": 1, "role": "textbox", "name": "Email", "tag": "input",
+     "bbox": {"x": 24, "y": 60, "w": 232, "h": 22}, "type": "email", "placeholder": "Email"},
+    {"ref": "e3", "index": 3, "role": "button", "name": "Sign In", "tag": "button",
+     "bbox": {"x": 24, "y": 140, "w": 88, "h": 28}}
+  ]
+}
+```
+
+`ref` is `e` + `index` for the current snapshot. After navigate / DOM mutation, call `/snapshot` again — stale refs fail like a stale `/state` index (missing map entry or act-side detached/disabled recheck).
+
+```bash
+curl -sS "http://127.0.0.1:8089/session/$SID/snapshot" | jq .
+curl -sS "http://127.0.0.1:8089/session/$SID/snapshot?format=text"
+curl -sS -X POST "http://127.0.0.1:8089/session/$SID/click" \
+  -H 'content-type: application/json' -d '{"ref":"e3"}'
+```
+
 ### POST /session/{id}/click
 
-Click an interactive element by index.
+Click an interactive element by index or snapshot `ref`.
+
 
 **Request fields:**
 
 | Field | Type | Required | Description |
 |------|------|------|------|
-| index | usize | ✅ | Element index (from `/state`) |
+| index | usize | one of index/ref | Element index (from `/state` or `/snapshot`) |
+| ref | string | one of index/ref | Snapshot ref (`e3`). If both set, they must agree. |
 
 **Response:**
 
