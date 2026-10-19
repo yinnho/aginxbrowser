@@ -450,7 +450,6 @@
       if (typeof _pageFU !== 'function') capturePageFyFU();
       if (typeof _pageFU !== 'function') return Promise.resolve(null);
       bridgeProxyFp();
-      seedMerchantOo();
       const e = { url: String(path || ''), headers: {}, data: data };
       const f = {
         platform: ((window.proxy && window.proxy.xsecplatform) || window.xsecplatform || 'PC'),
@@ -478,7 +477,7 @@
   try {
     setTimeout(capturePageFyFU, 1500);
     setTimeout(capturePageFyFU, 4000);
-    setTimeout(() => { bridgeProxyFp(); seedMerchantOo(); noteFp(); }, 2000);
+    setTimeout(() => { bridgeProxyFp(); noteFp(); }, 2000);
     setTimeout(() => { bridgeProxyFp(); noteFp(); }, 6000);
   } catch (e) {}
 
@@ -723,7 +722,6 @@
           return null;
         }
         bridgeProxyFp();
-        seedMerchantOo();
       }
       if (needSettle) {
         if (Date.now() - signerSeenAt < SETTLE_MS) return null;
