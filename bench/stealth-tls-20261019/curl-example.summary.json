@@ -1,0 +1,15 @@
+{
+  "engine": "curl",
+  "probe": "example",
+  "url": "https://example.com/",
+  "elapsed_ms": 635,
+  "content_len": 577,
+  "content_head": "<!doctype html><html lang=en><head><meta charset=utf-8><link rel=icon href=data:,><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>Example Domain</title><style>html{color-scheme:light dark;background:light-dark(#eee,#222)}body{font:16px/1.6 system-ui,sans-serif;max-width:26em;margin:auto;padding:25vh 2em 2em;text-align:center}</style></head><body><p>This domain is for use in documentation examples without needing permission. This is not a service; avoid relying on it for t",
+  "fetch_error": null,
+  "fp": null,
+  "challenge_signals": {
+    "just_a_moment": false,
+    "turnstile": false,
+    "captcha": false
+  }
+}

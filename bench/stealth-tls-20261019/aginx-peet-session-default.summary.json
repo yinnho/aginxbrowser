@@ -1,0 +1,19 @@
+{
+  "engine": "aginxbrowser-session",
+  "probe": "peet-session-default",
+  "url": "https://tls.peet.ws/api/all",
+  "elapsed_ms": 2010,
+  "session_id": "s_2",
+  "create": {
+    "session_id": "s_2",
+    "url": "https://tls.peet.ws/api/all",
+    "expires_in_secs": 479
+  },
+  "eval_last": {
+    "raw": ""
+  },
+  "content_len": 0,
+  "content_head": "",
+  "tls_fingerprint_requested": null,
+  "fp": null
+}

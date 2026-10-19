@@ -1,0 +1,19 @@
+{
+  "engine": "aginxbrowser",
+  "probe": "example",
+  "url": "https://example.com/",
+  "elapsed_ms": 814,
+  "tier": "http",
+  "title": "Example Domain",
+  "content_len": 156,
+  "content_head": "This domain is for use in documentation examples without needing permission. This is not a service; avoid relying on it for testing and monitoring purposes.",
+  "fetch_error": null,
+  "tls_fingerprint_requested": null,
+  "fp": null,
+  "challenge_signals": {
+    "just_a_moment": false,
+    "cf_ray": false,
+    "turnstile": false,
+    "captcha": false
+  }
+}

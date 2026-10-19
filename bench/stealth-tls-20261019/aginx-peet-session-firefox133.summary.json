@@ -1,0 +1,19 @@
+{
+  "engine": "aginxbrowser-session",
+  "probe": "peet-session-firefox133",
+  "url": "https://tls.peet.ws/api/all",
+  "elapsed_ms": 2005,
+  "session_id": "s_3",
+  "create": {
+    "session_id": "s_3",
+    "url": "https://tls.peet.ws/api/all",
+    "expires_in_secs": 479
+  },
+  "eval_last": {
+    "raw": ""
+  },
+  "content_len": 0,
+  "content_head": "",
+  "tls_fingerprint_requested": "firefox133",
+  "fp": null
+}

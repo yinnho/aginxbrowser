@@ -1,0 +1,30 @@
+{
+  "engine": "aginxbrowser",
+  "probe": "peet-auto-safari18",
+  "url": "https://tls.peet.ws/api/all",
+  "http_api_code": 200,
+  "elapsed_ms": 1265,
+  "tier": "browser",
+  "title": null,
+  "content_len": 5911,
+  "content_head": "{\n\"donate\": \"Please consider donating to keep this API running. Visit https://tls.peet.ws\",\n\"ip\": \"180.102.32.160:39641\",\n\"http_version\": \"h2\",\n\"method\": \"GET\",\n\"user_agent\": \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36\",\n\"tls\": {\n\"ciphers\": [\n\"TLS_GREASE (0xAAAA)\",\n\"TLS_AES_128_GCM_SHA256\",\n\"TLS_AES_256_GCM_SHA384\",\n\"TLS_CHACHA20_POLY1305_SHA256\",\n\"TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384\",\n\"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256\",\n\"TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256\",\n\"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384\",",
+  "fetch_error": null,
+  "tls_fingerprint_requested": "safari18",
+  "fp": {
+    "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+    "http_version": "h2",
+    "ja3_hash": "773906b0efdefa24a7f2b8eb6985bf37",
+    "ja4": "t13d2014h2_a09f3c656075_14788d8d241b",
+    "peetprint_hash": "b2bafdc69377086c3416be278fd21121",
+    "akamai_h2_hash": "d4a2dcbfde511b5040ed5a5190a8d78b",
+    "akamai_h2": "2:0;3:100;4:2097152;8:1;9:1|10420225|0|m,s,a,p",
+    "cipher_count": 21,
+    "extension_count": 16
+  },
+  "challenge_signals": {
+    "just_a_moment": false,
+    "turnstile": false,
+    "checking_browser": false,
+    "cf_clearance_mentioned": false
+  }
+}

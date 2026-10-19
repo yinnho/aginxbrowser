@@ -1,0 +1,19 @@
+{
+  "engine": "aginxbrowser",
+  "probe": "browserleaks-tls",
+  "url": "https://browserleaks.com/tls",
+  "elapsed_ms": 3538,
+  "tier": "browser",
+  "title": "TLS Client Test",
+  "content_len": 2398,
+  "content_head": "Home Page\nIP Address\nJavaScript\nWebRTC Leak Test\nCanvas Fingerprint\nWebGL Report\nFont Fingerprinting\nGeolocation API\nFeatures Detection\nTLS Client Test\nContent Filters\nMore Tools\nSettings\nTLS Client Test\nThis page displays your web browser's SSL/TLS capabilities, including supported TLS protocols, cipher suites, extensions, and key exchange groups. It highlights any weak or insecure options and generates a TLS fingerprint in JA3/JA4 formats. Additionally, it tests how your browser handles insecu",
+  "fetch_error": null,
+  "tls_fingerprint_requested": null,
+  "fp": null,
+  "challenge_signals": {
+    "just_a_moment": false,
+    "cf_ray": false,
+    "turnstile": false,
+    "captcha": false
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "date_local": "2026-10-19 Asia/Shanghai",
+  "aginx_health": {
+    "capabilities": {
+      "captcha_solver": false,
+      "screenshot": true,
+      "stealth": true
+    },
+    "commit": "0e6f37d",
+    "engine": "diting",
+    "status": "ok",
+    "tls": "chrome145",
+    "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+    "v8": "15.0.245.2-rusty",
+    "version": "0.6.0"
+  },
+  "machine": "darwin-arm64",
+  "notes": "Public fingerprint endpoints only; polite rate limits; no merchant APIs."
+}

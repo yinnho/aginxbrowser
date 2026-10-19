@@ -1,0 +1,20 @@
+{
+  "engine": "aginxbrowser",
+  "probe": "cf-blog",
+  "url": "https://blog.cloudflare.com/kitesurf/",
+  "http_api_code": 200,
+  "elapsed_ms": 4613,
+  "tier": "http",
+  "title": "Introducing Kitesurf: The agent-first browser that runs in V8 isolates on Cloudflare Workers | Cloudflare Blog",
+  "content_len": 21534,
+  "content_head": "Skip to contentShould we build our own browser? This is one of those questions that has come up every few months internally at Cloudflare for years. Unsurprisingly, it’s the kind that triggers long threads with multiple reasons and persuasive arguments on why we should do it. The browser is obviously the most important software we use every day on our computers; it’s arguably the operating system of the Internet. We’re a company on a mission to help build a better Internet — who wouldn’t want to take on the challenge of building a new browser?But we never quite found the balance between the te",
+  "fetch_error": null,
+  "tls_fingerprint_requested": null,
+  "fp": null,
+  "challenge_signals": {
+    "just_a_moment": false,
+    "turnstile": false,
+    "checking_browser": false,
+    "cf_clearance_mentioned": false
+  }
+}

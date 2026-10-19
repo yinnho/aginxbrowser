@@ -1,0 +1,138 @@
+{
+  "date_local": "2026-10-19 Asia/Shanghai",
+  "aginx_version": "0.6.0",
+  "aginx_commit_reported": "0e6f37d",
+  "aginx_tls_default": "chrome145",
+  "aginx_ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+  "aginx_stealth": true,
+  "peet_matrix": [
+    {
+      "engine": "aginxbrowser",
+      "config": "default (chrome145 TLS)",
+      "target": "https://tls.peet.ws/api/all",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+      "ja4": "t13d1516h2_8daaf6152771_d8a2da3f94cd",
+      "ja3_hash": "d248f2d9828c2a73963817145c9b679d",
+      "peetprint_hash": "1d4ffe9b0e34acac0bd883fa7f79d7b5",
+      "akamai_h2_hash": "52d84b11737d980aef856699f885ca86",
+      "elapsed_ms": 1372,
+      "receipt": "aginx-peet-auto-default.fp.json"
+    },
+    {
+      "engine": "aginxbrowser",
+      "config": "tls_fingerprint=chrome145",
+      "target": "https://tls.peet.ws/api/all",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+      "ja4": "t13d1516h2_8daaf6152771_d8a2da3f94cd",
+      "ja3_hash": "8502ec77b1d02bea18cac11a3446aaf0",
+      "peetprint_hash": "1d4ffe9b0e34acac0bd883fa7f79d7b5",
+      "akamai_h2_hash": "52d84b11737d980aef856699f885ca86",
+      "elapsed_ms": 2352,
+      "receipt": "aginx-peet-auto-chrome145.fp.json"
+    },
+    {
+      "engine": "aginxbrowser",
+      "config": "tls_fingerprint=firefox133",
+      "target": "https://tls.peet.ws/api/all",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+      "ja4": "t13d1716h2_5b57614c22b0_eeeea6562960",
+      "ja3_hash": "2d692a4485ca2f5f2b10ecb2d2909ad3",
+      "peetprint_hash": "199f9cf4a47bfc51995a9f3942190094",
+      "akamai_h2_hash": "6ea73faa8fc5aac76bded7bd238f6433",
+      "elapsed_ms": 1471,
+      "receipt": "aginx-peet-auto-firefox133.fp.json"
+    },
+    {
+      "engine": "aginxbrowser",
+      "config": "tls_fingerprint=safari18",
+      "target": "https://tls.peet.ws/api/all",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+      "ja4": "t13d2014h2_a09f3c656075_14788d8d241b",
+      "ja3_hash": "773906b0efdefa24a7f2b8eb6985bf37",
+      "peetprint_hash": "b2bafdc69377086c3416be278fd21121",
+      "akamai_h2_hash": "d4a2dcbfde511b5040ed5a5190a8d78b",
+      "elapsed_ms": 1265,
+      "receipt": "aginx-peet-auto-safari18.fp.json"
+    },
+    {
+      "engine": "aginxbrowser",
+      "config": "tls_fingerprint=edge145",
+      "target": "https://tls.peet.ws/api/all",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+      "ja4": "t13d1516h2_8daaf6152771_d8a2da3f94cd",
+      "ja3_hash": "e7d6c155e772f215424c8fc7fb6afa18",
+      "peetprint_hash": "1d4ffe9b0e34acac0bd883fa7f79d7b5",
+      "akamai_h2_hash": "52d84b11737d980aef856699f885ca86",
+      "elapsed_ms": 1372,
+      "receipt": "aginx-peet-auto-edge145.fp.json"
+    },
+    {
+      "engine": "chrome-headless",
+      "config": "Google Chrome 155 --dump-dom",
+      "target": "https://tls.peet.ws/api/all",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+      "ja4": "t13d1517h2_8daaf6152771_cb7bf5808d99",
+      "ja3_hash": "4dde2f451d2674f66a832e7bd30664ac",
+      "peetprint_hash": "fc97c1cdfb1409c9a9326c1b726d1dee",
+      "akamai_h2_hash": "52d84b11737d980aef856699f885ca86",
+      "elapsed_ms": 1998,
+      "receipt": "chrome-peet.fp.json"
+    },
+    {
+      "engine": "curl",
+      "config": "curl/8 (LibreSSL stack)",
+      "target": "https://tls.peet.ws/api/all",
+      "user_agent": "curl/8.0-stealth-bench",
+      "ja4": "t13d497h2_0d8feac7bc37_7395dae3b2f3",
+      "ja3_hash": "375c6162a492dfbf2795909110ce8424",
+      "peetprint_hash": "0d6ceceb9e71ec096d2022ad0651e2f2",
+      "akamai_h2_hash": "64a832f547be33249bf4d33e8a46c5dc",
+      "elapsed_ms": 588,
+      "receipt": "curl-peet.fp.json"
+    }
+  ],
+  "challenge_probes": [
+    {
+      "engine": "curl",
+      "target": "https://community.cloudflare.com/",
+      "http_code": "403",
+      "outcome": "Just a moment… interstitial (challenge page)",
+      "receipt": "curl-cf-community.summary.json"
+    },
+    {
+      "engine": "aginxbrowser",
+      "target": "https://community.cloudflare.com/",
+      "http_code": "200 (API)",
+      "outcome": "Detected CF challenge; cf_clearance wait timed out (25s); returned Chinese interstitial “正在进行安全验证” — NOT a bypass",
+      "receipt": "aginx-cf-community-auto.summary.json"
+    },
+    {
+      "engine": "aginxbrowser",
+      "target": "https://blog.cloudflare.com/kitesurf/",
+      "http_code": "200",
+      "outcome": "Full article body (~21k chars markdown) via tier=http — site did not challenge this exit",
+      "receipt": "aginx-cf-blog.summary.json"
+    },
+    {
+      "engine": "curl",
+      "target": "https://blog.cloudflare.com/kitesurf/",
+      "http_code": "200",
+      "outcome": "Full HTML (~349k) — same exit, no challenge",
+      "receipt": "meta.json"
+    }
+  ],
+  "not_run": [
+    {
+      "engine": "Kitesurf",
+      "reason": "No local install / no CF Browser Run token in this bench; published docs state it cannot negotiate bot challenges with real TLS fingerprints"
+    },
+    {
+      "engine": "Lightpanda",
+      "reason": "Not installed on this machine; maintainers publicly say UA override will not fix TLS/HTTP fingerprint distinguishability"
+    },
+    {
+      "engine": "Obscura",
+      "reason": "Not installed as a standalone binary on this machine"
+    }
+  ]
+}

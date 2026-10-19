@@ -1,0 +1,25 @@
+{
+  "engine": "curl",
+  "probe": "tls3",
+  "url": "https://tls3.peet.ws/api/all",
+  "elapsed_ms": 919,
+  "content_len": 6360,
+  "content_head": "{\n  \"donate\": \"Please consider donating to keep this API running. Visit https://tls.peet.ws\",\n  \"ip\": \"180.102.32.160:40482\",\n  \"http_version\": \"h2\",\n  \"method\": \"GET\",\n  \"user_agent\": \"curl/8.0-stealth-bench\",\n  \"tls\": {\n    \"ciphers\": [\n      \"TLS_CHACHA20_POLY1305_SHA256\",\n      \"TLS_AES_256_GCM_SHA384\",\n      \"TLS_AES_128_GCM_SHA256\",\n      \"TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256\",\n      \"TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256\",\n      \"TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256\",\n",
+  "fetch_error": null,
+  "fp": {
+    "user_agent": "curl/8.0-stealth-bench",
+    "http_version": "h2",
+    "ja3_hash": "375c6162a492dfbf2795909110ce8424",
+    "ja4": "t13d497h2_0d8feac7bc37_7395dae3b2f3",
+    "peetprint_hash": "0d6ceceb9e71ec096d2022ad0651e2f2",
+    "akamai_h2_hash": "64a832f547be33249bf4d33e8a46c5dc",
+    "akamai_h2": "3:100;4:10485760;2:0|1048510465|0|m,s,a,p",
+    "cipher_count": 49,
+    "extension_count": 7
+  },
+  "challenge_signals": {
+    "just_a_moment": false,
+    "turnstile": false,
+    "captcha": false
+  }
+}

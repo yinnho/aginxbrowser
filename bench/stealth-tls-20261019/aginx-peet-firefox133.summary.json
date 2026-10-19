@@ -1,0 +1,19 @@
+{
+  "engine": "aginxbrowser",
+  "probe": "peet-firefox133",
+  "url": "https://tls.peet.ws/api/all",
+  "elapsed_ms": 535,
+  "tier": null,
+  "title": null,
+  "content_len": 0,
+  "content_head": "",
+  "fetch_error": "HTTP Error 500: Internal Server Error",
+  "tls_fingerprint_requested": "firefox133",
+  "fp": null,
+  "challenge_signals": {
+    "just_a_moment": false,
+    "cf_ray": false,
+    "turnstile": false,
+    "captcha": false
+  }
+}

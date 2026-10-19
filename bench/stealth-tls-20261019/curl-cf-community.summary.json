@@ -1,0 +1,15 @@
+{
+  "engine": "curl",
+  "probe": "cf-community",
+  "url": "https://community.cloudflare.com/",
+  "http_code": "403",
+  "effective_url": "https://community.cloudflare.com/",
+  "bytes": "5361",
+  "elapsed_ms": 4559,
+  "content_head": "<!DOCTYPE html><html lang=\"en-US\"><head><title>Just a moment...</title><meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\"><meta http-equiv=\"X-UA-Compatible\" content=\"IE=Edge\"><meta name=\"robots\" content=\"noindex,nofollow\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"content-security-policy\" content=\"default-src &#39;none&#39;; script-src &#39;nonce-lzighTXQzDjnQxBmPdSsc6&#39; &#39;unsafe-eval&#39; https://challenges.cloudflare.com; script-src-attr &#39;none&#39;; style-src &#39;unsafe-inline&#39;; img-src &#39;self&#39; https://challenges",
+  "challenge_signals": {
+    "just_a_moment": true,
+    "turnstile": false,
+    "checking_browser": false
+  }
+}

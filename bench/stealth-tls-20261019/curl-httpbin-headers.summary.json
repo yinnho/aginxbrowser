@@ -1,0 +1,25 @@
+{
+  "engine": "curl",
+  "probe": "httpbin-headers",
+  "url": "https://httpbin.org/headers",
+  "elapsed_ms": 919,
+  "content_len": 184,
+  "content_head": "{\n  \"headers\": {\n    \"Accept\": \"*/*\", \n    \"Host\": \"httpbin.org\", \n    \"User-Agent\": \"curl/8.0-stealth-bench\", \n    \"X-Amzn-Trace-Id\": \"Root=1-6ad56ab8-0db4c845174fb3574e8b4cf0\"\n  }\n}\n",
+  "fetch_error": null,
+  "fp": {
+    "user_agent": null,
+    "http_version": null,
+    "ja3_hash": null,
+    "ja4": null,
+    "peetprint_hash": null,
+    "akamai_h2_hash": null,
+    "akamai_h2": null,
+    "cipher_count": 0,
+    "extension_count": 0
+  },
+  "challenge_signals": {
+    "just_a_moment": false,
+    "turnstile": false,
+    "captcha": false
+  }
+}

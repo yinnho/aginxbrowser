@@ -1,0 +1,12 @@
+{
+  "user_agent": "curl/8.0-stealth-bench",
+  "http_version": "h2",
+  "tls": {
+    "ja3_hash": "375c6162a492dfbf2795909110ce8424",
+    "ja4": "t13d497h2_0d8feac7bc37_7395dae3b2f3",
+    "peetprint_hash": "0d6ceceb9e71ec096d2022ad0651e2f2"
+  },
+  "http2": {
+    "akamai_fingerprint_hash": "64a832f547be33249bf4d33e8a46c5dc"
+  }
+}

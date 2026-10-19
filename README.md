@@ -64,6 +64,7 @@ An agent needs five things from a browser: **see, read, find, act, remember.** O
 Most new "agent browsers" are stateless, fingerprint-less one-shot renderers — fine for public pages, dead on arrival against Cloudflare or login flows. AginxBrowser goes the opposite way:
 
 - **🔐 Real TLS fingerprints** — stealth mode replicates Chrome / Firefox / Safari / Edge TLS handshakes via BoringSSL (JA3 preset names such as `chrome145`, `firefox133` — not just a UA string), switchable per request. The fleet User-Agent defaults to **Chrome/154**; the default TLS shape stays the `chrome145` preset. Cloudflare Turnstile challenges wait automatically for `cf_clearance`. Fingerprint-less engines eat 403s — we get through.
+- **Evidence:** public Stealth/TLS comparison (JA4 / Akamai H2 vs curl & Chrome, Kitesurf/Lightpanda cited not-run) — [`docs/stealth-tls-comparison.md`](docs/stealth-tls-comparison.md) · [中文](docs/stealth-tls-comparison.zh-CN.md) · receipts [`bench/stealth-tls-20261019/`](bench/stealth-tls-20261019/)
 - **🤝 Stateful interactive sessions** — login state injectable and exportable (`session_create(cookies=...)` ↔ `session_cookies`), surviving pagination and multi-step flows; `persistent: true` even survives idle eviction and server restarts — the same session id comes back logged in. One-shot engines throw state away.
 
 > Reference point: Cloudflare's Kitesurf explicitly ships neither real TLS-fingerprint negotiation nor persistent auth sessions — anti-bot and login territory is exactly where AginxBrowser plays.

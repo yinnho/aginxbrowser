@@ -1,0 +1,25 @@
+{
+  "engine": "chrome-headless",
+  "probe": "peet",
+  "url": "https://tls.peet.ws/api/all",
+  "elapsed_ms": 1998,
+  "content_len": 11296,
+  "content_head": "<html><head><meta name=\"color-scheme\" content=\"light dark\"><meta charset=\"utf-8\"></head><body><pre>{\n  \"donate\": \"Please consider donating to keep this API running. Visit https://tls.peet.ws\",\n  \"ip\": \"180.102.32.160:40306\",\n  \"http_version\": \"h2\",\n  \"method\": \"GET\",\n  \"user_agent\": \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36\",\n  \"tls\": {\n    \"ciphers\": [\n      \"TLS_GREASE (0x7A7A)\",\n      \"TLS_AES_128_GCM_SHA256\"",
+  "fetch_error": null,
+  "fp": {
+    "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+    "http_version": "h2",
+    "ja3_hash": "4dde2f451d2674f66a832e7bd30664ac",
+    "ja4": "t13d1517h2_8daaf6152771_cb7bf5808d99",
+    "peetprint_hash": "fc97c1cdfb1409c9a9326c1b726d1dee",
+    "akamai_h2_hash": "52d84b11737d980aef856699f885ca86",
+    "akamai_h2": "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p",
+    "cipher_count": 16,
+    "extension_count": 19
+  },
+  "challenge_signals": {
+    "just_a_moment": false,
+    "turnstile": false,
+    "captcha": false
+  }
+}

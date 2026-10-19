@@ -1,0 +1,358 @@
+{
+  "meta": {
+    "date_local": "2026-10-19 Asia/Shanghai",
+    "aginx_health": {
+      "capabilities": {
+        "captcha_solver": false,
+        "screenshot": true,
+        "stealth": true
+      },
+      "commit": "0e6f37d",
+      "engine": "diting",
+      "status": "ok",
+      "tls": "chrome145",
+      "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+      "v8": "15.0.245.2-rusty",
+      "version": "0.6.0"
+    },
+    "machine": "darwin-arm64",
+    "notes": "Public fingerprint endpoints only; polite rate limits; no merchant APIs."
+  },
+  "results": [
+    {
+      "engine": "aginxbrowser",
+      "probe": "peet-default",
+      "url": "https://tls.peet.ws/api/all",
+      "elapsed_ms": 2884,
+      "tier": null,
+      "title": null,
+      "content_len": 0,
+      "content_head": "",
+      "fetch_error": "HTTP Error 500: Internal Server Error",
+      "tls_fingerprint_requested": null,
+      "fp": null,
+      "challenge_signals": {
+        "just_a_moment": false,
+        "cf_ray": false,
+        "turnstile": false,
+        "captcha": false
+      }
+    },
+    {
+      "engine": "aginxbrowser",
+      "probe": "peet-chrome145",
+      "url": "https://tls.peet.ws/api/all",
+      "elapsed_ms": 563,
+      "tier": null,
+      "title": null,
+      "content_len": 0,
+      "content_head": "",
+      "fetch_error": "HTTP Error 500: Internal Server Error",
+      "tls_fingerprint_requested": "chrome145",
+      "fp": null,
+      "challenge_signals": {
+        "just_a_moment": false,
+        "cf_ray": false,
+        "turnstile": false,
+        "captcha": false
+      }
+    },
+    {
+      "engine": "aginxbrowser",
+      "probe": "peet-firefox133",
+      "url": "https://tls.peet.ws/api/all",
+      "elapsed_ms": 535,
+      "tier": null,
+      "title": null,
+      "content_len": 0,
+      "content_head": "",
+      "fetch_error": "HTTP Error 500: Internal Server Error",
+      "tls_fingerprint_requested": "firefox133",
+      "fp": null,
+      "challenge_signals": {
+        "just_a_moment": false,
+        "cf_ray": false,
+        "turnstile": false,
+        "captcha": false
+      }
+    },
+    {
+      "engine": "aginxbrowser",
+      "probe": "peet-safari18",
+      "url": "https://tls.peet.ws/api/all",
+      "elapsed_ms": 544,
+      "tier": null,
+      "title": null,
+      "content_len": 0,
+      "content_head": "",
+      "fetch_error": "HTTP Error 500: Internal Server Error",
+      "tls_fingerprint_requested": "safari18",
+      "fp": null,
+      "challenge_signals": {
+        "just_a_moment": false,
+        "cf_ray": false,
+        "turnstile": false,
+        "captcha": false
+      }
+    },
+    {
+      "engine": "aginxbrowser",
+      "probe": "peet-edge145",
+      "url": "https://tls.peet.ws/api/all",
+      "elapsed_ms": 511,
+      "tier": null,
+      "title": null,
+      "content_len": 0,
+      "content_head": "",
+      "fetch_error": "HTTP Error 500: Internal Server Error",
+      "tls_fingerprint_requested": "edge145",
+      "fp": null,
+      "challenge_signals": {
+        "just_a_moment": false,
+        "cf_ray": false,
+        "turnstile": false,
+        "captcha": false
+      }
+    },
+    {
+      "engine": "curl",
+      "probe": "peet",
+      "url": "https://tls.peet.ws/api/all",
+      "elapsed_ms": 588,
+      "content_len": 7162,
+      "content_head": "{\n  \"donate\": \"Please consider donating to keep this API running. Visit https://tls.peet.ws\",\n  \"ip\": \"180.102.32.160:40240\",\n  \"http_version\": \"h2\",\n  \"method\": \"GET\",\n  \"user_agent\": \"curl/8.0-stealth-bench\",\n  \"tls\": {\n    \"ciphers\": [\n      \"TLS_CHACHA20_POLY1305_SHA256\",\n      \"TLS_AES_256_GCM_SHA384\",\n      \"TLS_AES_128_GCM_SHA256\",\n      \"TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256\",\n      \"TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256\",\n      \"TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256\",\n",
+      "fetch_error": null,
+      "fp": {
+        "user_agent": "curl/8.0-stealth-bench",
+        "http_version": "h2",
+        "ja3_hash": "375c6162a492dfbf2795909110ce8424",
+        "ja4": "t13d497h2_0d8feac7bc37_7395dae3b2f3",
+        "peetprint_hash": "0d6ceceb9e71ec096d2022ad0651e2f2",
+        "akamai_h2_hash": "64a832f547be33249bf4d33e8a46c5dc",
+        "akamai_h2": "3:100;4:10485760;2:0|1048510465|0|m,s,a,p",
+        "cipher_count": 49,
+        "extension_count": 7
+      },
+      "challenge_signals": {
+        "just_a_moment": false,
+        "turnstile": false,
+        "captcha": false
+      }
+    },
+    {
+      "engine": "chrome-headless",
+      "probe": "peet",
+      "url": "https://tls.peet.ws/api/all",
+      "elapsed_ms": 1998,
+      "content_len": 11296,
+      "content_head": "<html><head><meta name=\"color-scheme\" content=\"light dark\"><meta charset=\"utf-8\"></head><body><pre>{\n  \"donate\": \"Please consider donating to keep this API running. Visit https://tls.peet.ws\",\n  \"ip\": \"180.102.32.160:40306\",\n  \"http_version\": \"h2\",\n  \"method\": \"GET\",\n  \"user_agent\": \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36\",\n  \"tls\": {\n    \"ciphers\": [\n      \"TLS_GREASE (0x7A7A)\",\n      \"TLS_AES_128_GCM_SHA256\"",
+      "fetch_error": null,
+      "fp": {
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+        "http_version": "h2",
+        "ja3_hash": "4dde2f451d2674f66a832e7bd30664ac",
+        "ja4": "t13d1517h2_8daaf6152771_cb7bf5808d99",
+        "peetprint_hash": "fc97c1cdfb1409c9a9326c1b726d1dee",
+        "akamai_h2_hash": "52d84b11737d980aef856699f885ca86",
+        "akamai_h2": "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p",
+        "cipher_count": 16,
+        "extension_count": 19
+      },
+      "challenge_signals": {
+        "just_a_moment": false,
+        "turnstile": false,
+        "captcha": false
+      }
+    },
+    {
+      "engine": "aginxbrowser",
+      "probe": "tls3-default",
+      "url": "https://tls3.peet.ws/api/all",
+      "elapsed_ms": 952,
+      "tier": null,
+      "title": null,
+      "content_len": 0,
+      "content_head": "",
+      "fetch_error": "HTTP Error 500: Internal Server Error",
+      "tls_fingerprint_requested": null,
+      "fp": null,
+      "challenge_signals": {
+        "just_a_moment": false,
+        "cf_ray": false,
+        "turnstile": false,
+        "captcha": false
+      }
+    },
+    {
+      "engine": "curl",
+      "probe": "tls3",
+      "url": "https://tls3.peet.ws/api/all",
+      "elapsed_ms": 919,
+      "content_len": 6360,
+      "content_head": "{\n  \"donate\": \"Please consider donating to keep this API running. Visit https://tls.peet.ws\",\n  \"ip\": \"180.102.32.160:40482\",\n  \"http_version\": \"h2\",\n  \"method\": \"GET\",\n  \"user_agent\": \"curl/8.0-stealth-bench\",\n  \"tls\": {\n    \"ciphers\": [\n      \"TLS_CHACHA20_POLY1305_SHA256\",\n      \"TLS_AES_256_GCM_SHA384\",\n      \"TLS_AES_128_GCM_SHA256\",\n      \"TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256\",\n      \"TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256\",\n      \"TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256\",\n",
+      "fetch_error": null,
+      "fp": {
+        "user_agent": "curl/8.0-stealth-bench",
+        "http_version": "h2",
+        "ja3_hash": "375c6162a492dfbf2795909110ce8424",
+        "ja4": "t13d497h2_0d8feac7bc37_7395dae3b2f3",
+        "peetprint_hash": "0d6ceceb9e71ec096d2022ad0651e2f2",
+        "akamai_h2_hash": "64a832f547be33249bf4d33e8a46c5dc",
+        "akamai_h2": "3:100;4:10485760;2:0|1048510465|0|m,s,a,p",
+        "cipher_count": 49,
+        "extension_count": 7
+      },
+      "challenge_signals": {
+        "just_a_moment": false,
+        "turnstile": false,
+        "captcha": false
+      }
+    },
+    {
+      "engine": "aginxbrowser",
+      "probe": "httpbin-headers",
+      "url": "https://httpbin.org/headers",
+      "elapsed_ms": 1089,
+      "tier": null,
+      "title": null,
+      "content_len": 0,
+      "content_head": "",
+      "fetch_error": "HTTP Error 500: Internal Server Error",
+      "tls_fingerprint_requested": null,
+      "fp": null,
+      "challenge_signals": {
+        "just_a_moment": false,
+        "cf_ray": false,
+        "turnstile": false,
+        "captcha": false
+      }
+    },
+    {
+      "engine": "curl",
+      "probe": "httpbin-headers",
+      "url": "https://httpbin.org/headers",
+      "elapsed_ms": 919,
+      "content_len": 184,
+      "content_head": "{\n  \"headers\": {\n    \"Accept\": \"*/*\", \n    \"Host\": \"httpbin.org\", \n    \"User-Agent\": \"curl/8.0-stealth-bench\", \n    \"X-Amzn-Trace-Id\": \"Root=1-6ad56ab8-0db4c845174fb3574e8b4cf0\"\n  }\n}\n",
+      "fetch_error": null,
+      "fp": {
+        "user_agent": null,
+        "http_version": null,
+        "ja3_hash": null,
+        "ja4": null,
+        "peetprint_hash": null,
+        "akamai_h2_hash": null,
+        "akamai_h2": null,
+        "cipher_count": 0,
+        "extension_count": 0
+      },
+      "challenge_signals": {
+        "just_a_moment": false,
+        "turnstile": false,
+        "captcha": false
+      }
+    },
+    {
+      "engine": "curl",
+      "probe": "cf-community",
+      "url": "https://community.cloudflare.com/",
+      "http_code": "403",
+      "effective_url": "https://community.cloudflare.com/",
+      "bytes": "5361",
+      "elapsed_ms": 4559,
+      "content_head": "<!DOCTYPE html><html lang=\"en-US\"><head><title>Just a moment...</title><meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\"><meta http-equiv=\"X-UA-Compatible\" content=\"IE=Edge\"><meta name=\"robots\" content=\"noindex,nofollow\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"content-security-policy\" content=\"default-src &#39;none&#39;; script-src &#39;nonce-lzighTXQzDjnQxBmPdSsc6&#39; &#39;unsafe-eval&#39; https://challenges.cloudflare.com; script-src-attr &#39;none&#39;; style-src &#39;unsafe-inline&#39;; img-src &#39;self&#39; https://challenges",
+      "challenge_signals": {
+        "just_a_moment": true,
+        "turnstile": false,
+        "checking_browser": false
+      }
+    },
+    {
+      "engine": "aginxbrowser",
+      "probe": "cf-community",
+      "url": "https://community.cloudflare.com/",
+      "elapsed_ms": 49374,
+      "tier": "browser",
+      "title": "community.cloudflare.com",
+      "content_len": 123,
+      "content_head": "community.cloudflare.com\n正在进行安全验证\n本网站使用安全服务防护恶意自动程序。在验证您不是自动程序期间，将显示此页面。\nRay ID: a4cbd2fa4b8ea609\n由 Cloudflare 提供的性能和安全服务隐私",
+      "fetch_error": null,
+      "tls_fingerprint_requested": null,
+      "fp": null,
+      "challenge_signals": {
+        "just_a_moment": false,
+        "cf_ray": false,
+        "turnstile": false,
+        "captcha": false
+      }
+    },
+    {
+      "engine": "aginxbrowser",
+      "probe": "example",
+      "url": "https://example.com/",
+      "elapsed_ms": 814,
+      "tier": "http",
+      "title": "Example Domain",
+      "content_len": 156,
+      "content_head": "This domain is for use in documentation examples without needing permission. This is not a service; avoid relying on it for testing and monitoring purposes.",
+      "fetch_error": null,
+      "tls_fingerprint_requested": null,
+      "fp": null,
+      "challenge_signals": {
+        "just_a_moment": false,
+        "cf_ray": false,
+        "turnstile": false,
+        "captcha": false
+      }
+    },
+    {
+      "engine": "curl",
+      "probe": "example",
+      "url": "https://example.com/",
+      "elapsed_ms": 635,
+      "content_len": 577,
+      "content_head": "<!doctype html><html lang=en><head><meta charset=utf-8><link rel=icon href=data:,><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>Example Domain</title><style>html{color-scheme:light dark;background:light-dark(#eee,#222)}body{font:16px/1.6 system-ui,sans-serif;max-width:26em;margin:auto;padding:25vh 2em 2em;text-align:center}</style></head><body><p>This domain is for use in documentation examples without needing permission. This is not a service; avoid relying on it for t",
+      "fetch_error": null,
+      "fp": null,
+      "challenge_signals": {
+        "just_a_moment": false,
+        "turnstile": false,
+        "captcha": false
+      }
+    },
+    {
+      "engine": "aginxbrowser",
+      "probe": "browserleaks-tls",
+      "url": "https://browserleaks.com/tls",
+      "elapsed_ms": 3538,
+      "tier": "browser",
+      "title": "TLS Client Test",
+      "content_len": 2398,
+      "content_head": "Home Page\nIP Address\nJavaScript\nWebRTC Leak Test\nCanvas Fingerprint\nWebGL Report\nFont Fingerprinting\nGeolocation API\nFeatures Detection\nTLS Client Test\nContent Filters\nMore Tools\nSettings\nTLS Client Test\nThis page displays your web browser's SSL/TLS capabilities, including supported TLS protocols, cipher suites, extensions, and key exchange groups. It highlights any weak or insecure options and generates a TLS fingerprint in JA3/JA4 formats. Additionally, it tests how your browser handles insecu",
+      "fetch_error": null,
+      "tls_fingerprint_requested": null,
+      "fp": null,
+      "challenge_signals": {
+        "just_a_moment": false,
+        "cf_ray": false,
+        "turnstile": false,
+        "captcha": false
+      }
+    },
+    {
+      "engine": "curl",
+      "probe": "browserleaks-tls",
+      "url": "https://browserleaks.com/tls",
+      "elapsed_ms": 1227,
+      "content_len": 54801,
+      "content_head": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"format-detection\" content=\"telephone=no\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>TLS Client Test - TLS Fingerprinting - BrowserLeaks</title>\n<meta name=\"description\" content=\"Check your browser's supported SSL/TLS protocols. Inspect TLS ClientHello, supported cipher suites, TLS extensions, test ECH support. Identify weak or insecure options, generate a JA3/JA4 TLS fingerprint, and test",
+      "fetch_error": null,
+      "fp": null,
+      "challenge_signals": {
+        "just_a_moment": false,
+        "turnstile": false,
+        "captcha": false
+      }
+    }
+  ]
+}

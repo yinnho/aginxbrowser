@@ -3,6 +3,8 @@
 记录 AginxBrowser 对各类反爬站点的实测结论、根因分析、以及未来的改进方向。
 基于实战调试（非理论），作为后续维护者的决策依据。
 
+> 公开 TLS/JA4 证据页（含 peet.ws 回执）：[`stealth-tls-comparison.zh-CN.md`](stealth-tls-comparison.zh-CN.md)
+
 ---
 
 ## 反爬检测的层级

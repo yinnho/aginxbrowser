@@ -1,0 +1,15 @@
+{
+  "engine": "curl",
+  "probe": "browserleaks-tls",
+  "url": "https://browserleaks.com/tls",
+  "elapsed_ms": 1227,
+  "content_len": 54801,
+  "content_head": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"format-detection\" content=\"telephone=no\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>TLS Client Test - TLS Fingerprinting - BrowserLeaks</title>\n<meta name=\"description\" content=\"Check your browser's supported SSL/TLS protocols. Inspect TLS ClientHello, supported cipher suites, TLS extensions, test ECH support. Identify weak or insecure options, generate a JA3/JA4 TLS fingerprint, and test",
+  "fetch_error": null,
+  "fp": null,
+  "challenge_signals": {
+    "just_a_moment": false,
+    "turnstile": false,
+    "captcha": false
+  }
+}
