@@ -1,0 +1,15 @@
+{
+  "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+  "http_version": "h2",
+  "tls": {
+    "ja3_hash": "2d692a4485ca2f5f2b10ecb2d2909ad3",
+    "ja4": "t13d1716h2_5b57614c22b0_eeeea6562960",
+    "peetprint_hash": "199f9cf4a47bfc51995a9f3942190094",
+    "cipher_count": 17,
+    "extension_count": 16
+  },
+  "http2": {
+    "akamai_fingerprint": "1:65536;2:0;4:131072;5:16384|12517377|0|m,p,a,s",
+    "akamai_fingerprint_hash": "6ea73faa8fc5aac76bded7bd238f6433"
+  }
+}

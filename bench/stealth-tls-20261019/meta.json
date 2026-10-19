@@ -1,12 +1,14 @@
 {
   "date_local": "2026-10-19 Asia/Shanghai",
+  "rerun": "tip",
+  "rerun_wall_clock": "2026-10-19 09:28 Asia/Shanghai",
   "aginx_health": {
     "capabilities": {
       "captcha_solver": false,
-      "screenshot": true,
+      "screenshot": false,
       "stealth": true
     },
-    "commit": "0e6f37d",
+    "commit": "9d43490",
     "engine": "diting",
     "status": "ok",
     "tls": "chrome145",
@@ -15,5 +17,6 @@
     "version": "0.6.0"
   },
   "machine": "darwin-arm64",
-  "notes": "Public fingerprint endpoints only; polite rate limits; no merchant APIs. Binary was local target/debug reporting commit 0e6f37d (PATH symlink), not Homebrew cellar. httpbin showed Sec-Ch-Ua v=145 under stealth until code override; TLS JA4 receipts still valid."
+  "binary": "local target/debug (cargo build --features stealth), NOT Homebrew",
+  "notes": "Tip re-run after Sec-Ch-Ua override (9af709f) + docs align (9d43490). /health commit 9d43490. JA4/H2 unchanged vs 0e6f37d matrix; CH now 154-aligned."
 }

@@ -1,0 +1,23 @@
+{
+  "date_local": "2026-10-19 Asia/Shanghai",
+  "rerun": "tip",
+  "rerun_wall_clock": "2026-10-19 09:28 Asia/Shanghai",
+  "binary": "local target/debug (cargo build --features stealth), NOT Homebrew",
+  "build_commit_env": "9d43490",
+  "aginx_health": {
+    "capabilities": {
+      "captcha_solver": false,
+      "screenshot": false,
+      "stealth": true
+    },
+    "commit": "9d43490",
+    "engine": "diting",
+    "status": "ok",
+    "tls": "chrome145",
+    "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+    "v8": "15.0.245.2-rusty",
+    "version": "0.6.0"
+  },
+  "machine": "darwin-arm64",
+  "notes": "Tip re-run after Sec-Ch-Ua override fix (9af709f) + docs align (9d43490). Peet matrix + httpbin + curl/chrome baselines."
+}

@@ -5,27 +5,38 @@ Raw receipts for the public comparison page:
 - English: [`docs/stealth-tls-comparison.md`](../../docs/stealth-tls-comparison.md)
 - 中文: [`docs/stealth-tls-comparison.zh-CN.md`](../../docs/stealth-tls-comparison.zh-CN.md)
 
+## Canonical tip run
+
+| Field | Value |
+|-------|-------|
+| `/health` commit | `9d43490` |
+| Binary | local `target/debug` (`cargo build --features stealth`), **not** Homebrew |
+| CH | UA + `Sec-Ch-Ua` both Chrome/154 (fix `9af709f`) |
+| JA4 vs first run (`0e6f37d`) | **unchanged** |
+
+Primary receipts use the `-tip` suffix (`aginx-peet-auto-*-tip.fp.json`). Older non-`-tip` peet files are the first-pass `0e6f37d` matrix kept for contrast.
+
 ## How to re-run
 
 ```bash
-# start a stealth-enabled binary built from this repo (or release/Homebrew 0.6.0+)
-# Note: the 2026-10-19 receipts used local target/debug @ 0e6f37d, not the cellar formula
-AGINXBROWSER_CACHE_TTL_SECS=0 AGINXBROWSER_BIND=127.0.0.1:18089 aginxbrowser &
-
-python3 bench/stealth-tls-20261019/run_probes.py
-# then the redo block in docs notes, or re-run the INDEX builder
+cd /path/to/aginxbrowser
+AGINXBROWSER_BUILD_COMMIT=$(git rev-parse --short HEAD) cargo build --features stealth
+AGINXBROWSER_CACHE_TTL_SECS=0 AGINXBROWSER_BIND=127.0.0.1:18089 ./target/debug/aginxbrowser &
+curl -sS http://127.0.0.1:18089/health   # expect commit == tip, stealth true
+# then tip probe harness (or adapt run_probes.py to write *-tip)
 ```
 
 ## Files to trust
 
 | File | Role |
 |------|------|
-| `INDEX.json` | Compact matrix + challenge outcomes |
-| `meta.json` | `/health` snapshot at run start |
-| `*-*.fp.json` | Slim JA3/JA4/Akamai hashes from peet.ws |
-| `*-*.summary.json` | Per-probe wall time, heads, challenge signals |
-| `run_probes.py` | First-pass harness (http tier; peet needs `auto`) |
+| `INDEX.json` | Compact matrix (tip) + challenge outcomes |
+| `meta.json` / `meta-tip.json` | `/health` snapshot for tip run |
+| `*-tip.fp.json` | Slim JA3/JA4/Akamai hashes from peet.ws (tip) |
+| `*-tip.summary.json` | Per-probe wall time / heads |
+| `aginx-httpbin-headers-auto-tip.*` | CH alignment proof (154/154) |
+| `run_probes.py` | First-pass harness |
 
 Do **not** treat JA3 as stable across GREASE; prefer JA4 + Akamai H2 hash.
 
-Chrome headless profile dir `_chrome_profile/` is local scratch — not committed.
+Chrome headless profile dirs `_chrome_profile*` are local scratch — not committed.

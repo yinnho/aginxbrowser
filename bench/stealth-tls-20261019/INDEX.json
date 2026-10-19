@@ -1,10 +1,15 @@
 {
   "date_local": "2026-10-19 Asia/Shanghai",
+  "rerun": "tip",
+  "rerun_wall_clock": "2026-10-19 09:28 Asia/Shanghai",
   "aginx_version": "0.6.0",
-  "aginx_commit_reported": "0e6f37d",
+  "aginx_commit_reported": "9d43490",
+  "aginx_binary": "local target/debug (cargo build --features stealth + AGINXBROWSER_BUILD_COMMIT), NOT Homebrew cellar",
   "aginx_tls_default": "chrome145",
   "aginx_ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
   "aginx_stealth": true,
+  "ja4_vs_prior_0e6f37d_matrix": "unchanged (JA4 + Akamai H2 identical for all rows; JA3 may drift with GREASE)",
+  "client_hints": "UA and Sec-Ch-Ua both Chrome/154 on tip (fix 9af709f)",
   "peet_matrix": [
     {
       "engine": "aginxbrowser",
@@ -12,11 +17,11 @@
       "target": "https://tls.peet.ws/api/all",
       "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
       "ja4": "t13d1516h2_8daaf6152771_d8a2da3f94cd",
-      "ja3_hash": "d248f2d9828c2a73963817145c9b679d",
+      "ja3_hash": "f0cfd47a9579646c4c7ff25cdc9b10c4",
       "peetprint_hash": "1d4ffe9b0e34acac0bd883fa7f79d7b5",
       "akamai_h2_hash": "52d84b11737d980aef856699f885ca86",
-      "elapsed_ms": 1372,
-      "receipt": "aginx-peet-auto-default.fp.json"
+      "elapsed_ms": 1287,
+      "receipt": "aginx-peet-auto-default-tip.fp.json"
     },
     {
       "engine": "aginxbrowser",
@@ -24,11 +29,11 @@
       "target": "https://tls.peet.ws/api/all",
       "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
       "ja4": "t13d1516h2_8daaf6152771_d8a2da3f94cd",
-      "ja3_hash": "8502ec77b1d02bea18cac11a3446aaf0",
+      "ja3_hash": "50622eba7b73f8fb25ae6a049da83bf8",
       "peetprint_hash": "1d4ffe9b0e34acac0bd883fa7f79d7b5",
       "akamai_h2_hash": "52d84b11737d980aef856699f885ca86",
-      "elapsed_ms": 2352,
-      "receipt": "aginx-peet-auto-chrome145.fp.json"
+      "elapsed_ms": 2101,
+      "receipt": "aginx-peet-auto-chrome145-tip.fp.json"
     },
     {
       "engine": "aginxbrowser",
@@ -39,8 +44,8 @@
       "ja3_hash": "2d692a4485ca2f5f2b10ecb2d2909ad3",
       "peetprint_hash": "199f9cf4a47bfc51995a9f3942190094",
       "akamai_h2_hash": "6ea73faa8fc5aac76bded7bd238f6433",
-      "elapsed_ms": 1471,
-      "receipt": "aginx-peet-auto-firefox133.fp.json"
+      "elapsed_ms": 2462,
+      "receipt": "aginx-peet-auto-firefox133-tip.fp.json"
     },
     {
       "engine": "aginxbrowser",
@@ -51,8 +56,8 @@
       "ja3_hash": "773906b0efdefa24a7f2b8eb6985bf37",
       "peetprint_hash": "b2bafdc69377086c3416be278fd21121",
       "akamai_h2_hash": "d4a2dcbfde511b5040ed5a5190a8d78b",
-      "elapsed_ms": 1265,
-      "receipt": "aginx-peet-auto-safari18.fp.json"
+      "elapsed_ms": 1267,
+      "receipt": "aginx-peet-auto-safari18-tip.fp.json"
     },
     {
       "engine": "aginxbrowser",
@@ -60,11 +65,11 @@
       "target": "https://tls.peet.ws/api/all",
       "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
       "ja4": "t13d1516h2_8daaf6152771_d8a2da3f94cd",
-      "ja3_hash": "e7d6c155e772f215424c8fc7fb6afa18",
+      "ja3_hash": "e3ce3ec40845a67b71de8d3ccceb98eb",
       "peetprint_hash": "1d4ffe9b0e34acac0bd883fa7f79d7b5",
       "akamai_h2_hash": "52d84b11737d980aef856699f885ca86",
-      "elapsed_ms": 1372,
-      "receipt": "aginx-peet-auto-edge145.fp.json"
+      "elapsed_ms": 1414,
+      "receipt": "aginx-peet-auto-edge145-tip.fp.json"
     },
     {
       "engine": "chrome-headless",
@@ -72,11 +77,11 @@
       "target": "https://tls.peet.ws/api/all",
       "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
       "ja4": "t13d1517h2_8daaf6152771_cb7bf5808d99",
-      "ja3_hash": "4dde2f451d2674f66a832e7bd30664ac",
+      "ja3_hash": "920d842d5c927bff2b08b481aba3125d",
       "peetprint_hash": "fc97c1cdfb1409c9a9326c1b726d1dee",
       "akamai_h2_hash": "52d84b11737d980aef856699f885ca86",
-      "elapsed_ms": 1998,
-      "receipt": "chrome-peet.fp.json"
+      "elapsed_ms": 4381,
+      "receipt": "chrome-peet-tip.fp.json"
     },
     {
       "engine": "curl",
@@ -87,8 +92,8 @@
       "ja3_hash": "375c6162a492dfbf2795909110ce8424",
       "peetprint_hash": "0d6ceceb9e71ec096d2022ad0651e2f2",
       "akamai_h2_hash": "64a832f547be33249bf4d33e8a46c5dc",
-      "elapsed_ms": 588,
-      "receipt": "curl-peet.fp.json"
+      "elapsed_ms": 564,
+      "receipt": "curl-peet-tip.fp.json"
     }
   ],
   "challenge_probes": [
@@ -96,29 +101,25 @@
       "engine": "curl",
       "target": "https://community.cloudflare.com/",
       "http_code": "403",
-      "outcome": "Just a moment\u2026 interstitial (challenge page)",
-      "receipt": "curl-cf-community.summary.json"
+      "outcome": "Just a moment… interstitial (challenge page)",
+      "receipt": "curl-cf-community.summary.json",
+      "note": "from earlier same-day run; not re-probed on tip (TLS shape unchanged)"
     },
     {
       "engine": "aginxbrowser",
       "target": "https://community.cloudflare.com/",
       "http_code": "200 (API)",
-      "outcome": "Detected CF challenge; cf_clearance wait timed out (25s); returned Chinese interstitial \u201c\u6b63\u5728\u8fdb\u884c\u5b89\u5168\u9a8c\u8bc1\u201d \u2014 NOT a bypass",
-      "receipt": "aginx-cf-community-auto.summary.json"
+      "outcome": "Detected CF challenge; cf_clearance wait timed out (25s); returned Chinese interstitial — NOT a bypass",
+      "receipt": "aginx-cf-community-auto.summary.json",
+      "note": "from earlier same-day run; not re-probed on tip"
     },
     {
       "engine": "aginxbrowser",
       "target": "https://blog.cloudflare.com/kitesurf/",
       "http_code": "200",
-      "outcome": "Full article body (~21k chars markdown) via tier=http \u2014 site did not challenge this exit",
-      "receipt": "aginx-cf-blog.summary.json"
-    },
-    {
-      "engine": "curl",
-      "target": "https://blog.cloudflare.com/kitesurf/",
-      "http_code": "200",
-      "outcome": "Full HTML (~349k) \u2014 same exit, no challenge",
-      "receipt": "meta.json"
+      "outcome": "Full article body (~21k chars markdown) via tier=http — site did not challenge this exit",
+      "receipt": "aginx-cf-blog.summary.json",
+      "note": "from earlier same-day run; not re-probed on tip"
     }
   ],
   "not_run": [
@@ -135,15 +136,16 @@
       "reason": "Not installed as a standalone binary on this machine"
     }
   ],
-  "client_hints_fix": {
-    "probe": "httpbin.org/headers after Sec-Ch-Ua override fix",
-    "health_commit": "3065b4f",
+  "client_hints_tip": {
+    "probe": "httpbin.org/headers on tip binary 9d43490",
+    "health_commit": "9d43490",
     "tier": "browser",
     "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
     "sec_ch_ua": "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\"",
     "sec_ch_ua_platform": "\"macOS\"",
     "aligned_ua_and_ch": true,
-    "receipt": "aginx-httpbin-headers-auto-after-ch-fix.raw.json",
-    "contrast_with": "aginx-httpbin-headers-auto.raw.json (pre-fix: UA 154 + CH v=145)"
-  }
+    "receipt": "aginx-httpbin-headers-auto-tip.raw.json",
+    "contrast_with_pre_fix": "aginx-httpbin-headers-auto.raw.json (UA 154 + CH v=145 on 0e6f37d)"
+  },
+  "prior_matrix_receipts": "aginx-peet-auto-*.fp.json without -tip suffix (0e6f37d); kept for contrast"
 }

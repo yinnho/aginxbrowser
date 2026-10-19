@@ -1,0 +1,211 @@
+{
+  "meta": {
+    "date_local": "2026-10-19 Asia/Shanghai",
+    "rerun": "tip",
+    "rerun_wall_clock": "2026-10-19 09:28 Asia/Shanghai",
+    "binary": "local target/debug (cargo build --features stealth), NOT Homebrew",
+    "build_commit_env": "9d43490",
+    "aginx_health": {
+      "capabilities": {
+        "captcha_solver": false,
+        "screenshot": false,
+        "stealth": true
+      },
+      "commit": "9d43490",
+      "engine": "diting",
+      "status": "ok",
+      "tls": "chrome145",
+      "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+      "v8": "15.0.245.2-rusty",
+      "version": "0.6.0"
+    },
+    "machine": "darwin-arm64",
+    "notes": "Tip re-run after Sec-Ch-Ua override fix (9af709f) + docs align (9d43490). Peet matrix + httpbin + curl/chrome baselines."
+  },
+  "results": [
+    {
+      "engine": "aginxbrowser",
+      "probe": "peet-auto-default",
+      "url": "https://tls.peet.ws/api/all",
+      "elapsed_ms": 1287,
+      "tier": "browser",
+      "title": null,
+      "content_len": 8851,
+      "content_head": "{\n\"donate\": \"Please consider donating to keep this API running. Visit https://tls.peet.ws\",\n\"ip\": \"180.102.32.160:41162\",\n\"http_version\": \"h2\",\n\"method\": \"GET\",\n\"user_agent\": \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36\",\n\"tls\": {\n\"ciphers\": [\n\"TLS_GREASE (0xDADA)\",\n\"TLS_AES_128_GCM_SHA256\",\n\"TLS_AES_256_GCM_SHA384\",\n\"TLS_CHACHA20_POLY1305_SHA256\",\n\"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256\",\n\"TLS_ECDHE_RSA_WITH_AES_128_GCM_",
+      "fetch_error": null,
+      "tls_fingerprint_requested": null,
+      "fp": {
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+        "http_version": "h2",
+        "ja3_hash": "f0cfd47a9579646c4c7ff25cdc9b10c4",
+        "ja4": "t13d1516h2_8daaf6152771_d8a2da3f94cd",
+        "peetprint_hash": "1d4ffe9b0e34acac0bd883fa7f79d7b5",
+        "akamai_h2_hash": "52d84b11737d980aef856699f885ca86",
+        "akamai_h2": "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p",
+        "cipher_count": 16,
+        "extension_count": 18
+      },
+      "binary_note": "local target/debug tip rebuild, not Homebrew"
+    },
+    {
+      "engine": "aginxbrowser",
+      "probe": "peet-auto-chrome145",
+      "url": "https://tls.peet.ws/api/all",
+      "elapsed_ms": 2101,
+      "tier": "browser",
+      "title": null,
+      "content_len": 8915,
+      "content_head": "{\n\"donate\": \"Please consider donating to keep this API running. Visit https://tls.peet.ws\",\n\"ip\": \"180.102.32.160:41280\",\n\"http_version\": \"h2\",\n\"method\": \"GET\",\n\"user_agent\": \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36\",\n\"tls\": {\n\"ciphers\": [\n\"TLS_GREASE (0xBABA)\",\n\"TLS_AES_128_GCM_SHA256\",\n\"TLS_AES_256_GCM_SHA384\",\n\"TLS_CHACHA20_POLY1305_SHA256\",\n\"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256\",\n\"TLS_ECDHE_RSA_WITH_AES_128_GCM_",
+      "fetch_error": null,
+      "tls_fingerprint_requested": "chrome145",
+      "fp": {
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+        "http_version": "h2",
+        "ja3_hash": "50622eba7b73f8fb25ae6a049da83bf8",
+        "ja4": "t13d1516h2_8daaf6152771_d8a2da3f94cd",
+        "peetprint_hash": "1d4ffe9b0e34acac0bd883fa7f79d7b5",
+        "akamai_h2_hash": "52d84b11737d980aef856699f885ca86",
+        "akamai_h2": "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p",
+        "cipher_count": 16,
+        "extension_count": 18
+      },
+      "binary_note": "local target/debug tip rebuild, not Homebrew"
+    },
+    {
+      "engine": "aginxbrowser",
+      "probe": "peet-auto-firefox133",
+      "url": "https://tls.peet.ws/api/all",
+      "elapsed_ms": 2462,
+      "tier": "browser",
+      "title": null,
+      "content_len": 9136,
+      "content_head": "{\n\"donate\": \"Please consider donating to keep this API running. Visit https://tls.peet.ws\",\n\"ip\": \"180.102.32.160:41360\",\n\"http_version\": \"h2\",\n\"method\": \"GET\",\n\"user_agent\": \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36\",\n\"tls\": {\n\"ciphers\": [\n\"TLS_AES_128_GCM_SHA256\",\n\"TLS_CHACHA20_POLY1305_SHA256\",\n\"TLS_AES_256_GCM_SHA384\",\n\"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256\",\n\"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256\",\n\"TLS_ECDHE_ECD",
+      "fetch_error": null,
+      "tls_fingerprint_requested": "firefox133",
+      "fp": {
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+        "http_version": "h2",
+        "ja3_hash": "2d692a4485ca2f5f2b10ecb2d2909ad3",
+        "ja4": "t13d1716h2_5b57614c22b0_eeeea6562960",
+        "peetprint_hash": "199f9cf4a47bfc51995a9f3942190094",
+        "akamai_h2_hash": "6ea73faa8fc5aac76bded7bd238f6433",
+        "akamai_h2": "1:65536;2:0;4:131072;5:16384|12517377|0|m,p,a,s",
+        "cipher_count": 17,
+        "extension_count": 16
+      },
+      "binary_note": "local target/debug tip rebuild, not Homebrew"
+    },
+    {
+      "engine": "aginxbrowser",
+      "probe": "peet-auto-safari18",
+      "url": "https://tls.peet.ws/api/all",
+      "elapsed_ms": 1267,
+      "tier": "browser",
+      "title": null,
+      "content_len": 6029,
+      "content_head": "{\n\"donate\": \"Please consider donating to keep this API running. Visit https://tls.peet.ws\",\n\"ip\": \"180.102.32.160:41455\",\n\"http_version\": \"h2\",\n\"method\": \"GET\",\n\"user_agent\": \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36\",\n\"tls\": {\n\"ciphers\": [\n\"TLS_GREASE (0xDADA)\",\n\"TLS_AES_128_GCM_SHA256\",\n\"TLS_AES_256_GCM_SHA384\",\n\"TLS_CHACHA20_POLY1305_SHA256\",\n\"TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384\",\n\"TLS_ECDHE_ECDSA_WITH_AES_128_GC",
+      "fetch_error": null,
+      "tls_fingerprint_requested": "safari18",
+      "fp": {
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+        "http_version": "h2",
+        "ja3_hash": "773906b0efdefa24a7f2b8eb6985bf37",
+        "ja4": "t13d2014h2_a09f3c656075_14788d8d241b",
+        "peetprint_hash": "b2bafdc69377086c3416be278fd21121",
+        "akamai_h2_hash": "d4a2dcbfde511b5040ed5a5190a8d78b",
+        "akamai_h2": "2:0;3:100;4:2097152;8:1;9:1|10420225|0|m,s,a,p",
+        "cipher_count": 21,
+        "extension_count": 16
+      },
+      "binary_note": "local target/debug tip rebuild, not Homebrew"
+    },
+    {
+      "engine": "aginxbrowser",
+      "probe": "peet-auto-edge145",
+      "url": "https://tls.peet.ws/api/all",
+      "elapsed_ms": 1414,
+      "tier": "browser",
+      "title": null,
+      "content_len": 8787,
+      "content_head": "{\n\"donate\": \"Please consider donating to keep this API running. Visit https://tls.peet.ws\",\n\"ip\": \"180.102.32.160:41531\",\n\"http_version\": \"h2\",\n\"method\": \"GET\",\n\"user_agent\": \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36\",\n\"tls\": {\n\"ciphers\": [\n\"TLS_GREASE (0xFAFA)\",\n\"TLS_AES_128_GCM_SHA256\",\n\"TLS_AES_256_GCM_SHA384\",\n\"TLS_CHACHA20_POLY1305_SHA256\",\n\"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256\",\n\"TLS_ECDHE_RSA_WITH_AES_128_GCM_",
+      "fetch_error": null,
+      "tls_fingerprint_requested": "edge145",
+      "fp": {
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+        "http_version": "h2",
+        "ja3_hash": "e3ce3ec40845a67b71de8d3ccceb98eb",
+        "ja4": "t13d1516h2_8daaf6152771_d8a2da3f94cd",
+        "peetprint_hash": "1d4ffe9b0e34acac0bd883fa7f79d7b5",
+        "akamai_h2_hash": "52d84b11737d980aef856699f885ca86",
+        "akamai_h2": "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p",
+        "cipher_count": 16,
+        "extension_count": 18
+      },
+      "binary_note": "local target/debug tip rebuild, not Homebrew"
+    },
+    {
+      "engine": "curl",
+      "probe": "peet",
+      "url": "https://tls.peet.ws/api/all",
+      "elapsed_ms": 564,
+      "content_len": 7162,
+      "content_head": "{\n  \"donate\": \"Please consider donating to keep this API running. Visit https://tls.peet.ws\",\n  \"ip\": \"180.102.32.160:41657\",\n  \"http_version\": \"h2\",\n  \"method\": \"GET\",\n  \"user_agent\": \"curl/8.0-stealth-bench\",\n  \"tls\": {\n    \"ciphers\": [\n      \"TLS_CHACHA20_POLY1305_SHA256\",\n      \"TLS_AES_256_GCM_SHA384\",\n      \"TLS_AES_128_GCM_SHA256\",\n      \"TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256\",\n      \"TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256\",\n      \"TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256\",\n",
+      "fetch_error": null,
+      "fp": {
+        "user_agent": "curl/8.0-stealth-bench",
+        "http_version": "h2",
+        "ja3_hash": "375c6162a492dfbf2795909110ce8424",
+        "ja4": "t13d497h2_0d8feac7bc37_7395dae3b2f3",
+        "peetprint_hash": "0d6ceceb9e71ec096d2022ad0651e2f2",
+        "akamai_h2_hash": "64a832f547be33249bf4d33e8a46c5dc",
+        "akamai_h2": "3:100;4:10485760;2:0|1048510465|0|m,s,a,p",
+        "cipher_count": 49,
+        "extension_count": 7
+      }
+    },
+    {
+      "engine": "chrome-headless",
+      "probe": "peet",
+      "url": "https://tls.peet.ws/api/all",
+      "elapsed_ms": 4381,
+      "content_len": 11297,
+      "content_head": "<html><head><meta name=\"color-scheme\" content=\"light dark\"><meta charset=\"utf-8\"></head><body><pre>{\n  \"donate\": \"Please consider donating to keep this API running. Visit https://tls.peet.ws\",\n  \"ip\": \"180.102.32.160:41736\",\n  \"http_version\": \"h2\",\n  \"method\": \"GET\",\n  \"user_agent\": \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36\",\n  \"tls\": {\n    \"ciphers\": [\n      \"TLS_GREASE (0x1A1A)\",\n      \"TLS_AES_128_GCM_SHA256\"",
+      "fetch_error": null,
+      "fp": {
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+        "http_version": "h2",
+        "ja3_hash": "920d842d5c927bff2b08b481aba3125d",
+        "ja4": "t13d1517h2_8daaf6152771_cb7bf5808d99",
+        "peetprint_hash": "fc97c1cdfb1409c9a9326c1b726d1dee",
+        "akamai_h2_hash": "52d84b11737d980aef856699f885ca86",
+        "akamai_h2": "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p",
+        "cipher_count": 16,
+        "extension_count": 19
+      }
+    },
+    {
+      "engine": "aginxbrowser",
+      "probe": "httpbin-headers-auto",
+      "url": "https://httpbin.org/headers",
+      "elapsed_ms": 1977,
+      "tier": "browser",
+      "title": null,
+      "content_len": 788,
+      "content_head": "{\n\"headers\": {\n\"Accept\": \"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7\",\n\"Accept-Encoding\": \"zstd,gzip,deflate,br\",\n\"Accept-Language\": \"zh-CN,zh;q=0.9\",\n\"Host\": \"httpbin.org\",\n\"Priority\": \"u=0, i\",\n\"Sec-Ch-Ua\": \"\\\"Chromium\\\";v=\\\"154\\\", \\\"Google Chrome\\\";v=\\\"154\\\", \\\"Not A(Brand\\\";v=\\\"99\\\"\",\n\"Sec-Ch-Ua-Mobile\": \"?0\",\n\"Sec-Ch-Ua-Platform\": \"\\\"macOS\\\"\",\n\"Sec-Fetch-Dest\": \"document\",\n\"Sec-Fetch-Mode\": \"navigat",
+      "fetch_error": null,
+      "tls_fingerprint_requested": null,
+      "fp": {
+        "user_agent": null,
+        "http_version": null,
+        "ja3_hash": null,
+        "ja4": null,
+        "peetprint_hash": null,
+        "akamai_h2_hash": null,
+        "akamai_h2": null,
+        "cipher_count": 0,
+        "extension_count": 0
+      },
+      "binary_note": "local target/debug tip rebuild, not Homebrew"
+    }
+  ]
+}
