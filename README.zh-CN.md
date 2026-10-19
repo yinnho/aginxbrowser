@@ -158,7 +158,7 @@ npx skills add yinnho/aginxbrowser
 1. 装 v0.6.0 到本机并确认健康：
    # 首选——当前 release 二进制（install.sh 自动选平台）：
    curl -fsSL https://browser.aginx.net/install.sh -o install.sh && less install.sh && bash install.sh
-   # 可选 Homebrew（tap 可能落后于 GitHub releases——装完用 `aginxbrowser --version` 核对）：
+   # 可选 Homebrew（tap 已跟到 v0.6.0；装完仍用 `aginxbrowser --version` 核对）：
    #   brew trust yinnho/aginxbrowser && brew install yinnho/aginxbrowser/aginxbrowser
    aginxbrowser doctor   # 然后启动：aginxbrowser（监听 0.0.0.0:8089）
    curl http://127.0.0.1:8089/health
@@ -182,10 +182,11 @@ less install.sh && bash install.sh
 # GitHub 慢/被墙？AGINXBROWSER_GH_PROXY=https://ghfast.top/ bash install.sh
 aginxbrowser doctor   # 特性 + 字体 + 出口自检
 
-# 可选：Homebrew（7+ 需先 trust）。tap 可能落后于 GitHub releases——
-# 装完用 `aginxbrowser --version` 核对。
+# 可选：Homebrew（7+ 需先 trust）。tap 已在 v0.6.0——
+# 装完 / 升级后仍用 `aginxbrowser --version` 核对。
 # brew trust yinnho/aginxbrowser
 # brew install yinnho/aginxbrowser/aginxbrowser
+# brew upgrade aginxbrowser
 
 # 或源码构建（--features stealth,screenshot，不带会掉这两项能力）
 cargo build --release --features stealth,screenshot

@@ -27,7 +27,7 @@ AginxBrowser 的定位（V8 + 内联 Obscura 自研 DOM + wreq stealth）覆盖 
 
 | 层 | 实现 | 状态 |
 |----|------|------|
-| TLS 指纹 | wreq（BoringSSL）Chrome145 emulation，`EmulationOS` 从 UA 推导保持自洽 | ✅ |
+| TLS 指纹 | wreq（BoringSSL）`chrome145` 形 emulation；舰队 UA / Sec-CH-UA 为 Chrome/154，与预设名可不一致 | ✅ |
 | HTTP/2 指纹 | wreq emulation 内置 | ✅ |
 | HTTP header | `ObscuraHttpClient`/`StealthHttpClient` 注入 Chrome sec-ch-ua / sec-fetch | ✅ |
 | JS navigator | `bootstrap.js` 的 `userAgent`/`platform`/`language` 从 `__obscura_ua` 动态推导 | ✅ |

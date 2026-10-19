@@ -15,5 +15,5 @@
     "version": "0.6.0"
   },
   "machine": "darwin-arm64",
-  "notes": "Public fingerprint endpoints only; polite rate limits; no merchant APIs."
+  "notes": "Public fingerprint endpoints only; polite rate limits; no merchant APIs. Binary was local target/debug reporting commit 0e6f37d (PATH symlink), not Homebrew cellar. httpbin showed Sec-Ch-Ua v=145 under stealth until code override; TLS JA4 receipts still valid."
 }

@@ -39,14 +39,14 @@ less install.sh
 bash install.sh
 ```
 
-自动识别平台、下载预编译二进制、SHA-256 校验、装到 `/usr/local/bin` 或 `~/.local/bin`（`AGINXBROWSER_BIN_DIR=...` 改路径、`AGINXBROWSER_VERSION=v0.5.x` 钉版本），收尾跑一次自检。
+自动识别平台、下载预编译二进制、SHA-256 校验、装到 `/usr/local/bin` 或 `~/.local/bin`（`AGINXBROWSER_BIN_DIR=...` 改路径、`AGINXBROWSER_VERSION=v0.6.0` 钉版本），收尾跑一次自检。
 
 ### 方式 C：手动下载预编译二进制
 
 各 release 提供预编译二进制（macOS Apple Silicon / Linux x86_64 / Windows x86_64；Windows 资产从 v0.3.1 起提供——v0.2.10 砍掉了 Intel-macOS 资产，它烤进去的 V8 snapshot 架构不对）：
 
 ```bash
-VER=v0.5.26
+VER=v0.6.0
 OS=$(uname -s); ARCH=$(uname -m)
 case "$OS-$ARCH" in
   Darwin-arm64)  T=aarch64-apple-darwin ;;

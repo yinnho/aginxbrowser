@@ -42,14 +42,14 @@ less install.sh
 bash install.sh
 ```
 
-Detects your platform, downloads the prebuilt binary, verifies the SHA-256, installs to `/usr/local/bin` or `~/.local/bin` (override with `AGINXBROWSER_BIN_DIR=...`, pin with `AGINXBROWSER_VERSION=v0.5.x`), and finishes with a self-check.
+Detects your platform, downloads the prebuilt binary, verifies the SHA-256, installs to `/usr/local/bin` or `~/.local/bin` (override with `AGINXBROWSER_BIN_DIR=...`, pin with `AGINXBROWSER_VERSION=v0.6.0`), and finishes with a self-check.
 
 ### Option C: Manual prebuilt download
 
 Prebuilt binaries per release (macOS Apple Silicon / Linux x86_64 / Windows x86_64; Windows assets ship from v0.3.1 — the Intel-macOS asset was dropped in v0.2.10, its baked V8 snapshot carried the wrong architecture):
 
 ```bash
-VER=v0.5.26
+VER=v0.6.0
 OS=$(uname -s); ARCH=$(uname -m)
 case "$OS-$ARCH" in
   Darwin-arm64)  T=aarch64-apple-darwin ;;

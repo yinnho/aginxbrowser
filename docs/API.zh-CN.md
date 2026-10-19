@@ -48,7 +48,7 @@ curl http://127.0.0.1:8089/health
   "engine": "diting",
   "version": "0.3.1",
   "commit": "a1b2c3d",
-  "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+  "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
   "tls": "chrome145",
   "capabilities": { "screenshot": true, "stealth": true, "captcha_solver": false }
 }
@@ -90,8 +90,8 @@ curl http://127.0.0.1:8089/health
 
 | 值 | 说明 |
 |----|------|
-| `null` | 默认 Chrome145 |
-| `"chrome145"` | Chrome 145 |
+| `null` | 默认（`chrome145` TLS 形；舰队 UA 为 Chrome/154） |
+| `"chrome145"` | Chrome 族 TLS 形（wreq-util Chrome145；不是 UA 主版本） |
 | `"firefox133"` | Firefox 133 |
 | `"firefox147"` | Firefox 147 |
 | `"safari17_5"` | Safari 17.5 |
@@ -876,7 +876,7 @@ curl -sS -X POST http://127.0.0.1:8089/session/create \
   "cookie_count": 12,
   "method": "GET",
   "has_body": false,
-  "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/145.0.0.0",
+  "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/154.0.0.0",
   "authorization_prefix": "Bearer eyJhbGciOi…",
   "expires_in_secs": 480,
   "note": "login state injected; navigate with session tools"
@@ -1036,7 +1036,7 @@ curl -sS -X POST http://127.0.0.1:8089/render_markdown \
 |------|------|------|
 | `AGINXBROWSER_BIND` | `127.0.0.1:8089` | HTTP 服务监听地址 |
 | `AGINXBROWSER_STEALTH` | 启用 | `0` 关闭 stealth（诊断用） |
-| `AGINXBROWSER_UA` | macOS Chrome145 persona | 浏览器流量的伪装 UA（指纹池钉住的 persona——本实例实际呈现什么看 `/health` 的 `ua`；搜索引擎传输层另用自己的默认值）。UA 的浏览器家族/主版本与 TLS 指纹（默认 chrome145）不一致时，启动会打 `fingerprint mismatch` 警告——保持成对一致才能不漏指纹 |
+| `AGINXBROWSER_UA` | macOS Chrome/154 persona | 浏览器流量的伪装 UA（指纹池钉住的 persona——本实例实际呈现什么看 `/health` 的 `ua`；搜索引擎传输层另用自己的默认值）。舰队 UA 为 Chrome/154；TLS 预设名仍为 `chrome145`（形）。UA 浏览器*家族*与 TLS 指纹家族不一致时启动会打 `fingerprint mismatch` 警告——Chrome 族 UA 配 chrome/edge 预设 |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 缓存 TTL（秒），`0` 禁用 |
 | `AGINXBROWSER_DOWNLOAD_DIR` | `.` | `/download` 落盘目录 |

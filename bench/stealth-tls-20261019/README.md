@@ -8,7 +8,8 @@ Raw receipts for the public comparison page:
 ## How to re-run
 
 ```bash
-# start a stealth-enabled binary (release/Homebrew 0.6.0+)
+# start a stealth-enabled binary built from this repo (or release/Homebrew 0.6.0+)
+# Note: the 2026-10-19 receipts used local target/debug @ 0e6f37d, not the cellar formula
 AGINXBROWSER_CACHE_TTL_SECS=0 AGINXBROWSER_BIND=127.0.0.1:18089 aginxbrowser &
 
 python3 bench/stealth-tls-20261019/run_probes.py

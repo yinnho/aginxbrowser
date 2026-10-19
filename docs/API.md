@@ -49,7 +49,7 @@ Response:
   "version": "0.3.1",
   "commit": "a1b2c3d",
   "v8": "15.0.274.2",
-  "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+  "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
   "tls": "chrome145",
   "capabilities": { "screenshot": true, "stealth": true, "captcha_solver": false, "ffmpeg": { "version": "8.1.1" } }
 }
@@ -95,8 +95,8 @@ Fetch a page and return its content. Supports tiered rendering, automatic Cloudf
 
 | Value | Description |
 |----|------|
-| `null` | Default Chrome145 |
-| `"chrome145"` | Chrome 145 |
+| `null` | Default (`chrome145` TLS shape; fleet UA is Chrome/154) |
+| `"chrome145"` | Chrome-family TLS shape (wreq-util Chrome145; not the UA major) |
 | `"firefox133"` | Firefox 133 |
 | `"firefox147"` | Firefox 147 |
 | `"safari17_5"` | Safari 17.5 |
@@ -828,7 +828,7 @@ Turn a DevTools **"Copy as cURL"** command into a logged-in browser session — 
   "cookie_count": 12,
   "method": "GET",
   "has_body": false,
-  "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/145.0.0.0",
+  "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/154.0.0.0",
   "authorization_prefix": "Bearer eyJhbGciOi…",
   "expires_in_secs": 480,
   "note": "login state injected; navigate with session tools"
@@ -891,7 +891,7 @@ Anonymous traffic shares one process-global cookie jar — deliberate (repeat-vi
 
 Attach a session with `account` on `POST /session/create` or `POST /import/curl` (1-64 chars of `[a-zA-Z0-9_-]`). The account is the persistence — account sessions don't need `persistent: true`.
 
-**Per-account device persona** — an identity is one stable *device*, not just one cookie jar. On first use an account draws a persona — a User-Agent from the Windows/macOS Chrome-145 pool plus a hardware seed that drives its `screen`/devicePixelRatio/GPU/canvas fingerprint — remembers both in its record, and reuses them for every later session, restarts included. Jar isolation alone can't stop risk-control linkage: two logins sharing one fingerprint read as "one device with two accounts". `import_curl` seeds the persona from the copied command's real User-Agent (the device the site already saw alongside those cookies). The pool is pinned to Chrome 145 so UA and the default TLS handshake never disagree; the hardware seed itself stays server-side — `GET /accounts` reports only the persona UA (`persona_ua`).
+**Per-account device persona** — an identity is one stable *device*, not just one cookie jar. On first use an account draws a persona — a User-Agent from the Windows/macOS Chrome/154 pool plus a hardware seed that drives its `screen`/devicePixelRatio/GPU/canvas fingerprint — remembers both in its record, and reuses them for every later session, restarts included. Jar isolation alone can't stop risk-control linkage: two logins sharing one fingerprint read as "one device with two accounts". `import_curl` seeds the persona from the copied command's real User-Agent (the device the site already saw alongside those cookies). The pool is pinned to Chrome/154 (fleet claim); the TLS handshake preset name remains `chrome145` (wreq-util JA3 *shape*, not the UA major). The hardware seed itself stays server-side — `GET /accounts` reports only the persona UA (`persona_ua`).
 
 **List accounts:**
 
@@ -903,8 +903,8 @@ curl -sS http://127.0.0.1:8089/accounts
 {
   "count": 2,
   "accounts": [
-    {"name": "taobao-publisher", "domains": ["taobao.com", "tmall.com"], "cookie_count": 34, "updated_at": 1762934400, "persona_ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36", "verify_url": "https://www.taobao.com/", "verify_predicate": "!!document.querySelector('.user-nick')", "verify_last": {"logged_in": true, "url": "https://www.taobao.com/", "checked_at": 1762934401}},
-    {"name": "taobao-scraper", "domains": ["taobao.com"], "cookie_count": 29, "updated_at": 1762933900, "persona_ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"}
+    {"name": "taobao-publisher", "domains": ["taobao.com", "tmall.com"], "cookie_count": 34, "updated_at": 1762934400, "persona_ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36", "verify_url": "https://www.taobao.com/", "verify_predicate": "!!document.querySelector('.user-nick')", "verify_last": {"logged_in": true, "url": "https://www.taobao.com/", "checked_at": 1762934401}},
+    {"name": "taobao-scraper", "domains": ["taobao.com"], "cookie_count": 29, "updated_at": 1762933900, "persona_ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"}
   ]
 }
 ```
@@ -1724,7 +1724,7 @@ curl -sS -X POST http://127.0.0.1:8089/render_markdown \
 | `AGINXBROWSER_TOKEN` | unset | Opt-in auth gate for the whole HTTP surface (#162). Unset = no gate (local dev keeps zero-config access). Set = every route requires the token via `Authorization: Bearer <t>` or `?token=<t>`; the human takeover view carries it too (`/live?session=…&token=…`). `/health` alone answers without a token, but only `{"status":"ok"}` — the build-identity detail (version/commit/UA/TLS/capabilities) needs the token (#246). Value must be 16+ chars of `[A-Za-z0-9_-]` (URL-safe so the header and query forms are the same string) — an invalid shape refuses to boot rather than serve a half-open surface |
 | `AGINXBROWSER_BIND` | `127.0.0.1:8089` | HTTP server listen address |
 | `AGINXBROWSER_STEALTH` | Enabled | `0` disables stealth (for diagnostics) |
-| `AGINXBROWSER_UA` | macOS Chrome145 persona | Spoofed User-Agent for browser traffic (a pinned persona from the fingerprint pool — see `/health`'s `ua` for what this instance presents; search-engine transports keep their own defaults). Startup logs a `fingerprint mismatch` warning when the UA's browser family/major version disagrees with the TLS fingerprint (default chrome145) — an intentionally coherent pair avoids a WAF tell |
+| `AGINXBROWSER_UA` | macOS Chrome/154 persona | Spoofed User-Agent for browser traffic (a pinned persona from the fingerprint pool — see `/health`'s `ua` for what this instance presents; search-engine transports keep their own defaults). Fleet UA is Chrome/154; TLS preset name stays `chrome145` (shape). Startup logs a `fingerprint mismatch` warning when the UA's browser *family* disagrees with the TLS fingerprint family — keep Chrome-family UA with chrome/edge presets |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language header |
 | `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` cache TTL (seconds); `0` disables |
 | `AGINXBROWSER_DOWNLOAD_DIR` | `.` | Directory where `/download` saves files |

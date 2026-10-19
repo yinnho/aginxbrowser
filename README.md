@@ -159,7 +159,7 @@ Set up aginxbrowser as your web access layer:
 1. Install v0.6.0 locally and verify it is healthy:
    # Preferred — current release binary (install.sh picks the platform):
    curl -fsSL https://browser.aginx.net/install.sh -o install.sh && less install.sh && bash install.sh
-   # Optional Homebrew (tap may lag behind GitHub releases — check `aginxbrowser --version`):
+   # Optional Homebrew (tap tracks v0.6.0; still verify with `aginxbrowser --version`):
    #   brew trust yinnho/aginxbrowser && brew install yinnho/aginxbrowser/aginxbrowser
    aginxbrowser doctor   # then start: aginxbrowser (listens on 0.0.0.0:8089)
    curl http://127.0.0.1:8089/health
@@ -183,10 +183,11 @@ less install.sh && bash install.sh
 # GitHub slow/blocked? AGINXBROWSER_GH_PROXY=https://ghfast.top/ bash install.sh
 aginxbrowser doctor   # features + fonts + egress self-check
 
-# Optional: Homebrew (7+ needs the trust line first). The tap can lag behind
-# GitHub releases — confirm with `aginxbrowser --version` after install.
+# Optional: Homebrew (7+ needs the trust line first). Tap is at v0.6.0 —
+# still verify with `aginxbrowser --version` after install / upgrade.
 # brew trust yinnho/aginxbrowser
 # brew install yinnho/aginxbrowser/aginxbrowser
+# brew upgrade aginxbrowser
 
 # Or build from source (--features stealth,screenshot or you lose both)
 cargo build --release --features stealth,screenshot

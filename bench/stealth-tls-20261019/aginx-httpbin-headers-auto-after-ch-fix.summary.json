@@ -1,0 +1,11 @@
+{
+  "probe": "httpbin.org/headers after Sec-Ch-Ua override fix",
+  "health_commit": "3065b4f",
+  "tier": "browser",
+  "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+  "sec_ch_ua": "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\"",
+  "sec_ch_ua_platform": "\"macOS\"",
+  "aligned_ua_and_ch": true,
+  "receipt": "aginx-httpbin-headers-auto-after-ch-fix.raw.json",
+  "contrast_with": "aginx-httpbin-headers-auto.raw.json (pre-fix: UA 154 + CH v=145)"
+}

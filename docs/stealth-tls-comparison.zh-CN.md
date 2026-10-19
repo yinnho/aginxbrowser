@@ -2,7 +2,7 @@
 
 [English](stealth-tls-comparison.md) | [中文](stealth-tls-comparison.zh-CN.md)
 
-> 快照：**2026-10-19 Asia/Shanghai** · AginxBrowser **0.6.0**（`/health` commit `0e6f37d`，`stealth: true`，默认 TLS 预设 `chrome145`，舰队 UA Chrome/154）  
+> 快照：**2026-10-19 Asia/Shanghai** · AginxBrowser **0.6.0**（探针用本地 debug 二进制，`/health` commit `0e6f37d`；当时 tip 之后多为文档/bootstrap 拆分，TLS 形未变。默认 TLS 预设名 `chrome145`，舰队 UA Chrome/154。初测发现 stealth 路径 `Sec-Ch-Ua` 仍为 v=145——已在后续提交覆盖为跟 UA）  
 > 原始回执：[`bench/stealth-tls-20261019/`](../bench/stealth-tls-20261019/) · 索引 [`INDEX.json`](../bench/stealth-tls-20261019/INDEX.json)
 
 本页量的是**线上握手长什么样**，不是「无法检测」营销分。下表数字均可在回执里复核；没跑到的竞品标 **待测**，并附公开文档引用。
@@ -26,7 +26,7 @@
 
 | 引擎 | 跑法 | 备注 |
 |------|------|------|
-| **aginxbrowser 0.6.0** | Homebrew，`POST /fetch` + `render_tier:"auto"`，可选 `tls_fingerprint` | 必跑 |
+| **aginxbrowser 0.6.0** | 本机 `target/debug`（`/health`=`0e6f37d`，非 cellar Homebrew），`POST /fetch` + `render_tier:"auto"`，可选 `tls_fingerprint` | 必跑 |
 | **curl** | macOS `/usr/bin/curl` | 无浏览器 TLS 伪装 |
 | **Google Chrome 155 headless** | `--headless=new --dump-dom` | 同机真 Chromium 基线 |
 | **Kitesurf / Lightpanda / Obscura** | **待测** | 本机无二进制 / 无 CF token — 见引用 |
@@ -34,7 +34,7 @@
 ### 边界（先读）
 
 - **不等于「防检测」。** JA4 像 Chrome 族 ≠ 站点放过你。JS/canvas、IP ASN、行为、验证码是别的层（见 [ANTI_BOT.md](ANTI_BOT.md)）。
-- **UA 与 TLS 预设可能不一致。** 舰队 UA 默认 Chrome/154，TLS 默认仍叫 `chrome145`。把 `tls_fingerprint` 切到 `firefox133` / `safari18` 会改 JA4/H2，**本构建不会同步改 UA**——会关联 UA 族与 TLS 的 WAF 仍可能报警。
+- **UA / TLS 预设名 / Client Hints 要对齐看。** 舰队 UA 默认 Chrome/154，TLS 预设名仍叫 `chrome145`（wreq-util 形）。把 `tls_fingerprint` 切到 `firefox133` / `safari18` 会改 JA4/H2，**本构建不会同步改 UA**。初测 receipt 里 httpbin 曾出现 **UA 154 + Sec-Ch-Ua v=145**（stealth 未覆盖 emulation 内嵌 CH）——见 `aginx-httpbin-headers-auto.raw.json`；代码已改为跟 UA 派生 CH。 复测见 [`aginx-httpbin-headers-auto-after-ch-fix.summary.json`](../bench/stealth-tls-20261019/aginx-httpbin-headers-auto-after-ch-fix.summary.json)（UA 与 CH 均为 154）。
 - **碰到挑战 ≠ 过关。** 等到 `cf_clearance` 超时也会如实记。
 - **不打商家/鉴权生产 API**（无千帆上架等）。
 - 探针间隔约 1–1.5s；只用公开指纹页。

@@ -2,7 +2,7 @@
 
 [English](stealth-tls-comparison.md) | [中文](stealth-tls-comparison.zh-CN.md)
 
-> Snapshot: **2026-10-19 Asia/Shanghai** · AginxBrowser **0.6.0** (`/health` commit `0e6f37d`, `stealth: true`, default TLS preset `chrome145`, fleet UA Chrome/154)  
+> Snapshot: **2026-10-19 Asia/Shanghai** · AginxBrowser **0.6.0** (probed with local debug binary, `/health` commit `0e6f37d`; later tip commits were mostly docs / bootstrap split — TLS shape unchanged. Default TLS preset name `chrome145`, fleet UA Chrome/154. Initial run showed stealth-path `Sec-Ch-Ua` still v=145 — fixed in a follow-up to track the UA)  
 > Raw receipts: [`bench/stealth-tls-20261019/`](../bench/stealth-tls-20261019/) · index [`INDEX.json`](../bench/stealth-tls-20261019/INDEX.json)
 
 This page measures **what the wire looks like**, not a marketing “undetectable” score. Numbers below come from the committed receipts; peer engines we did not run are labeled **not run** with citations.
@@ -26,7 +26,7 @@ This page measures **what the wire looks like**, not a marketing “undetectable
 
 | Engine | How run | Notes |
 |--------|---------|-------|
-| **aginxbrowser 0.6.0** | Homebrew binary, `POST /fetch` `render_tier:"auto"`, optional `tls_fingerprint` | Must-run. |
+| **aginxbrowser 0.6.0** | Local `target/debug` (`/health`=`0e6f37d`, not Homebrew cellar), `POST /fetch` `render_tier:"auto"`, optional `tls_fingerprint` | Must-run. |
 | **curl** | `/usr/bin/curl` on macOS | No browser TLS impersonation. |
 | **Google Chrome 155 headless** | `--headless=new --dump-dom` | Real Chromium baseline on the same machine. |
 | **Kitesurf / Lightpanda / Obscura** | **Not run** | No local binary / API token in this bench — see citations. |
@@ -34,7 +34,7 @@ This page measures **what the wire looks like**, not a marketing “undetectable
 ### Limits (read this)
 
 - **Not “undetectable.”** JA4 ≈ Chrome family ≠ site will accept you. JS canvas/WebGL, IP ASN, behavior, and challenge solvers are separate layers ([ANTI_BOT.md](ANTI_BOT.md)).
-- **UA vs TLS preset can diverge.** Fleet UA defaults to Chrome/154 while the default TLS preset is still named `chrome145`. Switching `tls_fingerprint` to `firefox133` / `safari18` changes JA4/H2 **without** rewriting the UA string in this build — a WAF that correlates UA family with TLS can still flag that. Startup already warns on family/major mismatch when configured that way.
+- **UA / TLS preset name / Client Hints must be read together.** Fleet UA defaults to Chrome/154; TLS preset name stays `chrome145` (wreq-util shape). Switching `tls_fingerprint` to `firefox133` / `safari18` changes JA4/H2 **without** rewriting the UA. The initial receipt showed **UA 154 + Sec-Ch-Ua v=145** on httpbin (stealth left the emulation bake-in) — see `aginx-httpbin-headers-auto.raw.json`; code now overrides CH from the UA. Re-probe: [`aginx-httpbin-headers-auto-after-ch-fix.summary.json`](../bench/stealth-tls-20261019/aginx-httpbin-headers-auto-after-ch-fix.summary.json) (UA and CH both 154).
 - **Challenge ≠ bypass.** Hitting a Cloudflare interstitial and waiting for `cf_clearance` is recorded honestly when it times out.
 - **No merchant / authenticated production APIs** were probed (no XHS Qianfan create, etc.).
 - **Rate limit:** ~1–1.5 s between probes; public fingerprint endpoints only.
