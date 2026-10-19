@@ -216,6 +216,8 @@ mod tests {
             "_webmsxyw",
             "resolveSigner",
             "resolveMnsv2",
+            "installMnsv2Bridge",
+            "mns_bridged",
             "mnsv2",
             "xyw_blocked",
             "isXywPoison",

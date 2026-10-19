@@ -1,11 +1,11 @@
 (() => {
-  // v7: v6 + ark mnsv2/XYS_ gate. Chrome ark publish_render needs
-  // window.mnsv2 → XYS_~408 + x-s-common (library-launcher fy+fU). When
-  // mnsv2 is missing, fy throws, page keeps only x-s-common, and v6
-  // resigned with www _webmsxyw (XYW_~668, no common) → stripped common →
-  // 300015. v7: mirror mnsv2; wait for it on ark PR; never resign PR with
-  // XYW_/no-common when page had common (soft-block instead of poison).
-  const XS_VER = 7;
+  // v8: v7 + TEMPORARY mnsv2 bridge. signV2Init WASM lands (xy_*/Instance +
+  // ~17 hashed VM stubs) but never aliases window.mnsv2 (bytecode maps
+  // xy_18d12*→mnsv2 and mns0101→_66062487*; neither write runs after
+  // WA.instantiate.then). Bridge: wrap Instance xy_18* (or 16-byte crypto
+  // stub) as window.mnsv2 so library-launcher fy() can mint XYS_. Remove
+  // when native alias is fixed.
+  const XS_VER = 8;
   let prev = null;
   try { if (typeof window.__xsStats === 'function') prev = window.__xsStats(); } catch (e) {}
   if (prev && prev.ver >= XS_VER) return 'already';
@@ -13,7 +13,7 @@
     ver: XS_VER, installed: 1, mirrored: 0, arkified: 0, swallowed: 0,
     passthrough: 0, passthrough_coherent: 0, common_stripped: 0, signed: 0,
     pr_held: 0, pr_blocked: 0, fuse: 0, replayed: 0, dropped: 0,
-    mns_mirrored: 0, xyw_blocked: 0,
+    mns_mirrored: 0, mns_bridged: 0, xyw_blocked: 0,
   };
   const bump = (k) => { stats[k] = (stats[k] || 0) + 1; };
   // Last publish_render decision + wire outcome (closure-only, surfaced via
@@ -71,6 +71,111 @@
       return window.mnsv2;
     } catch (e) { return null; }
   };
+
+  // TEMPORARY: synthesize window.mnsv2 from signV2Init WASM / VM crypto when
+  // the jsvmp skips the native alias (see commit receipt). Prefer xy_18*
+  // export (bytecode binds that name to mnsv2); fall back to a 16-byte
+  // hashed crypto stub if present.
+  const bytesToHex = (bytes, n) => {
+    const lim = Math.min(n || 16, bytes.length || 0);
+    let s = '';
+    for (let i = 0; i < lim; i++) {
+      const b = bytes[i] & 0xff;
+      s += (b < 16 ? '0' : '') + b.toString(16);
+    }
+    return s;
+  };
+  const findWasmMnsExport = () => {
+    try {
+      if (typeof WebAssembly === 'undefined' || !WebAssembly.Instance) return null;
+      const names = Object.getOwnPropertyNames(window);
+      for (let i = 0; i < names.length; i++) {
+        let inst;
+        try { inst = window[names[i]]; } catch (e) { continue; }
+        if (!inst || !(inst instanceof WebAssembly.Instance) || !inst.exports) continue;
+        const ex = inst.exports;
+        if (typeof ex.malloc !== 'function' || !ex.memory) continue;
+        let xy = null;
+        const keys = Object.keys(ex);
+        for (let k = 0; k < keys.length; k++) {
+          if (/^xy_18/.test(keys[k]) && typeof ex[keys[k]] === 'function') { xy = ex[keys[k]]; break; }
+        }
+        if (!xy) {
+          for (let k = 0; k < keys.length; k++) {
+            if (/^xy_/.test(keys[k]) && typeof ex[keys[k]] === 'function' && ex[keys[k]].length === 3) {
+              xy = ex[keys[k]]; break;
+            }
+          }
+        }
+        if (xy) return { xy: xy, malloc: ex.malloc, memory: ex.memory };
+      }
+    } catch (e) {}
+    return null;
+  };
+  const findCryptoStub = () => {
+    // Probe hashed helpers: mns core returns a 16-byte array-like from 3 strings.
+    // Guarded try/catch — other stubs throw or mutate; only accept clean 16-byte outs.
+    try {
+      const names = Object.getOwnPropertyNames(window);
+      for (let i = 0; i < names.length; i++) {
+        const k = names[i];
+        if (!/^_[0-9a-f]{32}$/.test(k)) continue;
+        const fn = window[k];
+        if (typeof fn !== 'function') continue;
+        try {
+          const out = fn('xs', 'bridge', 'probe');
+          if (out && typeof out === 'object' && out.length === 16) return fn;
+        } catch (e) {}
+      }
+    } catch (e) {}
+    return null;
+  };
+  const installMnsv2Bridge = () => {
+    try {
+      if (typeof window.mnsv2 === 'function' && window.mnsv2.__xsBridge) return window.mnsv2;
+      if (typeof window.mnsv2 === 'function' && !window.mnsv2.__xsBridge) return window.mnsv2; // native won
+      let bridge = null;
+      const wasm = findWasmMnsExport();
+      if (wasm) {
+        const enc = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
+        bridge = function mnsv2(a, b, d) {
+          const write = (s) => {
+            const str = String(s == null ? '' : s);
+            let u8;
+            if (enc) u8 = enc.encode(str);
+            else {
+              u8 = new Uint8Array(str.length);
+              for (let i = 0; i < str.length; i++) u8[i] = str.charCodeAt(i) & 0xff;
+            }
+            const p = wasm.malloc(u8.length + 1);
+            const he = new Uint8Array(wasm.memory.buffer, p, u8.length + 1);
+            he.set(u8); he[u8.length] = 0;
+            return p;
+          };
+          const r = wasm.xy(write(a), write(b), write(d));
+          const bytes = new Uint8Array(wasm.memory.buffer, r >>> 0, 32);
+          return bytesToHex(bytes, 16);
+        };
+        bridge.__xsBridge = 'xy18';
+      }
+      if (!bridge) {
+        const stub = findCryptoStub();
+        if (stub) {
+          bridge = function mnsv2(a, b, d) {
+            const out = stub(a, b, d);
+            return bytesToHex(out, 16);
+          };
+          bridge.__xsBridge = 'crypto-stub';
+        }
+      }
+      if (!bridge) return null;
+      window.mnsv2 = bridge;
+      try { if (window.proxy) window.proxy.mnsv2 = bridge; } catch (e2) {}
+      bump('mns_bridged');
+      return window.mnsv2;
+    } catch (e) { return null; }
+  };
+
   const isArkHost = () => {
     try { return /^ark\./i.test(location.hostname); } catch (e) { return false; }
   };
@@ -88,7 +193,12 @@
   };
   mirrorSigner();
   mirrorMnsv2();
-  const mirrorTimer = setInterval(() => { mirrorSigner(); mirrorMnsv2(); }, 200);
+  installMnsv2Bridge();
+  const mirrorTimer = setInterval(() => {
+    mirrorSigner();
+    mirrorMnsv2();
+    if (typeof window.mnsv2 !== 'function') installMnsv2Bridge();
+  }, 200);
   setTimeout(() => { try { clearInterval(mirrorTimer); } catch (e) {} }, 60000);
   // Only production xhs hosts — never sit/SSO ticket hosts (signing those
   // with the itemark AS signer can bounce the jar into customer.sit).
@@ -553,5 +663,5 @@
       _markNative(FM.fetch);
     }
   } catch (e) {}
-  return 'patched-v7-mnsv2-xys-gate';
+  return 'patched-v8-mnsv2-bridge';
 })()
