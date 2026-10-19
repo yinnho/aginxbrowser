@@ -5566,10 +5566,17 @@ class Element extends Node {
       return axis === "w" ? (globalThis.innerWidth || 1280) : (globalThis.innerHeight || 720);
     }
     if (_ditingDisplayNone(this)) return 0;
+    // Prefer font-box for inline-styled leaf text. Layout wins for everything
+    // else, but taffy ignores named font-family — FingerprintJS/Castle probes
+    // set style.fontFamily = "'Menlo',monospace" and compare offsetWidth to the
+    // bare generic; if layout always wins, every named face matches baseline
+    // and x29/fonts stays []. _ditingFontBox only fires when style._props has
+    // font + leaf textContent (the probe shape), so page layout is untouched.
+    const m = _ditingFontBox(this);
+    if (m) return m[axis];
     const box = _ditingLayoutBox(this);
     if (box) return Math.round(box[axis]);
-    const m = _ditingFontBox(this);
-    return m ? m[axis] : fallback;
+    return fallback;
   }
   _isViewportRoot() {
     const t = this.tagName;
@@ -7603,7 +7610,7 @@ const _INSTALLED_FONTS = {
     "Helvetica", "Helvetica Neue", "Hiragino Maru Gothic ProN", "Hiragino Sans",
     "Hiragino Sans CNS", "Hiragino Sans GB", "Hoefler Text", "Impact",
     "Kaiti SC", "Kaiti SC Black", "Lucida Grande", "Marker Felt", "Menlo",
-    "Microsoft YaHei", "Monaco", "Noto Color Emoji", "Optima", "Palatino",
+    "Microsoft YaHei", "Monaco", "Apple Color Emoji", "Noto Color Emoji", "Optima", "Palatino",
     "Papyrus", "PingFang HK", "PingFang SC", "PingFang TC", "SimSun",
     "Snell Roundhand", "Songti SC", "STHeiti", "STHeiti Light", "STKaiti",
     "STSong", "Tahoma", "Times New Roman", "Trebuchet MS", "Verdana",
@@ -13593,9 +13600,16 @@ class _Canvas2D {
     // missing ones fall back to the default) see a realistic spread.
     // Shares the persona's installed-font table with _ditingFontBox so
     // canvas probing and offsetWidth probing agree on which faces exist.
-    const fam = String(this.font || '');
+    // CSS font shorthand is "style weight 72px Family" — strip tokens up to
+    // and including the size so "72px Arial" resolves Arial (not "72px Arial").
+    let famPart = String(this.font || '');
+    const sizeHit = famPart.match(/(?:^|\s)(\d+(?:\.\d+)?)(px|pt|em|rem|%)\b/i);
+    if (sizeHit) {
+      famPart = famPart.slice(sizeHit.index + sizeHit[0].length).replace(/^\s*\/\s*[\d.]+(?:px|pt|em|rem|%)?\s*/, ' ').trim();
+    }
     let factor = 1;
-    for (const name of fam.split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, ''))) {
+    for (const name of famPart.split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)) {
+      if (_GENERIC_FONT[name]) continue;
       const f = _installedFontFactor(name);
       if (f !== null) { factor = f; break; }
     }

@@ -1,13 +1,9 @@
 (() => {
-  // v17: real collector depth for profileData gap (do NOT invent ssk).
-  // v16: shield/webprofile must NOT be fy-resigned to XYS_.
-  // Live gaps vs Chrome: as pdLen engine ~464-1696 vs Chrome 2176-2224;
-  // burdock 2848 vs 3040; XYS_~184 missing x6/x7 (webSsk empty; Chrome
-  // captures also never returned ext.ssk). Engine RTC had 0 ICE candidates
-  // and OAC graphs rendered silence — both fixed in diting audio/RTC.
-  // Warm: PD_MIN 2000, up to 2 spaced getV18 retries (re-call can reset;
-  // prefer fewer longer waits over tight loops).
-  const XS_VER = 17;
+  // v18: font-metric collectors (x29 fonts). Layout swallowed _ditingFontBox
+  // so FPJS offsetWidth probes matched every named face to generic baseline.
+  // measureText missed families inside 72px Arial shorthand. Do NOT invent ssk.
+  // v17: RTC ICE + OAC graph. Warm PD_MIN 2000 + spaced getV18 retries.
+  const XS_VER = 18;
   let prev = null;
   try { if (typeof window.__xsStats === 'function') prev = window.__xsStats(); } catch (e) {}
   if (prev && prev.ver >= XS_VER) return 'already';
@@ -17,6 +13,7 @@
     pr_held: 0, pr_blocked: 0, fuse: 0, replayed: 0, dropped: 0,
     mns_mirrored: 0, mns_bridged: 0, xyw_blocked: 0, ark_xys: 0, page_fy: 0, page_fu: 0,
     fp_init: 0, fp_wait: 0, web_ssk: 0, shield_pt: 0, fp_v18_delay: 0, fp_v18_warm: 0,
+    pd_tap: 0,
   };
   const bump = (k) => { stats[k] = (stats[k] || 0) + 1; };
   // Last publish_render decision + wire outcome (closure-only, surfaced via
@@ -31,6 +28,125 @@
       writable: true, configurable: true, enumerable: false,
     });
   } catch (e) { window.__xsStats = function () { return JSON.parse(JSON.stringify(stats)); }; }
+  // Document-start pd tap: field-level get()/getV18 + shield profile bodies.
+  const PD_TAP_MAX = 40;
+  if (!window.__xsPdTap) {
+    try {
+      Object.defineProperty(window, '__xsPdTap', {
+        value: [], writable: false, configurable: true, enumerable: false,
+      });
+    } catch (e) { window.__xsPdTap = []; }
+  }
+  const pdTapPush = (rec) => {
+    try {
+      const a = window.__xsPdTap;
+      if (!a || a.length >= PD_TAP_MAX) return;
+      a.push(Object.assign({ ts: Date.now() }, rec));
+      bump('pd_tap');
+    } catch (e) {}
+  };
+  const snapFpFields = (raw) => {
+    try {
+      const map = {};
+      if (!raw || !raw.length) return map;
+      for (let i = 0; i < raw.length; i++) {
+        const it = raw[i];
+        if (!it || it.key == null) continue;
+        const v = it.value;
+        if (Array.isArray(v)) map[it.key] = { t: 'arr', n: v.length, sample: v.slice(0, 8) };
+        else if (typeof v === 'string') map[it.key] = { t: 'str', len: v.length, head: v.slice(0, 48) };
+        else map[it.key] = v;
+      }
+      return map;
+    } catch (e) { return { err: String(e) }; }
+  };
+  const tapProfileBody = (url, body) => {
+    try {
+      const s = typeof body === 'string' ? body : (body && body.toString ? body.toString() : '');
+      if (!s || s.length < 8) return;
+      if (!/profileData|webprofile|shield\/profile|burdock/i.test(String(url || '') + s.slice(0, 240))) return;
+      let pdLen = 0, sdk = null, svn = null, platform = null, head = null;
+      try {
+        const j = JSON.parse(s);
+        if (j && typeof j.profileData === 'string') {
+          pdLen = j.profileData.length;
+          head = j.profileData.slice(0, 40);
+          sdk = j.sdkVersion || null;
+          svn = j.svn || null;
+          platform = j.platform || null;
+        }
+      } catch (e) {
+        const m = s.match(/"profileData"\s*:\s*"([0-9a-fA-F]*)"/);
+        if (m) { pdLen = m[1].length; head = m[1].slice(0, 40); }
+      }
+      if (!pdLen) return;
+      pdTapPush({
+        kind: 'profile_post',
+        url: String(url || '').slice(0, 180),
+        bodyLen: s.length,
+        pdLen: pdLen,
+        pdHead: head,
+        sdkVersion: sdk,
+        svn: svn,
+        platform: platform,
+      });
+    } catch (e) {}
+  };
+  const tapGetV18 = (fp) => {
+    if (!fp || typeof fp.getV18 !== 'function' || fp.getV18.__xsPdTap) return;
+    const orig = fp.getV18.bind(fp);
+    const wrapped = function (cb) {
+      if (typeof cb !== 'function') return orig.apply(fp, arguments);
+      return orig(function () {
+        try {
+          const args = [].slice.call(arguments);
+          const pd = args.length === 2 ? args[1] : args[0];
+          const meta = args.length === 2 ? args[0] : null;
+          let fields = null;
+          try {
+            if (typeof fp.getPromise === 'function') {
+              // fire-and-forget async field snap
+              Promise.resolve(fp.getPromise()).then((raw) => {
+                pdTapPush({
+                  kind: 'fp_fields',
+                  fields: snapFpFields(raw),
+                  emptyHints: (function (f) {
+                    if (!f) return null;
+                    return { x18: f.x18, x20: f.x20, x29n: f.x29 && f.x29.n, x37: f.x37 };
+                  })(snapFpFields(raw)),
+                });
+              }).catch(function () {});
+            }
+          } catch (e) {}
+          pdTapPush({
+            kind: 'getV18',
+            pdLen: pd != null ? String(pd).length : 0,
+            pdHead: pd != null ? String(pd).slice(0, 40) : null,
+            meta: meta && typeof meta === 'object' ? {
+              x33: meta.x33, x34: meta.x34, x35: meta.x35, x36: meta.x36,
+              x37: meta.x37, x38: meta.x38, x39: meta.x39,
+            } : null,
+          });
+        } catch (e) {}
+        return cb.apply(this, arguments);
+      });
+    };
+    wrapped.__xsPdTap = 1;
+    if (fp.getV18.__xsWarm) wrapped.__xsWarm = 1;
+    try { fp.getV18 = wrapped; } catch (e) {}
+  };
+  const tickPdTap = () => {
+    try { tapGetV18(window.xhsFingerprintV3); } catch (e) {}
+    try { if (window.proxy) tapGetV18(window.proxy.xhsFingerprintV3); } catch (e) {}
+  };
+  try {
+    setTimeout(tickPdTap, 500);
+    setTimeout(tickPdTap, 2000);
+    setTimeout(tickPdTap, 6000);
+    const iv = setInterval(tickPdTap, 200);
+    setTimeout(() => { try { clearInterval(iv); } catch (e) {} }, 25000);
+  } catch (e) {}
+
   // Hidden own props on wrapped XHR instances (plain assignment would show in
   // Object.keys(xhr) — Chrome instances have no own enumerable props).
   const def = (o, k, v) => {
@@ -1033,12 +1149,16 @@
   };
   XMLHttpRequest.prototype.open = XM.open;
   XMLHttpRequest.prototype.setRequestHeader = XM.setRequestHeader;
-  XMLHttpRequest.prototype.send = XM.send;
+  XMLHttpRequest.prototype.send = function (body) {
+    try { tapProfileBody(this.__xs_u || '', body); } catch (e) {}
+    return XM.send.apply(this, arguments);
+  };
   const F = window.fetch;
   const FM = {
     fetch(u, o) {
       o = o || {};
       let us = String(typeof u === 'object' && u ? u.url : u);
+      try { tapProfileBody(us, o.body); } catch (e) {}
       if (isPublishRender(us)) {
         const a = arkify(us);
         if (a !== us) {
