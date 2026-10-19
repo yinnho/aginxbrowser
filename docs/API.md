@@ -1138,7 +1138,8 @@ Type text into an input field by index. The element is focused first; after writ
 
 | Field | Type | Required | Description |
 |------|------|------|------|
-| index | usize | ✅ | Element index |
+| index | usize | one of index/ref | Element index (from `/state` or `/snapshot`) |
+| ref | string | one of index/ref | Snapshot ref (`e3`). If both set, they must agree. |
 | text | string | ✅ | Text to enter — any characters (newlines, quotes, backslashes) ride through as-is |
 | events | string | `"standard"` | `standard` → `input` + `change` after the value lands; `full` → focus, per-character `keydown`/`keypress`/`input`/`keyup` cycles, trailing `change`, then blur — the complete human typing gesture. The tail blur is what commits on forms that save in `onBlur` (React capture-phase blur listeners never saw script-typed text before, #100). In `full` mode a `\n` in the text types as the **Enter key** (`key:'Enter'`, keyCode 13 — the "type + Enter submit" encoding): a textarea keeps the newline in its value, a single-line `<input>` appends nothing; the page's Enter listeners (search bars, chat inputs) fire before the blur, and if the key wasn't canceled the input's form submits implicitly (Chrome's default action — `requestSubmit`, so validation and the form's own `submit` listeners run; a `preventDefault` on the key events or the submit event vetoes it, like Chrome). `\r` is never typed |
 

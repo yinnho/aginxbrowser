@@ -1,0 +1,5 @@
+{
+  "_comment": "Proposed agent-browser.json once Aginx CDP serve ships. Not valid in stock vercel-labs/agent-browser today (engines are chrome|lightpanda|obscura over CDP).",
+  "engine": "aginx",
+  "executablePath": "/opt/homebrew/bin/aginxbrowser"
+}

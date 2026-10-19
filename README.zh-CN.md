@@ -347,6 +347,8 @@ cargo build --release --features stealth,screenshot
 ## API 文档
 
 **完整 API 参考** → [`docs/API.md`](docs/API.md)
+
+**Agent / 多引擎（HTTP snapshot + shim）** → [`docs/agent-browser-engine.zh-CN.md`](docs/agent-browser-engine.zh-CN.md) · shim `scripts/aginx-agent` · CDP 后续 [`docs/cdp-serve-design.md`](docs/cdp-serve-design.md)
 **安全审计说明** → [`docs/skills-sh-audit.md`](docs/skills-sh-audit.md) — 为什么 skills.sh 上显示 Critical Risk，每条告警对应的真实产品功能
 
 包含：

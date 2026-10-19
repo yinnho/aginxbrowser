@@ -89,7 +89,7 @@ curl http://127.0.0.1:8089/health
 | Run JS on a page (one-shot) | `BASE/eval` | `url`, `script`(async/Promise supported) |
 | Click one element, done | `BASE/click` | `url`, `selector` |
 | Screenshot as visual input | `BASE/screenshot` | `url`, `full_page`, `wait_secs`, `selector`(crop / element rects) |
-| Multi-step interaction (login/form/paginate) | `BASE/session/create` → `BASE/session/{id}/state` → `/click` `/input` → … → `/close` | index `[N]` from `state` |
+| Multi-step interaction (login/form/paginate) | `BASE/session/create` → `BASE/session/{id}/snapshot` → `/click` `/input` by `ref` → … → `/close` | prefer `ref=eN` from `/snapshot` (same map as `/state` index `[N]`) |
 | Reuse a logged-in session | `session/create{cookies:[...]}` + `GET BASE/session/{id}/cookies` export | `cookies` array round-trips |
 | Human logs in, agent takes over | `BASE/import/curl` -> session_id carries the login | paste DevTools "Copy as cURL" |
 | Run a recorded interaction again (zero tokens) | `BASE/flow/run` | `name` (installed workflow) or `flow` (inline doc), `vars`, `session_id` |
@@ -135,14 +135,17 @@ curl -sS -X POST $BASE/fetch -H "Content-Type: application/json" -d '{
   "js_extract":{"expression":"JSON.stringify(window.__INITIAL_STATE__)","timeout_ms":3000}
 }'
 
-# Multi-step interaction (login flow)
+# Multi-step interaction (login / forms) — prefer snapshot refs
 # 1. POST $BASE/session/create {"url":"https://site.com/login"} -> session_id
-# 2. GET  $BASE/session/$ID/state                          -> [N] indexes
-# 3. POST $BASE/session/$ID/input  {"index":1,"text":"user"}
-# 4. POST $BASE/session/$ID/input  {"index":2,"text":"pass"}
-# 5. POST $BASE/session/$ID/click  {"index":3}             -> submit
-# 6. GET  $BASE/session/$ID/state                          -> post-login state
+# 2. GET  $BASE/session/$ID/snapshot?format=text           -> ref=eN lines
+#    (or format=json for role/name/bbox; same map as /state indexes)
+# 3. POST $BASE/session/$ID/input  {"ref":"e1","text":"user"}
+# 4. POST $BASE/session/$ID/input  {"ref":"e2","text":"pass"}
+# 5. POST $BASE/session/$ID/click  {"ref":"e3"}            -> submit
+# 6. GET  $BASE/session/$ID/snapshot                       -> post-login
 # 7. POST $BASE/session/$ID/close
+# Shim with agent-browser-like verbs: ./scripts/aginx-agent open|snapshot|click|fill
+# Multi-engine / agent-browser notes: docs/agent-browser-engine.md
 ```
 
 ## Why aginxbrowser
@@ -166,7 +169,7 @@ curl -sS -X POST $BASE/fetch -H "Content-Type: application/json" -d '{
   coordinates are available: `screenshot` with `selector` returns
   `selector_rects` (CSS-px page coords) and can crop straight to an element;
   coordinate-based clicking isn't wired up yet, interaction is JS `click()`.
-- **Sessions idle-recycle after 8 minutes**: call `/session/{id}/state`
+- **Sessions idle-recycle after 8 minutes**: call `/session/{id}/snapshot` or `/state`
   mid-task to keep it alive, or re-create.
 - **`/search` CAPTCHAs**: engines back off progressively
   (5min→10min→30min→1h). Set `CAPTCHA_SOLVER_API_KEY` to solve automatically.

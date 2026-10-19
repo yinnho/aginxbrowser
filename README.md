@@ -352,6 +352,8 @@ If your network can't reach the rusty_v8 CDN (build hangs with zero progress aft
 ## API Documentation
 
 **Full API reference** → [`docs/API.md`](docs/API.md)
+
+**Agent / multi-engine (HTTP snapshot + shim)** → [`docs/agent-browser-engine.md`](docs/agent-browser-engine.md) · shim `scripts/aginx-agent` · CDP later [`docs/cdp-serve-design.md`](docs/cdp-serve-design.md)
 **Security audit notes** → [`docs/skills-sh-audit.md`](docs/skills-sh-audit.md) — why skills.sh shows "Critical Risk", and which real product feature each warning corresponds to
 
 Covers:

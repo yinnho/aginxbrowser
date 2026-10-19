@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# Thin agent-browser-shaped CLI over AginxBrowser HTTP.
+# No CDP, no MCP. Session id persisted under ~/.aginxbrowser/agent-session.
+set -euo pipefail
+
+BASE="${AGINXBROWSER_URL:-http://127.0.0.1:8089}"
+STATE_DIR="${AGINXBROWSER_AGENT_DIR:-$HOME/.aginxbrowser}"
+SID_FILE="${STATE_DIR}/agent-session"
+mkdir -p "$STATE_DIR"
+
+need_jq() {
+  command -v jq >/dev/null 2>&1 || {
+    echo "aginx-agent: jq is required" >&2
+    exit 1
+  }
+}
+
+http() {
+  local method=$1 path=$2
+  shift 2
+  curl -sS -X "$method" "${BASE}${path}" \
+    -H 'content-type: application/json' \
+    "$@"
+}
+
+load_sid() {
+  if [[ -n "${AGINX_AGENT_SESSION:-}" ]]; then
+    echo "$AGINX_AGENT_SESSION"
+    return
+  fi
+  if [[ -f "$SID_FILE" ]]; then
+    cat "$SID_FILE"
+    return
+  fi
+  echo "aginx-agent: no session — run: $0 open <url>" >&2
+  exit 1
+}
+
+save_sid() {
+  printf '%s' "$1" >"$SID_FILE"
+}
+
+usage() {
+  cat <<USAGE
+aginx-agent — AginxBrowser HTTP shim (agent-browser-like verbs)
+
+Usage:
+  aginx-agent open <url>          Create session + navigate; print session_id
+  aginx-agent navigate <url>      Navigate current session
+  aginx-agent snapshot [json|text]  Interactive snapshot (default text)
+  aginx-agent click <ref|index>   Click by ref (e3) or index
+  aginx-agent fill <ref|index> <text...>  Type into input
+  aginx-agent eval <script>       Evaluate JS
+  aginx-agent state               Compact /state listing
+  aginx-agent close               Close session
+  aginx-agent health              GET /health
+  aginx-agent sid                 Print current session_id
+
+Env:
+  AGINXBROWSER_URL     Base URL (default http://127.0.0.1:8089)
+  AGINX_AGENT_SESSION  Override session id (skip sid file)
+
+Docs: docs/agent-browser-engine.md
+USAGE
+}
+
+ref_or_index_json() {
+  local target=$1
+  if [[ "$target" =~ ^e[0-9]+$ ]]; then
+    jq -nc --arg r "$target" '{ref:$r}'
+  elif [[ "$target" =~ ^[0-9]+$ ]]; then
+    jq -nc --argjson i "$target" '{index:$i}'
+  else
+    echo "aginx-agent: expected ref eN or numeric index, got: $target" >&2
+    exit 1
+  fi
+}
+
+cmd=${1:-}
+shift || true
+
+case "$cmd" in
+  ""|-h|--help|help) usage; exit 0 ;;
+  health)
+    http GET /health
+    echo
+    ;;
+  sid)
+    load_sid
+    echo
+    ;;
+  open)
+    need_jq
+    url=${1:?url required}
+    resp=$(http POST /session/create -d "$(jq -nc --arg u "$url" '{url:$u}')")
+    sid=$(echo "$resp" | jq -r .session_id)
+    if [[ -z "$sid" || "$sid" == null ]]; then
+      echo "$resp" >&2
+      exit 1
+    fi
+    save_sid "$sid"
+    echo "$sid"
+    ;;
+  navigate)
+    need_jq
+    sid=$(load_sid)
+    url=${1:?url required}
+    http POST "/session/${sid}/navigate" -d "$(jq -nc --arg u "$url" '{url:$u}')"
+    echo
+    ;;
+  snapshot)
+    need_jq
+    sid=$(load_sid)
+    fmt=${1:-text}
+    case "$fmt" in
+      json) http GET "/session/${sid}/snapshot" | jq . ;;
+      text|a11y) http GET "/session/${sid}/snapshot?format=text"; echo ;;
+      *) echo "format: json|text" >&2; exit 1 ;;
+    esac
+    ;;
+  state)
+    sid=$(load_sid)
+    http GET "/session/${sid}/state"
+    echo
+    ;;
+  click)
+    need_jq
+    sid=$(load_sid)
+    target=${1:?ref or index required}
+    body=$(ref_or_index_json "$target")
+    http POST "/session/${sid}/click" -d "$body" | jq .
+    ;;
+  fill|input|type)
+    need_jq
+    sid=$(load_sid)
+    target=${1:?ref or index required}
+    shift
+    text=${*:?text required}
+    body=$(jq -nc --argjson base "$(ref_or_index_json "$target")" --arg t "$text" '$base + {text:$t}')
+    http POST "/session/${sid}/input" -d "$body" | jq .
+    ;;
+  eval)
+    need_jq
+    sid=$(load_sid)
+    script=${1:?script required}
+    http POST "/session/${sid}/eval" -d "$(jq -nc --arg s "$script" '{script:$s}')" | jq .
+    ;;
+  close)
+    sid=$(load_sid)
+    http POST "/session/${sid}/close" -d '{}' || true
+    echo
+    rm -f "$SID_FILE"
+    ;;
+  *)
+    echo "unknown command: $cmd" >&2
+    usage >&2
+    exit 1
+    ;;
+esac
