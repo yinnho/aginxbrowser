@@ -1,9 +1,11 @@
 (() => {
+  // v19: qiankun proxy AS facade getV18 (~1024/4.4.4) vs top FPJS (~2928).
+  // Bridge facade.getV18 → top; do NOT copy VERSION (sdk stays rE 4.x).
   // v18: font-metric collectors (x29 fonts). Layout swallowed _ditingFontBox
   // so FPJS offsetWidth probes matched every named face to generic baseline.
   // measureText missed families inside 72px Arial shorthand. Do NOT invent ssk.
   // v17: RTC ICE + OAC graph. Warm PD_MIN 2000 + spaced getV18 retries.
-  const XS_VER = 18;
+  const XS_VER = 19;
   let prev = null;
   try { if (typeof window.__xsStats === 'function') prev = window.__xsStats(); } catch (e) {}
   if (prev && prev.ver >= XS_VER) return 'already';
@@ -13,7 +15,7 @@
     pr_held: 0, pr_blocked: 0, fuse: 0, replayed: 0, dropped: 0,
     mns_mirrored: 0, mns_bridged: 0, xyw_blocked: 0, ark_xys: 0, page_fy: 0, page_fu: 0,
     fp_init: 0, fp_wait: 0, web_ssk: 0, shield_pt: 0, fp_v18_delay: 0, fp_v18_warm: 0,
-    pd_tap: 0,
+    fp_proxy_bridge: 0, pd_tap: 0,
   };
   const bump = (k) => { stats[k] = (stats[k] || 0) + 1; };
   // Last publish_render decision + wire outcome (closure-only, surfaced via
@@ -137,7 +139,10 @@
   };
   const tickPdTap = () => {
     try { tapGetV18(window.xhsFingerprintV3); } catch (e) {}
-    try { if (window.proxy) tapGetV18(window.proxy.xhsFingerprintV3); } catch (e) {}
+    try {
+      const p = window.proxy && window.proxy.xhsFingerprintV3;
+      if (p && typeof p.get === 'function') tapGetV18(p);
+    } catch (e) {}
   };
   try {
     setTimeout(tickPdTap, 500);
@@ -531,12 +536,34 @@
     } catch (e) {}
   };
   // Qiankun: AntiSpam/r6/getCurMiniUa live on window.proxy, not top window.
+  // proxy.xhsFingerprintV3 is often an AS *facade* (getV18/r6/runMiniUa, no
+  // get/getPromise/VERSION). Its getV18 encrypts ~1024 hex and VERSION||rE
+  // yields sdk 4.4.4. Top window holds the real FPJS (VERSION 2.1.2, getV18
+  // ~2928 with fonts) that burdock already uses. as.webprofile runs in the
+  // sandbox and calls window(=proxy).xhsFingerprintV3.getV18 → short track.
+  // Bridge facade.getV18 → top. Do NOT copy VERSION (Chrome as also posts rE).
   const bridgeProxyFp = () => {
     try {
       const pfp = window.proxy && window.proxy.xhsFingerprintV3;
       if (!pfp) return;
       const top = window.xhsFingerprintV3;
       if (!top) { window.xhsFingerprintV3 = pfp; return; }
+      if (typeof top.getV18 === 'function' && typeof pfp.get !== 'function') {
+        try {
+          if (!pfp.getV18 || !pfp.getV18.__xsTopBridge) {
+            const bridged = function () { return top.getV18.apply(top, arguments); };
+            bridged.__xsTopBridge = 1;
+            pfp.getV18 = bridged;
+            bump('fp_proxy_bridge');
+            try {
+              if (typeof pfp.r6 === 'function' && !pfp.__xsR6AfterBridge) {
+                pfp.__xsR6AfterBridge = 1;
+                setTimeout(function () { try { pfp.r6(); } catch (e2) {} }, 50);
+              }
+            } catch (e3) {}
+          }
+        } catch (e) {}
+      }
       if (typeof top.getCurMiniUa !== 'function' && typeof pfp.getCurMiniUa === 'function') {
         try { top.getCurMiniUa = pfp.getCurMiniUa.bind(pfp); } catch (e) {}
       }
@@ -640,7 +667,11 @@
   };
   const tickWarmFp = () => {
     try { wrapGetV18(window.xhsFingerprintV3); } catch (e) {}
-    try { if (window.proxy) wrapGetV18(window.proxy.xhsFingerprintV3); } catch (e) {}
+    try {
+      // Facade (no get) delegates to top — wrapping it double-fires warm.
+      const p = window.proxy && window.proxy.xhsFingerprintV3;
+      if (p && typeof p.get === 'function') wrapGetV18(p);
+    } catch (e) {}
   };
   try {
     setTimeout(capturePageFyFU, 1500);
