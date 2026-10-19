@@ -14229,8 +14229,6 @@ const __RTCPCImpl = class RTCPeerConnection extends EventTarget {
   __setGather(s){
     if (this.iceGatheringState === s) return;
     this.iceGatheringState = s;
-    const ev = { type: 'icegatheringstatechange', target: this };
-    try { if (typeof this.onicegatheringstatechange === 'function') this.onicegatheringstatechange(ev); } catch (e) {}
     try { this.dispatchEvent(new Event('icegatheringstatechange')); } catch (e) {}
   }
   __emitCand(candStr){
@@ -14238,7 +14236,7 @@ const __RTCPCImpl = class RTCPeerConnection extends EventTarget {
       candidate: candStr, sdpMid: '0', sdpMLineIndex: 0,
     });
     const ev = new RTCPeerConnectionIceEvent('icecandidate', { candidate: cand });
-    try { if (typeof this.onicecandidate === 'function') this.onicecandidate(ev); } catch (e) {}
+    // dispatchEvent alone: onicecandidate is an EventHandler listener.
     try { this.dispatchEvent(ev); } catch (e) {}
   }
   __mkOfferSdp(){
