@@ -4,7 +4,7 @@
   // blocked). library-launcher fy() is: mnsv2(a,md5(a),md5(path)) → x3,
   // pack {x0..x5} → custom-b64 → XYS_. Embed that for ark resign + keep
   // page x-s-common (fU). Native mnsv2 alias still missing.
-  const XS_VER = 12;
+  const XS_VER = 13;
   let prev = null;
   try { if (typeof window.__xsStats === 'function') prev = window.__xsStats(); } catch (e) {}
   if (prev && prev.ver >= XS_VER) return 'already';
@@ -194,6 +194,13 @@
             return hex;
           } catch (e) {
             _wasmMnsCache = false;
+            try {
+              if (window.mnsv2 && window.mnsv2.__xsBridge === 'xy18') {
+                // Demote so callers do not keep hitting a poisoned Instance.
+                delete window.mnsv2;
+                try { if (window.proxy && window.proxy.mnsv2 && window.proxy.mnsv2.__xsBridge === 'xy18') delete window.proxy.mnsv2; } catch (e3) {}
+              }
+            } catch (e2) {}
             throw e;
           }
         };
@@ -927,5 +934,5 @@
       _markNative(FM.fetch);
     }
   } catch (e) {}
-  return 'patched-v12-wasm-oob';
+  return 'patched-v13-demote-oob';
 })()
