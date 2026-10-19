@@ -1,9 +1,13 @@
 (() => {
-  // v15: wait qiankun proxy fingerprint (initReport/r6/getCurMiniUa) before
-  // gated PR; mint common via page fU with proxy FP + async getCurMiniUa poll.
-  // webprofile sends cpk but server still omits data.ext.ssk → webSsk empty
-  // → XYS_~184 (Chrome ~408). Warm common ~1.8k closer to Chrome ~2108.
-  const XS_VER = 15;
+  // v16: shield/webprofile must NOT be fy-resigned to XYS_.
+  // Chrome burdock shield uses short native x-s (~44)+common; engine was
+  // sending XYS_~188 on as/webprofile+cpk. Live diff (s_2, 5cff707):
+  //   Chrome as/webprofile: sdk 4.3.5 svn2 platform Mac OS pdLen~2176-2224 no cpk → {st}
+  //   Engine cold as/webprofile: sdk 4.4.4 svn2 Mac OS pdLen 464 +cpk → {st} (no ssk)
+  //   Engine warmer: pdLen 1696 +cpk → still {st} only — no inventing ssk.
+  //   burdock: engine pd 2848 vs Chrome 3040; same topKeys; no pdLen field either side.
+  // Also: single delayed getV18 retry (not tight loop) when first pd < 1500.
+  const XS_VER = 16;
   let prev = null;
   try { if (typeof window.__xsStats === 'function') prev = window.__xsStats(); } catch (e) {}
   if (prev && prev.ver >= XS_VER) return 'already';
@@ -12,7 +16,7 @@
     passthrough: 0, passthrough_coherent: 0, common_stripped: 0, signed: 0,
     pr_held: 0, pr_blocked: 0, fuse: 0, replayed: 0, dropped: 0,
     mns_mirrored: 0, mns_bridged: 0, xyw_blocked: 0, ark_xys: 0, page_fy: 0, page_fu: 0,
-    fp_init: 0, fp_wait: 0, web_ssk: 0,
+    fp_init: 0, fp_wait: 0, web_ssk: 0, shield_pt: 0, fp_v18_delay: 0, fp_v18_warm: 0,
   };
   const bump = (k) => { stats[k] = (stats[k] || 0) + 1; };
   // Last publish_render decision + wire outcome (closure-only, surfaced via
@@ -323,6 +327,15 @@
   };
   // Itemark create SPA races publish_render before AS signer is healthy; gate it.
   const isPublishRender = (u) => /\/api\/edith\/product\/publish_render\b/i.test(String(u || ''));
+  // FP report endpoints: page AntiSpam signs these (Chrome ~44-char x-s on
+  // burdock). Resigning with ark fy→XYS_ changes the shield wire shape and
+  // correlates with server returning only {st} (no data.ext.ssk) on cpk mint.
+  const isShieldProfile = (u) => {
+    const s = String(u || '');
+    return /\/api\/sec\/v1\/shield\/webprofile\b/i.test(s)
+      || /\/fe_api\/burdock\/v2\/shield\/profile\b/i.test(s)
+      || /\/shield\/webprofile\b/i.test(s);
+  };
   // Keep merchant product APIs on ark (SPA sometimes hops to www after env reject).
   const arkify = (u) => {
     const s = String(u || '');
@@ -474,11 +487,45 @@
     } catch (e) { return Promise.resolve(null); }
   };
   // opportunistic capture once DOM/chunk ready
+  // Single delayed getV18 retry: cold first paint is ~464 hex; Chrome as ~
+  // 2200. Tight re-call loops reset collectors and stall at ~400-800.
+  const PD_MIN = 1500;
+  const wrapGetV18 = (fp) => {
+    if (!fp || typeof fp.getV18 !== 'function' || fp.getV18.__xsWarm) return;
+    const orig = fp.getV18.bind(fp);
+    const wrapped = function (cb) {
+      if (typeof cb !== 'function') return orig.apply(fp, arguments);
+      orig(function () {
+        const args = [].slice.call(arguments);
+        const pd = args.length === 2 ? args[1] : args[0];
+        const len = pd != null ? String(pd).length : 0;
+        if (len >= PD_MIN) {
+          bump('fp_v18_warm');
+          return cb.apply(this, args);
+        }
+        bump('fp_v18_delay');
+        setTimeout(() => {
+          orig(function () {
+            bump('fp_v18_warm');
+            cb.apply(this, arguments);
+          });
+        }, 4500);
+      });
+    };
+    wrapped.__xsWarm = 1;
+    try { fp.getV18 = wrapped; } catch (e) {}
+  };
+  const tickWarmFp = () => {
+    try { wrapGetV18(window.xhsFingerprintV3); } catch (e) {}
+    try { if (window.proxy) wrapGetV18(window.proxy.xhsFingerprintV3); } catch (e) {}
+  };
   try {
     setTimeout(capturePageFyFU, 1500);
     setTimeout(capturePageFyFU, 4000);
-    setTimeout(() => { bridgeProxyFp(); noteFp(); }, 2000);
-    setTimeout(() => { bridgeProxyFp(); noteFp(); }, 6000);
+    setTimeout(() => { bridgeProxyFp(); noteFp(); tickWarmFp(); }, 2000);
+    setTimeout(() => { bridgeProxyFp(); noteFp(); tickWarmFp(); }, 6000);
+    const warmIv = setInterval(tickWarmFp, 100);
+    setTimeout(() => { try { clearInterval(warmIv); } catch (e) {} }, 20000);
   } catch (e) {}
 
   // --- ark fy-replica (library-launcher fy without x6/x7 SSK; webSsk often empty) ---
@@ -849,6 +896,19 @@
             const signerReady = typeof (mirrorSigner() || resolveSigner()) === 'function';
             const formBody = b instanceof FormData;
             const cross = !sameOrigin(snap.u);
+            // Shield FP reports: never fy-resign. Restore page wire or send bare.
+            if (isShieldProfile(snap.u) && !formBody) {
+              if (hasPageXs) {
+                S.call(self, 'X-s', page['x-s']);
+                if (page['x-t']) S.call(self, 'X-t', page['x-t']);
+                if (hasPageCommon) S.call(self, 'X-s-common', page['x-s-common']);
+              } else if (snap.deferred && hasPageCommon) {
+                S.call(self, 'X-s-common', page['x-s-common']);
+              }
+              bump('shield_pt');
+              bump('passthrough');
+              return D.apply(self, args);
+            }
             const sg = formBody ? null : sign(snap.u, b);
             // PRIMARY (Oct-11): signer ready + page already set x-s (+ ideally x-s-common) → passthrough
             if (signerReady && hasPageXs && !formBody) {
@@ -1010,6 +1070,12 @@
             ));
           }
           if (hasXs) bump('passthrough');
+          return F.call(this, u, o);
+        }
+        // Shield FP: never resign via fetch either.
+        if (isShieldProfile(us)) {
+          bump('shield_pt');
+          bump('passthrough');
           return F.call(this, u, o);
         }
         // ELSE resign: strip x-s-common unless signer returns it atomically
