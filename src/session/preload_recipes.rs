@@ -219,6 +219,8 @@ mod tests {
             "installMnsv2Bridge",
             "mns_bridged",
             "mnsv2",
+            "signArkXyS",
+            "ark_xys",
             "xyw_blocked",
             "isXywPoison",
             "window.proxy",
