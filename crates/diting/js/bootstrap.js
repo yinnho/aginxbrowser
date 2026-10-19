@@ -16485,10 +16485,34 @@ globalThis.__diting_init = function() {
   // native result — and are marked native so toString lie-detectors report
   // [native code].
   if (!globalThis.__diting_gopn_patched) {
-    // Pattern, not the static hide list: `__diting_objects` & friends are
-    // created by the Rust init AFTER the snapshot froze the list, so they'd
-    // slip through a membership check against it.
-    const _isInternal = n => typeof n === 'string' && (n.startsWith('_') || n.includes('diting') || n.includes('Diting') || n === '__bootstrap');
+    // Hide engine bookkeeping from window enumeration, but do NOT blanket-
+    // strip every `_`-prefixed name. Chrome exposes page-installed props
+    // like `_webmsxyw` (ark/itemark AS signer) in getOwnPropertyNames, and
+    // xhs 300015 "risk plugin" probes hash that face. A blanket
+    // `startsWith('_')` made our winKeys diverge on every page that
+    // installs a `_` signer — leading candidate for the ark VM refusing
+    // to take over (www-family X-s≈664 / no x-s-common vs Chrome
+    // ark-family X-s≈408 + common≈2108).
+    // Policy:
+    //   - `__*` double-underscore: engine/recipe bookkeeping → hide
+    //   - single `_` in the snapshot hide list: engine helpers → hide
+    //   - `*diting*` / `__bootstrap`: engine → hide
+    //   - page `_webmsxyw` and friends: visible like Chrome
+    // `__diting_objects` & friends created by Rust AFTER the snapshot
+    // froze the list are still caught by the diting / `__` arms.
+    let _hideSet = null;
+    const _isInternal = (n) => {
+      if (typeof n !== 'string') return false;
+      if (n.includes('diting') || n.includes('Diting') || n === '__bootstrap') return true;
+      if (n.startsWith('__')) return true;
+      if (n.startsWith('_')) {
+        if (_hideSet === null) {
+          _hideSet = new Set(globalThis.__diting_hide_list || []);
+        }
+        return _hideSet.has(n);
+      }
+      return false;
+    };
     const _gopn = Object.getOwnPropertyNames;
     const _ownKeys = Reflect.ownKeys;
     const _keys = Object.keys;

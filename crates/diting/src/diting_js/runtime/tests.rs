@@ -14495,6 +14495,9 @@
 
     /// Upstream 4c33f6d (unusualWindowProperties): internal globals must not
     /// surface through any reflection API on the global object.
+    /// Engine helpers (`_wrap`, `__diting*`, …) stay hidden; page-installed
+    /// single-underscore names are covered by
+    /// `page_underscore_globals_remain_visible_to_gopn` (Chrome face).
     #[test]
     fn internal_globals_are_hidden_from_all_reflection_apis() {
         let mut rt = setup_runtime("<html><body></body></html>");
@@ -14512,6 +14515,36 @@
             )
             .unwrap();
         assert_eq!(v, serde_json::json!("0|0|0|0"));
+    }
+
+    /// Chrome exposes page-installed single-underscore window props (xhs
+    /// `_webmsxyw`) via getOwnPropertyNames; double-underscore bookkeeping
+    /// and engine hide-list names stay filtered. Blanket `startsWith('_')`
+    /// used to hide `_webmsxyw` and skew the winKeys face ark's 300015
+    /// probes hash.
+    #[test]
+    fn page_underscore_globals_remain_visible_to_gopn() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let v = rt
+            .evaluate(
+                r#"(() => {
+                    window._webmsxyw = function xy() { return 1; };
+                    window.__shouldStayHidden = 1;
+                    const names = Object.getOwnPropertyNames(window);
+                    const ownKeys = Reflect.ownKeys(window);
+                    const descs = Object.getOwnPropertyDescriptors(window);
+                    return [
+                      names.includes('_webmsxyw'),
+                      ownKeys.includes('_webmsxyw'),
+                      Object.prototype.hasOwnProperty.call(descs, '_webmsxyw'),
+                      names.includes('__shouldStayHidden'),
+                      names.some(n => typeof n === 'string' && (n.includes('diting') || n.includes('Diting'))),
+                      typeof window._webmsxyw
+                    ].join('|');
+                })()"#,
+            )
+            .unwrap();
+        assert_eq!(v, serde_json::json!("true|true|true|false|false|function"));
     }
 
     /// Upstream c7e7c70: WebIDL interface globals are non-enumerable in a real

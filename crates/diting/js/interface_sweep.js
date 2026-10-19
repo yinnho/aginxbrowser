@@ -259,3 +259,29 @@ try { (function () {
   }
   g.__ditingWinSlot = slot;
 })(); } catch (e) {}
+
+// hide_list final refresh: bootstrap.js built __diting_hide_list before
+// worker/idb/fetch/audio/... modules installed their `_foo` helpers, so a
+// membership-only gopn filter (needed so page `_webmsxyw` stays Chrome-
+// visible) would miss those late engine names. Re-scan once here — this
+// file is the LAST snapshot module — and merge. gopn patch reads the list
+// lazily on first filter, so the Set sees the final membership.
+(function () {
+  try {
+    var list = globalThis.__diting_hide_list;
+    if (!Array.isArray(list)) {
+      globalThis.__diting_hide_list = list = [];
+    }
+    var seen = Object.create(null);
+    for (var i = 0; i < list.length; i++) seen[list[i]] = 1;
+    var names = Object.getOwnPropertyNames(globalThis);
+    for (var j = 0; j < names.length; j++) {
+      var k = names[j];
+      if (typeof k !== 'string') continue;
+      if (!(k.startsWith('_') || k.includes('diting') || k.includes('Diting'))) continue;
+      if (seen[k]) continue;
+      seen[k] = 1;
+      list.push(k);
+    }
+  } catch (e) {}
+})();
