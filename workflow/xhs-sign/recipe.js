@@ -1,9 +1,9 @@
 (() => {
-  // v14: call page webpack 69850 fy/fU (not invent signer). mnsv2 bridge uses
-  // stackAlloc+copy+stackRestore (malloc ABI OOBs after 1–N calls). Prefer
-  // page fy for XYS_; await page fU for x-s-common. webSsk/x6/x7 still empty
-  // → XYS_~184 (Chrome ~408); fU common ~588 (Chrome ~2108).
-  const XS_VER = 14;
+  // v15: wait qiankun proxy fingerprint (initReport/r6/getCurMiniUa) before
+  // gated PR; mint common via page fU with proxy FP + async getCurMiniUa poll.
+  // webprofile sends cpk but server still omits data.ext.ssk → webSsk empty
+  // → XYS_~184 (Chrome ~408). Warm common ~1.8k closer to Chrome ~2108.
+  const XS_VER = 15;
   let prev = null;
   try { if (typeof window.__xsStats === 'function') prev = window.__xsStats(); } catch (e) {}
   if (prev && prev.ver >= XS_VER) return 'already';
@@ -12,6 +12,7 @@
     passthrough: 0, passthrough_coherent: 0, common_stripped: 0, signed: 0,
     pr_held: 0, pr_blocked: 0, fuse: 0, replayed: 0, dropped: 0,
     mns_mirrored: 0, mns_bridged: 0, xyw_blocked: 0, ark_xys: 0, page_fy: 0, page_fu: 0,
+    fp_init: 0, fp_wait: 0, web_ssk: 0,
   };
   const bump = (k) => { stats[k] = (stats[k] || 0) + 1; };
   // Last publish_render decision + wire outcome (closure-only, surfaced via
@@ -383,24 +384,103 @@
       return { 'X-s': String(xs), 'X-t': String(Date.now()) };
     } catch (e) { return null; }
   };
+  const proxyFp = () => {
+    try { return (window.proxy && window.proxy.xhsFingerprintV3) || window.xhsFingerprintV3 || null; }
+    catch (e) { return null; }
+  };
+  const noteWebSsk = () => {
+    try {
+      const raw = localStorage.getItem('webSsk');
+      stats.web_ssk = raw ? String(raw).length : 0;
+    } catch (e) { stats.web_ssk = -1; }
+  };
+  const noteFp = () => {
+    try {
+      const fp = proxyFp();
+      stats.fp_init = fp && fp.initReport != null ? fp.initReport : 0;
+      noteWebSsk();
+    } catch (e) {}
+  };
+  // Qiankun: AntiSpam/r6/getCurMiniUa live on window.proxy, not top window.
+  const bridgeProxyFp = () => {
+    try {
+      const pfp = window.proxy && window.proxy.xhsFingerprintV3;
+      if (!pfp) return;
+      const top = window.xhsFingerprintV3;
+      if (!top) { window.xhsFingerprintV3 = pfp; return; }
+      if (typeof top.getCurMiniUa !== 'function' && typeof pfp.getCurMiniUa === 'function') {
+        try { top.getCurMiniUa = pfp.getCurMiniUa.bind(pfp); } catch (e) {}
+      }
+      if (typeof top.r6 !== 'function' && typeof pfp.r6 === 'function') {
+        try { top.r6 = pfp.r6.bind(pfp); } catch (e) {}
+      }
+      if (top.initReport == null && pfp.initReport != null) {
+        try { top.initReport = pfp.initReport; } catch (e) {}
+      }
+    } catch (e) {}
+  };
+  // Enable getCurMiniUa branch inside page fU for merchant publish (server
+  // realTimeCommonPatch is empty for itemark; without oO, fU skips miniUa).
+  const seedMerchantOo = () => {
+    try {
+      const chunk = (window.proxy && window.proxy.webpackChunkitemark) || window.webpackChunkitemark;
+      if (!chunk) return;
+      let req = null;
+      chunk.push([['__xs_oo_' + Date.now()], {}, function (r) { req = r; }]);
+      if (!req || !req.m || !req.m[16658]) return;
+      const t = req(16658);
+      if (!t || !Array.isArray(t.oO)) return;
+      const add = [
+        '/api/edith/product/publish_render',
+        'publish_render',
+        '/api/edith/',
+      ];
+      for (let i = 0; i < add.length; i++) {
+        if (t.oO.indexOf(add[i]) < 0) t.oO.push(add[i]);
+      }
+    } catch (e) {}
+  };
+  const readCommon = (headers) => {
+    if (!headers) return null;
+    const cm = headers['X-S-Common'] || headers['X-s-common'] || headers['x-s-common'];
+    return cm != null && cm !== '' ? String(cm) : null;
+  };
   const mintPageCommon = (path, data) => {
     try {
       if (typeof _pageFU !== 'function') capturePageFyFU();
       if (typeof _pageFU !== 'function') return Promise.resolve(null);
+      bridgeProxyFp();
+      seedMerchantOo();
       const e = { url: String(path || ''), headers: {}, data: data };
       const f = {
-        platform: (window.xsecplatform || (window.proxy && window.proxy.xsecplatform) || 'PC'),
+        platform: ((window.proxy && window.proxy.xsecplatform) || window.xsecplatform || 'PC'),
         configInit: true, xsIgnore: [], autoReload: false, disableMns: true,
       };
-      return Promise.resolve(_pageFU(f, e)).then(() => {
-        const cm = e.headers['X-S-Common'] || e.headers['X-s-common'] || e.headers['x-s-common'];
-        if (cm != null && cm !== '') { bump('page_fu'); return String(cm); }
-        return null;
-      }).catch(() => null);
+      // fU may set X-S-Common sync, or async via getCurMiniUa(callback).
+      return Promise.resolve(_pageFU(f, e)).then(() => new Promise((resolve) => {
+        const hit = () => {
+          const cm = readCommon(e.headers);
+          if (cm) { bump('page_fu'); resolve(cm); return true; }
+          return false;
+        };
+        if (hit()) return;
+        const start = Date.now();
+        const t = setInterval(() => {
+          if (hit() || Date.now() - start > 2500) {
+            clearInterval(t);
+            resolve(readCommon(e.headers));
+          }
+        }, 50);
+      })).catch(() => null);
     } catch (e) { return Promise.resolve(null); }
   };
   // opportunistic capture once DOM/chunk ready
-  try { setTimeout(capturePageFyFU, 1500); setTimeout(capturePageFyFU, 4000); } catch (e) {}
+  try {
+    setTimeout(capturePageFyFU, 1500);
+    setTimeout(capturePageFyFU, 4000);
+    setTimeout(() => { bridgeProxyFp(); seedMerchantOo(); noteFp(); }, 2000);
+    setTimeout(() => { bridgeProxyFp(); noteFp(); }, 6000);
+  } catch (e) {}
 
   // --- ark fy-replica (library-launcher fy without x6/x7 SSK; webSsk often empty) ---
   const XS_ALPH = 'ZmserbBoHQtNP+wOcza/LpngG8yJq42KWYj0DSfdikx3VT16IlUAFM97hECvuRX5';
@@ -632,6 +712,19 @@
       // Ark create: hold until mnsv2 is up so page fy() can mint XYS_+common.
       // Without it, resign falls to www XYW_ and 300015s.
       if (needSettle && isArkHost() && !resolveMnsv2() && !mirrorMnsv2()) return null;
+      // Ark: also hold until qiankun proxy fingerprint report finished
+      // (initReport 2=ok / 3=err). Cold fU common is short; warm is ~1.8k.
+      if (needSettle && isArkHost()) {
+        noteFp();
+        const fp = proxyFp();
+        const ir = fp && fp.initReport;
+        if (!(ir === 2 || ir === 3)) {
+          bump('fp_wait');
+          return null;
+        }
+        bridgeProxyFp();
+        seedMerchantOo();
+      }
       if (needSettle) {
         if (Date.now() - signerSeenAt < SETTLE_MS) return null;
         // If nothing else has been signed yet, keep holding until settle*1.5 or a sign lands.
@@ -1060,5 +1153,5 @@
       _markNative(FM.fetch);
     }
   } catch (e) {}
-  return 'patched-v14-page-fy-fu';
+  return 'patched-v15-fp-proxy-common';
 })()
