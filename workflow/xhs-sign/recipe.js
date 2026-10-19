@@ -1,10 +1,10 @@
 (() => {
-  // v9: v8 bridge + ark fy-replica resign. Live verify showed mnsv2/xy18
+  // v10: v9 + upgrade crypto-stub→xy18; reject zero x3. Live verify showed mnsv2/xy18
   // mounts but page/probe still hit www _webmsxyw → XYW_~668 (gate soft-
   // blocked). library-launcher fy() is: mnsv2(a,md5(a),md5(path)) → x3,
   // pack {x0..x5} → custom-b64 → XYS_. Embed that for ark resign + keep
   // page x-s-common (fU). Native mnsv2 alias still missing.
-  const XS_VER = 9;
+  const XS_VER = 10;
   let prev = null;
   try { if (typeof window.__xsStats === 'function') prev = window.__xsStats(); } catch (e) {}
   if (prev && prev.ver >= XS_VER) return 'already';
@@ -131,8 +131,11 @@
   };
   const installMnsv2Bridge = () => {
     try {
-      if (typeof window.mnsv2 === 'function' && window.mnsv2.__xsBridge) return window.mnsv2;
-      if (typeof window.mnsv2 === 'function' && !window.mnsv2.__xsBridge) return window.mnsv2; // native won
+      const cur = typeof window.mnsv2 === 'function' ? window.mnsv2 : null;
+      if (cur && !cur.__xsBridge) return cur; // native won
+      // Upgrade path: crypto-stub (or missing) → xy18 when WASM Instance appears.
+      // Do NOT early-return on existing __xsBridge=crypto-stub.
+      if (cur && cur.__xsBridge === 'xy18') return cur;
       let bridge = null;
       const wasm = findWasmMnsExport();
       if (wasm) {
@@ -157,7 +160,7 @@
         };
         bridge.__xsBridge = 'xy18';
       }
-      if (!bridge) {
+      if (!bridge && !(cur && cur.__xsBridge)) {
         const stub = findCryptoStub();
         if (stub) {
           bridge = function mnsv2(a, b, d) {
@@ -167,10 +170,10 @@
           bridge.__xsBridge = 'crypto-stub';
         }
       }
-      if (!bridge) return null;
+      if (!bridge) return cur || null;
       window.mnsv2 = bridge;
       try { if (window.proxy) window.proxy.mnsv2 = bridge; } catch (e2) {}
-      bump('mns_bridged');
+      if (!cur || cur.__xsBridge !== bridge.__xsBridge) bump('mns_bridged');
       return window.mnsv2;
     } catch (e) { return null; }
   };
@@ -196,9 +199,10 @@
   const mirrorTimer = setInterval(() => {
     mirrorSigner();
     mirrorMnsv2();
-    if (typeof window.mnsv2 !== 'function') installMnsv2Bridge();
+    // Always tick bridge so crypto-stub can upgrade to xy18 when WASM lands.
+    installMnsv2Bridge();
   }, 200);
-  setTimeout(() => { try { clearInterval(mirrorTimer); } catch (e) {} }, 60000);
+  setTimeout(() => { try { clearInterval(mirrorTimer); } catch (e) {} }, 120000);
   // Only production xhs hosts — never sit/SSO ticket hosts (signing those
   // with the itemark AS signer can bounce the jar into customer.sit).
   const isXhsUrl = (u) => {
@@ -387,8 +391,15 @@
       else if (typeof data === 'string') a += data;
       const b = xsMd5([a].join(''));
       const d = xsMd5(String(path || ''));
-      const x3 = mns(a, b, d);
+      // Prefer xy18; crypto-stub often returns zeros and 406s.
+      if (mns.__xsBridge === 'crypto-stub') {
+        const up = installMnsv2Bridge();
+        if (!up || up.__xsBridge !== 'xy18') return null;
+      }
+      const x3 = (resolveMnsv2() || mns)(a, b, d);
       if (x3 == null || x3 === '') return null;
+      const x3s = String(x3);
+      if (/^0+$/.test(x3s)) return null;
       let plat = 'PC';
       try { plat = window.xsecplatform || (window.proxy && window.proxy.xsecplatform) || 'PC'; } catch (e) {}
       const n = {
@@ -865,5 +876,5 @@
       _markNative(FM.fetch);
     }
   } catch (e) {}
-  return 'patched-v9-ark-fy-replica';
+  return 'patched-v10-xy18-upgrade';
 })()
