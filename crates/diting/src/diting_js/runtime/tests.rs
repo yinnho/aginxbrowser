@@ -1662,7 +1662,7 @@
             r.u_proto = JSON.stringify(Object.getOwnPropertyNames(Object.getPrototypeOf(uad)));
             r.u_mobile = uad.mobile === false;
             r.u_mobile_proto = typeof Object.getOwnPropertyDescriptor(Object.getPrototypeOf(uad), 'mobile').get;
-            r.u_json_shape = (function(){ var j = uad.toJSON(); return j.mobile === false && typeof j.platform === 'string' && j.platform.length > 0 && j.brands.length === 3 && j.brands[0].brand === 'Chromium' && j.brands[1].brand === 'Google Chrome' && j.brands[2].brand === 'Not A(Brand' && j.brands[0].version === '154' && j.brands[0].version === j.brands[1].version && j.brands[2].version === '99'; })();
+            r.u_json_shape = (function(){ var j = uad.toJSON(); return j.mobile === false && typeof j.platform === 'string' && j.platform.length > 0 && j.brands.length === 3 && j.brands[0].brand === 'Not:A-Brand' && j.brands[1].brand === 'Google Chrome' && j.brands[2].brand === 'Chromium' && j.brands[1].version === '145' && j.brands[1].version === j.brands[2].version && j.brands[0].version === '99'; })();
             r.u_gev = typeof uad.getHighEntropyValues === 'function';
             r.u_instanceof = uad instanceof NavigatorUAData;
             r.u_enum = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(uad), 'brands').enumerable === true;

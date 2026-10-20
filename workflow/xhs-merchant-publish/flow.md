@@ -28,8 +28,8 @@
 - **绿 jar**：先跑 `workflow/xhs-qianfan-login`（B 端 CAS QR 登录，落
   `xhs-qf-stable` 账号）。jar 死会在 create 页被弹去 login——flow 的
   wait_signer predicate 放行弹跳，signer 观测步报精确 url。
-- fleet 面 **Chrome/154**（A-154-lite，f124c1e）：145/155 面都会死
-  （145=300015 环境杀、155=SIT 路由墙）。persona_ua 与 fleet 同钉 154。
+- fleet 面 **Chrome/145**（2026-10-20 起与 TLS 预设 chrome145 一致；此前 154 声明配 145 握手）
+  （146–153/155/156 会被路由进 SIT 墙；此前 145 的 300015 是在旧引擎上测的）。persona_ua 与 fleet 同钉 145。
 
 ## 已知坑
 

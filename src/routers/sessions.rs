@@ -63,11 +63,11 @@ pub struct SessionCreateRequest {
     #[serde(default)]
     pub account: Option<String>,
     /// Optional User-Agent to teach as the account's device persona on first
-    /// create (teach-once). Prefer Mac/Win Chrome/154 (fleet UA claim); the
+    /// create (teach-once). Prefer Mac/Win Chrome/145 (fleet UA claim); the
     /// TLS handshake still uses the chrome145 JA3 shape — mismatched UA
     /// majors are rewritten to 154. Ignored when the account already has a
     /// stored persona. When omitted on Darwin (or with
-    /// `AGINXBROWSER_PERSONA_OS=mac`), the engine pins Mac Chrome/154.
+    /// `AGINXBROWSER_PERSONA_OS=mac`), the engine pins Mac Chrome/145.
     #[serde(default)]
     pub persona_ua: Option<String>,
 }

@@ -7581,7 +7581,7 @@ function __ditingUADataPlatformFromUA() {
 // numbers (real Chrome reports four-part builds there, never x.0.0.0).
 function __ditingChromeMajorFromUA() {
   const m = String(globalThis.__diting_ua || "").match(/Chrome\/(\d+)/);
-  return m ? m[1] : "154";
+  return m ? m[1] : "145";
 }
 // Chromium's UA-CH GREASE, computed the way user_agent_utils.cc does instead
 // of pinning one generation's face: brand = "Not"+C[m%11]+"A"+C[(m+1)%11]
@@ -8377,7 +8377,7 @@ const __navStore = {
   get appVersion() { return this.userAgent.replace('Mozilla/', ''); },
   get platform() { return globalThis.__diting_platform_override || __ditingPlatformFromUA(); },
   product: "Gecko",
-  get userAgent() { return globalThis.__diting_ua || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"; },
+  get userAgent() { return globalThis.__diting_ua || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"; },
   get language() { return __ditingLangList()[0]; },
   get languages() {
     const list = __ditingLangList();

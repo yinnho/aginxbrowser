@@ -21,7 +21,7 @@ use crate::diting_net::client::{Response, NetError, ResourceType};
 
 #[cfg(feature = "stealth")]
 pub const STEALTH_USER_AGENT: &str =
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36";
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
 
 /// The TLS fingerprint stealth builds present by default. `with_proxy_and_os`
 /// constructs the matching emulation and `/health` reports this string, so
@@ -112,22 +112,21 @@ fn fingerprint_family_version(name: &str) -> Option<(&'static str, u32)> {
 }
 
 /// The Chrome major the whole fleet claims (persona UA, GL tables, uad
-/// brands, sec-ch-ua). 154 since the 2026-10-17 xhs SIT finding: the edge
-/// buckets UA-155 sessions into its customer.sit loop while 154 routes
-/// production. The TLS handshake preset itself stays chrome145
-/// *shaped* — wreq-util rc.31's ceiling: its BoringSSL name table predates
-/// the mldsa sigalgs, so the Chrome 150+ signature-algorithms delta is
-/// inexpressible on this dependency generation. Accepted residual;
-/// revisit on a wreq 0.16 migration. Mirrors `default_tls_chrome_major` in
-/// aginxbrowser/src/account.rs (kept separate: that side avoids the stealth
-/// feature gate).
+/// brands, sec-ch-ua) — equal to the TLS preset's major (Chrome145), so the
+/// UA and the ClientHello agree. 145 is the one production-routed major a
+/// real wreq-util preset backs: the xhs edge buckets UA 146–153/155/156 into
+/// its customer.sit loop (2026-10-17 probe), and presets stop at 149. The
+/// fleet claimed 154 over this chrome145 handshake from 2026-10-17 to
+/// 2026-10-20; that UA/TLS mismatch is gone. Mirrors
+/// `default_tls_chrome_major` in aginxbrowser/src/account.rs (kept separate:
+/// that side avoids the stealth feature gate).
 #[cfg(feature = "stealth")]
-pub const CLAIMED_CHROME_MAJOR: u32 = 154;
+pub const CLAIMED_CHROME_MAJOR: u32 = 145;
 
 /// Warn when the effective UA and the browser claim disagree on family or
 /// major version. With an explicit `tls_fingerprint`, coherence means the UA
 /// rides that fingerprint's family+major (operator chose the pair). With the
-/// default handshake, coherence means the fleet claim: Chrome/154 over the
+/// default handshake, coherence means the fleet claim: Chrome/145 over the
 /// chrome145-shaped preset — "Chrome/152" in the UA over the fleet claim is
 /// the kind of tell WAFs diff (taobao compat report ⑤). Returns true when a
 /// mismatch was logged; `None` fingerprint means the default handshake.
@@ -420,7 +419,7 @@ impl StealthHttpClient {
             extra_headers: RwLock::new(HashMap::new()),
             user_agent: RwLock::new(
                 std::env::var("AGINXBROWSER_UA").unwrap_or_else(|_| {
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36".to_string()
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36".to_string()
                 }),
             ),
             accept_language: RwLock::new(
@@ -570,7 +569,7 @@ impl StealthHttpClient {
             let ua = self.user_agent.read().await.clone();
             let lang = self.accept_language.read().await.clone();
             // Emulation (wreq-util Chrome145) bakes Sec-Ch-Ua v=145 into the
-            // profile. Fleet UA is Chrome/154 — override brands to match UA,
+            // profile. Fleet UA is Chrome/145 — override brands to match UA,
             // same as the plain client path. Leaving the bake-in is a WAF tell
             // (UA 154 + CH 145), measured on httpbin 2026-10-19.
             let (sec_ch_ua, platform) = crate::diting_net::client::derive_client_hints(&ua);

@@ -288,7 +288,7 @@ async fn main() -> anyhow::Result<()> {
 
     // UA/TLS coherence (taobao compat report ⑤): AGINXBROWSER_UA overrides
     // the UA while the stealth transport keeps its default chrome145-shaped
-    // TLS handshake; fleet claim is Chrome/154 — warn when the UA major
+    // TLS handshake; fleet claim is Chrome/145 — warn when the UA major
     // disagrees with that claim (WAF tell).
     #[cfg(feature = "stealth")]
     if let Ok(ua) = std::env::var("AGINXBROWSER_UA") {

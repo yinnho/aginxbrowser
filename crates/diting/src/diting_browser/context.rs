@@ -132,7 +132,7 @@ impl BrowserContext {
             client.tls_fingerprint = tls_fingerprint.clone();
         }
         // Resolution chain: explicit per-context UA → AGINXBROWSER_UA → the
-        // fingerprint pool's stable default (macOS Chrome/154 UA; TLS shape
+        // fingerprint pool's stable default (macOS Chrome/145 UA; TLS shape
         // stays chrome145 — pin or rotate via AGINXBROWSER_PROFILE /
         // AGINXBROWSER_ROTATE_PROFILE; see profiles.rs).
         let resolved_ua = user_agent.unwrap_or_else(|| {

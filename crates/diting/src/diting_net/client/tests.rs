@@ -25,15 +25,16 @@ fn derive_client_hints_grease_matches_chromium_algorithm() {
         ch_ua,
         r#""Chromium";v="154", "Google Chrome";v="154", "Not A(Brand";v="99""#
     );
-    // 155 regression pin (previous fleet major): [GC, Chromium, "Not(A:Brand" v24].
+    // 155 regression pin (earlier fleet major): [GC, Chromium, "Not(A:Brand" v24].
     let ua155 = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
     let (ch_ua, _) = derive_client_hints(ua155);
     assert_eq!(
         ch_ua,
         r#""Google Chrome";v="155", "Chromium";v="155", "Not(A:Brand";v="24""#
     );
-    // 145 (our TLS shape's true major): "Not:A-Brand" v99, %6=1 →
-    // [grease, GC, Chromium] — matches wreq-util's upstream v145 table.
+    // 145 (the fleet major since 2026-10-20 and our TLS shape's major):
+    // "Not:A-Brand" v99, %6=1 → [grease, GC, Chromium] — matches
+    // wreq-util's upstream v145 table.
     let ua145 = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
     let (ch_ua, _) = derive_client_hints(ua145);
     assert_eq!(
@@ -66,10 +67,10 @@ fn derive_client_hints_android() {
 
 #[test]
 fn derive_client_hints_defaults_when_no_version() {
-    // No Chrome/ token → falls back to the fleet major (154).
+    // No Chrome/ token → falls back to the fleet major (145).
     let ua = "Mozilla/5.0 (Macintosh) Gecko Firefox/120.0";
     let (ch_ua, _) = derive_client_hints(ua);
-    assert!(ch_ua.contains(r#""Chromium";v="154""#));
+    assert!(ch_ua.contains(r#""Chromium";v="145""#));
 }
 
 // Env- and flag-sensitive (1f7486c pattern): the lock serializes tests
