@@ -618,6 +618,19 @@ function _parserVisibleIds(ids) {
 // options object, which collapsed to "[object Object]" and hid which
 // resource timed out).
 const _FMT_DEPTH = 3, _FMT_WIDTH = 20, _FMT_KEYS = 15, _FMT_MAX = 8192;
+// A console call must never run page code: Chrome without DevTools open
+// formats nothing, and anti-bot scripts plant accessors on the arguments
+// (Error.stack, element id, plain props) as a "DevTools attached" tripwire.
+// xhs's mnsv2 loader does exactly that — console.log(err) firing its stack
+// getter made it conclude "inspected" and silently skip installing mnsv2.
+// Own accessors are therefore never invoked; prototype-chain reads (native
+// getters like Element.tagName) stay as they were.
+const _peek = (v, k) => {
+  const d = Object.getOwnPropertyDescriptor(v, k);
+  if (d) return "value" in d ? d.value : _PEEK_GETTER;
+  return v[k];
+};
+const _PEEK_GETTER = Symbol("getter");
 const _fmtVal = (v, depth, seen) => {
   if (v === null) return "null";
   if (v === undefined) return "undefined";
@@ -626,11 +639,18 @@ const _fmtVal = (v, depth, seen) => {
   if (t === "number" || t === "boolean" || t === "bigint" || t === "symbol") return String(v);
   if (t === "function") return "[Function" + (v.name ? ": " + v.name : "") + "]";
   try {
-    if (v instanceof Error) return v.stack || v.message || String(v);
+    if (v instanceof Error) {
+      const st = _peek(v, "stack");
+      if (typeof st === "string" && st) return st;
+      const nm = _peek(v, "name"), msg = _peek(v, "message");
+      return (typeof nm === "string" ? nm : "Error") + (typeof msg === "string" && msg ? ": " + msg : "");
+    }
     if (typeof Element !== "undefined" && v instanceof Element) {
-      let s = "<" + String(v.tagName).toLowerCase();
-      if (v.id) s += "#" + v.id;
-      const cl = typeof v.className === "string" ? v.className.trim() : "";
+      let s = "<" + String(_peek(v, "tagName")).toLowerCase();
+      const eid = _peek(v, "id");
+      if (typeof eid === "string" && eid) s += "#" + eid;
+      const ecl = _peek(v, "className");
+      const cl = typeof ecl === "string" ? ecl.trim() : "";
       if (cl) s += "." + cl.split(/\s+/).join(".");
       return s + ">";
     }
@@ -678,7 +698,11 @@ const _fmtVal = (v, depth, seen) => {
     let keys; try { keys = Object.keys(v); } catch { seen.delete(v); return String(v); }
     const parts = [];
     for (const k of keys.slice(0, _FMT_KEYS)) {
-      let val; try { val = _fmtVal(v[k], depth + 1, seen); } catch { val = "[Getter threw]"; }
+      let val;
+      try {
+        const pv = _peek(v, k);
+        val = pv === _PEEK_GETTER ? "[Getter]" : _fmtVal(pv, depth + 1, seen);
+      } catch { val = "[Getter threw]"; }
       parts.push(k + ": " + val);
     }
     if (keys.length > _FMT_KEYS) parts.push("… +" + (keys.length - _FMT_KEYS) + " more");
@@ -696,8 +720,13 @@ const _consoleFn = (level, args) => {
     try {
       globalThis.__diting_errors = globalThis.__diting_errors || [];
       globalThis.__diting_errors.push({msg: args.map(a => {
-        if (a && a.stack) return a.stack;
-        if (a && a.message) return a.message;
+        if (a !== null && typeof a === "object") {
+          const st = _peek(a, "stack");
+          if (typeof st === "string" && st) return st;
+          const m = _peek(a, "message");
+          if (typeof m === "string" && m) return m;
+          return _fmtVal(a, 0, new WeakSet());
+        }
         return String(a);
       }).join(" ")});
     } catch {}
@@ -17559,6 +17588,7 @@ globalThis.dispatchEvent = function(event) {
 // snapshot module) — fetch.js/xhr.js/window_faces.js install more globals
 // after this file, and a bootstrap-time-only sweep never sees them
 // (`globalThis.fetch` was still nameless for exactly that reason).
+const _globalThisFixed = new WeakSet();
 globalThis.__diting_name_sweep = function () {
   const sweep = (obj) => {
     const names = Object.getOwnPropertyNames(obj);
@@ -17573,6 +17603,62 @@ globalThis.__diting_name_sweep = function () {
   };
   sweep(globalThis);
   if (globalThis.Window && Window.prototype) sweep(Window.prototype);
+  // WebIDL accessors report "get <attr>" / "set <attr>" as their name, so
+  // toString() answers "function get webdriver() { [native code] }".
+  // Table-built accessors here were anonymous ("function () { [native code] }"),
+  // and anti-tamper loaders (xhs mnsv2 reads Navigator.prototype.webdriver's
+  // getter) treat that as a patched navigator and quietly skip installing.
+  // Only nameless functions are renamed: one function shared by several
+  // keys keeps whatever name it already has.
+  const nameAccessors = (o) => {
+    let keys;
+    try { keys = Object.getOwnPropertyNames(o); } catch (e) { return; }
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      let d;
+      try { d = Object.getOwnPropertyDescriptor(o, k); } catch (e) { continue; }
+      if (!d) continue;
+      for (const w of ['get', 'set']) {
+        const f = d[w];
+        if (typeof f === 'function' && (f.name === '' || f.name === w)) {
+          try { Object.defineProperty(f, 'name', { value: w + ' ' + k, configurable: true }); } catch (e) {}
+        }
+      }
+    }
+  };
+  // Detached EventTarget calls: `const add = document.addEventListener;
+  // add(type, fn)` runs with `this` undefined, and Chrome falls back to the
+  // global object instead of throwing. Here the registry keyed a WeakMap on
+  // `this`, so the call threw "Invalid value used as weak map key" — xhs's
+  // mnsv2 loader makes exactly this call inside a try/catch, read the throw
+  // as a hostile runtime and silently skipped installing mnsv2/mns0101.
+  const evtProtos = [globalThis.Document && Document.prototype,
+    globalThis.Element && Element.prototype,
+    globalThis.Window && Window.prototype,
+    globalThis.EventTarget && EventTarget.prototype];
+  for (const P of evtProtos) {
+    if (!P) continue;
+    for (const m of ['addEventListener', 'removeEventListener', 'dispatchEvent']) {
+      const d = Object.getOwnPropertyDescriptor(P, m);
+      if (!d || typeof d.value !== 'function' || _globalThisFixed.has(d.value)) continue;
+      const orig = d.value;
+      const w = ({ [m]() { return orig.apply(this == null ? globalThis : this, arguments); } })[m];
+      try { Object.defineProperty(w, 'length', { value: orig.length, configurable: true }); } catch (e) {}
+      _markNative(w);
+      _globalThisFixed.add(w);
+      try { Object.defineProperty(P, m, { value: w, writable: d.writable, enumerable: d.enumerable, configurable: d.configurable }); } catch (e) {}
+    }
+  }
+  const gnames = Object.getOwnPropertyNames(globalThis);
+  for (let i = 0; i < gnames.length; i++) {
+    const g = gnames[i];
+    if (g.startsWith('_') || g.includes('diting')) continue;
+    let C;
+    try { C = globalThis[g]; } catch (e) { continue; }
+    if (typeof C !== 'function') continue;
+    nameAccessors(C);
+    if (C.prototype && typeof C.prototype === 'object') nameAccessors(C.prototype);
+  }
 };
 globalThis.__diting_name_sweep();
 
