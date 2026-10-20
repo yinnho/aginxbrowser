@@ -285,3 +285,42 @@ try { (function () {
     }
   } catch (e) {}
 })();
+
+// document.all is Chrome's one [[IsHTMLDDA]] object: typeof is "undefined"
+// and `== null` holds, yet it has `length`, `item()`, `namedItem()` and
+// can be called. No JS construct makes such an object, so the Rust side
+// mints one per isolate (V8 `%GetUndetectable()`, natives syntax enabled
+// only for that single compile — see JsRuntime::new) and hands it here.
+// xhs's mnsv2 loader probes `typeof document.all` and aborts the whole
+// install when it reads "function"/"object" or real undefined. The
+// undetectable object's own call handler always yields null; that is all
+// V8 offers and the loader tolerates it.
+globalThis.__diting_install_all = function (u) {
+  var P = globalThis.HTMLAllCollection && HTMLAllCollection.prototype;
+  // `u` is falsy by design (undetectable): never test it for truthiness.
+  if (!P) return;
+  var all = function () { return document.getElementsByTagName('*'); };
+  var members = {
+    length: { get: function () { return all().length; } },
+    item: { value: function item(i) { return all()[i >>> 0] || null; } },
+    namedItem: { value: function namedItem(n) {
+      n = String(n);
+      return document.getElementById(n) || document.getElementsByName(n)[0] || null;
+    } },
+  };
+  var keys = Object.keys(members);
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i], m = members[k];
+    var d = { configurable: true, enumerable: true };
+    if (m.get) { d.get = m.get; _markNative(m.get); try { Object.defineProperty(m.get, 'name', { value: 'get ' + k, configurable: true }); } catch (e) {} }
+    else { d.value = m.value; d.writable = true; _markNative(m.value); }
+    try { Object.defineProperty(P, k, d); } catch (e) {}
+  }
+  Object.setPrototypeOf(u, P);
+  var getter = { get all() { return u; } };
+  var g = Object.getOwnPropertyDescriptor(getter, 'all').get;
+  _markNative(g);
+  try {
+    Object.defineProperty(Document.prototype, 'all', { get: g, set: undefined, enumerable: true, configurable: true });
+  } catch (e) {}
+};

@@ -232,6 +232,10 @@ impl JsRuntime {
                 let kb = crate::env_knobs::js_stack_mb().saturating_sub(2).max(1) * 1024;
                 // Returns (); V8 itself logs to stderr if a flag is rejected,
                 // which would leave the default ~984 KB ceiling in place.
+                // Must precede V8 init: lets the document.all mint below flip
+                // --allow-natives-syntax on and off again (frozen flags make
+                // any later set_flags_from_string a V8_Fatal).
+                v8::V8::set_flags_from_string("--no-freeze-flags-after-init");
                 v8::V8::set_flags_from_string(&format!("--stack-size={kb}"));
             });
             // #224: same one-shot shape for the old-space ceiling. V8's
@@ -282,6 +286,24 @@ impl JsRuntime {
                 "globalThis.__diting_objects = {}; globalThis.__diting_oid = 0; globalThis.__diting_init();",
             )
             .expect("init should not fail");
+
+        // document.all needs a real [[IsHTMLDDA]] object (typeof "undefined"
+        // yet indexable/callable); only V8's `%GetUndetectable()` can mint
+        // one. Natives syntax is on for exactly this one compile, under the
+        // construction lock, then switched off so page scripts never parse
+        // `%Foo()` (Chrome: SyntaxError).
+        {
+            let _natives_guard = ISOLATE_CONSTRUCT_LOCK.lock().unwrap();
+            v8::V8::set_flags_from_string("--allow-natives-syntax");
+            let minted = runtime.execute_script(
+                "<anonymous>",
+                "globalThis.__diting_install_all(%GetUndetectable()); delete globalThis.__diting_install_all;",
+            );
+            v8::V8::set_flags_from_string("--no-allow-natives-syntax");
+            if let Err(e) = minted {
+                tracing::warn!("document.all undetectable object not installed: {}", e);
+            }
+        }
 
         let isolate_handle = runtime.isolate_handle();
         let heap_limit_state = std::sync::Arc::new(HeapLimitState::default());
