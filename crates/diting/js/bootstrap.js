@@ -16626,8 +16626,8 @@ globalThis.__diting_init = function() {
   const dcl = 60 + Math.floor(_fpRand(642) * 540);
   const load = dcl + 40 + Math.floor(_fpRand(643) * 760);
   // (#78) Chrome's timeOrigin is a float; navigationStart stays integral.
-  globalThis.performance.timeOrigin = t0 + _fpRand(644) * 0.9;
-  globalThis.performance.timing = {
+  globalThis.performance._timeOrigin = t0 + _fpRand(644) * 0.9;
+  globalThis.performance._timing = {
     navigationStart: t0,
     fetchStart: t0 + 1, domainLookupStart: t0 + 2, domainLookupEnd: t0 + 12,
     connectStart: t0 + 12, connectEnd: t0 + 48, secureConnectionStart: t0 + 18,
@@ -16638,7 +16638,7 @@ globalThis.__diting_init = function() {
   };
   // Derived entries (navigation/paint) are cached per navigation.
   if (globalThis.performance._resetDerived) globalThis.performance._resetDerived();
-  globalThis.performance.memory = {
+  globalThis.performance._memory = {
     jsHeapSizeLimit: 2172649472,
     totalJSHeapSize: 15000000 + Math.floor(_fpRand(620) * 85000000),
     usedJSHeapSize: 8000000 + Math.floor(_fpRand(621) * 42000000),
@@ -16711,9 +16711,13 @@ globalThis.__diting_init = function() {
     const _keys = Object.keys;
     const _gopds = Object.getOwnPropertyDescriptors;
     const _patch = (obj, key, impl) => {
-      _markNative(impl);
-      try { Object.defineProperty(impl, 'name', { value: key }); } catch(e) {}
-      try { Object.defineProperty(obj, key, { value: impl, writable: true, enumerable: false, configurable: true }); } catch(e) {}
+      // Method-shorthand shell: Chrome's Object.keys & co. are plain
+      // natives — not constructible and no own `prototype`. A bare
+      // `function(o){}` impl has both, which any hooked-native check reads
+      // (xhs b1 x45).
+      const w = ({ [key](o) { return impl.apply(this, arguments); } })[key];
+      _markNative(w);
+      try { Object.defineProperty(obj, key, { value: w, writable: true, enumerable: false, configurable: true }); } catch(e) {}
     };
     // Also strip engine `_` slots on Performance / Document. Chrome keeps
     // those as internal slots (absent from gopn); our __hideOwn only clears

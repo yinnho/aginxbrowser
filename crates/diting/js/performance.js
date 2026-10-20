@@ -144,16 +144,24 @@ class _Performance {
     this._navEntry = null; this._paintEntries = null;
     this._resources = [];
     this._resourceCap = 250;
-    this.timeOrigin = 0;
-    this.timing = { navigationStart: 0, domContentLoadedEventEnd: 0, loadEventEnd: 0 };
-    this.navigation = { type: 0, redirectCount: 0 };
-    this.memory = {
+    // Hidden slots; the public timeOrigin/timing/navigation/memory are
+    // prototype accessors (see the graft at the end of interface_sweep.js:
+    // in Chrome `performance` is a real Performance whose own-property list
+    // is empty, and these four live on Performance.prototype).
+    this._timeOrigin = 0;
+    this._timing = { navigationStart: 0, domContentLoadedEventEnd: 0, loadEventEnd: 0 };
+    this._navigation = { type: 0, redirectCount: 0 };
+    this._memory = {
       jsHeapSizeLimit: 2172649472,
       totalJSHeapSize: 19321856,
       usedJSHeapSize: 16781520,
     };
     __hideOwn(this);
   }
+  get timeOrigin() { return this._timeOrigin; }
+  get timing() { return this._timing; }
+  get navigation() { return this._navigation; }
+  get memory() { return this._memory; }
   now() {
     // (#78) monotonic: _perfLast floors any regression, THEN the 100µs
     // bucket + fixed noise shape lands (quantizing first would let rounding

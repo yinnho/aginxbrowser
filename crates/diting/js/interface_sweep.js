@@ -324,3 +324,58 @@ globalThis.__diting_install_all = function (u) {
     Object.defineProperty(Document.prototype, 'all', { get: g, set: undefined, enumerable: true, configurable: true });
   } catch (e) {}
 };
+
+// Graft the engine's `_Performance` onto the real Performance interface.
+// Chrome: `performance instanceof Performance`, constructor.name
+// "Performance", chain Performance > EventTarget > Object, an empty own-key
+// list, and every method/accessor on Performance.prototype. Here the
+// instance came from the internal `_Performance` class (constructor name
+// leaked as "_Performance", methods on a hidden prototype, Performance
+// .prototype empty) — the first thing a hook-detector that walks
+// Performance.prototype hits. Private helpers (`_*`) stay reachable as own
+// non-enumerable instance slots, which the enumeration patch already hides.
+(function () {
+  try {
+    var P = globalThis.Performance, perf = globalThis.performance;
+    if (!P || !perf || typeof _Performance === 'undefined') return;
+    var src = _Performance.prototype, dst = P.prototype;
+    if (typeof EventTarget === 'function' && Object.getPrototypeOf(dst) === Object.prototype) {
+      Object.setPrototypeOf(dst, EventTarget.prototype);
+    }
+    var extras = {
+      onresourcetimingbufferfull: (function () {
+        var g = Object.getOwnPropertyDescriptor({ get onresourcetimingbufferfull() { return this._orbf === undefined ? null : this._orbf; } }, 'onresourcetimingbufferfull').get;
+        var s = Object.getOwnPropertyDescriptor({ set onresourcetimingbufferfull(v) { this._orbf = (typeof v === 'function' || (v !== null && typeof v === 'object')) ? v : null; } }, 'onresourcetimingbufferfull').set;
+        return { get: g, set: s, enumerable: true, configurable: true };
+      })(),
+      toJSON: { value: ({ toJSON() { return { timeOrigin: this.timeOrigin, timing: this.timing, navigation: this.navigation, eventCounts: this.eventCounts }; } }).toJSON, writable: true, enumerable: true, configurable: true },
+    };
+    var order = ['timeOrigin', 'onresourcetimingbufferfull', 'clearMarks', 'clearMeasures',
+      'clearResourceTimings', 'getEntries', 'getEntriesByName', 'getEntriesByType', 'mark',
+      'measure', 'setResourceTimingBufferSize', 'toJSON', 'now', 'constructor', 'timing',
+      'navigation', 'memory', 'eventCounts'];
+    var descs = {};
+    order.forEach(function (k) {
+      var d = k === 'constructor' ? Object.getOwnPropertyDescriptor(dst, k)
+        : (Object.getOwnPropertyDescriptor(src, k) || extras[k] || Object.getOwnPropertyDescriptor(dst, k));
+      if (d) descs[k] = d;
+    });
+    Object.getOwnPropertyNames(dst).forEach(function (k) { if (k !== 'constructor') { try { delete dst[k]; } catch (e) {} } });
+    try { delete dst.constructor; } catch (e) {}
+    order.forEach(function (k) {
+      var d = descs[k]; if (!d) return;
+      if (k !== 'constructor') { d = Object.assign({}, d, { enumerable: true, configurable: true }); }
+      if (d.get) _markNative(d.get); if (d.set) _markNative(d.set); if (typeof d.value === 'function' && k !== 'constructor') _markNative(d.value);
+      try { Object.defineProperty(dst, k, d); } catch (e) {}
+    });
+    // private helpers: own, non-enumerable slots on the instance
+    Object.getOwnPropertyNames(src).forEach(function (k) {
+      if (k.charAt(0) !== '_') return;
+      var d = Object.getOwnPropertyDescriptor(src, k);
+      if (d && typeof d.value === 'function') {
+        try { Object.defineProperty(perf, k, { value: d.value, writable: true, enumerable: false, configurable: true }); } catch (e) {}
+      }
+    });
+    Object.setPrototypeOf(perf, dst);
+  } catch (e) {}
+})();
