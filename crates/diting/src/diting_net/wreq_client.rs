@@ -723,6 +723,41 @@ impl StealthHttpClient {
                 req = req.body(b.to_vec());
             }
 
+            // Chrome's wire layout (chrome_headers.rs): the preset seeds a
+            // plain HeaderMap with no real Chrome order and no
+            // accept-encoding, and wreq's decompression layer then appends
+            // its own "zstd,gzip,deflate,br" last; navigation/fetch priority
+            // also differs (`u=0, i` is only the top-level document).
+            if !request_local("accept-encoding") && !extra.contains_key("Accept-Encoding") {
+                req = req.header("Accept-Encoding", crate::diting_net::chrome_headers::ACCEPT_ENCODING);
+            }
+            if !request_local("priority") && !extra.contains_key("Priority") {
+                req = req.header("Priority", crate::diting_net::chrome_headers::priority(resource_type));
+            }
+            if method != wreq::Method::GET && method != wreq::Method::HEAD && !request_local("content-length") {
+                req = req.header("Content-Length", body.map(|b| b.len()).unwrap_or(0).to_string());
+            }
+            {
+                let navigation = crate::diting_net::client::metadata::is_navigation(resource_type);
+                let authored = request_headers
+                    .map(|h| crate::diting_net::chrome_headers::has_author_headers(h.keys().map(|k| k.as_str())))
+                    .unwrap_or(false)
+                    || crate::diting_net::chrome_headers::has_author_headers(extra.keys().map(|k| k.as_str()));
+                // `accept: */*` is what the browser itself sends when the page
+                // set nothing, and the page layer mirrors it into
+                // `request_headers`; only a different value is author-set (its
+                // slot in Blink's author-header map is what the list models).
+                let authored_accept = request_headers
+                    .and_then(|h| h.iter().find(|(k, _)| k.eq_ignore_ascii_case("accept")))
+                    .map(|(_, v)| v.trim() != "*/*")
+                    .unwrap_or(false);
+                req = req.orig_headers(crate::diting_net::chrome_headers::header_order(
+                    navigation,
+                    authored,
+                    authored_accept,
+                ));
+            }
+
             // #97: snapshot the request's header set right before it goes
             // out — everything this code set on the builder (identity,
             // cookies, extra/request-local headers, content-type). The

@@ -5,6 +5,8 @@ pub mod encoding;
 pub mod blocklist;
 pub mod site;
 #[cfg(feature = "stealth")]
+pub mod chrome_headers;
+#[cfg(feature = "stealth")]
 pub mod wreq_client;
 
 pub use client::{
