@@ -1,0 +1,899 @@
+{
+ "args": [
+  "images"
+ ],
+ "vars": {
+  "create_url": "https://ark.xiaohongshu.com/app-item/good/create",
+  "ready_ms": 60000,
+  "img_ms": 60000,
+  "done": {},
+  "on_exists": "reuse",
+  "expect_seller_id": ""
+ },
+ "create": {
+  "width": 1440,
+  "height": 900,
+  "account": "xhs-qf-stable",
+  "persona_ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+ },
+ "steps": [
+  {
+   "op": "eval",
+   "args": {
+    "script": "(function(){return JSON.stringify({url:location.href.slice(0,100)})})()"
+   },
+   "save": "where",
+   "note": "already on ark? skip the home hop (every rerun re-navigating ark home hits the cold-start busy page and starves the next eval)"
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "where",
+     "is": "contains",
+     "value": "ark.xiaohongshu.com"
+    },
+    "goto": "jar_probe"
+   }
+  },
+  {
+   "id": "nav_home",
+   "op": "navigate",
+   "args": {
+    "url": "https://ark.xiaohongshu.com/ark"
+   },
+   "note": "jar pre-check springboard. A dead jar is only bounced to the CAS login page (benign), never into the product API storm."
+  },
+  {
+   "id": "jar_probe",
+   "op": "eval",
+   "args": {
+    "script": "(async function(){try{var r=await fetch('/api/edith/seller/info/v2',{credentials:'include'});var t=await r.text();var c=null; try{c=JSON.parse(t).code}catch(e){} return JSON.stringify({seller_status:r.status,seller_code:c,url:location.href,body:t.slice(0,200)})} catch(e){return JSON.stringify({thrown:String(e),url:location.href})}})()",
+    "timeout_ms": 30000
+   },
+   "save": "jar",
+   "note": "seller/info before touching the create page. Entering create with a dead jar = 401 storm -> bounce chain -> root session killed."
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "jar",
+     "is": "contains",
+     "value": "\"seller_code\":0"
+    },
+    "goto": "nav_create"
+   }
+  },
+  {
+   "id": "jar_dead",
+   "op": "eval",
+   "args": {
+    "script": "throw new Error('xhs-merchant-upload: jar is dead (seller/info != code 0) - '+JSON.stringify({{jar}})+' - run xhs-qianfan-login first; never enter the create page with a dead jar')"
+   },
+   "note": "fail loud, before the create page"
+  },
+  {
+   "id": "nav_create",
+   "op": "navigate",
+   "args": {
+    "url": "{{create_url}}"
+   }
+  },
+  {
+   "id": "wait_ready",
+   "op": "wait",
+   "args": {
+    "predicate": "(function(){ var chunk=(window.proxy&&window.proxy.webpackChunkitemark)||window.webpackChunkitemark; if(!chunk||!document.querySelector('#ark-app-itemark-mount-container'))return false; var els=document.querySelectorAll('*'); for(var i=0;i<els.length;i++){var a=els[i].__vue_app__; if(a&&a.config&&a.config.globalProperties&&a.config.globalProperties.$pinia){ var m=a.config.globalProperties.$pinia._s.get('itemFormMain'); return !!(m&&m.initialized);}} return false;})()",
+    "timeout_ms": "{{ready_ms}}"
+   },
+   "note": "itemark micro-app mounted and the form store initialized (itemFormMain.initialized)"
+  },
+  {
+   "id": "boot",
+   "op": "eval",
+   "args": {
+    "script": "(function(){ var chunk=(window.proxy&&window.proxy.webpackChunkitemark)||window.webpackChunkitemark; if(!chunk)throw new Error('boot: itemark webpack chunk missing - not on app-item/good/create (or the app is not mounted yet)'); var req=null;chunk.push([['__agx_'+Date.now()],{},function(r){req=r}]); if(!req||!req.m)throw new Error('boot: webpack require not obtainable'); var LV=null,Yw=null,ids=Object.keys(req.m); for(var i=0;i<ids.length&&!(LV&&Yw);i++){ var s;try{s=req.m[ids[i]].toString()}catch(e){continue} if(!LV&&/\\bLV:\\(\\)=>/.test(s)){try{var e1=req(ids[i]);if(e1&&e1.LV&&typeof e1.LV.post==='function')LV=e1.LV}catch(x){}} if(!Yw&&s.indexOf('stage=\"upload\"')>=0&&s.indexOf('directoryManageables')>=0){ try{var e2=req(ids[i]);Object.keys(e2).forEach(function(k){ if(!Yw&&typeof e2[k]==='function'&&e2[k].length===2&&String(e2[k]).indexOf('stage=\"upload\"')>=0)Yw=e2[k]})}catch(x){}} } if(!LV)throw new Error('boot: shared HTTP client (LV) not found in the bundle'); var app=null,pinia=null,els=document.querySelectorAll('*'); for(var j=0;j<els.length;j++){var a=els[j].__vue_app__; if(a&&a.config&&a.config.globalProperties&&a.config.globalProperties.$pinia){app=a;pinia=a.config.globalProperties.$pinia;break}} var st=app&&app.config.globalProperties.$store; var ui=st&&st.getters&&st.getters.userInfo; var sellerId=ui&&ui.sellerId; if(!sellerId)throw new Error('boot: sellerId unavailable - the session is not a logged-in merchant'); window.__agx={req:req,LV:LV,Yw:Yw,pinia:pinia,app:app,sellerId:sellerId}; return {sellerId:sellerId,sellerName:ui.sellerName||ui.name||null,hasYw:typeof Yw==='function',hasPinia:!!pinia,modules:ids.length}; })()",
+    "timeout_ms": 30000
+   },
+   "save": "boot",
+   "note": "no module ids hard-coded: LV (signed HTTP client) and Yw (original upload job) are found by content"
+  },
+  {
+   "id": "identity",
+   "op": "eval",
+   "args": {
+    "script": "(function(){ var X=window.__agx,want='{{expect_seller_id}}'; if(want&&want!==X.sellerId)throw new Error('identity: logged in as seller '+X.sellerId+', expected '+want+' - refusing to touch the wrong store'); return {sellerId:X.sellerId,matches_expected:want?true:null}; })()",
+    "timeout_ms": 10000
+   },
+   "save": "identity"
+  },
+  {
+   "id": "args_check",
+   "op": "eval",
+   "save": "img_count",
+   "note": "fails in seconds and feeds the branch guards (img_count as a NUMBER)",
+   "args": {
+    "timeout_ms": 15000,
+    "script": "(function(){ var ALL={{args.images}}; if(!ALL||!ALL.length)throw new Error('images: pass a non-empty array of {name, content_base64, mime_type?, width?, height?}'); if(ALL.length>36)throw new Error('images: max 36 per call (img_0..img_35) - split larger sets; names already in the gallery are reused'); var seen={},errs=[]; for(var i=0;i<ALL.length;i++){var im=ALL[i]||{}; if(!im.name){errs.push('images['+i+']: name required');continue} if(seen[im.name])errs.push('images['+i+']: duplicate name '+im.name);seen[im.name]=1; if(!/\\.(jpe?g|png)$/i.test(im.name))errs.push('images['+i+']: '+im.name+' must end .jpg/.jpeg/.png'); } if(errs.length)throw new Error(errs.slice(0,8).join('; ')); window.__agxRecs={}; return ALL.length; })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 0
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_0",
+   "op": "eval",
+   "save": "img_0",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.0}},DONE={{done}},K=0; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 1
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_1",
+   "op": "eval",
+   "save": "img_1",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.1}},DONE={{done}},K=1; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 2
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_2",
+   "op": "eval",
+   "save": "img_2",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.2}},DONE={{done}},K=2; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 3
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_3",
+   "op": "eval",
+   "save": "img_3",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.3}},DONE={{done}},K=3; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 4
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_4",
+   "op": "eval",
+   "save": "img_4",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.4}},DONE={{done}},K=4; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 5
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_5",
+   "op": "eval",
+   "save": "img_5",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.5}},DONE={{done}},K=5; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 6
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_6",
+   "op": "eval",
+   "save": "img_6",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.6}},DONE={{done}},K=6; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 7
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_7",
+   "op": "eval",
+   "save": "img_7",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.7}},DONE={{done}},K=7; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 8
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_8",
+   "op": "eval",
+   "save": "img_8",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.8}},DONE={{done}},K=8; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 9
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_9",
+   "op": "eval",
+   "save": "img_9",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.9}},DONE={{done}},K=9; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 10
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_10",
+   "op": "eval",
+   "save": "img_10",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.10}},DONE={{done}},K=10; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 11
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_11",
+   "op": "eval",
+   "save": "img_11",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.11}},DONE={{done}},K=11; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 12
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_12",
+   "op": "eval",
+   "save": "img_12",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.12}},DONE={{done}},K=12; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 13
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_13",
+   "op": "eval",
+   "save": "img_13",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.13}},DONE={{done}},K=13; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 14
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_14",
+   "op": "eval",
+   "save": "img_14",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.14}},DONE={{done}},K=14; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 15
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_15",
+   "op": "eval",
+   "save": "img_15",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.15}},DONE={{done}},K=15; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 16
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_16",
+   "op": "eval",
+   "save": "img_16",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.16}},DONE={{done}},K=16; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 17
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_17",
+   "op": "eval",
+   "save": "img_17",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.17}},DONE={{done}},K=17; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 18
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_18",
+   "op": "eval",
+   "save": "img_18",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.18}},DONE={{done}},K=18; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 19
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_19",
+   "op": "eval",
+   "save": "img_19",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.19}},DONE={{done}},K=19; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 20
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_20",
+   "op": "eval",
+   "save": "img_20",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.20}},DONE={{done}},K=20; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 21
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_21",
+   "op": "eval",
+   "save": "img_21",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.21}},DONE={{done}},K=21; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 22
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_22",
+   "op": "eval",
+   "save": "img_22",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.22}},DONE={{done}},K=22; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 23
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_23",
+   "op": "eval",
+   "save": "img_23",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.23}},DONE={{done}},K=23; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 24
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_24",
+   "op": "eval",
+   "save": "img_24",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.24}},DONE={{done}},K=24; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 25
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_25",
+   "op": "eval",
+   "save": "img_25",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.25}},DONE={{done}},K=25; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 26
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_26",
+   "op": "eval",
+   "save": "img_26",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.26}},DONE={{done}},K=26; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 27
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_27",
+   "op": "eval",
+   "save": "img_27",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.27}},DONE={{done}},K=27; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 28
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_28",
+   "op": "eval",
+   "save": "img_28",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.28}},DONE={{done}},K=28; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 29
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_29",
+   "op": "eval",
+   "save": "img_29",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.29}},DONE={{done}},K=29; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 30
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_30",
+   "op": "eval",
+   "save": "img_30",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.30}},DONE={{done}},K=30; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 31
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_31",
+   "op": "eval",
+   "save": "img_31",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.31}},DONE={{done}},K=31; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 32
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_32",
+   "op": "eval",
+   "save": "img_32",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.32}},DONE={{done}},K=32; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 33
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_33",
+   "op": "eval",
+   "save": "img_33",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.33}},DONE={{done}},K=33; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 34
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_34",
+   "op": "eval",
+   "save": "img_34",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.34}},DONE={{done}},K=34; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 35
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_35",
+   "op": "eval",
+   "save": "img_35",
+   "note": "per-image save point (one continuation per eval, same shape as doudian-upload): a lost continuation costs this image only; saved img_0..img_k is the resume map",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var X=window.__agx,im={{args.images.35}},DONE={{done}},K=35; var rec={i:K,name:im.name},R=(window.__agxRecs=window.__agxRecs||{}); try{ if(DONE[im.name]){rec.skipped=1;rec.materialId=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].materialId;R[K]=rec;return rec} var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:im.name,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===im.name}); if(hit.length>1){rec.failed={stage:'exists',msg:'gallery already holds '+hit.length+' items named '+im.name+' - clean up or rename'};R[K]=rec;return rec} if(hit.length===1&&'{{on_exists}}'==='reuse'){rec.reused=1;rec.materialId=hit[0].id;R[K]=rec;return rec} if(hit.length===1){rec.failed={stage:'exists',msg:im.name+' already in the gallery and vars.on_exists is not reuse'};R[K]=rec;return rec} if(!im.content_base64){rec.failed={stage:'build',msg:'not in the gallery and no content_base64'};R[K]=rec;return rec} if(typeof X.Yw!=='function'){rec.fatal={stage:'boot',msg:'original upload job (Yw) not found in the bundle'};R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var mime=im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg'); var file=new File([u8],im.name,{type:mime}); var w=im.width,h=im.height; if(!w||!h){var bm=await createImageBitmap(file);w=bm.width;h=bm.height} var ext='.'+String(im.name).split('.').pop().toLowerCase(); var item={file:file,name:im.name,size:file.size,width:w,height:h,extension:ext,id:im.name,status:'wait',stage:'upload',uploadCount:0}; await X.Yw(item,X.sellerId,'0'); rec.status=item.status;rec.stage=item.stage;rec.msg=item.msg;rec.materialId=item.materialId; if(item.status!=='success'||!item.materialId)rec.failed={stage:item.stage,msg:item.msg}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,160)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 36
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "manifest",
+   "op": "eval",
+   "save": "upload",
+   "note": "merge + independent gallery readback (exact-name search, formal path/link/size). Throws only here.",
+   "args": {
+    "timeout_ms": 120000,
+    "script": "(async function(){ var X=window.__agx,R=window.__agxRecs||{},N={{img_count}},mats={},missing=[],failed=[],fatals=[],uploaded=0,reused=0,skipped=0; for(var i=0;i<N;i++){var r=R[i]; if(!r){missing.push('img_'+i+'(no-attempt)');continue} if(r.fatal){fatals.push(r.fatal);missing.push(r.name);continue} if(r.failed){failed.push({name:r.name,failed:r.failed});missing.push(r.name);continue} if(r.skipped)skipped++;else if(r.reused)reused++;else uploaded++; } if(missing.length)throw new Error('upload incomplete: '+(N-missing.length)+'/'+N+' ok; failed='+JSON.stringify(failed.slice(0,8))+(fatals.length?('; fatal='+JSON.stringify(fatals.slice(0,3))):'')+' - nothing is re-uploaded on a rerun: names already in the gallery are reused'); for(var k=0;k<N;k++){ var nm=R[k].name; var q=await X.LV.post('/api/edith/product/material_space/search_directory_manageable', {sellerId:X.sellerId,pageIndex:1,pageSize:20,filter:{keyword:nm,statuses:[1],basicTypes:[2],fatherDirectoryId:''}, order:{orderList:[{field:'createTime',asc:false}]},option:{withDetail:true}},{transform:false}); var hit=(q.directoryManageables||[]).filter(function(x){return x.name===nm}); if(hit.length!==1)throw new Error('readback: '+nm+' appears '+hit.length+' times in the gallery (expected exactly 1)'); var it=hit[0],ad=it.additionalData||{}; if(R[k].materialId&&R[k].materialId!==it.id)throw new Error('readback: '+nm+' materialId '+it.id+' != upload receipt '+R[k].materialId); var uim=ad.uploaderInfoModel;if(typeof uim==='string'){try{uim=JSON.parse(uim)}catch(e){}} mats[nm]={materialId:it.id,path:ad.path,link:ad.link,size:it.size,width:Number(ad.width),height:Number(ad.height),extension:ad.extension,uploaderInfoModel:uim}; } return {count:N,uploaded_new:uploaded,reused_existing:reused,skipped_done:skipped,materials:mats, note:'path/link/size are the GALLERY formal fields (they differ from the upload-stage ones) - feed this map to xhs-merchant-create args.materials'}; })()"
+   }
+  }
+ ]
+}

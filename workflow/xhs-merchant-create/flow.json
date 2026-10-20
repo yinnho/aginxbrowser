@@ -1,0 +1,349 @@
+{
+ "args": [
+  "title",
+  "skus",
+  "main_images",
+  "desc_images",
+  "materials"
+ ],
+ "vars": {
+  "create_url": "https://ark.xiaohongshu.com/app-item/good/create",
+  "ready_ms": 60000,
+  "submit": 0,
+  "allow_duplicate": 0,
+  "category_leaf_id": "65f995f83e946300016b0efc",
+  "spec_property": "套装规格",
+  "logistics_plan": "偏远地区不包邮",
+  "delivery_hours": 48,
+  "brand": "none",
+  "poll_ms": 800,
+  "poll_max": 150,
+  "expect_seller_id": ""
+ },
+ "create": {
+  "width": 1440,
+  "height": 900,
+  "account": "xhs-qf-stable",
+  "persona_ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+ },
+ "steps": [
+  {
+   "op": "eval",
+   "args": {
+    "script": "(function(){return JSON.stringify({url:location.href.slice(0,100)})})()"
+   },
+   "save": "where",
+   "note": "already on ark? skip the home hop (every rerun re-navigating ark home hits the cold-start busy page and starves the next eval)"
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "where",
+     "is": "contains",
+     "value": "ark.xiaohongshu.com"
+    },
+    "goto": "jar_probe"
+   }
+  },
+  {
+   "id": "nav_home",
+   "op": "navigate",
+   "args": {
+    "url": "https://ark.xiaohongshu.com/ark"
+   },
+   "note": "jar pre-check springboard. A dead jar is only bounced to the CAS login page (benign), never into the product API storm."
+  },
+  {
+   "id": "jar_probe",
+   "op": "eval",
+   "args": {
+    "script": "(async function(){try{var r=await fetch('/api/edith/seller/info/v2',{credentials:'include'});var t=await r.text();var c=null; try{c=JSON.parse(t).code}catch(e){} return JSON.stringify({seller_status:r.status,seller_code:c,url:location.href,body:t.slice(0,200)})} catch(e){return JSON.stringify({thrown:String(e),url:location.href})}})()",
+    "timeout_ms": 30000
+   },
+   "save": "jar",
+   "note": "seller/info before touching the create page. Entering create with a dead jar = 401 storm -> bounce chain -> root session killed."
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "jar",
+     "is": "contains",
+     "value": "\"seller_code\":0"
+    },
+    "goto": "nav_create"
+   }
+  },
+  {
+   "id": "jar_dead",
+   "op": "eval",
+   "args": {
+    "script": "throw new Error('xhs-merchant-create: jar is dead (seller/info != code 0) - '+JSON.stringify({{jar}})+' - run xhs-qianfan-login first; never enter the create page with a dead jar')"
+   },
+   "note": "fail loud, before the create page"
+  },
+  {
+   "id": "nav_create",
+   "op": "navigate",
+   "args": {
+    "url": "{{create_url}}"
+   }
+  },
+  {
+   "id": "wait_ready",
+   "op": "wait",
+   "args": {
+    "predicate": "(function(){ var chunk=(window.proxy&&window.proxy.webpackChunkitemark)||window.webpackChunkitemark; if(!chunk||!document.querySelector('#ark-app-itemark-mount-container'))return false; var els=document.querySelectorAll('*'); for(var i=0;i<els.length;i++){var a=els[i].__vue_app__; if(a&&a.config&&a.config.globalProperties&&a.config.globalProperties.$pinia){ var m=a.config.globalProperties.$pinia._s.get('itemFormMain'); return !!(m&&m.initialized);}} return false;})()",
+    "timeout_ms": "{{ready_ms}}"
+   },
+   "note": "itemark micro-app mounted and the form store initialized (itemFormMain.initialized)"
+  },
+  {
+   "id": "boot",
+   "op": "eval",
+   "args": {
+    "script": "(function(){ var chunk=(window.proxy&&window.proxy.webpackChunkitemark)||window.webpackChunkitemark; if(!chunk)throw new Error('boot: itemark webpack chunk missing - not on app-item/good/create (or the app is not mounted yet)'); var req=null;chunk.push([['__agx_'+Date.now()],{},function(r){req=r}]); if(!req||!req.m)throw new Error('boot: webpack require not obtainable'); var LV=null,Yw=null,ids=Object.keys(req.m); for(var i=0;i<ids.length&&!(LV&&Yw);i++){ var s;try{s=req.m[ids[i]].toString()}catch(e){continue} if(!LV&&/\\bLV:\\(\\)=>/.test(s)){try{var e1=req(ids[i]);if(e1&&e1.LV&&typeof e1.LV.post==='function')LV=e1.LV}catch(x){}} if(!Yw&&s.indexOf('stage=\"upload\"')>=0&&s.indexOf('directoryManageables')>=0){ try{var e2=req(ids[i]);Object.keys(e2).forEach(function(k){ if(!Yw&&typeof e2[k]==='function'&&e2[k].length===2&&String(e2[k]).indexOf('stage=\"upload\"')>=0)Yw=e2[k]})}catch(x){}} } if(!LV)throw new Error('boot: shared HTTP client (LV) not found in the bundle'); var app=null,pinia=null,els=document.querySelectorAll('*'); for(var j=0;j<els.length;j++){var a=els[j].__vue_app__; if(a&&a.config&&a.config.globalProperties&&a.config.globalProperties.$pinia){app=a;pinia=a.config.globalProperties.$pinia;break}} var st=app&&app.config.globalProperties.$store; var ui=st&&st.getters&&st.getters.userInfo; var sellerId=ui&&ui.sellerId; if(!sellerId)throw new Error('boot: sellerId unavailable - the session is not a logged-in merchant'); window.__agx={req:req,LV:LV,Yw:Yw,pinia:pinia,app:app,sellerId:sellerId}; return {sellerId:sellerId,sellerName:ui.sellerName||ui.name||null,hasYw:typeof Yw==='function',hasPinia:!!pinia,modules:ids.length}; })()",
+    "timeout_ms": 30000
+   },
+   "save": "boot",
+   "note": "no module ids hard-coded: LV (signed HTTP client) and Yw (original upload job) are found by content"
+  },
+  {
+   "id": "identity",
+   "op": "eval",
+   "args": {
+    "script": "(function(){ var X=window.__agx,want='{{expect_seller_id}}'; if(want&&want!==X.sellerId)throw new Error('identity: logged in as seller '+X.sellerId+', expected '+want+' - refusing to touch the wrong store'); return {sellerId:X.sellerId,matches_expected:want?true:null}; })()",
+    "timeout_ms": 10000
+   },
+   "save": "identity"
+  },
+  {
+   "id": "args_check",
+   "op": "eval",
+   "save": "args_ok",
+   "args": {
+    "timeout_ms": 15000,
+    "script": "(function(){ var A={{args}},errs=[]; if(!A.title)errs.push('title'); if(!A.skus||!A.skus.length)errs.push('skus (non-empty array of {name, price_yuan, stock, code, image})'); if(!A.main_images||!A.main_images.length)errs.push('main_images (names, 1:1)'); if(!A.desc_images||!A.desc_images.length)errs.push('desc_images (names)'); if(!A.materials)errs.push('materials (the map from xhs-merchant-upload)'); if(errs.length)throw new Error('args missing: '+errs.join(', ')); var seen={};A.skus.forEach(function(s,i){ if(!s.name)errs.push('skus['+i+'].name');if(seen[s.name])errs.push('skus['+i+'] duplicate name');seen[s.name]=1; if(!(s.price_yuan>=0.1))errs.push('skus['+i+'].price_yuan');if(!(s.stock>=0))errs.push('skus['+i+'].stock'); if(!s.code)errs.push('skus['+i+'].code'); if(!s.image||!A.materials[s.image])errs.push('skus['+i+'].image -> '+s.image+' not in materials')}); A.main_images.concat(A.desc_images).forEach(function(n){if(!A.materials[n])errs.push('image '+n+' not in materials')}); if(A.main_images.length>10)errs.push('main_images max 10'); if(errs.length)throw new Error('args invalid: '+errs.slice(0,10).join('; ')); return {skus:A.skus.length,main:A.main_images.length,desc:A.desc_images.length}; })()"
+   },
+   "note": "fails in seconds, before any page work is trusted"
+  },
+  {
+   "id": "dedupe",
+   "op": "eval",
+   "save": "dedupe",
+   "args": {
+    "timeout_ms": 120000,
+    "script": "(async function(){ var X=window.__agx,A={{args}},all=[],total=null; for(var pg=1;pg<=20;pg++){ var r=await X.LV.post('/api/edith/product/search_item_v2',{pageNo:pg,pageSize:50},{transform:true}); var d=(r&&r.data)||r;var it=(d&&d.items)||[];total=d&&d.total;all=all.concat(it); if(it.length<50||(total&&all.length>=total))break; } var pats=(A.dedupe_keywords&&A.dedupe_keywords.length)?A.dedupe_keywords:[]; var res=pats.map(function(p){return new RegExp(p)}); var hits=all.filter(function(x){var n=x.itemName||'';return n===A.title||res.some(function(re){return re.test(n)})}) .map(function(x){return {itemId:x.itemId,itemName:x.itemName}}); if(hits.length&&!{{allow_duplicate}})throw new Error('dedupe: '+hits.length+' existing item(s) already match - '+JSON.stringify(hits.slice(0,5))+' - refusing to create a duplicate (vars.allow_duplicate=1 to override)'); return {scanned:all.length,total:total,hits:hits,allowed:hits.length?true:false}; })()"
+   },
+   "note": "reads the WHOLE store listing and matches args.title / args.dedupe_keywords (the server-side keyword filter is a no-op). Throws on a hit unless vars.allow_duplicate=1."
+  },
+  {
+   "id": "fill_category",
+   "op": "eval",
+   "save": "category",
+   "args": {
+    "timeout_ms": 60000,
+    "script": "(async function(){ var X=window.__agx,P=X.pinia,A={{args}},c=P._s.get('itemFormCategory'),s=P._s.get('itemFormSingleSkuStore'); var leaf=A.category_leaf_id||'{{category_leaf_id}}',paths=A.category_paths||null; if(!paths){var opts=c.recentCategoryOptions||[],t=opts.find(function(x){return x.value===leaf}); if(!t)throw new Error('category: leaf '+leaf+' is not among the recent categories ('+opts.map(function(x){return x.label+':'+x.value}).join(', ')+') - pass args.category_paths (the path objects) instead'); paths=t.paths} await c.setCategories(paths); for(var i=0;i<40&&!(s.saleProperties&&s.saleProperties.length);i++)await new Promise(function(r){setTimeout(r,250)}); if(c.leafCategoryId!==leaf)throw new Error('category: leaf is '+c.leafCategoryId+' after setCategories, expected '+leaf); return {leaf:c.leafCategoryId,path:(c.categories||[]).map(function(x){return x.categoryName}),saleProps:(s.saleProperties||[]).map(function(x){return x.propertyName})}; })()"
+   }
+  },
+  {
+   "id": "fill_title",
+   "op": "eval",
+   "save": "title",
+   "args": {
+    "timeout_ms": 60000,
+    "script": "(function(){ var P=window.__agx.pinia,A={{args}},n=P._s.get('itemFormItemName'); n.setItemName(A.title); if(n.itemName!==A.title)throw new Error('title: store holds '+n.itemName); var bad=(n.itemNameFeValidate||[]);if(bad.length||(n.itemNameFeValidate&&!Array.isArray(n.itemNameFeValidate)&&Object.keys(n.itemNameFeValidate).length)) throw new Error('title: '+JSON.stringify(n.itemNameFeValidate).slice(0,200)); return {title:n.itemName,len:n.itemNameLen}; })()"
+   }
+  },
+  {
+   "id": "fill_variants",
+   "op": "eval",
+   "save": "variants",
+   "args": {
+    "timeout_ms": 60000,
+    "script": "(async function(){ var P=window.__agx.pinia,A={{args}},s=P._s.get('itemFormSingleSkuStore'); var pn=A.spec_property||'{{spec_property}}',prop=(s.saleProperties||[]).find(function(x){return x.propertyName===pn}); if(!prop)throw new Error('variants: sale property '+pn+' not offered by this category ('+(s.saleProperties||[]).map(function(x){return x.propertyName}).join(', ')+')'); if(!prop.customizable)throw new Error('variants: '+pn+' is not customizable'); var pid=prop.propertyId; if((s.selectedVariantIds||[]).indexOf(pid)<0)s.addSelectedVariant(pid); var bad=[]; A.skus.forEach(function(k){var r=s.addVariantValue(pid,k.name);if(!r||r.type!=='success')bad.push(k.name+' -> '+JSON.stringify(r).slice(0,100))}); if(bad.length)throw new Error('variants: '+bad.length+' value(s) rejected: '+bad.slice(0,3).join(' | ')); for(var i=0;i<40&&(s.skuList||[]).length!==A.skus.length;i++)await new Promise(function(r){setTimeout(r,150)}); if((s.skuList||[]).length!==A.skus.length)throw new Error('variants: skuList has '+(s.skuList||[]).length+' rows, expected '+A.skus.length); return {propertyId:pid,values:A.skus.length,skuRows:s.skuList.length}; })()"
+   }
+  },
+  {
+   "id": "fill_skus",
+   "op": "eval",
+   "save": "skus",
+   "args": {
+    "timeout_ms": 60000,
+    "script": "function agxImg(name,M){var m=M[name];if(!m)throw new Error('materials: '+name+' missing from args.materials - run xhs-merchant-upload first'); var u=m.uploaderInfoModel;if(typeof u==='string'){try{u=JSON.parse(u)}catch(e){}} var ext=m.extension||'.jpg';if(ext.charAt(0)!=='.')ext='.'+ext; return {key:m.materialId,type:'spaceImage',materialId:m.materialId,name:String(name).replace(/\\.[^.]+$/,''), width:Number(m.width),height:Number(m.height),size:m.size,extension:ext,path:m.path,link:m.link,uploaderInfoModel:u}} function agxSleep(ms){return new Promise(function(r){setTimeout(r,ms)})} (function(){ var P=window.__agx.pinia,A={{args}},s=P._s.get('itemFormSingleSkuStore'),M=A.materials,done=0; A.skus.forEach(function(k){ var row=s.skuList.find(function(x){return x.skuVariantInfos&&x.skuVariantInfos[0]&&x.skuVariantInfos[0].variantValue===k.name}); if(!row)throw new Error('skus: no row for '+k.name); var img=agxImg(k.image,M); s.setSkuPrice(row,k.price_yuan);s.setSkuStock(row,k.stock);s.setSkuErpCode(row,k.code); s.setSkuSpecImage(row,img);s.setMainSpecImage(row.skuVariantInfos[0],img);done++; }); return {skus:done,mainSpecImages:Object.keys(s.mainSpecImageMap||{}).length}; })()"
+   },
+   "note": "setters take the SKU row OBJECT; spec images go through setMainSpecImage(variantValueObject, image) - setSkuSpecImage alone leaves spec-image-empty"
+  },
+  {
+   "id": "fill_ship",
+   "op": "eval",
+   "save": "ship",
+   "args": {
+    "timeout_ms": 120000,
+    "script": "(async function(){ var P=window.__agx.pinia,A={{args}},o={}; var l=P._s.get('itemFormLogisticsPlanStore'),s=P._s.get('itemFormSingleSkuStore'),d=P._s.get('itemFormDeliveryTime'),b=P._s.get('itemFormBrand'); var want='{{logistics_plan}}',plan=(l.logisticsPlanList||[]).find(function(x){return x.name===want}); if(!plan)throw new Error('logistics: plan '+want+' not available ('+(l.logisticsPlanList||[]).map(function(x){return x.name+':'+x.planId}).join(', ')+')'); l.setItemLogisticsPlanId(plan.planId); s.skuList.forEach(function(row){s.setSkuLogisticsPlanId(row,plan.planId)}); o.logistics={name:plan.name,planId:plan.planId}; var hrs=String({{delivery_hours}}),cur=d.itemDelivery||{}; if(String(cur.time)!==hrs||cur.type!=='notPresale'){d.setItemDelivery({type:'notPresale',time:hrs})} cur=d.itemDelivery||{}; if(String(cur.time)!==hrs)throw new Error('delivery: store holds '+JSON.stringify(cur)+', expected '+hrs+'h'); o.delivery=cur; var br='{{brand}}'; if(br==='none'){await b.getInitBrandList();await b.onSearchMarketableBrandList('无品牌'); var nb=b.noBrandInfo;if(!nb)throw new Error('brand: the platform no-brand option was not offered');b.setBrandInfo(nb);} else{await b.onSearchMarketableBrandList(br);var m=(b.brandList||[]).find(function(x){return x.brandName===br}); if(!m)throw new Error('brand: '+br+' not found among marketable brands');b.setBrandInfo(m)} o.brand=b.brandInfo&&{id:b.brandInfo.brandId,name:b.brandInfo.brandName}; return o; })()"
+   }
+  },
+  {
+   "id": "fill_images",
+   "op": "eval",
+   "save": "images",
+   "args": {
+    "timeout_ms": 60000,
+    "script": "function agxImg(name,M){var m=M[name];if(!m)throw new Error('materials: '+name+' missing from args.materials - run xhs-merchant-upload first'); var u=m.uploaderInfoModel;if(typeof u==='string'){try{u=JSON.parse(u)}catch(e){}} var ext=m.extension||'.jpg';if(ext.charAt(0)!=='.')ext='.'+ext; return {key:m.materialId,type:'spaceImage',materialId:m.materialId,name:String(name).replace(/\\.[^.]+$/,''), width:Number(m.width),height:Number(m.height),size:m.size,extension:ext,path:m.path,link:m.link,uploaderInfoModel:u}} function agxSleep(ms){return new Promise(function(r){setTimeout(r,ms)})} (function(){ var P=window.__agx.pinia,A={{args}},M=A.materials; var main=A.main_images.map(function(n){return agxImg(n,M)}),desc=A.desc_images.map(function(n){return agxImg(n,M)}); var long=(A.long_images||[]).map(function(n){return agxImg(n,M)}); P._s.get('itemFormBaseImages').setBaseImages(main.concat(long)); P._s.get('itemFormMainImages').setImages(main); if(long.length)P._s.get('itemFormMainImages').setLongMainImages(long); P._s.get('itemFormDescImages').setDescImages(desc); return {main:main.length,long:long.length,desc:desc.length}; })()"
+   }
+  },
+  {
+   "id": "validate",
+   "op": "eval",
+   "save": "validate",
+   "args": {
+    "timeout_ms": 60000,
+    "script": "(function(){ var P=window.__agx.pinia,m=P._s.get('itemFormMain'),issues=[]; P._s.forEach(function(st,id){ Object.keys(st).filter(function(k){return /FeValidate$|BeValidate$|^validate$|Validate$/.test(k)&&typeof st[k]!=='function'}).forEach(function(k){ var v;try{v=st[k]}catch(e){v='ERR '+e} var has=Array.isArray(v)?v.length>0:(v&&typeof v==='object'?Object.keys(v).length>0:!!v); if(!has)return; if(m.isSingleGood&&/^itemFormUnionSku$/.test(id))return; if({{allow_duplicate}}&&/duplicate-name/.test(JSON.stringify(v)))return; issues.push(id+'.'+k+' '+JSON.stringify(v).slice(0,200)); })}); if(!m.isSingleGood)throw new Error('validate: form is not a single good (goodType '+m.goodType+')'); if(issues.length)throw new Error('validate: '+issues.length+' front-end issue(s): '+issues.slice(0,6).join(' || ')); return {issues:0,single:m.isSingleGood}; })()"
+   },
+   "note": "the form's own front-end validators across all stores (the union-good store is ignored for a single good)"
+  },
+  {
+   "id": "build",
+   "op": "eval",
+   "save": "built",
+   "args": {
+    "timeout_ms": 60000,
+    "script": "(async function(){ var X=window.__agx,P=X.pinia,A={{args}},m=P._s.get('itemFormMain'); var body=await m.getFormData(),errs=[]; if(body.name!==A.title)errs.push('name'); var leaf=A.category_leaf_id||'{{category_leaf_id}}';if(body.categoryId!==leaf)errs.push('categoryId '+body.categoryId); if(!body.skuData||body.skuData.length!==A.skus.length)errs.push('skuData length '+(body.skuData&&body.skuData.length)); var by={};(body.skuData||[]).forEach(function(s){by[s.variants[0].attributeValue]=s}); A.skus.forEach(function(k){var s=by[k.name];if(!s){errs.push('missing sku '+k.name);return} if(s.price.price!==Math.round(k.price_yuan*100))errs.push('price '+k.code+' '+s.price.price); if(s.stock!==k.stock)errs.push('stock '+k.code+' '+s.stock); if(s.erpCode!==k.code)errs.push('code '+k.code); if(!s.specImage||s.specImage.path!==A.materials[k.image].path)errs.push('specImage '+k.code); if(String(s.deliveryTime&&s.deliveryTime.time)!==String({{delivery_hours}}))errs.push('delivery '+k.code)}); var imgs=body.images||body.standardImages||[]; if(imgs.length!==A.main_images.length||imgs.some(function(x,i){return x.path!==A.materials[A.main_images[i]].path}))errs.push('main images'); if((body.imageDescriptions||[]).length!==A.desc_images.length||body.imageDescriptions.some(function(x,i){return x.path!==A.materials[A.desc_images[i]].path}))errs.push('desc images'); if(errs.length)throw new Error('build: created body disagrees with args: '+errs.slice(0,8).join('; ')); var txt=JSON.stringify(body),h=null; try{var buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(txt));h=Array.prototype.map.call(new Uint8Array(buf),function(b){return ('0'+b.toString(16)).slice(-2)}).join('')}catch(e){} window.__agx.body=body;window.__agx.publishMode=m.publishMode; var prices=body.skuData.map(function(s){return s.price.price/100}); return {bytes:txt.length,sha256:h,skus:body.skuData.length,price_min:Math.min.apply(null,prices),price_max:Math.max.apply(null,prices), stock_total:body.skuData.reduce(function(a,s){return a+s.stock},0),images:imgs.length,desc:body.imageDescriptions.length, brandId:body.brandId,logisticsPlanId:body.logisticsPlanId,shippingTemplateId:body.shippingTemplateId,categoryId:body.categoryId}; })()"
+   },
+   "note": "itemFormMain.getFormData(): the exact body the page would submit, cross-checked field by field against args; sha256 is the dry-run witness"
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "submit",
+     "is": "not_equals",
+     "value": 1
+    },
+    "goto": "dry_done"
+   },
+   "note": "vars.submit defaults to 0: nothing is written unless the caller sets 1 explicitly"
+  },
+  {
+   "id": "submit_fire",
+   "op": "eval",
+   "save": "fired",
+   "args": {
+    "timeout_ms": 20000,
+    "script": "(function(){ var X=window.__agx; if(window.__agxSubmitted)throw new Error('submit: already fired in this page - NEVER resend; read the receipt and check the store'); if(!X.body)throw new Error('submit: no built body in this page'); window.__agxSubmitted={ts:Date.now()};window.__agxSub={state:'sending'}; X.LV.post('/api/edith/product/batch_create_item',{itemData:[X.body],options:{asyncExec:true,withChild:true,retrieveResult:true},publishMode:X.publishMode},{transform:false}) .then(function(r){window.__agxSub={state:'sent',taskId:r&&r.taskId,resp:JSON.stringify(r).slice(0,300)}}, function(e){window.__agxSub={state:'err',err:String((e&&(e.message||e.msg))||e).slice(0,300),extra:JSON.stringify((e&&e.extra)||null).slice(0,300)}}); return {fired:true}; })()"
+   },
+   "note": "ONE batch_create_item, guarded by window.__agxSubmitted. Never retried by the flow."
+  },
+  {
+   "id": "submit_wait",
+   "op": "wait",
+   "args": {
+    "predicate": "!!(window.__agxSub&&(window.__agxSub.state==='sent'||window.__agxSub.state==='err'))",
+    "timeout_ms": 90000
+   }
+  },
+  {
+   "id": "submit_check",
+   "op": "eval",
+   "save": "sub",
+   "args": {
+    "timeout_ms": 15000,
+    "script": "(function(){ var s=window.__agxSub||{}; if(s.state==='err')throw new Error('submit: request failed ('+s.err+' '+s.extra+') - the item may or may not exist: check the store (dedupe) BEFORE any retry'); if(!s.taskId)throw new Error('submit: no taskId in the response '+JSON.stringify(s)+' - result unknown, check the store before any retry'); return {taskId:s.taskId}; })()"
+   }
+  },
+  {
+   "id": "poll",
+   "op": "eval",
+   "save": "task",
+   "args": {
+    "timeout_ms": 30000,
+    "script": "(async function(){ var X=window.__agx,T=window.__agxPoll=window.__agxPoll||{n:0},id='{{sub.taskId}}'; await new Promise(function(r){setTimeout(r,{{poll_ms}})}); T.n++; var r=await X.LV.get('/api/edith/product/query_task_status',{params:{taskId:id},transform:false}); var t=(r&&r.task)||{}; var out={n:T.n,status:t.status,pending:(t.status===1||t.status===2)}; if(!out.pending){window.__agxTaskDone=t} return out; })()"
+   },
+   "note": "one query_task_status per step (status 1/2 pending, 3 done, 4/5 failed) - the loop lives in the branches, so a lost continuation costs one poll"
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "task.pending",
+     "is": "falsy"
+    },
+    "goto": "task_result"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "task.n",
+     "is": "at_least",
+     "value": "{{poll_max}}"
+    },
+    "goto": "task_timeout"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "task.n",
+     "is": "at_least",
+     "value": 0
+    },
+    "goto": "poll"
+   }
+  },
+  {
+   "id": "task_timeout",
+   "op": "eval",
+   "args": {
+    "script": "throw new Error('task: still pending after {{poll_max}} polls (taskId {{sub.taskId}}) - result UNKNOWN. Do not resubmit: check the store for the title, then query_task_status again')"
+   }
+  },
+  {
+   "id": "task_result",
+   "op": "eval",
+   "save": "task_result",
+   "args": {
+    "timeout_ms": 15000,
+    "script": "(function(){ var t=window.__agxTaskDone||{},st=t.status,res=t.result||{},ex=null; try{ex=JSON.parse(res.extraJson||'{}')}catch(e){} if(st!==3)throw new Error('task: finished with status '+st+' msg='+(res.msg||'')+' - '+JSON.stringify(ex&&ex.failData||[]).slice(0,600)+' - a failed task leaves no item, but confirm in the store before retrying'); if(ex&&ex.failData&&ex.failData.length)throw new Error('task: failData '+JSON.stringify(ex.failData).slice(0,800)+' - nothing was created for these fields; fix and rerun after confirming the store'); var ids=(ex&&ex.itemIds)||[]; if(ids.length!==1)throw new Error('task: expected exactly 1 itemId, got '+JSON.stringify(ids)+' - check the store'); return {taskId:'{{sub.taskId}}',itemId:ids[0],status:st}; })()"
+   }
+  },
+  {
+   "id": "readback",
+   "op": "eval",
+   "save": "final",
+   "args": {
+    "timeout_ms": 180000,
+    "script": "(async function(){ var X=window.__agx,A={{args}},id='{{task_result.itemId}}',errs=[]; var r=await X.LV.post('/api/edith/product/publish_render',{data:JSON.stringify({publishType:2,sourceType:1,itemId:id})},{transform:false}); var d=(r&&r.data!==undefined)?r.data:r;var o=typeof d==='string'?JSON.parse(d):d; var pd=o&&o.product&&o.product.productDetail||{},item=pd.item||{},skus=pd.skuList||[]; if(item.itemId!==id)errs.push('itemId '+item.itemId); if(item.itemName!==A.title)errs.push('itemName'); if(skus.length!==A.skus.length)errs.push('sku count '+skus.length); var by={};skus.forEach(function(s){by[s.skuVariantInfos[0].variantValue]=s}); A.skus.forEach(function(k){var s=by[k.name];if(!s){errs.push('missing '+k.code);return} if(((s.basePriceInfo||{}).price)!==Math.round(k.price_yuan*100))errs.push('price '+k.code); var st=(s.baseStockInfos||[]).reduce(function(a,x){return a+(x.stock||0)},0);if(st!==k.stock)errs.push('stock '+k.code+' '+st); if(s.erpCode!==k.code)errs.push('code '+k.code); if(s.buyable!==true)errs.push('buyable '+k.code); if(!s.specImage||s.specImage.path!==A.materials[k.image].path)errs.push('specImage '+k.code)}); var ip=(item.images||[]).map(function(x){return x.path}),want=A.main_images.map(function(n){return A.materials[n].path}); if(JSON.stringify(ip)!==JSON.stringify(want))errs.push('main images'); var dp=(item.imageDescriptions||[]).map(function(x){return x.path}),wd=A.desc_images.map(function(n){return A.materials[n].path}); if(JSON.stringify(dp)!==JSON.stringify(wd))errs.push('desc images'); var all=[],total=null; for(var pg=1;pg<=20;pg++){var q=await X.LV.post('/api/edith/product/search_item_v2',{pageNo:pg,pageSize:50},{transform:true}); var dd=(q&&q.data)||q;var it=(dd&&dd.items)||[];total=dd&&dd.total;all=all.concat(it);if(it.length<50||(total&&all.length>=total))break} var same=all.filter(function(x){return x.itemName===A.title}); if(same.length!==1)errs.push('store lists '+same.length+' items titled like this one (expected exactly 1)'); var receipt={itemId:id,taskId:'{{task_result.taskId}}',store_total:total,same_title_in_store:same.length, skus:skus.length,all_buyable:skus.every(function(s){return s.buyable===true}), stock_total:skus.reduce(function(a,s){return a+(s.baseStockInfos||[]).reduce(function(b,x){return b+(x.stock||0)},0)},0), brand:(item.brandInfo||{}).brandName,main_images:ip.length,desc_images:dp.length,mismatches:errs}; if(errs.length)throw new Error('readback: item '+id+' EXISTS but disagrees with the request: '+errs.slice(0,8).join('; ')+' - receipt '+JSON.stringify(receipt)); return receipt; })()"
+   },
+   "note": "independent verification through publish_render(publishType 2) + the store listing; the receipt carries itemId even when this step throws"
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "final.itemId",
+     "is": "truthy"
+    },
+    "goto": "end"
+   }
+  },
+  {
+   "id": "dry_done",
+   "op": "eval",
+   "save": "dry_run",
+   "args": {
+    "script": "(function(){return {submitted:false,note:'vars.submit != 1: filled and validated the real form, built the real body, sent nothing',built:{{built}}}})()"
+   }
+  },
+  {
+   "id": "end",
+   "op": "eval",
+   "args": {
+    "script": "1"
+   }
+  }
+ ]
+}

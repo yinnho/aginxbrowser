@@ -110,7 +110,9 @@ receipt is the function's return value (`status` / `saved` / `session_id`).
 | `taobao-publish-singlesku` | item.upload.taobao.com | green path (single-sku) | same family; `custom_-1` axis rejected — **do not extract** yet |
 | `taobao-publish-multisku` | item.upload.taobao.com | green path (multi-sku v17) | same family; ladder binding — **do not extract** yet |
 | `tmall-publish-singlesku` | item.upload.tmall.com | green path (tmall gate) | same family + previewDraftSubmit gate — **do not extract** yet |
-| `xhs-merchant-publish` | ark.xiaohongshu.com | skeleton | merchant listing stub — fill after green moka witness |
+| `xhs-merchant-publish` | ark.xiaohongshu.com | 千帆 jar | `publish_render` signature-chain probe — green since 2026-10-20 (300015 cleared); writes nothing |
+| `xhs-merchant-upload` | ark.xiaohongshu.com | 千帆 jar (`xhs-qf-stable`) | upload ≤36 images into the 素材库 (original `Yw` job, exact-name reuse) → `materials` map with formal path/link/size — see flow.md |
+| `xhs-merchant-create` | ark.xiaohongshu.com | 千帆 jar | list one product: dedupe → local Pinia form fill → validate → body sha256 → (`submit:1`) single `batch_create_item` → poll → readback; default is a dry run — see flow.md |
 | `v2ex-hot` / `v2ex-node` / `v2ex-topic` / `v2ex-member` | www.v2ex.com/api | runs green (needs `AGINXBROWSER_PROXY` egress + plain UA) | 公开 API 四件套纯 http 步；朴素 UA 过 CF（默认 Chrome UA 配引擎 TLS 指纹=错配会被 managed challenge）——机制与墙见 v2ex-hot/flow.md |
 | `web-read` | any URL | runs green (CF-challenge sites excluded) | 引擎本体=reader 的 Jina 平替：goto + 容器优先级抽取 + 截断；404 页诚实抽取 — see flow.md |
 | `wechat-oa-post` | api.weixin.qq.com | runs green (certified OA) / draft-only (uncertified) | 5 pure http steps (token→cover→draft→publish→verify); account = `creds {app_id, app_secret}` via vars, never in flow.json — see flow.md |
