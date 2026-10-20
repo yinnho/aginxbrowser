@@ -8668,8 +8668,12 @@ globalThis.__diting_navSet = function(k, v) {
 // `runtime` key: fp-diff-1014 #2 caught us exposing chrome.runtime as an
 // object — on a normal Chrome page it is absent entirely (it only exists in
 // extension content-script contexts), so its presence reads as automation.
+// Real Chrome's csi/loadTimes are anonymous, constructible natives
+// (name "", own `prototype`, toString "function () { [native code] }");
+// the `(0, function () {})` shape keeps name inference from naming them.
+// xhs's b1 field x45 (__SEC_CAV__) checks exactly this and read 0 for both.
 globalThis.chrome = {
-  loadTimes() {
+  loadTimes: (0, function () {
     const t = Date.now() / 1000;
     const request = t - 0.5 - _fpRand(611) * 0.5;
     const startLoad = request + 0.05 + _fpRand(612) * 0.02;
@@ -8687,11 +8691,11 @@ globalThis.chrome = {
       npnNegotiatedProtocol: "http/1.1",
       wasAlternateProtocolAvailable: false, connectionInfo: "http/1.1",
     };
-  },
-  csi() {
+  }),
+  csi: (0, function () {
     const t = Date.now();
-    return { onloadT: t, startE: t - Math.floor(100 + _fpRand(610) * 200), pageT: 0, tran: 5, flashVersion: "" };
-  },
+    return { startE: t - Math.floor(100 + _fpRand(610) * 200), onloadT: t, pageT: 0, tran: 5 };
+  }),
   // Key set AND order captured from a real Chrome 155 (fp probe 10-14):
   // isInstalled|getDetails|getIsInstalled|installState|runningState|InstallState|RunningState
   app: {
@@ -17648,6 +17652,47 @@ globalThis.__diting_name_sweep = function () {
       _globalThisFixed.add(w);
       try { Object.defineProperty(P, m, { value: w, writable: d.writable, enumerable: d.enumerable, configurable: d.configurable }); } catch (e) {}
     }
+  }
+  // Window operations/attributes the anti-bot lie detector (xhs b1 field
+  // x82 / mnsv2 siblings) probes for a native shape. Chrome: not
+  // constructible, no own `prototype`, correct arity, `getter/fn.call({})`
+  // throws "Illegal invocation" (undefined/null receiver means the global),
+  // accessors named "get <attr>". Table-built shims here failed every one.
+  const isWinLike = (t) => t === globalThis || (t !== null && typeof t === 'object' && t.window === t);
+  const illegal = () => new TypeError('Illegal invocation');
+  const winFns = { setTimeout: 1, clearTimeout: 0, setInterval: 1, clearInterval: 0,
+    requestAnimationFrame: 1, matchMedia: 1, getComputedStyle: 1, getSelection: 0, focus: 0, blur: 0 };
+  for (const k of Object.keys(winFns)) {
+    const d = Object.getOwnPropertyDescriptor(globalThis, k);
+    if (!d || typeof d.value !== 'function' || _globalThisFixed.has(d.value)) continue;
+    const orig = d.value;
+    const w = ({ [k]() {
+      if (this != null && !isWinLike(this)) throw illegal();
+      return orig.apply(this == null ? globalThis : this, arguments);
+    } })[k];
+    try { Object.defineProperty(w, 'length', { value: winFns[k], configurable: true }); } catch (e) {}
+    _markNative(w);
+    _globalThisFixed.add(w);
+    try { Object.defineProperty(globalThis, k, { value: w, writable: d.writable, enumerable: d.enumerable, configurable: d.configurable }); } catch (e) {}
+  }
+  for (const k of ['isSecureContext', 'scrollX', 'scrollY', 'pageXOffset', 'pageYOffset']) {
+    const d = Object.getOwnPropertyDescriptor(globalThis, k);
+    if (!d || typeof d.get !== 'function' || _globalThisFixed.has(d.get)) continue;
+    const og = d.get, os = d.set;
+    const g = Object.getOwnPropertyDescriptor({ get [k]() {
+      if (this != null && !isWinLike(this)) throw illegal();
+      return og.call(this == null ? globalThis : this);
+    } }, k).get;
+    _markNative(g); _globalThisFixed.add(g);
+    let st;
+    if (typeof os === 'function') {
+      st = Object.getOwnPropertyDescriptor({ set [k](v) {
+        if (this != null && !isWinLike(this)) throw illegal();
+        os.call(this == null ? globalThis : this, v);
+      } }, k).set;
+      _markNative(st); _globalThisFixed.add(st);
+    }
+    try { Object.defineProperty(globalThis, k, { get: g, set: st, enumerable: d.enumerable, configurable: d.configurable }); } catch (e) {}
   }
   const gnames = Object.getOwnPropertyNames(globalThis);
   for (let i = 0; i < gnames.length; i++) {

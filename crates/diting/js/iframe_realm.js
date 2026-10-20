@@ -151,6 +151,7 @@ class _IframeDocument {
   close() {}
 }
 
+const __frameOnHandlers = new WeakMap();
 class _IframeWindow {
   constructor(doc, url) {
     this.document = doc;
@@ -225,6 +226,71 @@ class _IframeWindow {
         if (!(e[0] in this)) {
           Object.defineProperty(this, e[0], e[1]);
         }
+      }
+    }
+    // Chrome's iframe window owns these as own enumerable properties; the
+    // `in` guard above skips them because the prototype chain already has
+    // them. Anti-bot window-vs-clean-iframe diffs (xhs b1 field x82) list
+    // every name that is own on the main window but not on a fresh frame.
+    // Functions are shared (their receiver check accepts any window-like
+    // `this`); accessors get frame-local getters so the frame never reads the
+    // main window's scroll state.
+    const __ownForced = ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
+      'requestAnimationFrame', 'isSecureContext', 'scrollX', 'scrollY', 'pageXOffset',
+      'pageYOffset', 'matchMedia', 'getComputedStyle', 'getSelection', 'focus', 'blur'];
+    for (let i = 0; i < __ownForced.length; i++) {
+      const k = __ownForced[i];
+      if (Object.prototype.hasOwnProperty.call(this, k)) continue;
+      const d = Object.getOwnPropertyDescriptor(globalThis, k);
+      if (!d) continue;
+      try {
+        if ('value' in d) {
+          Object.defineProperty(this, k, d);
+        } else {
+          const secure = k === 'isSecureContext';
+          const g = Object.getOwnPropertyDescriptor({ get [k]() {
+            return secure ? d.get.call(globalThis) : 0;
+          } }, k).get;
+          _markNative(g);
+          Object.defineProperty(this, k, { get: g, set: d.set, enumerable: d.enumerable, configurable: d.configurable });
+        }
+      } catch (e) {}
+    }
+    // Census parity: every other name the main window owns but this frame only
+    // inherits (close, postMessage, on* handlers, ...) becomes an own property
+    // carrying the inherited descriptor. The getter/method keeps running
+    // against THIS window (`this`), so per-frame behavior is unchanged; only
+    // the own-key census now matches Chrome's contentWindow.
+    {
+      const __mainNames = Object.getOwnPropertyNames(globalThis);
+      for (let i = 0; i < __mainNames.length; i++) {
+        const k = __mainNames[i];
+        if (k === 'constructor' || k.startsWith('_') || k.includes('diting') || k.includes('Diting')) continue;
+        if (Object.prototype.hasOwnProperty.call(this, k)) continue;
+        let o = Object.getPrototypeOf(this), d = null;
+        while (o && !d) { d = Object.getOwnPropertyDescriptor(o, k); o = Object.getPrototypeOf(o); }
+        if (!d) {
+          // Not inherited either: the main window owns it directly. Event
+          // handler attributes get a frame-local accessor pair (handler kept
+          // per window, native-shaped names); anything else shares the main
+          // descriptor.
+          const md = Object.getOwnPropertyDescriptor(globalThis, k);
+          if (!md) continue;
+          if (k.startsWith('on') && !('value' in md)) {
+            const gs = Object.getOwnPropertyDescriptor({ get [k]() {
+              const m = __frameOnHandlers.get(this); return m && m[k] !== undefined ? m[k] : null;
+            } }, k).get;
+            const ss = Object.getOwnPropertyDescriptor({ set [k](v) {
+              let m = __frameOnHandlers.get(this); if (!m) { m = {}; __frameOnHandlers.set(this, m); }
+              m[k] = (typeof v === 'function' || (v !== null && typeof v === 'object')) ? v : null;
+            } }, k).set;
+            _markNative(gs); _markNative(ss);
+            d = { get: gs, set: ss, enumerable: md.enumerable, configurable: md.configurable };
+          } else {
+            d = md;
+          }
+        }
+        try { Object.defineProperty(this, k, d); } catch (e) {}
       }
     }
     __hideOwn(this);
