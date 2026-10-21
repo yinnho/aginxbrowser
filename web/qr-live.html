@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Live QR</title>
+<style>
+  body{font-family:-apple-system,system-ui,sans-serif;text-align:center;margin:0;padding:24px;background:#fafafa;color:#222}
+  img{width:min(320px,80vw);height:auto;image-rendering:pixelated;background:#fff;padding:12px;border:1px solid #ddd;border-radius:8px}
+  #s{margin-top:16px;font-size:14px;color:#555;word-break:break-all}
+  .ok{color:#0a7d2c;font-weight:600}
+</style></head><body>
+<h2>Scan with the app</h2>
+<img id="q" alt="QR code (refreshes every second)">
+<div id="s">loading…</div>
+<script>
+// Live QR page: the engine re-reads the CURRENT code from the session's page
+// every second, so a code that expired while you were reaching for the phone
+// is replaced before you scan it. Session id comes from the URL path
+// /session/<id>/qr/live.
+var m = location.pathname.match(/\/session\/([^/]+)\/qr\/live/);
+var base = m ? '/session/' + m[1] + '/qr' : null;
+var q = document.getElementById('q'), s = document.getElementById('s');
+function tick() {
+  if (!base) { s.textContent = 'open /session/<id>/qr/live'; return; }
+  fetch(base + '?json=1', {cache: 'no-store'}).then(r => r.json()).then(j => {
+    if (j.landed) { s.innerHTML = '<span class="ok">logged in — landed on</span> ' + j.url; return; }
+    q.src = base + '?t=' + Date.now();
+    s.textContent = (j.qr ? 'scan, then confirm in the app · ' : 'waiting for the code… · ') + j.url;
+  }).catch(e => { s.textContent = 'engine unreachable: ' + e; });
+}
+setInterval(tick, 1000); tick();
+</script></body></html>

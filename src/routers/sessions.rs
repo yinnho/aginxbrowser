@@ -1355,3 +1355,83 @@ mod tests {
         }
     }
 }
+
+/// Reads the QR code the session's page is CURRENTLY showing. Login pages
+/// render it three ways — a CSS background data URL (抖店), a square canvas
+/// (拼多多, 淘宝/天猫) or a data-URL <img> (小红书 千帆) — and refresh it on
+/// expiry; re-reading per request is what makes a "live code" possible
+/// (static screenshots go stale before the person reaches the phone).
+const QR_EXTRACT_JS: &str = r#"(function(){
+  function pick(){
+    var e=document.querySelector('.account-center-image-content');
+    if(e){var m=getComputedStyle(e).backgroundImage.match(/data:(image\/[a-z+]+);base64,([A-Za-z0-9+\/=]+)/);if(m)return [m[1],m[2]];}
+    var cs=document.querySelectorAll('canvas');
+    for(var i=0;i<cs.length;i++){var c=cs[i],w=c.width,h=c.height;
+      if(w>=80&&w<=480&&Math.abs(w-h)<=4){try{var d=c.toDataURL('image/png').match(/data:(image\/png);base64,(.*)/);if(d)return [d[1],d[2]];}catch(x){}}}
+    var im=document.querySelectorAll('img');
+    for(var j=0;j<im.length;j++){var s=im[j].src||'';var m3=s.match(/^data:(image\/[a-z+]+);base64,(.*)/);
+      if(m3&&im[j].width>=80&&Math.abs(im[j].width-im[j].height)<=6)return [m3[1],m3[2]];}
+    return null;
+  }
+  var r=pick();
+  return JSON.stringify({u:location.href,mime:r?r[0]:null,qr:r?r[1]:null});
+})()"#;
+
+#[derive(Debug, Deserialize)]
+pub struct QrQuery {
+    #[serde(default)]
+    pub json: Option<String>,
+}
+
+/// `GET /session/:id/qr` → the current QR image (404 when the page shows none);
+/// `?json=1` → `{url, qr, landed}` without the bytes.
+pub(crate) async fn session_qr_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<QrQuery>,
+) -> Result<axum::response::Response, AppError> {
+    let raw = session::send_command(&id, |reply| session::SessionCommand::Eval {
+        script: QR_EXTRACT_JS.to_string(),
+        timeout_ms: Some(8000),
+        reply,
+    })
+    .await
+    .map_err(session_err)?;
+    let raw_s = match &raw {
+        serde_json::Value::String(t) => t.clone(),
+        other => other.to_string(),
+    };
+    let v: serde_json::Value = serde_json::from_str(&raw_s).unwrap_or(serde_json::Value::Null);
+    let url = v["u"].as_str().unwrap_or("").to_string();
+    let b64 = v["qr"].as_str();
+    if q.json.is_some() {
+        // "landed": the page left a login/passport URL — the scan took.
+        let on_login = ["login", "passport", "sso", "havana", "loginmyseller"]
+            .iter()
+            .any(|k| url.contains(k));
+        let landed = !url.is_empty() && !url.starts_with("about:") && !on_login;
+        return Ok(Json(serde_json::json!({ "url": url, "qr": b64.is_some(), "landed": landed })).into_response());
+    }
+    let (Some(b64), Some(mime)) = (b64, v["mime"].as_str()) else {
+        return Err(AppError::NotFound("no QR code on the page right now".into()));
+    };
+    let bytes = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| AppError::Internal(format!("QR decode: {e}")))?
+    };
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, mime.to_string()),
+            (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+/// `GET /session/:id/qr/live` — the self-refreshing scan page (`web/qr-live.html`).
+pub(crate) async fn session_qr_live_handler() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("../../web/qr-live.html"))
+}

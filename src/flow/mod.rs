@@ -1143,7 +1143,7 @@ pub(crate) async fn run_flow(
     call_vars: &Map<String, Value>,
     session_id: Option<String>,
 ) -> Value {
-    run_flow_inner(FlowSessions(Some(mgr)), flow, call_vars, session_id).await
+    with_timing(|t| run_flow_inner(FlowSessions(Some(mgr)), flow, call_vars, session_id, t)).await
 }
 
 /// The HTTP face's entry (issue #238): same receipt semantics as
@@ -1156,7 +1156,43 @@ pub async fn run_flow_global(
     call_vars: &Map<String, Value>,
     session_id: Option<String>,
 ) -> Value {
-    run_flow_inner(FlowSessions(None), flow, call_vars, session_id).await
+    with_timing(|t| run_flow_inner(FlowSessions(None), flow, call_vars, session_id, t)).await
+}
+
+/// Step start offsets (ms since the run began) recorded by the executor:
+/// (pc, step id or op, start_ms). Durations are the gaps between starts, so a
+/// step that fails mid-flight still gets its time.
+type StepStarts = std::sync::Arc<std::sync::Mutex<Vec<(usize, String, u128)>>>;
+
+/// Run a flow and stamp the receipt with its wall clock (`elapsed_ms`) and a
+/// per-step breakdown (`timings`: [{step, id, ms}]) — the publish-speed
+/// numbers, present on ok AND failed receipts.
+async fn with_timing<F, Fut>(run: F) -> Value
+where
+    F: FnOnce(StepStarts) -> Fut,
+    Fut: std::future::Future<Output = Value>,
+{
+    let t: StepStarts = Default::default();
+    let started = std::time::Instant::now();
+    let mut receipt = run(t.clone()).await;
+    let total = started.elapsed().as_millis();
+    if let Some(obj) = receipt.as_object_mut() {
+        let starts = t.lock().map(|g| g.clone()).unwrap_or_default();
+        let mut rows = Vec::with_capacity(starts.len());
+        for (i, (pc, id, at)) in starts.iter().enumerate() {
+            let end = starts.get(i + 1).map(|n| n.2).unwrap_or(total);
+            rows.push(json!({ "step": pc, "id": id, "ms": end.saturating_sub(*at) as u64 }));
+        }
+        obj.insert("elapsed_ms".into(), json!(total as u64));
+        // A person scanning a login code needs the code the page shows NOW,
+        // not a screenshot that expired on the way: every receipt names the
+        // self-refreshing scan page of its session.
+        if let Some(sid) = obj.get("session_id").and_then(|v| v.as_str()).map(str::to_string) {
+            obj.insert("live_qr".into(), json!(format!("/session/{sid}/qr/live")));
+        }
+        obj.insert("timings".into(), Value::Array(rows));
+    }
+    receipt
 }
 
 async fn run_flow_inner(
@@ -1164,7 +1200,9 @@ async fn run_flow_inner(
     flow: &Value,
     call_vars: &Map<String, Value>,
     session_id: Option<String>,
+    step_starts: StepStarts,
 ) -> Value {
+    let run_started = std::time::Instant::now();
     let mut vars = effective_vars(flow, call_vars);
     if let Some(err) = validate_flow_args(flow, &vars) {
         // Same shape as a pre-session create-block failure: no session was
@@ -1270,7 +1308,19 @@ async fn run_flow_inner(
                 )),
                 _ => None,
             };
-            let account = match c.get("account").and_then(|v| v.as_str()) {
+            // `{ts}` in create.account becomes the unix time: a login flow gets a
+            // FRESH cookie jar per run. A reused jar carries the previous scan's
+            // SSO cookies, and a QR scanned into it writes cookies without the
+            // page ever navigating (抖店 shows it as "scanned, nothing happens").
+            let account_name = c
+                .get("account")
+                .and_then(|v| v.as_str())
+                .map(|n| n.replace("{ts}", &std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+                    .to_string()));
+            let account = match account_name.as_deref() {
                 Some(name) => match crate::account::validate_name(name) {
                     Ok(()) => Some((crate::store::REST_OWNER.to_string(), name.to_string())),
                     Err(e) => {
@@ -1337,6 +1387,15 @@ async fn run_flow_inner(
             .await;
         }
         executed += 1;
+        if let Ok(mut g) = step_starts.lock() {
+            let label = steps[pc]
+                .get("id")
+                .and_then(|v| v.as_str())
+                .or_else(|| steps[pc].get("op").and_then(|v| v.as_str()))
+                .unwrap_or("")
+                .to_string();
+            g.push((pc, label, run_started.elapsed().as_millis()));
+        }
         // Reserved var: the execution counter, maintained by the EXECUTOR —
         // a loop budget that survives page-context resets (a wall-page
         // navigation can wipe window.* state, but the executor keeps

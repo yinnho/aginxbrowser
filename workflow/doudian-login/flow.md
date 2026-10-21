@@ -64,3 +64,11 @@ ttwid）。doudian-publish 用 `session_id` 复用直接组合。
 （URL 一直停在 /login/common，看起来像"扫了没反应"）。连扫三次都落不了地，换成每次一个全新 account
 （`POST /session/create {account:"dd-fresh-<ts>", width:1440, height:900}` → navigate 登录页 → 跑本 flow 传 `session_id`）
 就 16 秒落地。给人扫的码别发静态图（60-100 秒过期，来回延迟就赶不上），起一个本机小页面按秒刷新当前二维码最稳。
+
+## 活码 + 新 jar（2026-10-21，已写进 flow/引擎）
+
+- `create.account = "dd-login-{ts}"`：每次登录都是全新 cookie 库（引擎把 `{ts}` 换成 unix 秒）。共享 jar 里前次扫码留下的 SSO cookie
+  会让后来的扫码"cookie 写进去了、页面不跳转"。
+- 回执带 `live_qr`（`/session/<id>/qr/live`）：自刷新扫码页，每秒重读登录页**当前**的码。**给人扫码一律发这个链接，不发静态图**
+  （静态图 60–100 秒过期，来回延迟就赶不上）。`/session/<id>/qr` 是当前码的图片，`?json=1` 回 `{url, qr, landed}`。
+- 回执带 `elapsed_ms` 和 `timings`（逐步耗时），发布 flow 的速度直接从回执统计。

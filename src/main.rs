@@ -106,7 +106,7 @@ use routers::sessions::{
     session_click_xy_handler, session_clone_handler, session_close_handler,
     session_console_handler, session_cookies_handler, session_cookie_trace_handler,
     session_create_handler,
-    session_dialog_handler, session_drag_handler, session_eval_handler, session_export_handler,
+    session_dialog_handler, session_drag_handler, session_qr_handler, session_qr_live_handler, session_eval_handler, session_export_handler,
     session_har_handler, session_input_handler, session_list_handler, session_navigate_handler,
     session_network_handler, session_preload_handler, session_screenshot_handler, session_scroll_handler,
     session_set_files_handler, session_snapshot_handler, session_state_handler, session_storage_handler,
@@ -411,6 +411,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/session/:id/scroll", post(session_scroll_handler))
         .route("/session/:id/viewport", post(session_viewport_handler))
         .route("/session/:id/screenshot", post(session_screenshot_handler))
+        .route("/session/:id/qr", get(session_qr_handler))
+        .route("/session/:id/qr/live", get(session_qr_live_handler))
         .route("/session/:id/wait", post(session_wait_handler))
         .route(
             "/session/:id/eval",

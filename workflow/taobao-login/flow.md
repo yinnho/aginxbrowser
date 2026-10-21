@@ -57,3 +57,8 @@ havana 跳离 login.taobao.com（中途登录 hop 留在该域，所以 predicat
 跟 doudian-login 凑一对：两个都是「出码交给人的 handoff 流」，回执
 `saved.qr_shot` 直接可递，或 `/live?session=<id>` 给人盯着扫（活页
 码不会像静态截图那样两三分钟就死）。
+
+## 活码 + 新 jar（2026-10-21）
+
+`create.account = "tb-login-{ts}"`（每次全新 jar，淘宝本来就要求被处决过的账户别叠扫）。回执 `live_qr` 是自刷新扫码页
+（`/session/<id>/qr/live`），给人扫码发这个链接，不发静态截图。

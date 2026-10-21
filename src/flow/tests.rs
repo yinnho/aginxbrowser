@@ -914,3 +914,33 @@ async fn run_flow_global_releases_sessions_lock_during_wait() {
     assert!(reason.contains("timeout") && reason.contains("#absent"), "reason: {reason}");
     assert!(SESSIONS.lock().await.close_and_wait(&sid).await);
 }
+
+/// Publish-speed numbers: every receipt (ok or failed) carries the run's wall
+/// clock and a per-step breakdown, so flow throughput is measurable without a
+/// caller-side stopwatch.
+#[tokio::test]
+async fn run_flow_receipt_carries_elapsed_and_step_timings() {
+    let _net = crate::server::test_util::net_env_guard();
+    let (port, _hits) = crate::server::test_util::recording_server(&[(
+        "GET /a",
+        r#"{"ok":1}"#,
+    )]);
+    let mut mgr = SessionManager::new();
+    let flow = json!({
+        "steps": [
+            { "op": "http", "id": "first", "args": { "url": format!("http://127.0.0.1:{port}/a") }, "save": "a" },
+            { "op": "http", "args": { "url": format!("http://127.0.0.1:{port}/a") }, "save": "b" },
+        ]
+    });
+    let receipt = run_flow(&mut mgr, &flow, &Map::new(), None).await;
+    assert_eq!(receipt["status"], "ok", "receipt: {receipt}");
+    assert!(receipt["elapsed_ms"].is_u64(), "receipt: {receipt}");
+    let rows = receipt["timings"].as_array().expect("timings array");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["id"], "first");
+    assert_eq!(rows[1]["id"], "http");
+    let sum: u64 = rows.iter().map(|r| r["ms"].as_u64().unwrap()).sum();
+    assert!(sum <= receipt["elapsed_ms"].as_u64().unwrap() + 5);
+    let sid = receipt["session_id"].as_str().unwrap().to_string();
+    assert!(mgr.close_and_wait(&sid).await);
+}
