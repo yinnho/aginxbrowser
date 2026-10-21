@@ -1362,6 +1362,14 @@ mod tests {
 /// expiry; re-reading per request is what makes a "live code" possible
 /// (static screenshots go stale before the person reaches the phone).
 const QR_EXTRACT_JS: &str = r#"(function(){
+  // An expired code (the login SDK overlays 二维码已过期 + a refresh button
+  // and does not renew it by itself): click refresh, report no code this tick.
+  if(/二维码(已)?(过期|失效)|已失效/.test(document.body?document.body.innerText:'')){
+    var cand=[].slice.call(document.querySelectorAll('button,a,span,div')).filter(function(x){
+      var t=(x.textContent||'').trim();
+      return x.children.length<=1&&(t==='刷新'||t==='点击刷新'||t==='重新获取'||t==='刷新二维码');});
+    if(cand.length){cand[0].click();return JSON.stringify({u:location.href,mime:null,qr:null,refreshed:true});}
+  }
   function pick(){
     var e=document.querySelector('.account-center-image-content');
     if(e){var m=getComputedStyle(e).backgroundImage.match(/data:(image\/[a-z+]+);base64,([A-Za-z0-9+\/=]+)/);if(m)return [m[1],m[2]];}

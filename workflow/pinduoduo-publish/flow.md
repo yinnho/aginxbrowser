@@ -191,3 +191,9 @@ rename body 必带 `cat_id`（detail 优先，其次 `args.cat_id`），**禁止
 
 `submit` 步的 `save` 必须叫 `submit_out`，不能叫 `submit`——否则会盖住 `vars.submit`，
 后面 verify 里 `String({{submit}})` 变成 `String(skip: …)` 直接 SyntaxError。
+
+## 2026-10-21 回读修正
+
+`goodsListByGoodsId` 的体必须是 `{goods_id, is_onsale:1, page:1, size:10}`（只给 goods_id 会回「参数校验失败: 不能为null」）。
+真提交后（`submit:1`）用它回读店铺在售列表，`on_shop/detail` 回读审核态。耗时见回执 `elapsed_ms` / `timings`
+（2026-10-21 真发 114.3s：页面启动≈46s、登录检查 30.2s、copyGoodsCommit 31.8s、提交 0.7s、核验 4.7s）。
