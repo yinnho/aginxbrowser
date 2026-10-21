@@ -1,6 +1,6 @@
 # taobao-upload — 淘宝图片空间传图
 
-把图片传进淘宝图片空间，回 alicdn 地址，喂给 `taobao-publish-custom`（或其他淘宝发布 flow）。
+把图片传进淘宝图片空间，回 alicdn 地址，喂给 `taobao-publish`（或其他淘宝发布 flow）。
 **写店操作**：每张图都会在图片空间新增一条，不查重（淘宝允许同名）。
 
 ## 跑法

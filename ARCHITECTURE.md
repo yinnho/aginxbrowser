@@ -194,7 +194,7 @@ wait for a green publish witness before collapsing):
 
 | Cluster | Why it stays duplicated |
 |---------|-------------------------|
-| `taobao-publish` / `taobao-publish-singlesku` / `taobao-publish-multisku` / `tmall-publish-singlesku` | stash / fiber walk / brand-fire / submit paths diverge per SKU mode and tmall gate; premature recipe extract risks a green→red publish |
+| `taobao-publish` / `tmall-publish` | one fill/submit chain each (merged 2026-10-21 from four per-SKU-mode clones); they differ in publish domain, title/brand shapes and the Tmall gate, so a shared recipe extract would risk a green→red publish |
 | `doudian-upload` per-image eval steps (~35 near-copies) | chunked upload died on #240 face-2; one-step-per-image is the stable shape until a safer compaction lands |
 
 Safe recent extractions (recipes): `xhs-sign`, `xhs-qrcode`, `x-p256`,

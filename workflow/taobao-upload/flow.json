@@ -908,7 +908,7 @@
     "timeout_ms": 30000,
     "script": "(function(){ var R=window.__agxTbUp||{},N={{img_count}},urls={},bad=[]; for(var i=0;i<N;i++){var r=R[i]; if(!r){bad.push('img_'+i+'(no-attempt)');continue} if(r.fatal||r.failed){bad.push(r.name+':'+JSON.stringify(r.fatal||r.failed));continue} urls[r.name]=r.meta||{url:r.url}; } if(bad.length)throw new Error('upload incomplete: '+(N-bad.length)+'/'+N+' ok; '+bad.slice(0,6).join(' | ')+' - rerun with vars.done set to the urls map saved so far'); return {count:N,urls:urls}; })()"
    },
-   "note": "name -> {url (alicdn picture-space), fileId, width, height, size}; feed to taobao-publish-custom"
+   "note": "name -> {url (alicdn picture-space), fileId, width, height, size}; feed to taobao-publish"
   }
  ]
 }

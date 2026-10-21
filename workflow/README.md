@@ -46,7 +46,6 @@ is safe. Core stays generic; these stay as workflow data.
 
 | Cluster | Status |
 |---------|--------|
-| `taobao-publish` · `taobao-publish-singlesku` · `taobao-publish-multisku` · `tmall-publish-singlesku` | stash / walk / brand-fire / submit diverge by SKU mode + tmall gate — wait for green publish witness |
 | `doudian-upload` ~35 near-copy image steps | one eval per image is the stable shape after #240 face-2 chunk failures — compaction is speculative |
 
 Also not a cleanup target: `scripts/xhs-qr-login.py` (thin `flow/run` CLI only;
@@ -106,13 +105,9 @@ receipt is the function's return value (`status` / `saved` / `session_id`).
 | `taobao-live` | live.taobao.com | runs green logged-out | verdict-gated front probe: delivers "no wall + telemetry"; room list awaits engine hydration — see flow.md |
 | `taobao-shop-collect` | shop<N>.taobao.com | runs green (reboot handles boot roulette; wall receipt verified ×3) | buyer-side listing collect: 60 cards via React fiber walk + secfont price tokens/cps (offline decode companion in flow.md); data-level gates, no verdict (session-cumulative rows false-wall a rebooted-clean page) — see flow.md |
 | `taobao-orders` | buyertrade.taobao.com | runs green logged-in | buyer order list via hooked XHR bodies — see flow.md |
-| `taobao-publish` | item.upload.taobao.com | green path (multi-sku lineage) | seller publish; known clone of singlesku/multisku/tmall — **do not extract** stash/walk/submit yet — see Known clones |
-| `taobao-publish-singlesku` | item.upload.taobao.com | green path (single-sku) | same family; `custom_-1` axis rejected — **do not extract** yet |
-| `taobao-publish-multisku` | item.upload.taobao.com | green path (multi-sku v17) | same family; ladder binding — **do not extract** yet |
+| `taobao-publish` | item.upload.taobao.com | 淘宝卖家登录 | single item with N spec names as 颜色分类 values (custom negative ids, or preset `vid`); real submit; `item_param` reopens an item in edit mode — see flow.md |
 | `taobao-upload` | item.upload.taobao.com | 淘宝卖家登录 | upload images to the 图片空间 via `stream-upload.taobao.com/api/upload.api`, returns alicdn urls — see flow.md |
-| `taobao-publish-custom` | item.upload.taobao.com | 淘宝卖家登录 | single item with N custom spec names as 颜色分类 custom values (real submit; `item_param` reopens an item in edit mode) — see flow.md |
-| `tmall-publish-custom` | sell.publish.tmall.com | 天猫店铺登录 | Tmall flagship variant of taobao-publish-custom (own publish domain, title/brand shapes, required 透明素材图); real submit — see flow.md |
-| `tmall-publish-singlesku` | item.upload.tmall.com | green path (tmall gate) | same family + previewDraftSubmit gate — **do not extract** yet |
+| `tmall-publish` | sell.publish.tmall.com | 天猫店铺登录 | Tmall flagship variant (own publish domain, title/brand shapes, required 透明素材图); real submit — see flow.md |
 | `xhs-merchant-publish` | ark.xiaohongshu.com | 千帆 jar | `publish_render` signature-chain probe — green since 2026-10-20 (300015 cleared); writes nothing |
 | `xhs-merchant-upload` | ark.xiaohongshu.com | 千帆 jar (`xhs-qf-stable`) | upload ≤36 images into the 素材库 (original `Yw` job, exact-name reuse) → `materials` map with formal path/link/size — see flow.md |
 | `xhs-merchant-create` | ark.xiaohongshu.com | 千帆 jar | list one product: dedupe → local Pinia form fill → validate → body sha256 → (`submit:1`) single `batch_create_item` → poll → readback; default is a dry run — see flow.md |

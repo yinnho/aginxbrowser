@@ -1,6 +1,6 @@
-# tmall-publish-custom — 天猫旗舰店多规格发布（颜色分类轴自定义值）
+# tmall-publish — 天猫旗舰店多规格发布（颜色分类轴自定义值）
 
-淘宝 `taobao-publish-custom` 的天猫版，**真提交**。先 `taobao-upload` 传图（图片空间按卖家号算，天猫店号自己的）。
+淘宝 `taobao-publish` 的天猫版，**真提交**。先 `taobao-upload` 传图（图片空间按卖家号算，天猫店号自己的）。
 
 ## 天猫和淘宝表单的差别（2026-10-21 在婧途车品旗舰店摸出来的）
 
@@ -13,12 +13,12 @@
 | 发货地/模板/详情 | `shippingArea` / `template` / `desc` | `location` / `tmExtractWay` / `descRepublicOfSell`（页面默认值即可，stash 里不再要求前三者） |
 | 提交 | replica XHR | 页面自己的 `pageState.submit`，第一下点击就直接提交（也可能先过 `previewDraftSubmit` 关卡，flow 两种都等） |
 
-规格、规格图、商家编码、颜色分类自定义值的做法同 `taobao-publish-custom`。
+规格、规格图、商家编码、颜色分类自定义值的做法同 `taobao-publish`。
 
 ## 跑法
 
 ```
-POST /flow/run {"name":"tmall-publish-custom","session_id":"<天猫店登录会话>",
+POST /flow/run {"name":"tmall-publish","session_id":"<天猫店登录会话>",
   "vars":{"args":{cat_id,title,brand_id,brand_text,brand_prop_name,white_bg_image,
                   main_images[],portrait_images[],desc_images[{url,width,height}],
                   skus[{text,price,stock,img,code,pkg_value,pkg_text}]}}}
@@ -33,3 +33,7 @@ POST /flow/run {"name":"tmall-publish-custom","session_id":"<天猫店登录会�
 标题、18 行规格名与价格（天猫参考价）、规格图 18/18、商家编码、主图 5、品牌婧途、透明素材图都在。
 
 **透明素材图是我用 SKU 图里的屏幕区域裁出来的圆角透明底 PNG（近似），不是美工抠图**；要换成正式素材，传好图后改 `white_bg_image` 重提（`item_param` 走编辑模式）。
+
+## 合并说明（2026-10-21）
+
+取代旧的 `tmall-publish-singlesku`（淘宝域名 + `custom_-1` 轴，对现在的旗舰店都不通）。`skus[].vid` 同 `taobao-publish`。
