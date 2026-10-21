@@ -8685,8 +8685,8 @@ pub(crate) fn container_plan(
                 nodes.sort_unstable();
                 nodes.dedup();
                 extra_rules.push(crate::diting_css::ParsedRule {
-                    selector: rule.selector.clone(),
                     declarations: bake_container_units(&rule.declarations, w, h),
+                    ..rule.clone()
                 });
                 gates.insert(idx, nodes);
             }

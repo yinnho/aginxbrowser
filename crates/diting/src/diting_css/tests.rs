@@ -919,11 +919,11 @@ fn keyframes_and_import_do_not_bleed_into_next_selector() {
 #[test]
 fn collect_selector_attr_names_extracts_bracket_idents() {
     let rules = vec![
-        ParsedRule { selector: "[data-x]".into(), declarations: String::new() },
-        ParsedRule { selector: ".a[aria-expanded=\"true\"]:hover".into(), declarations: String::new() },
-        ParsedRule { selector: "[TabIndex]".into(), declarations: String::new() },
-        ParsedRule { selector: "[lang|=en]".into(), declarations: String::new() },
-        ParsedRule { selector: ".plain > #id".into(), declarations: String::new() },
+        ParsedRule { selector: "[data-x]".into(), declarations: String::new(), ..Default::default() },
+        ParsedRule { selector: ".a[aria-expanded=\"true\"]:hover".into(), declarations: String::new(), ..Default::default() },
+        ParsedRule { selector: "[TabIndex]".into(), declarations: String::new(), ..Default::default() },
+        ParsedRule { selector: "[lang|=en]".into(), declarations: String::new(), ..Default::default() },
+        ParsedRule { selector: ".plain > #id".into(), declarations: String::new(), ..Default::default() },
     ];
     let names = collect_selector_attr_names(&rules);
     assert!(names.contains("data-x"), "{names:?}");
@@ -997,9 +997,9 @@ fn cascade_specificity_then_source_order_then_inline() {
     let node = tree.get_element_by_id("main").unwrap();
 
     let rules = [
-        ParsedRule { selector: "p".into(), declarations: "color: #111111".into() },
-        ParsedRule { selector: ".intro".into(), declarations: "color: #222222".into() },
-        ParsedRule { selector: "#main".into(), declarations: "color: #333333".into() },
+        ParsedRule { selector: "p".into(), declarations: "color: #111111".into(), ..Default::default() },
+        ParsedRule { selector: ".intro".into(), declarations: "color: #222222".into(), ..Default::default() },
+        ParsedRule { selector: "#main".into(), declarations: "color: #333333".into(), ..Default::default() },
     ];
     // Compile through our own diting_dom selectors for specificity truth.
     let matched: Vec<(&ParsedRule, u32)> = rules
@@ -1055,8 +1055,7 @@ fn cascade_important_beats_inline_and_important_inline_wins() {
     let node = tree.get_element_by_id("main").unwrap();
     let rules = [ParsedRule {
         selector: ".slide".into(),
-        declarations: "margin-top: 1px !important; transform: none !important".into(),
-    }];
+        declarations: "margin-top: 1px !important; transform: none !important".into(), ..Default::default() }];
     let matched: Vec<(&ParsedRule, u32)> = rules
         .iter()
         .filter_map(|rule| {
@@ -1113,7 +1112,7 @@ fn inheritance_flows_from_parent_and_author_overrides() {
     assert_eq!(child.display, Some(Display::Inline), "UA default for <em>");
 
     // Author rule on the child overrides the inherited color only.
-    let rule = ParsedRule { selector: "em".into(), declarations: "color: red".into() };
+    let rule = ParsedRule { selector: "em".into(), declarations: "color: red".into(), ..Default::default() };
     let spec = tree.compile_rule_selector("em").unwrap().specificity();
     let overridden = cascade_element("em", &tree, em, &[(&rule, spec)], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
     assert_eq!(overridden.color, Some(Color(255, 0, 0, 255)));
@@ -1167,7 +1166,7 @@ fn form_controls_carry_ua_font_not_inherited() {
 
     // The reset contract: author declarations override every UA slot, and an
     // author em still folds against the parent (the UA row is absolute only).
-    let rule = ParsedRule { selector: "input".into(), declarations: "font-size: 2em; font-family: serif; font-weight: 700; line-height: 2".into() };
+    let rule = ParsedRule { selector: "input".into(), declarations: "font-size: 2em; font-family: serif; font-weight: 700; line-height: 2".into(), ..Default::default() };
     let spec = tree.compile_rule_selector("input").unwrap().specificity();
     let authored = cascade_element("input", &tree, input, &[(&rule, spec)], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
     assert_eq!(authored.font_size, Some(48.0), "2em folds against the 24px parent");
@@ -1249,8 +1248,7 @@ fn var_substitutes_from_custom_properties_and_inherits() {
 
     let root_rule = ParsedRule {
         selector: "section".into(),
-        declarations: "--main-color: #ff0000; color: var(--main-color)".into(),
-    };
+        declarations: "--main-color: #ff0000; color: var(--main-color)".into(), ..Default::default() };
     let spec = tree.compile_rule_selector("section").unwrap().specificity();
     let parent = cascade_element("section", &tree, section, &[(&root_rule, spec)], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
     assert_eq!(parent.color, Some(Color(255, 0, 0, 255)), "var() resolves against same-element custom property");
@@ -1261,7 +1259,7 @@ fn var_substitutes_from_custom_properties_and_inherits() {
     assert_eq!(child.custom.get("--main-color").map(String::as_str), Some("#ff0000"), "custom properties inherit");
 
     // Child rule USING the inherited custom property.
-    let use_rule = ParsedRule { selector: "span".into(), declarations: "color: var(--main-color)".into() };
+    let use_rule = ParsedRule { selector: "span".into(), declarations: "color: var(--main-color)".into(), ..Default::default() };
     let use_spec = tree.compile_rule_selector("span").unwrap().specificity();
     let styled = cascade_element("span", &tree, span, &[(&use_rule, use_spec)], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
     assert_eq!(styled.color, Some(Color(255, 0, 0, 255)), "var() resolves against inherited custom property");
@@ -1274,8 +1272,7 @@ fn var_fallback_and_unresolved_behavior() {
 
     let rule = ParsedRule {
         selector: "p".into(),
-        declarations: "color: var(--missing, rgb(0, 0, 255)); background-color: var(--missing)".into(),
-    };
+        declarations: "color: var(--missing, rgb(0, 0, 255)); background-color: var(--missing)".into(), ..Default::default() };
     let spec = tree.compile_rule_selector("p").unwrap().specificity();
 
     let parent = ComputedStyle { color: Some(Color(1, 2, 3, 255)), ..Default::default() };
@@ -1294,8 +1291,7 @@ fn var_in_dimensions_and_chained_custom_properties() {
     let rule = ParsedRule {
         selector: "div".into(),
         declarations:
-            "--w: 100px; width: var(--w); --a: var(--b); --b: 10px; padding-top: var(--a)".into(),
-    };
+            "--w: 100px; width: var(--w); --a: var(--b); --b: 10px; padding-top: var(--a)".into(), ..Default::default() };
     let spec = tree.compile_rule_selector("div").unwrap().specificity();
     let cs = cascade_element("div", &tree, div, &[(&rule, spec)], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
     assert_eq!(cs.width, Some(Length::Px(100.0)), "var() resolves in dimensions");
@@ -1326,8 +1322,7 @@ fn line_height_parses_all_forms_and_inherits_as_number() {
 
     let rule = ParsedRule {
         selector: "#outer".into(),
-        declarations: "line-height: 1.6".into(),
-    };
+        declarations: "line-height: 1.6".into(), ..Default::default() };
     let spec = tree.compile_rule_selector("#outer").unwrap().specificity();
     let parent = cascade_element("div", &tree, outer, &[(&rule, spec)], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
     assert_eq!(parent.line_height, Some(LineHeightSpec::Number(1.6)));
@@ -1340,8 +1335,7 @@ fn line_height_parses_all_forms_and_inherits_as_number() {
     // Length forms collapse to absolute px (em against own font-size).
     let px_rule = ParsedRule {
         selector: "#inner".into(),
-        declarations: "font-size: 20px; line-height: 1.5em".into(),
-    };
+        declarations: "font-size: 20px; line-height: 1.5em".into(), ..Default::default() };
     let spec2 = tree.compile_rule_selector("#inner").unwrap().specificity();
     let sized = cascade_element("div", &tree, inner, &[(&px_rule, spec2)], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
     assert_eq!(sized.line_height, Some(LineHeightSpec::Px(30.0)));
@@ -1712,7 +1706,7 @@ fn ua_box_defaults_match_browser_sheet() {
     assert_eq!(ul_style.padding.left, Some(Length::Px(40.0)), "ul 40px inline-start padding");
 
     // Author margin overrides per side.
-    let rule = ParsedRule { selector: "p".into(), declarations: "margin-top: 0".into() };
+    let rule = ParsedRule { selector: "p".into(), declarations: "margin-top: 0".into(), ..Default::default() };
     let spec = tree.compile_rule_selector("p").unwrap().specificity();
     let authored = cascade_element("p", &tree, p, &[(&rule, spec)], None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
     assert_eq!(authored.margin.top, Some(Length::Px(0.0)), "author margin-top wins");
@@ -1742,7 +1736,7 @@ fn font_size_em_percent_against_parent_rem_against_root() {
     let mk = |decl: &str, root: f32| {
         cascade_element(
             "p", &tree, p,
-            &[(&ParsedRule { selector: "p".into(), declarations: decl.into() }, 1)],
+            &[(&ParsedRule { selector: "p".into(), declarations: decl.into(), ..Default::default() }, 1)],
             Some(&parent), None, root, (1280.0, 720.0),
         )
     };
@@ -1806,7 +1800,7 @@ fn font_size_computes_before_em_lengths_same_block() {
     let p = tree.query_selector("p").unwrap().unwrap();
     let cs = cascade_element(
         "p", &tree, p,
-        &[(&ParsedRule { selector: "p".into(), declarations: "width: 10em; font-size: 24px".into() }, 1)],
+        &[(&ParsedRule { selector: "p".into(), declarations: "width: 10em; font-size: 24px".into(), ..Default::default() }, 1)],
         None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0),
     );
     assert_eq!(cs.font_size, Some(24.0));
@@ -1821,8 +1815,8 @@ fn cascade_font_size_wins_by_specificity_not_prepass_order() {
     let tree = diting_dom::tree_sink::parse_html(r#"<p id="m" class="c">x</p>"#);
     let p = tree.get_element_by_id("m").unwrap();
     let rules = [
-        ParsedRule { selector: "p.c".into(), declarations: "font-size: 10px; width: 2em".into() },
-        ParsedRule { selector: "#m".into(), declarations: "font-size: 30px".into() },
+        ParsedRule { selector: "p.c".into(), declarations: "font-size: 10px; width: 2em".into(), ..Default::default() },
+        ParsedRule { selector: "#m".into(), declarations: "font-size: 30px".into(), ..Default::default() },
     ];
     let matched: Vec<(&ParsedRule, u32)> = rules
         .iter()
@@ -3190,4 +3184,53 @@ fn four_digit_hex_colors_parse() {
     assert_eq!(parse_color("#0000"), Some(Color(0, 0, 0, 0)));
     assert_eq!(parse_color("#f008"), Some(Color(255, 0, 0, 136)));
     assert_eq!(parse_color("#12"), None);
+}
+
+#[test]
+fn layers_and_nesting_follow_chrome_cascade() {
+    // Chrome truth (headless Chrome, 2026-10-22): layer order, unlayered
+    // beats layered, !important inverts, nested layers, anonymous layers,
+    // and CSS nesting resolve to these colours.
+    let (rules, _) = parse_stylesheet_timed(
+        r#"@layer a,b;
+           @layer b{#p1{color:red}}
+           @layer a{#p1{color:blue}}
+           @layer l{#p2{color:red}}
+           #p2{color:blue}
+           @layer a2,b2;
+           @layer a2{#p3{color:red!important}}
+           @layer b2{#p3{color:blue!important}}
+           @layer x{@layer inner{#p4{color:red}} #p4{color:green}}
+           @layer {#p5{color:red}}
+           .n{color:blue;& .m{color:red}}
+           .n2{color:blue;.m2{color:red} &:hover{color:green}}
+           .n3{color:blue; @media (min-width:100px){color:red}}
+           .n4,.n5{& > span{color:red}}"#,
+        (1280.0, 720.0),
+        CssMediaType::Screen,
+    );
+    let tree = diting_dom::tree_sink::parse_html(
+        r#"<p id=p1>1</p><p id=p2>2</p><p id=p3>3</p><p id=p4>4</p><p id=p5>5</p>
+           <div class=n><p class=m id=m1>m</p></div><div class=n2><p class=m2 id=m2>m</p></div>
+           <div class=n3 id=m3>x</div><div class=n5><span id=m5>s</span></div>"#,
+    );
+    let color_of = |sel: &str| {
+        let id = tree.query_selector(sel).unwrap().unwrap();
+        let matched: Vec<(&ParsedRule, u32)> = rules
+            .iter()
+            .filter(|r| tree.matches_selector(id, &r.selector).unwrap_or(false))
+            .map(|r| (r, tree.compile_rule_selector(&r.selector).unwrap().specificity()))
+            .collect();
+        cascade_element("p", &tree, id, &matched, None, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0)).color
+    };
+    let red = Some(Color(255, 0, 0, 255));
+    let blue = Some(Color(0, 0, 255, 255));
+    assert_eq!(color_of("#p1"), red, "later layer beats earlier");
+    assert_eq!(color_of("#p2"), blue, "unlayered beats layered");
+    assert_eq!(color_of("#p3"), red, "!important: earlier layer wins");
+    assert_eq!(color_of("#p4"), Some(Color(0, 128, 0, 255)), "a layer's own rules beat its sub-layers");
+    assert_eq!(color_of("#p5"), red, "anonymous layer");
+    for id in ["#m1", "#m2", "#m3", "#m5"] {
+        assert_eq!(color_of(id), red, "nested rule {id}");
+    }
 }

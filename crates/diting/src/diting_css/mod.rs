@@ -24,6 +24,8 @@ mod animation;
 use animation::{parse_animation_shorthand, parse_keyframes_body};
 mod supports;
 pub(crate) mod props;
+mod layers;
+mod nesting;
 mod vars;
 use vars::substitute_vars;
 mod transform;
@@ -65,10 +67,12 @@ fn media_pref_default(name: &str) -> Option<&'static str> {
 
 /// One flattened stylesheet rule: selector text plus its declaration block.
 /// Selectors are compiled lazily by the cascade via diting_dom.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ParsedRule {
     pub selector: String,
     pub declarations: String,
+    /// `@layer` the rule was written in (0 = unlayered); see `layers`.
+    pub layer: u32,
 }
 
 /// Attribute names referenced by attribute selectors in a rule pool
@@ -227,6 +231,7 @@ pub fn parse_stylesheet_timed_with(
     overrides: &MediaOverrides,
 ) -> (Vec<ParsedRule>, KeyframesMap) {
     props::reset_for_parse();
+    layers::reset();
     parse_stylesheet_with_containers(css, viewport, media_type, overrides, &mut Vec::new())
 }
 
@@ -242,6 +247,7 @@ pub fn parse_stylesheet_full(
 ) -> (Vec<ParsedRule>, KeyframesMap, Vec<ContainerRule>) {
     let mut containers = Vec::new();
     props::reset_for_parse();
+    layers::reset();
     let (rules, keyframes) =
         parse_stylesheet_with_containers(css, viewport, media_type, overrides, &mut containers);
     (rules, keyframes, containers)
@@ -300,10 +306,15 @@ fn parse_stylesheet_with_containers(
                         overrides,
                         containers,
                     );
+                } else if let Some(flat) = decls.contains('{').then(|| nesting::flatten(sel, decls)).flatten() {
+                    let (r, k) = parse_stylesheet_with_containers(&flat, viewport, media_type, overrides, containers);
+                    rules.extend(r);
+                    keyframes.extend(k);
                 } else {
                     rules.push(ParsedRule {
                         selector: sel.to_string(),
                         declarations: decls.to_string(),
+                        layer: layers::current(),
                     });
                 }
                 current_selector.clear();
@@ -315,6 +326,9 @@ fn parse_stylesheet_with_containers(
             // Statement at-rules (`@layer a;`) establish ordering slots but
             // emit no rule; drop them so the prelude cannot bleed into the
             // next selector.
+            if let Some(p) = current_selector.trim().strip_prefix("@layer") {
+                layers::declare_list(p);
+            }
             current_selector.clear();
         } else if block_depth > 0 {
             current_decls.push(c);
@@ -362,8 +376,10 @@ fn flush_at_rule(
         if supports_condition_applies(prelude) {
             recurse(rules, keyframes, containers);
         }
-    } else if let Some(_prelude) = at_rule_prelude(at, "layer") {
+    } else if let Some(prelude) = at_rule_prelude(at, "layer") {
+        layers::enter(prelude);
         recurse(rules, keyframes, containers);
+        layers::leave();
     } else if let Some(prelude) = at_rule_prelude(at, "keyframes") {
         // `from`/`to`/`NN%` stops; a stop that fails to parse is skipped,
         // not fatal — the sampler works with however many stops survive.
@@ -6137,6 +6153,7 @@ struct CascadeCandidate<'a> {
     declarations: &'a str,
     specificity: u32,
     source_order: usize,
+    layer_rank: u32,
 }
 
 /// Compute the style for one element: UA defaults ← author rules (specificity,
@@ -6341,9 +6358,13 @@ pub fn cascade_element(
             declarations: &rule.declarations,
             specificity: *spec,
             source_order: order,
+            layer_rank: layers::rank(rule.layer),
         })
         .collect();
-    candidates.sort_by_key(|c| (c.specificity, c.source_order));
+    candidates.sort_by_key(|c| (c.layer_rank, c.specificity, c.source_order));
+    // !important inverts layer order: the earlier layer wins, unlayered loses.
+    let mut important_order: Vec<&CascadeCandidate> = candidates.iter().collect();
+    important_order.sort_by_key(|c| (std::cmp::Reverse(c.layer_rank), c.specificity, c.source_order));
 
     // Font-size pre-pass: CSS computes font-size before every other
     // property (regardless of declaration order within a block), because
@@ -6511,7 +6532,7 @@ pub fn cascade_element(
     if let Some(inline) = inline_css {
         apply_declarations_importance(&mut style, inline, &fonts, Importance::Normal, parent);
     }
-    for candidate in &candidates {
+    for candidate in &important_order {
         apply_declarations_importance(
             &mut style,
             candidate.declarations,
