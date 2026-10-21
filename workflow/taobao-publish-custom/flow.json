@@ -14,7 +14,8 @@
   "publish_url": "https://item.upload.taobao.com/sell/v2/publish.htm",
   "form_ready_ms": 120000,
   "submit_result_ms": 120000,
-  "dispatch_value": "0"
+  "dispatch_value": "0",
+  "item_param": ""
  },
  "create": {
   "width": 1440,

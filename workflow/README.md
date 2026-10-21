@@ -111,6 +111,7 @@ receipt is the function's return value (`status` / `saved` / `session_id`).
 | `taobao-publish-multisku` | item.upload.taobao.com | green path (multi-sku v17) | same family; ladder binding — **do not extract** yet |
 | `taobao-upload` | item.upload.taobao.com | 淘宝卖家登录 | upload images to the 图片空间 via `stream-upload.taobao.com/api/upload.api`, returns alicdn urls — see flow.md |
 | `taobao-publish-custom` | item.upload.taobao.com | 淘宝卖家登录 | single item with N custom spec names as 颜色分类 custom values (real submit; `item_param` reopens an item in edit mode) — see flow.md |
+| `tmall-publish-custom` | sell.publish.tmall.com | 天猫店铺登录 | Tmall flagship variant of taobao-publish-custom (own publish domain, title/brand shapes, required 透明素材图); real submit — see flow.md |
 | `tmall-publish-singlesku` | item.upload.tmall.com | green path (tmall gate) | same family + previewDraftSubmit gate — **do not extract** yet |
 | `xhs-merchant-publish` | ark.xiaohongshu.com | 千帆 jar | `publish_render` signature-chain probe — green since 2026-10-20 (300015 cleared); writes nothing |
 | `xhs-merchant-upload` | ark.xiaohongshu.com | 千帆 jar (`xhs-qf-stable`) | upload ≤36 images into the 素材库 (original `Yw` job, exact-name reuse) → `materials` map with formal path/link/size — see flow.md |
