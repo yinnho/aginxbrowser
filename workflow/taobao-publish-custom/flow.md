@@ -19,7 +19,7 @@
 POST /flow/run {"name":"taobao-publish-custom","session_id":"<已登录会话>",
   "vars":{"args":{cat_id,title,brand_id,brand_text,brand_prop_name,shipping_value?,template_id?,spec_name?,
                   main_images[],portrait_images[],desc_images[{url,width,height}],
-                  skus[{text,price,stock,img,pkg_value,pkg_text}]},
+                  skus[{text,price,stock,img,code,pkg_value,pkg_text}]},
           "item_param":"&itemId=<id>"}}      # 可选：重开已有商品走编辑模式，不新建
 ```
 
@@ -30,7 +30,8 @@ POST /flow/run {"name":"taobao-publish-custom","session_id":"<已登录会话>",
 
 - 2026-10-21 真发：昊铂 HL 18 规格，编辑模式 `itemId=1094881528917` 提交成功，重开编辑页回读：标题、18 行规格名与价格
   （16.60–98.80）、总库存 17982、主图 5、详情图 8、品牌无品牌、运费模板偏远地区不包邮 全对。
-- **已知缺口**：回读里 SKU 规格图（`props[0].img`）为空、`tmDeliveryTime.value` 为空——提交被接受，但这两项没落库，
-  规格图要换别的字段/路径再试。
+- 第二轮（编辑模式重提交）补齐：SKU 规格图——`saleProp` 每项和行 `props[0]` 都带 `img`，服务器回读 18/18 有图；
+  商家编码——行字段 `skuOuterId`（args `skus[].code`），回读 HL-25-S01…S18 全对；发货时间——表单默认就是「48 小时内发货」
+  （`tmDeliveryTime.value` 读回为 null 是默认值的表示，页面单选读回为 48 小时），`vars.dispatch_value` 非默认时才需要改。
 - 事故：为试 sku 形状跑了一次缺描述的"实验"，页面自动补详情后真建了一件 2 规格的商品（同一个 itemId），
   随后用编辑模式改成了完整 18 规格，所以店里只有这一件。
