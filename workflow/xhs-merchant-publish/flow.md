@@ -1,15 +1,9 @@
-# xhs-merchant-publish — 千帆/Ark publish_render 签名链
+# xhs-merchant-publish — 千帆/Ark publish_render 签名链探测
 
-> **2026-10-17 接线，run4 终审过。** 目标=证明签名链：从页内发一发
-> `publish_render` 探测 fetch，`xhs-sign` 门闩（waitSigner 12s + settle）
-> 放行后自动补 X-s/X-t/X-s-common。**不提交商品**——`batch_create_item`
-> 刻意不接，真写上架须用户点头。
->
-> **run4 判决（2026-10-17 深夜）**：签名链**通**（resign 成真、无 406、
-> 四出路全按设计路由），但 publish_render 端点的服务端风控闸**活着**——
-> 探测与页面自己的真实调用（authorization+x-b3-traceid）双双 200+
-> code 300015。154 面清掉的是客户端秒杀+create 渲染+毒印律，端点闸是
-> 另一堵墙。详见交接档十二·补六。
+> **2026-10-21 重写。** 300015 通关后（原生 mnsv2 + Chrome 请求头顺序），页面自己的签名 HTTP 客户端就能签 `publish_render`，
+> 不再需要 `xhs-sign` 配方（门闩/镜像/桥接那一整套已删，配方回到 C 端 flow 用的精简版）。本 flow 现在=
+> 进创建页 → 按内容找页面 SDK 的 HTTP 客户端 → 发一发体为 `{}` 的 `publish_render`。**不提交商品。**
+> 回「请求详情不能为空 / 未找到执行流程」这类业务错误=签名链+环境层都放行；`300015`=环境杀；jar 死会在探测前被拦。
 
 ## 判决表（flow 的四条出路）
 

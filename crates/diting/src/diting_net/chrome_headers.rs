@@ -18,6 +18,7 @@
 //!     x-b3-traceid, x-s-common, x-s, content-type) the publish endpoints use.
 //!   * subresource without author headers: platform/UA/ch-ua first, then
 //!     accept and the fetch-metadata triple.
+//!
 //! Headers a list does not name keep wreq's default placement (after the
 //! named ones), which is where Chrome puts unknown author headers closest to.
 

@@ -1,13 +1,10 @@
 (() => {
-  // v20: poll bridgeProxyFp until facade mounts (itemark late).
-  // v19.1: poll bridgeProxyFp until facade mounts (itemark late).
-  // v19: qiankun proxy AS facade getV18 (~1024/4.4.4) vs top FPJS (~2928).
-  // Bridge facade.getV18 → top; do NOT copy VERSION (sdk stays rE 4.x).
-  // v18: font-metric collectors (x29 fonts). Layout swallowed _ditingFontBox
-  // so FPJS offsetWidth probes matched every named face to generic baseline.
-  // measureText missed families inside 72px Arial shorthand. Do NOT invent ssk.
-  // v17: RTC ICE + OAC graph. Warm PD_MIN 2000 + spaced getV18 retries.
-  const XS_VER = 20;
+  // v6: same fingerprint shape as v5 + functional fixes (CORS auto-sign
+  // guard, gate snapshot vs XHR reuse, FormData PR block, page-x-s replay,
+  // array-header rebuild, deferred-common restore, fail-closed waitSigner).
+  // 300015 "risk plugin" probes enumerate window keys and diff
+  // Function.prototype.toString — v4 leaked the whole recipe source there.
+  const XS_VER = 6;
   let prev = null;
   try { if (typeof window.__xsStats === 'function') prev = window.__xsStats(); } catch (e) {}
   if (prev && prev.ver >= XS_VER) return 'already';
@@ -15,9 +12,6 @@
     ver: XS_VER, installed: 1, mirrored: 0, arkified: 0, swallowed: 0,
     passthrough: 0, passthrough_coherent: 0, common_stripped: 0, signed: 0,
     pr_held: 0, pr_blocked: 0, fuse: 0, replayed: 0, dropped: 0,
-    mns_mirrored: 0, mns_bridged: 0, xyw_blocked: 0, ark_xys: 0, page_fy: 0, page_fu: 0,
-    fp_init: 0, fp_wait: 0, web_ssk: 0, shield_pt: 0, fp_v18_delay: 0, fp_v18_warm: 0,
-    fp_proxy_bridge: 0, pd_tap: 0,
   };
   const bump = (k) => { stats[k] = (stats[k] || 0) + 1; };
   // Last publish_render decision + wire outcome (closure-only, surfaced via
@@ -32,147 +26,19 @@
       writable: true, configurable: true, enumerable: false,
     });
   } catch (e) { window.__xsStats = function () { return JSON.parse(JSON.stringify(stats)); }; }
-  // Document-start pd tap: field-level get()/getV18 + shield profile bodies.
-  const PD_TAP_MAX = 40;
-  if (!window.__xsPdTap) {
-    try {
-      Object.defineProperty(window, '__xsPdTap', {
-        value: [], writable: false, configurable: true, enumerable: false,
-      });
-    } catch (e) { window.__xsPdTap = []; }
-  }
-  const pdTapPush = (rec) => {
-    try {
-      const a = window.__xsPdTap;
-      if (!a || a.length >= PD_TAP_MAX) return;
-      a.push(Object.assign({ ts: Date.now() }, rec));
-      bump('pd_tap');
-    } catch (e) {}
-  };
-  const snapFpFields = (raw) => {
-    try {
-      const map = {};
-      if (!raw || !raw.length) return map;
-      for (let i = 0; i < raw.length; i++) {
-        const it = raw[i];
-        if (!it || it.key == null) continue;
-        const v = it.value;
-        if (Array.isArray(v)) map[it.key] = { t: 'arr', n: v.length, sample: v.slice(0, 8) };
-        else if (typeof v === 'string') map[it.key] = { t: 'str', len: v.length, head: v.slice(0, 48) };
-        else map[it.key] = v;
-      }
-      return map;
-    } catch (e) { return { err: String(e) }; }
-  };
-  const tapProfileBody = (url, body) => {
-    try {
-      const s = typeof body === 'string' ? body : (body && body.toString ? body.toString() : '');
-      if (!s || s.length < 8) return;
-      if (!/profileData|webprofile|shield\/profile|burdock/i.test(String(url || '') + s.slice(0, 240))) return;
-      let pdLen = 0, sdk = null, svn = null, platform = null, head = null;
-      try {
-        const j = JSON.parse(s);
-        if (j && typeof j.profileData === 'string') {
-          pdLen = j.profileData.length;
-          head = j.profileData.slice(0, 40);
-          sdk = j.sdkVersion || null;
-          svn = j.svn || null;
-          platform = j.platform || null;
-        }
-      } catch (e) {
-        const m = s.match(/"profileData"\s*:\s*"([0-9a-fA-F]*)"/);
-        if (m) { pdLen = m[1].length; head = m[1].slice(0, 40); }
-      }
-      if (!pdLen) return;
-      pdTapPush({
-        kind: 'profile_post',
-        url: String(url || '').slice(0, 180),
-        bodyLen: s.length,
-        pdLen: pdLen,
-        pdHead: head,
-        sdkVersion: sdk,
-        svn: svn,
-        platform: platform,
-      });
-    } catch (e) {}
-  };
-  const tapGetV18 = (fp) => {
-    if (!fp || typeof fp.getV18 !== 'function' || fp.getV18.__xsPdTap) return;
-    const orig = fp.getV18.bind(fp);
-    const wrapped = function (cb) {
-      if (typeof cb !== 'function') return orig.apply(fp, arguments);
-      return orig(function () {
-        try {
-          const args = [].slice.call(arguments);
-          const pd = args.length === 2 ? args[1] : args[0];
-          const meta = args.length === 2 ? args[0] : null;
-          let fields = null;
-          try {
-            if (typeof fp.getPromise === 'function') {
-              // fire-and-forget async field snap
-              Promise.resolve(fp.getPromise()).then((raw) => {
-                pdTapPush({
-                  kind: 'fp_fields',
-                  fields: snapFpFields(raw),
-                  emptyHints: (function (f) {
-                    if (!f) return null;
-                    return { x18: f.x18, x20: f.x20, x29n: f.x29 && f.x29.n, x37: f.x37 };
-                  })(snapFpFields(raw)),
-                });
-              }).catch(function () {});
-            }
-          } catch (e) {}
-          pdTapPush({
-            kind: 'getV18',
-            pdLen: pd != null ? String(pd).length : 0,
-            pdHead: pd != null ? String(pd).slice(0, 40) : null,
-            meta: meta && typeof meta === 'object' ? {
-              x33: meta.x33, x34: meta.x34, x35: meta.x35, x36: meta.x36,
-              x37: meta.x37, x38: meta.x38, x39: meta.x39,
-            } : null,
-          });
-        } catch (e) {}
-        return cb.apply(this, arguments);
-      });
-    };
-    wrapped.__xsPdTap = 1;
-    if (fp.getV18.__xsWarm) wrapped.__xsWarm = 1;
-    try { fp.getV18 = wrapped; } catch (e) {}
-  };
-  const tickPdTap = () => {
-    try { tapGetV18(window.xhsFingerprintV3); } catch (e) {}
-    try {
-      const p = window.proxy && window.proxy.xhsFingerprintV3;
-      if (p && typeof p.get === 'function') tapGetV18(p);
-    } catch (e) {}
-  };
-  try {
-    setTimeout(tickPdTap, 500);
-    setTimeout(tickPdTap, 2000);
-    setTimeout(tickPdTap, 6000);
-    const iv = setInterval(tickPdTap, 200);
-    setTimeout(() => { try { clearInterval(iv); } catch (e) {} }, 25000);
-  } catch (e) {}
-
   // Hidden own props on wrapped XHR instances (plain assignment would show in
   // Object.keys(xhr) — Chrome instances have no own enumerable props).
   const def = (o, k, v) => {
     try { Object.defineProperty(o, k, { value: v, writable: true, configurable: true }); }
     catch (e) { try { o[k] = v; } catch (e2) {} }
   };
-  // Qiankun/single-spa (ark itemark) may put AS signer / mnsv2 on window.proxy
-  // only. Resolve lazily and mirror onto window so page + recipe both win.
+  // Qiankun/single-spa (ark itemark) may put the AS signer on window.proxy
+  // only — window._webmsxyw stays undefined. Resolve lazily at sign time and
+  // mirror onto window so page code that looks at window._webmsxyw also wins.
   const resolveSigner = () => {
     try {
       if (typeof window._webmsxyw === 'function') return window._webmsxyw;
       if (window.proxy && typeof window.proxy._webmsxyw === 'function') return window.proxy._webmsxyw;
-    } catch (e) {}
-    return null;
-  };
-  const resolveMnsv2 = () => {
-    try {
-      if (typeof window.mnsv2 === 'function') return window.mnsv2;
-      if (window.proxy && typeof window.proxy.mnsv2 === 'function') return window.proxy.mnsv2;
     } catch (e) {}
     return null;
   };
@@ -186,245 +52,9 @@
       return window._webmsxyw;
     } catch (e) { return null; }
   };
-  const mirrorMnsv2 = () => {
-    try {
-      if (typeof window.mnsv2 === 'function') return window.mnsv2;
-      const s = resolveMnsv2();
-      if (!s) return null;
-      window.mnsv2 = s;
-      try { if (window.proxy && typeof window.proxy.mnsv2 !== 'function') window.proxy.mnsv2 = s; } catch (e2) {}
-      bump('mns_mirrored');
-      return window.mnsv2;
-    } catch (e) { return null; }
-  };
-
-  // TEMPORARY: synthesize window.mnsv2 from signV2Init WASM / VM crypto when
-  // the jsvmp skips the native alias (see commit receipt). Prefer xy_18*
-  // export (bytecode binds that name to mnsv2); fall back to a 16-byte
-  // hashed crypto stub if present.
-  const bytesToHex = (bytes, n) => {
-    const lim = Math.min(n || 16, bytes.length || 0);
-    let s = '';
-    for (let i = 0; i < lim; i++) {
-      const b = bytes[i] & 0xff;
-      s += (b < 16 ? '0' : '') + b.toString(16);
-    }
-    return s;
-  };
-  let _wasmMnsCache = null; // {xy,malloc,memory} | false (probed fail)
-  const findWasmMnsExport = () => {
-    try {
-      if (_wasmMnsCache === false) return null;
-      if (_wasmMnsCache) return _wasmMnsCache;
-      if (typeof WebAssembly === 'undefined' || !WebAssembly.Instance) return null;
-      const names = Object.getOwnPropertyNames(window);
-      for (let i = 0; i < names.length; i++) {
-        let inst;
-        try { inst = window[names[i]]; } catch (e) { continue; }
-        if (!inst || !(inst instanceof WebAssembly.Instance) || !inst.exports) continue;
-        const ex = inst.exports;
-        if (typeof ex.malloc !== 'function' || !ex.memory) continue;
-        let xy = null;
-        const keys = Object.keys(ex);
-        for (let k = 0; k < keys.length; k++) {
-          if (/^xy_18/.test(keys[k]) && typeof ex[keys[k]] === 'function') { xy = ex[keys[k]]; break; }
-        }
-        if (!xy) {
-          for (let k = 0; k < keys.length; k++) {
-            if (/^xy_/.test(keys[k]) && typeof ex[keys[k]] === 'function' && ex[keys[k]].length === 3) {
-              xy = ex[keys[k]]; break;
-            }
-          }
-        }
-        if (xy) {
-          // One-shot probe: if digest is zeros or throws, blacklist this Instance.
-          try {
-            const enc = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
-            const toU8 = (s) => {
-              const str = String(s == null ? '' : s);
-              if (enc) return enc.encode(str);
-              const u8 = new Uint8Array(str.length);
-              for (let j = 0; j < str.length; j++) u8[j] = str.charCodeAt(j) & 0xff;
-              return u8;
-            };
-            let bytes;
-            if (typeof ex.stackSave === 'function' && typeof ex.stackAlloc === 'function' && typeof ex.stackRestore === 'function') {
-              const sp = ex.stackSave();
-              try {
-                const write = (s) => {
-                  const u8 = toU8(s);
-                  const need = (u8.length + 1 + 15) & ~15;
-                  const ptr = ex.stackAlloc(need) >>> 0;
-                  const view = new Uint8Array(ex.memory.buffer);
-                  view.set(u8, ptr); view[ptr + u8.length] = 0;
-                  return ptr;
-                };
-                const r = xy(write('xs'), write('bridge'), write('probe')) >>> 0;
-                const view = new Uint8Array(ex.memory.buffer);
-                bytes = Uint8Array.from(view.subarray(r, r + 16));
-              } finally { try { ex.stackRestore(sp); } catch (e0) {} }
-            } else {
-              const write = (s) => {
-                const u8 = toU8(s);
-                const ptr = ex.malloc(u8.length + 1);
-                const he = new Uint8Array(ex.memory.buffer, ptr, u8.length + 1);
-                he.set(u8); he[u8.length] = 0;
-                return ptr;
-              };
-              const r = xy(write('xs'), write('bridge'), write('probe'));
-              bytes = new Uint8Array(ex.memory.buffer, r >>> 0, 16);
-            }
-            let nz = false;
-            for (let j = 0; j < 16; j++) if (bytes[j]) { nz = true; break; }
-            if (!nz) { _wasmMnsCache = false; return null; }
-          } catch (e) { _wasmMnsCache = false; return null; }
-          _wasmMnsCache = {
-            xy: xy, malloc: ex.malloc, memory: ex.memory, free: ex.free,
-            stackSave: ex.stackSave, stackAlloc: ex.stackAlloc, stackRestore: ex.stackRestore,
-          };
-          return _wasmMnsCache;
-        }
-      }
-    } catch (e) {}
-    return null;
-  };
-  const findCryptoStub = () => {
-    // Probe hashed helpers: mns core returns a 16-byte array-like from 3 strings.
-    // Guarded try/catch — other stubs throw or mutate; only accept clean 16-byte outs.
-    try {
-      const names = Object.getOwnPropertyNames(window);
-      for (let i = 0; i < names.length; i++) {
-        const k = names[i];
-        if (!/^_[0-9a-f]{32}$/.test(k)) continue;
-        const fn = window[k];
-        if (typeof fn !== 'function') continue;
-        try {
-          const out = fn('xs', 'bridge', 'probe');
-          if (out && typeof out === 'object' && out.length === 16) return fn;
-        } catch (e) {}
-      }
-    } catch (e) {}
-    return null;
-  };
-  const installMnsv2Bridge = () => {
-    try {
-      const cur = typeof window.mnsv2 === 'function' ? window.mnsv2 : null;
-      if (cur && !cur.__xsBridge) return cur; // native won
-      // Upgrade path: crypto-stub (or missing) → xy18 when WASM Instance appears.
-      // Do NOT early-return on existing __xsBridge=crypto-stub.
-      if (cur && (cur.__xsBridge === 'xy18' || cur.__xsBridge === 'xy18-stack')) return cur;
-      let bridge = null;
-      const wasm = findWasmMnsExport();
-      if (wasm) {
-        const enc = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
-        // Prefer stackAlloc (VM-like). Copy digest before stackRestore. malloc OOBs after reuse.
-        const hasStack = typeof wasm.stackSave === 'function' && typeof wasm.stackAlloc === 'function'
-          && typeof wasm.stackRestore === 'function';
-        bridge = function mnsv2(a, b, d) {
-          try {
-            const toU8 = (s) => {
-              const str = String(s == null ? '' : s);
-              if (enc) return enc.encode(str);
-              const u8 = new Uint8Array(str.length);
-              for (let i = 0; i < str.length; i++) u8[i] = str.charCodeAt(i) & 0xff;
-              return u8;
-            };
-            let hex;
-            if (hasStack) {
-              const sp = wasm.stackSave();
-              try {
-                const write = (s) => {
-                  const u8 = toU8(s);
-                  const need = (u8.length + 1 + 15) & ~15;
-                  const p = wasm.stackAlloc(need) >>> 0;
-                  const view = new Uint8Array(wasm.memory.buffer);
-                  view.set(u8, p); view[p + u8.length] = 0;
-                  return p;
-                };
-                const r = wasm.xy(write(a), write(b), write(d)) >>> 0;
-                const view = new Uint8Array(wasm.memory.buffer);
-                if (!r || r + 16 > view.length) throw new Error('ret-oob:' + r);
-                const copy = Uint8Array.from(view.subarray(r, r + 16));
-                hex = bytesToHex(copy, 16);
-              } finally { try { wasm.stackRestore(sp); } catch (e0) {} }
-            } else {
-              const write = (s) => {
-                const u8 = toU8(s);
-                const p = wasm.malloc(u8.length + 1) >>> 0;
-                if (!p) throw new Error('malloc0');
-                const buf = wasm.memory.buffer;
-                if (p + u8.length + 1 > buf.byteLength) throw new Error('malloc-oob');
-                const he = new Uint8Array(buf, p, u8.length + 1);
-                he.set(u8); he[u8.length] = 0;
-                return p;
-              };
-              const pa = write(a), pb = write(b), pd = write(d);
-              const r = wasm.xy(pa, pb, pd) >>> 0;
-              const buf2 = wasm.memory.buffer;
-              if (!r || r + 16 > buf2.byteLength) throw new Error('ret-oob:' + r);
-              hex = bytesToHex(new Uint8Array(buf2, r, 16), 16);
-            }
-            if (/^0+$/.test(hex)) throw new Error('zero-digest');
-            return hex;
-          } catch (e) {
-            _wasmMnsCache = false;
-            try {
-              if (window.mnsv2 && window.mnsv2.__xsBridge === 'xy18') {
-                delete window.mnsv2;
-                try { if (window.proxy && window.proxy.mnsv2 && window.proxy.mnsv2.__xsBridge === 'xy18') delete window.proxy.mnsv2; } catch (e3) {}
-              }
-            } catch (e2) {}
-            throw e;
-          }
-        };
-        bridge.__xsBridge = 'xy18';
-      }
-      if (!bridge && !(cur && cur.__xsBridge)) {
-        const stub = findCryptoStub();
-        if (stub) {
-          bridge = function mnsv2(a, b, d) {
-            const out = stub(a, b, d);
-            return bytesToHex(out, 16);
-          };
-          bridge.__xsBridge = 'crypto-stub';
-        }
-      }
-      if (!bridge) return cur || null;
-      window.mnsv2 = bridge;
-      try { if (window.proxy) window.proxy.mnsv2 = bridge; } catch (e2) {}
-      if (!cur || cur.__xsBridge !== bridge.__xsBridge) bump('mns_bridged');
-      return window.mnsv2;
-    } catch (e) { return null; }
-  };
-
-  const isArkHost = () => {
-    try { return /^ark\./i.test(location.hostname); } catch (e) { return false; }
-  };
-  // www-family XYW_ has no x-s-common; ark Chrome family is XYS_ + common.
-  const sgFamily = (sg) => {
-    try {
-      const xs = String((sg && (sg['X-s'] || sg['x-s'])) || '');
-      const cm = sg && (sg['X-s-common'] || sg['x-s-common']);
-      return { prefix: xs.slice(0, 4), xsLen: xs.length, hasCommon: !!(cm != null && cm !== '') };
-    } catch (e) { return { prefix: '', xsLen: 0, hasCommon: false }; }
-  };
-  const isXywPoison = (sg) => {
-    const f = sgFamily(sg);
-    return f.prefix === 'XYW_' || (f.xsLen > 0 && !f.hasCommon && f.xsLen > 500);
-  };
   mirrorSigner();
-  mirrorMnsv2();
-  installMnsv2Bridge();
-  const mirrorTimer = setInterval(() => {
-    mirrorSigner();
-    mirrorMnsv2();
-    try {
-      const br = window.mnsv2 && window.mnsv2.__xsBridge;
-      if (!(br === 'xy18' || br === 'xy18-stack' || (window.mnsv2 && !window.mnsv2.__xsBridge))) installMnsv2Bridge();
-      capturePageFyFU();
-    } catch (e) {}
-  }, 1000);
-  setTimeout(() => { try { clearInterval(mirrorTimer); } catch (e) {} }, 120000);
+  const mirrorTimer = setInterval(mirrorSigner, 200);
+  setTimeout(() => { try { clearInterval(mirrorTimer); } catch (e) {} }, 60000);
   // Only production xhs hosts — never sit/SSO ticket hosts (signing those
   // with the itemark AS signer can bounce the jar into customer.sit).
   const isXhsUrl = (u) => {
@@ -450,15 +80,6 @@
   };
   // Itemark create SPA races publish_render before AS signer is healthy; gate it.
   const isPublishRender = (u) => /\/api\/edith\/product\/publish_render\b/i.test(String(u || ''));
-  // FP report endpoints: page AntiSpam signs these (Chrome ~44-char x-s on
-  // burdock). Resigning with ark fy→XYS_ changes the shield wire shape and
-  // correlates with server returning only {st} (no data.ext.ssk) on cpk mint.
-  const isShieldProfile = (u) => {
-    const s = String(u || '');
-    return /\/api\/sec\/v1\/shield\/webprofile\b/i.test(s)
-      || /\/fe_api\/burdock\/v2\/shield\/profile\b/i.test(s)
-      || /\/shield\/webprofile\b/i.test(s);
-  };
   // Keep merchant product APIs on ark (SPA sometimes hops to www after env reject).
   const arkify = (u) => {
     const s = String(u || '');
@@ -475,417 +96,16 @@
     } catch (e) {}
     return s;
   };
-
-  // --- page webpack fy/fU (module 69850) ---
-  let _pageFy = null, _pageFU = null, _pageCapTried = 0;
-  const capturePageFyFU = () => {
-    try {
-      if (typeof _pageFy === 'function' && typeof _pageFU === 'function') return true;
-      if (_pageCapTried > 8) return false;
-      _pageCapTried++;
-      const chunk = (window.proxy && window.proxy.webpackChunkitemark)
-        || window.webpackChunkitemark;
-      if (!chunk || typeof chunk.push !== 'function') return false;
-      let req = null;
-      chunk.push([['__xs_pagefy_' + Date.now()], {}, function (r) { req = r; }]);
-      if (typeof req !== 'function' || !req.m || !req.m[69850]) return false;
-      let src = Function.prototype.toString.call(req.m[69850]);
-      const idx = src.lastIndexOf('}');
-      if (idx < 0) return false;
-      src = src.slice(0, idx)
-        + ';try{if(typeof fy==="function"){e.__xsFy=fy;e.__xsFU=fU;}}catch(__e){}'
-        + src.slice(idx);
-      const fn = (0, eval)('(' + src + ')');
-      const mod = { exports: {} };
-      fn(mod, mod.exports, req);
-      if (typeof mod.exports.__xsFy === 'function') _pageFy = mod.exports.__xsFy;
-      if (typeof mod.exports.__xsFU === 'function') _pageFU = mod.exports.__xsFU;
-      try {
-        if (_pageFy) { window.__pageFy = _pageFy; if (window.proxy) window.proxy.__pageFy = _pageFy; }
-        if (_pageFU) { window.__pageFU = _pageFU; if (window.proxy) window.proxy.__pageFU = _pageFU; }
-      } catch (e2) {}
-      return typeof _pageFy === 'function';
-    } catch (e) { return false; }
-  };
-  const signPageFy = (path, data) => {
-    try {
-      if (typeof _pageFy !== 'function') capturePageFyFU();
-      if (typeof _pageFy !== 'function') return null;
-      // Ensure mnsv2 before page fy (fy calls window.mnsv2).
-      installMnsv2Bridge();
-      const xs = _pageFy(path, data);
-      if (!xs || String(xs).slice(0, 4) !== 'XYS_') return null;
-      bump('ark_xys');
-      bump('page_fy');
-      return { 'X-s': String(xs), 'X-t': String(Date.now()) };
-    } catch (e) { return null; }
-  };
-  const proxyFp = () => {
-    try { return (window.proxy && window.proxy.xhsFingerprintV3) || window.xhsFingerprintV3 || null; }
-    catch (e) { return null; }
-  };
-  const noteWebSsk = () => {
-    try {
-      const raw = localStorage.getItem('webSsk');
-      stats.web_ssk = raw ? String(raw).length : 0;
-    } catch (e) { stats.web_ssk = -1; }
-  };
-  const noteFp = () => {
-    try {
-      const fp = proxyFp();
-      stats.fp_init = fp && fp.initReport != null ? fp.initReport : 0;
-      noteWebSsk();
-    } catch (e) {}
-  };
-  // Qiankun: AntiSpam/r6/getCurMiniUa live on window.proxy, not top window.
-  // proxy.xhsFingerprintV3 is often an AS *facade* (getV18/r6/runMiniUa, no
-  // get/getPromise/VERSION). Its getV18 encrypts ~1024 hex and VERSION||rE
-  // yields sdk 4.4.4. Top window holds the real FPJS (VERSION 2.1.2, getV18
-  // ~2928 with fonts) that burdock already uses. as.webprofile runs in the
-  // sandbox and calls window(=proxy).xhsFingerprintV3.getV18 → short track.
-  // Bridge facade.getV18 → top. Do NOT copy VERSION (Chrome as also posts rE).
-  const bridgeProxyFp = () => {
-    try {
-      const pfp = window.proxy && window.proxy.xhsFingerprintV3;
-      if (!pfp) return;
-      const top = window.xhsFingerprintV3;
-      if (!top) { window.xhsFingerprintV3 = pfp; return; }
-      if (typeof top.getV18 === 'function' && typeof pfp.get !== 'function') {
-        try {
-          if (!pfp.getV18 || !pfp.getV18.__xsTopBridge) {
-            const bridged = function () { return top.getV18.apply(top, arguments); };
-            bridged.__xsTopBridge = 1;
-            pfp.getV18 = bridged;
-            bump('fp_proxy_bridge');
-            try {
-              if (typeof pfp.r6 === 'function' && !pfp.__xsR6AfterBridge) {
-                pfp.__xsR6AfterBridge = 1;
-                setTimeout(function () { try { pfp.r6(); } catch (e2) {} }, 50);
-              }
-            } catch (e3) {}
-          }
-        } catch (e) {}
-      }
-      if (typeof top.getCurMiniUa !== 'function' && typeof pfp.getCurMiniUa === 'function') {
-        try { top.getCurMiniUa = pfp.getCurMiniUa.bind(pfp); } catch (e) {}
-      }
-      if (typeof top.r6 !== 'function' && typeof pfp.r6 === 'function') {
-        try { top.r6 = pfp.r6.bind(pfp); } catch (e) {}
-      }
-      if (top.initReport == null && pfp.initReport != null) {
-        try { top.initReport = pfp.initReport; } catch (e) {}
-      }
-    } catch (e) {}
-  };
-  // Enable getCurMiniUa branch inside page fU for merchant publish (server
-  // realTimeCommonPatch is empty for itemark; without oO, fU skips miniUa).
-  const seedMerchantOo = () => {
-    try {
-      const chunk = (window.proxy && window.proxy.webpackChunkitemark) || window.webpackChunkitemark;
-      if (!chunk) return;
-      let req = null;
-      chunk.push([['__xs_oo_' + Date.now()], {}, function (r) { req = r; }]);
-      if (!req || !req.m || !req.m[16658]) return;
-      const t = req(16658);
-      if (!t || !Array.isArray(t.oO)) return;
-      const add = [
-        '/api/edith/product/publish_render',
-        'publish_render',
-        '/api/edith/',
-      ];
-      for (let i = 0; i < add.length; i++) {
-        if (t.oO.indexOf(add[i]) < 0) t.oO.push(add[i]);
-      }
-    } catch (e) {}
-  };
-  const readCommon = (headers) => {
-    if (!headers) return null;
-    const cm = headers['X-S-Common'] || headers['X-s-common'] || headers['x-s-common'];
-    return cm != null && cm !== '' ? String(cm) : null;
-  };
-  const mintPageCommon = (path, data) => {
-    try {
-      if (typeof _pageFU !== 'function') capturePageFyFU();
-      if (typeof _pageFU !== 'function') return Promise.resolve(null);
-      bridgeProxyFp();
-      const e = { url: String(path || ''), headers: {}, data: data };
-      const f = {
-        platform: ((window.proxy && window.proxy.xsecplatform) || window.xsecplatform || 'PC'),
-        configInit: true, xsIgnore: [], autoReload: false, disableMns: true,
-      };
-      // fU may set X-S-Common sync, or async via getCurMiniUa(callback).
-      return Promise.resolve(_pageFU(f, e)).then(() => new Promise((resolve) => {
-        const hit = () => {
-          const cm = readCommon(e.headers);
-          if (cm) { bump('page_fu'); resolve(cm); return true; }
-          return false;
-        };
-        if (hit()) return;
-        const start = Date.now();
-        const t = setInterval(() => {
-          if (hit() || Date.now() - start > 2500) {
-            clearInterval(t);
-            resolve(readCommon(e.headers));
-          }
-        }, 50);
-      })).catch(() => null);
-    } catch (e) { return Promise.resolve(null); }
-  };
-  // opportunistic capture once DOM/chunk ready
-  // Single delayed getV18 retry: cold first paint is ~464 hex; Chrome as ~
-  // 2200. Tight re-call loops reset collectors and stall at ~400-800.
-  const PD_MIN = 2000;
-  const wrapGetV18 = (fp) => {
-    if (!fp || typeof fp.getV18 !== 'function' || fp.getV18.__xsWarm) return;
-    const orig = fp.getV18.bind(fp);
-    const wrapped = function (cb) {
-      if (typeof cb !== 'function') return orig.apply(fp, arguments);
-      let bestArgs = null;
-      let bestLen = -1;
-      let tries = 0;
-      const finish = (args) => {
-        bump('fp_v18_warm');
-        cb.apply(this, args);
-      };
-      const attempt = () => {
-        orig(function () {
-          const args = [].slice.call(arguments);
-          const pd = args.length === 2 ? args[1] : args[0];
-          const len = pd != null ? String(pd).length : 0;
-          if (len > bestLen) { bestLen = len; bestArgs = args; }
-          tries++;
-          if (len >= PD_MIN || tries >= 3) {
-            return finish(bestArgs || args);
-          }
-          bump('fp_v18_delay');
-          // Spaced retries: 5s then 8s. Tight loops reset collectors.
-          setTimeout(attempt, tries === 1 ? 5000 : 8000);
-        });
-      };
-      attempt();
-    };
-    wrapped.__xsWarm = 1;
-    try { fp.getV18 = wrapped; } catch (e) {}
-  };
-  const tickWarmFp = () => {
-    try { wrapGetV18(window.xhsFingerprintV3); } catch (e) {}
-    try {
-      // Facade (no get) delegates to top — wrapping it double-fires warm.
-      const p = window.proxy && window.proxy.xhsFingerprintV3;
-      if (p && typeof p.get === 'function') wrapGetV18(p);
-    } catch (e) {}
-  };
-  try {
-    setTimeout(capturePageFyFU, 1500);
-    setTimeout(capturePageFyFU, 4000);
-    setTimeout(() => { bridgeProxyFp(); noteFp(); tickWarmFp(); }, 2000);
-    setTimeout(() => { bridgeProxyFp(); noteFp(); tickWarmFp(); }, 6000);
-    // Proxy AS facade often mounts with itemark AFTER the 6s bridge tick —
-    // poll bridge until it lands (or 45s).
-    const warmIv = setInterval(() => { bridgeProxyFp(); tickWarmFp(); }, 100);
-    setTimeout(() => { try { clearInterval(warmIv); } catch (e) {} }, 45000);
-  } catch (e) {}
-
-  // --- ark fy-replica (library-launcher fy without x6/x7 SSK; webSsk often empty) ---
-  const XS_ALPH = 'ZmserbBoHQtNP+wOcza/LpngG8yJq42KWYj0DSfdikx3VT16IlUAFM97hECvuRX5';
-  const XS_A = (() => { const a = []; for (let i = 0; i < XS_ALPH.length; i++) a[i] = XS_ALPH[i]; return a; })();
-  const xsAf = (f) => {
-    const e = encodeURIComponent(f);
-    const c = [];
-    for (let i = 0; i < e.length; i++) {
-      const b = e.charAt(i);
-      if (b === '%') { c.push(parseInt(e.charAt(i + 1) + e.charAt(i + 2), 16)); i += 2; }
-      else c.push(b.charCodeAt(0));
-    }
-    return c;
-  };
-  const xsN3 = (f) => XS_A[f >> 18 & 63] + XS_A[f >> 12 & 63] + XS_A[f >> 6 & 63] + XS_A[63 & f];
-  const xsEncChunk = (f, e, c) => {
-    const out = [];
-    for (let b = e; b < c; b += 3) out.push(xsN3((f[b] << 16 & 0xff0000) + (f[b + 1] << 8 & 65280) + (255 & f[b + 2])));
-    return out.join('');
-  };
-  const xsTF = (f) => {
-    const c = f.length, b = c % 3, d = [], x = 16383;
-    let t = 0, n2 = c - b;
-    for (; t < n2; t += x) d.push(xsEncChunk(f, t, t + x > n2 ? n2 : t + x));
-    if (b === 1) { const e = f[c - 1]; d.push(XS_A[e >> 2] + XS_A[e << 4 & 63] + '=='); }
-    else if (b === 2) { const e = (f[c - 2] << 8) + f[c - 1]; d.push(XS_A[e >> 10] + XS_A[e >> 4 & 63] + XS_A[e << 2 & 63] + '='); }
-    return d.join('');
-  };
-  // paul johnston md5 (utf8) — matches fo.BD
-  const xsMd5 = (s) => {
-    const add32 = (a, b) => (a + b) & 0xFFFFFFFF;
-    const cmn = (q, a, b, x, s, t) => {
-      a = add32(add32(a, q), add32(x, t));
-      return add32((a << s) | (a >>> (32 - s)), b);
-    };
-    const ff = (a, b, c, d, x, s, t) => cmn((b & c) | ((~b) & d), a, b, x, s, t);
-    const gg = (a, b, c, d, x, s, t) => cmn((b & d) | (c & (~d)), a, b, x, s, t);
-    const hh = (a, b, c, d, x, s, t) => cmn(b ^ c ^ d, a, b, x, s, t);
-    const ii = (a, b, c, d, x, s, t) => cmn(c ^ (b | (~d)), a, b, x, s, t);
-    const md5cycle = (x, k) => {
-      let a = x[0], b = x[1], c = x[2], d = x[3];
-      a = ff(a, b, c, d, k[0], 7, -680876936);
-      d = ff(d, a, b, c, k[1], 12, -389564586);
-      c = ff(c, d, a, b, k[2], 17, 606105819);
-      b = ff(b, c, d, a, k[3], 22, -1044525330);
-      a = ff(a, b, c, d, k[4], 7, -176418897);
-      d = ff(d, a, b, c, k[5], 12, 1200080426);
-      c = ff(c, d, a, b, k[6], 17, -1473231341);
-      b = ff(b, c, d, a, k[7], 22, -45705983);
-      a = ff(a, b, c, d, k[8], 7, 1770035416);
-      d = ff(d, a, b, c, k[9], 12, -1958414417);
-      c = ff(c, d, a, b, k[10], 17, -42063);
-      b = ff(b, c, d, a, k[11], 22, -1990404162);
-      a = ff(a, b, c, d, k[12], 7, 1804603682);
-      d = ff(d, a, b, c, k[13], 12, -40341101);
-      c = ff(c, d, a, b, k[14], 17, -1502002290);
-      b = ff(b, c, d, a, k[15], 22, 1236535329);
-      a = gg(a, b, c, d, k[1], 5, -165796510);
-      d = gg(d, a, b, c, k[6], 9, -1069501632);
-      c = gg(c, d, a, b, k[11], 14, 643717713);
-      b = gg(b, c, d, a, k[0], 20, -373897302);
-      a = gg(a, b, c, d, k[5], 5, -701558691);
-      d = gg(d, a, b, c, k[10], 9, 38016083);
-      c = gg(c, d, a, b, k[15], 14, -660478335);
-      b = gg(b, c, d, a, k[4], 20, -405537848);
-      a = gg(a, b, c, d, k[9], 5, 568446438);
-      d = gg(d, a, b, c, k[14], 9, -1019803690);
-      c = gg(c, d, a, b, k[3], 14, -187363961);
-      b = gg(b, c, d, a, k[8], 20, 1163531501);
-      a = gg(a, b, c, d, k[13], 5, -1444681467);
-      d = gg(d, a, b, c, k[2], 9, -51403784);
-      c = gg(c, d, a, b, k[7], 14, 1735328473);
-      b = gg(b, c, d, a, k[12], 20, -1926607734);
-      a = hh(a, b, c, d, k[5], 4, -378558);
-      d = hh(d, a, b, c, k[8], 11, -2022574463);
-      c = hh(c, d, a, b, k[11], 16, 1839030562);
-      b = hh(b, c, d, a, k[14], 23, -35309556);
-      a = hh(a, b, c, d, k[1], 4, -1530992060);
-      d = hh(d, a, b, c, k[4], 11, 1272893353);
-      c = hh(c, d, a, b, k[7], 16, -155497632);
-      b = hh(b, c, d, a, k[10], 23, -1094730640);
-      a = hh(a, b, c, d, k[13], 4, 681279174);
-      d = hh(d, a, b, c, k[0], 11, -358537222);
-      c = hh(c, d, a, b, k[3], 16, -722521979);
-      b = hh(b, c, d, a, k[6], 23, 76029189);
-      a = hh(a, b, c, d, k[9], 4, -640364487);
-      d = hh(d, a, b, c, k[12], 11, -421815835);
-      c = hh(c, d, a, b, k[15], 16, 530742520);
-      b = hh(b, c, d, a, k[2], 23, -995338651);
-      a = ii(a, b, c, d, k[0], 6, -198630844);
-      d = ii(d, a, b, c, k[7], 10, 1126891415);
-      c = ii(c, d, a, b, k[14], 15, -1416354905);
-      b = ii(b, c, d, a, k[5], 21, -57434055);
-      a = ii(a, b, c, d, k[12], 6, 1700485571);
-      d = ii(d, a, b, c, k[3], 10, -1894986606);
-      c = ii(c, d, a, b, k[10], 15, -1051523);
-      b = ii(b, c, d, a, k[1], 21, -2054922799);
-      a = ii(a, b, c, d, k[8], 6, 1873313359);
-      d = ii(d, a, b, c, k[15], 10, -30611744);
-      c = ii(c, d, a, b, k[6], 15, -1560198380);
-      b = ii(b, c, d, a, k[13], 21, 1309151649);
-      a = ii(a, b, c, d, k[4], 6, -145523070);
-      d = ii(d, a, b, c, k[11], 10, -1120210379);
-      c = ii(c, d, a, b, k[2], 15, 718787259);
-      b = ii(b, c, d, a, k[9], 21, -343485551);
-      x[0] = add32(a, x[0]); x[1] = add32(b, x[1]); x[2] = add32(c, x[2]); x[3] = add32(d, x[3]);
-    };
-    const md5blk = (s) => {
-      const md5blks = [];
-      for (let i = 0; i < 64; i += 4) {
-        md5blks[i >> 2] = s.charCodeAt(i) + (s.charCodeAt(i + 1) << 8) + (s.charCodeAt(i + 2) << 16) + (s.charCodeAt(i + 3) << 24);
-      }
-      return md5blks;
-    };
-    const md51 = (s) => {
-      const n = s.length;
-      const state = [1732584193, -271733879, -1732584194, 271733878];
-      let i;
-      for (i = 64; i <= n; i += 64) md5cycle(state, md5blk(s.substring(i - 64, i)));
-      s = s.substring(i - 64);
-      const tail = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-      for (i = 0; i < s.length; i++) tail[i >> 2] |= s.charCodeAt(i) << ((i % 4) << 3);
-      tail[i >> 2] |= 0x80 << ((i % 4) << 3);
-      if (i > 55) { md5cycle(state, tail); for (i = 0; i < 16; i++) tail[i] = 0; }
-      tail[14] = n * 8;
-      md5cycle(state, tail);
-      return state;
-    };
-    const hex_chr = '0123456789abcdef'.split('');
-    const rhex = (n) => {
-      let s = '', j = 0;
-      for (; j < 4; j++) s += hex_chr[(n >> (j * 8 + 4)) & 0x0F] + hex_chr[(n >> (j * 8)) & 0x0F];
-      return s;
-    };
-    s = unescape(encodeURIComponent(s));
-    const x = md51(s);
-    return rhex(x[0]) + rhex(x[1]) + rhex(x[2]) + rhex(x[3]);
-  };
-  const signArkXyS = (path, data) => {
-    try {
-      const mns = resolveMnsv2() || mirrorMnsv2() || installMnsv2Bridge();
-      if (typeof mns !== 'function') return null;
-      let a = String(path || '');
-      if (data != null && typeof data === 'object') a += JSON.stringify(data);
-      else if (typeof data === 'string') a += data;
-      const b = xsMd5([a].join(''));
-      const d = xsMd5(String(path || ''));
-      // Prefer xy18; crypto-stub / OOB WASM often fails — retry once after cache clear.
-      let fn = mns;
-      if (fn.__xsBridge === 'crypto-stub') {
-        const up = installMnsv2Bridge();
-        if (!up || up.__xsBridge !== 'xy18') return null;
-        fn = up;
-      }
-      let x3;
-      try { x3 = fn(a, b, d); }
-      catch (e1) {
-        _wasmMnsCache = false;
-        try {
-          const up2 = installMnsv2Bridge();
-          if (!up2 || up2.__xsBridge !== 'xy18') return null;
-          x3 = up2(a, b, d);
-        } catch (e2) { return null; }
-      }
-      if (x3 == null || x3 === '') return null;
-      const x3s = String(x3);
-      if (/^0+$/.test(x3s)) return null;
-      let plat = 'PC';
-      try { plat = window.xsecplatform || (window.proxy && window.proxy.xsecplatform) || 'PC'; } catch (e) {}
-      const n = {
-        x0: '4.4.4',
-        x1: 'itemark',
-        x2: plat,
-        x3: x3,
-        x4: data != null ? (typeof data) : '',
-        x5: b,
-      };
-      const xs = 'XYS_' + xsTF(xsAf(JSON.stringify(n)));
-      if (xs.length < 20 || xs.slice(0, 4) !== 'XYS_') return null;
-      bump('ark_xys');
-      return { 'X-s': xs, 'X-t': String(Date.now()) };
-    } catch (e) { return null; }
-  };
-
   const sign = (u, b) => {
     try {
+      const fn = mirrorSigner() || resolveSigner();
+      if (typeof fn !== 'function') return null;
       const s = String(u);
       if (!isXhsUrl(s) && !isPublishRender(s)) return null;
       const path = s.replace(/^(https?:)?\/\/[^/]+/, '');
       let data = b;
       if (typeof b === 'string') { try { data = JSON.parse(b); } catch (e) {} }
       if (b == null || b instanceof FormData || b instanceof ArrayBuffer || b instanceof Blob) data = undefined;
-      // Ark: prefer real page fy (webpack 69850); fall back to fy-replica.
-      if (isArkHost()) {
-        const page = signPageFy(path, data);
-        if (page && page['X-s']) return page;
-        const xys = signArkXyS(path, data);
-        if (xys && xys['X-s']) return xys;
-      }
-      const fn = mirrorSigner() || resolveSigner();
-      if (typeof fn !== 'function') return null;
       const sg = fn(path, data);
       return sg && sg['X-s'] ? sg : null;
     } catch (e) { return null; }
@@ -913,21 +133,6 @@
     const ready = () => {
       const fn = noteSigner();
       if (!fn) return null;
-      // Ark create: hold until mnsv2 is up so page fy() can mint XYS_+common.
-      // Without it, resign falls to www XYW_ and 300015s.
-      if (needSettle && isArkHost() && !resolveMnsv2() && !mirrorMnsv2()) return null;
-      // Ark: also hold until qiankun proxy fingerprint report finished
-      // (initReport 2=ok / 3=err). Cold fU common is short; warm is ~1.8k.
-      if (needSettle && isArkHost()) {
-        noteFp();
-        const fp = proxyFp();
-        const ir = fp && fp.initReport;
-        if (!(ir === 2 || ir === 3)) {
-          bump('fp_wait');
-          return null;
-        }
-        bridgeProxyFp();
-      }
       if (needSettle) {
         if (Date.now() - signerSeenAt < SETTLE_MS) return null;
         // If nothing else has been signed yet, keep holding until settle*1.5 or a sign lands.
@@ -1054,19 +259,6 @@
             const signerReady = typeof (mirrorSigner() || resolveSigner()) === 'function';
             const formBody = b instanceof FormData;
             const cross = !sameOrigin(snap.u);
-            // Shield FP reports: never fy-resign. Restore page wire or send bare.
-            if (isShieldProfile(snap.u) && !formBody) {
-              if (hasPageXs) {
-                S.call(self, 'X-s', page['x-s']);
-                if (page['x-t']) S.call(self, 'X-t', page['x-t']);
-                if (hasPageCommon) S.call(self, 'X-s-common', page['x-s-common']);
-              } else if (snap.deferred && hasPageCommon) {
-                S.call(self, 'X-s-common', page['x-s-common']);
-              }
-              bump('shield_pt');
-              bump('passthrough');
-              return D.apply(self, args);
-            }
             const sg = formBody ? null : sign(snap.u, b);
             // PRIMARY (Oct-11): signer ready + page already set x-s (+ ideally x-s-common) → passthrough
             if (signerReady && hasPageXs && !formBody) {
@@ -1084,45 +276,16 @@
             // ELSE resign (same-origin unsigned APIs, or anything the page signed;
             // cross-origin unsigned must stay untouched — extra x-s = preflight break).
             if (sg && (!cross || hasPageXs)) {
-              // Ark poison path: page had x-s-common (fU ok) but fy failed (no
-              // mnsv2), so we must not attach www XYW_ and strip common.
-              if (snap.pr && (hasPageCommon || isArkHost()) && isXywPoison(sg)) {
-                bump('xyw_blocked');
-                notePr('blocked', { reason: 'xyw-no-mnsv2', pageCommon: hasPageCommon, fam: sgFamily(sg) });
-                bump('pr_blocked');
-                try {
-                  Object.defineProperty(self, 'readyState', { value: 4, configurable: true });
-                  Object.defineProperty(self, 'status', { value: 200, configurable: true });
-                  Object.defineProperty(self, 'responseText', {
-                    value: JSON.stringify({ code: -1, success: false, msg: 'xs-gate:awaiting-mnsv2-xys' }),
-                    configurable: true
-                  });
-                  setTimeout(() => { try {
-                    self.dispatchEvent(new Event('readystatechange'));
-                    self.dispatchEvent(new Event('load'));
-                    self.dispatchEvent(new Event('loadend'));
-                  } catch (e) {} }, 0);
-                  return;
-                } catch (e) { return; }
-              }
               S.call(self, 'X-s', String(sg['X-s']));
               S.call(self, 'X-t', String(sg['X-t']));
               const cm = commonFromSg(sg);
-              const fam = sgFamily(sg);
-              // Ark XYS_ pairs with page fU common (signer does not mint common).
               if (cm) {
                 S.call(self, 'X-s-common', cm);
-              } else if (fam.prefix === 'XYS_' && (hasPageCommon || snap.deferred) && page['x-s-common']) {
-                S.call(self, 'X-s-common', page['x-s-common']);
               } else if (self.__xs_common_deferred || hasPageCommon) {
-                if (fam.prefix === 'XYS_' && page['x-s-common']) {
-                  S.call(self, 'X-s-common', page['x-s-common']);
-                } else {
-                  bump('common_stripped');
-                  // intentionally omit page x-s-common — never pair stale common with www X-s/X-t
-                }
+                bump('common_stripped');
+                // intentionally omit page x-s-common — never pair stale common with new X-s/X-t
               }
-              notePr('resign', { signerCommon: !!cm, pageCommon: hasPageCommon, fam: fam });
+              notePr('resign', { signerCommon: !!cm, pageCommon: hasPageCommon });
               self.addEventListener('loadend', function () {
                 try { if (stats.pr_last) { stats.pr_last.status = self.status; } } catch (e) {}
               });
@@ -1184,16 +347,12 @@
   };
   XMLHttpRequest.prototype.open = XM.open;
   XMLHttpRequest.prototype.setRequestHeader = XM.setRequestHeader;
-  XMLHttpRequest.prototype.send = function (body) {
-    try { tapProfileBody(this.__xs_u || '', body); } catch (e) {}
-    return XM.send.apply(this, arguments);
-  };
+  XMLHttpRequest.prototype.send = XM.send;
   const F = window.fetch;
   const FM = {
     fetch(u, o) {
       o = o || {};
       let us = String(typeof u === 'object' && u ? u.url : u);
-      try { tapProfileBody(us, o.body); } catch (e) {}
       if (isPublishRender(us)) {
         const a = arkify(us);
         if (a !== us) {
@@ -1234,47 +393,8 @@
           if (hasXs) bump('passthrough');
           return F.call(this, u, o);
         }
-        // Shield FP: never resign via fetch either.
-        if (isShieldProfile(us)) {
-          bump('shield_pt');
-          bump('passthrough');
-          return F.call(this, u, o);
-        }
         // ELSE resign: strip x-s-common unless signer returns it atomically
-        if (gated && (hasCommon || isArkHost()) && isXywPoison(sg)) {
-          notePr('blocked', { via: 'fetch', reason: 'xyw-no-mnsv2', pageCommon: hasCommon, fam: sgFamily(sg) });
-          bump('xyw_blocked');
-          bump('pr_blocked');
-          return Promise.resolve(new Response(
-            JSON.stringify({ code: -1, success: false, msg: 'xs-gate:awaiting-mnsv2-xys' }),
-            { status: 200, headers: { 'content-type': 'application/json' } }
-          ));
-        }
         const cm = commonFromSg(sg);
-        const famF = sgFamily(sg);
-        // Capture page common before rebuild (XYS_ pairs with fU common).
-        let pageCommonVal = null;
-        try {
-          if (h instanceof Headers) pageCommonVal = h.get('x-s-common') || h.get('X-s-common');
-          else if (h && !Array.isArray(h)) {
-            pageCommonVal = h['x-s-common'] || h['X-s-common'];
-            if (!pageCommonVal) {
-              for (const k of Object.keys(h)) if (String(k).toLowerCase() === 'x-s-common') { pageCommonVal = h[k]; break; }
-            }
-          } else if (Array.isArray(h)) {
-            for (const pair of h) {
-              if (pair && pair.length >= 2 && String(pair[0]).toLowerCase() === 'x-s-common') {
-                pageCommonVal = String(pair[1]); break;
-              }
-            }
-          }
-        } catch (e) {}
-        const pickCommon = () => {
-          if (cm) return cm;
-          if (famF.prefix === 'XYS_' && pageCommonVal) return pageCommonVal;
-          return null;
-        };
-        const outCm = pickCommon();
         let nh;
         if (!h || Array.isArray(h)) {
           // Array-of-pairs form: rebuild via Headers so page headers survive
@@ -1289,8 +409,8 @@
             }
           }
           nh.set('x-s', String(sg['X-s'])); nh.set('x-t', String(sg['X-t']));
-          if (outCm) nh.set('x-s-common', outCm);
-          else if (hasCommon) bump('common_stripped');
+          if (cm) nh.set('x-s-common', cm);
+          if (hasCommon && !cm) bump('common_stripped');
         } else if (!(h instanceof Headers)) {
           nh = Object.assign({}, h);
           delete nh['x-s']; delete nh['X-s']; delete nh['x-t']; delete nh['X-t'];
@@ -1301,19 +421,19 @@
             if (lk === 'x-s' || lk === 'x-t' || lk === 'x-s-common') delete nh[k];
           }
           nh['x-s'] = String(sg['X-s']); nh['x-t'] = String(sg['X-t']);
-          if (outCm) nh['x-s-common'] = outCm;
+          if (cm) nh['x-s-common'] = cm;
           else if (hasCommon) bump('common_stripped');
         } else {
           nh = new Headers(h);
           nh.delete('x-s'); nh.delete('X-s'); nh.delete('x-t'); nh.delete('X-t');
           nh.delete('x-s-common'); nh.delete('X-s-common');
           nh.set('x-s', String(sg['X-s'])); nh.set('x-t', String(sg['X-t']));
-          if (outCm) nh.set('x-s-common', outCm);
+          if (cm) nh.set('x-s-common', cm);
           else if (hasCommon) bump('common_stripped');
         }
         if (hasXs) bump('swallowed');
         bump('signed');
-        if (gated) notePr('resign', { via: 'fetch', signerCommon: !!cm, pageCommon: hasCommon, fam: famF, keptPageCommon: !!(outCm && !cm) });
+        if (gated) notePr('resign', { via: 'fetch', signerCommon: !!commonFromSg(sg), pageCommon: hasCommon });
         return F.call(this, u, Object.assign({}, o, { headers: nh }));
       };
       if (!isXhsUrl(us) && !isPublishRender(us)) return F.call(this, u, o);
@@ -1326,21 +446,7 @@
       if (!gated && !has && (!isApiUrl(us) || !sameOrigin(us))) return F.call(this, u, o);
       if (gated) {
         bump('pr_held');
-        return waitSigner(GATE_WAIT_MS, true).then(() => {
-          const sg0 = sign(us, body);
-          if (!sg0) return apply(null, true);
-          const fam0 = sgFamily(sg0);
-          if (fam0.prefix === 'XYS_' && !commonFromSg(sg0)) {
-            let path0 = String(us || '').replace(/^(https?:)?\/\/[^/]+/, '');
-            let data0 = body;
-            if (typeof body === 'string') { try { data0 = JSON.parse(body); } catch (e) {} }
-            return mintPageCommon(path0, data0).then((cm0) => {
-              if (cm0) sg0['X-s-common'] = cm0;
-              return apply(sg0, true);
-            });
-          }
-          return apply(sg0, true);
-        });
+        return waitSigner(GATE_WAIT_MS, true).then(() => apply(sign(us, body), true));
       }
       // If page already set x-s and signer ready — passthrough without waiting/resign
       if (has && typeof (mirrorSigner() || resolveSigner()) === 'function') {
@@ -1379,5 +485,5 @@
       _markNative(FM.fetch);
     }
   } catch (e) {}
-  return 'patched-v15-fp-proxy-common';
+  return 'patched-v5-fingerprint-clean';
 })()

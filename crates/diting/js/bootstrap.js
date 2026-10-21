@@ -7721,6 +7721,12 @@ function _ditingFontBox(el) {
     const display = props["display"];
     if (display === "none") return { w: 0, h: 0 };
     if (el.children && el.children.length) return null;
+    // Only the font-probe shape (font-family set inline, size left to the
+    // text): an element the page sized itself, or one with no font at all,
+    // belongs to layout. Without this gate every inline-styled leaf with
+    // text reported the text's box instead of its laid-out one.
+    if (!(props["font-family"] || props["fontFamily"])) return null;
+    if (props["width"] || props["height"] || props["min-width"] || props["min-height"]) return null;
     const text = (el.textContent || "").trim();
     if (!text) return null;
     const fontSize = parseFloat(props["font-size"] || props["fontSize"]) || 16;
@@ -13189,12 +13195,20 @@ _EventTarget.prototype.dispatchEvent = function dispatchEvent(ev) {
     ev.eventPhase = 2;
   } catch (e) {}
   const l = (_etLs(self)[ev.type]) || [];
-  for (const f of l.slice()) { try { _invokeListener(f, self, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } }
+  // The page's own synchronous dispatch loop is bracketed so a timer
+  // delivery that would land mid-dispatch defers (#327) — the window arm
+  // this relink replaced did the same.
+  _mtWindow(() => {
+    for (const f of l.slice()) { try { _invokeListener(f, self, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } }
+  });
   // Event handler IDL attributes (on*) fire during dispatch too — Chrome
   // runs them for every EventTarget subclass (conn.onchange, node.onclick),
   // not just for "real" DOM events (300015 P6, was conn-only before the
   // EventTarget relink).
-  const h = self["on" + ev.type];
+  // window.onerror is the exception: it takes (message, source, line, col,
+  // error) and runs only from the uncaught-error pipeline
+  // (__diting_reportUncaught), never from a dispatched ErrorEvent.
+  const h = (self === globalThis && ev.type === "error") ? null : self["on" + ev.type];
   if (typeof h === "function") { try { _invokeListener(h, self, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } }
   return !ev.defaultPrevented;
 };
