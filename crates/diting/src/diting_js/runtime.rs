@@ -402,6 +402,15 @@ impl JsRuntime {
         v8::icu::set_default_locale(first_tag);
     }
 
+    /// Whether the page has nothing that could fire inside the next
+    /// `window_ms` (see `__diting_settle_quiet`). Any failure reads as "not
+    /// quiet" so the settle loop keeps its full budget.
+    pub fn settle_quiet(&mut self, window_ms: u64) -> bool {
+        self.evaluate(&format!("globalThis.__diting_settle_quiet({window_ms})"))
+            .map(|v| v == serde_json::Value::Bool(true))
+            .unwrap_or(false)
+    }
+
     pub fn evaluate(&mut self, expression: &str) -> Result<serde_json::Value, String> {
         self.recover_heap_limit();
         let wrapped = Self::wrap_expression(expression);

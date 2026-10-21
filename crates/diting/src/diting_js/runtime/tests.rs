@@ -22910,3 +22910,26 @@ fn document_evaluate_xpath_subset() {
         assert!(rt.recover_heap_limit());
         assert_eq!(rt.heap_guard_strikes(), 2);
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_settle_quiet_ignores_far_timers_but_not_near_work() {
+        // The settle loop's early exit: a page parked on a far-off timer is
+        // quiet for any window that ends before it; a due timer or an
+        // in-flight fetch is not.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        assert!(rt.settle_quiet(500), "fresh page has nothing pending");
+
+        rt.evaluate("setTimeout(function () {}, 4000)").unwrap();
+        assert!(rt.settle_quiet(500), "a 4s timer cannot fire inside 500ms");
+        assert!(!rt.settle_quiet(5000), "but it can inside a 5s window");
+
+        rt.evaluate("setTimeout(function () {}, 50)").unwrap();
+        assert!(!rt.settle_quiet(500), "a 50ms timer fires inside the window");
+        let _ = rt.run_event_loop_bounded(300).await;
+        assert!(rt.settle_quiet(500), "once it has fired only the far timer is left");
+
+        rt.evaluate("globalThis.__p = fetch('data:text/plain,x'); 1").unwrap();
+        assert!(!rt.settle_quiet(500), "an in-flight fetch is never quiet");
+        let _ = rt.run_event_loop_bounded(300).await;
+        assert!(rt.settle_quiet(500), "settled fetch is quiet again");
+    }

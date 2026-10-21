@@ -40,3 +40,17 @@ function __probeInflightFetches() {
 function __armFetchProbeHeartbeat() {
   if (!__fetchProbeTimer) __fetchProbeTimer = setInterval(function () { __probeInflightFetches(); }, 5000);
 }
+
+// Settle early-exit probe: true when nothing the page owns can still fire
+// inside the next `win` ms — no in-flight fetch, no queued or running
+// macrotask, and the earliest timer lands after the window. Lets
+// Page::settle_pending_work stop at the first quiet moment instead of
+// idling out its whole fast-path budget (the event loop itself never reads
+// idle while any far-off timer is armed).
+globalThis.__diting_settle_quiet = function (win) {
+  if (__inflightFetches.size) return false;
+  var s = globalThis.__MT_STATE();
+  if (s.depth || s.armed || s.qlen) return false;
+  var w = s.wheel;
+  return !w.heap || w.armedIn === null || w.armedIn > win;
+};

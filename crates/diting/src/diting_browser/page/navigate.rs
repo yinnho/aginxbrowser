@@ -61,6 +61,20 @@ impl Page {
                 Ok(Err(_)) => break,
                 Err(_) => {
                     idle_count = 0;
+                    // The loop is parked on a far-off timer, not on work:
+                    // when nothing is in flight and nothing fires inside
+                    // the rest of the fast-path window, waiting it out
+                    // only adds latency.
+                    if self.http_client.active_requests() == 0
+                        && !js.has_pending_dynamic_scripts()
+                    {
+                        let left = deadline
+                            .saturating_duration_since(tokio::time::Instant::now())
+                            .as_millis() as u64;
+                        if js.settle_quiet(left) {
+                            break;
+                        }
+                    }
                 }
             }
         }
