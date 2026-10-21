@@ -13186,9 +13186,7 @@ _EventTarget.prototype.addEventListener = function addEventListener(type, cb) {
 _EventTarget.prototype.dispatchEvent = function dispatchEvent(ev) {
   if (!ev) return true;
   const self = _etSelf(this);
-  // DOM: dispatch re-pins target to the host (window arm used to live only
-  // on the own/gate AEL that 52df046 removed — without this, e.target stays
-  // null and AWSC/slider + window_dispatch_pins_target_family break).
+  // DOM: dispatch re-pins target to the host it runs on.
   try {
     ev.target = self;
     ev.currentTarget = self;
@@ -13196,8 +13194,8 @@ _EventTarget.prototype.dispatchEvent = function dispatchEvent(ev) {
   } catch (e) {}
   const l = (_etLs(self)[ev.type]) || [];
   // The page's own synchronous dispatch loop is bracketed so a timer
-  // delivery that would land mid-dispatch defers (#327) — the window arm
-  // this relink replaced did the same.
+  // delivery that would land mid-dispatch defers (#327), like every other
+  // dispatch arm.
   _mtWindow(() => {
     for (const f of l.slice()) { try { _invokeListener(f, self, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } }
   });
@@ -13205,10 +13203,7 @@ _EventTarget.prototype.dispatchEvent = function dispatchEvent(ev) {
   // runs them for every EventTarget subclass (conn.onchange, node.onclick),
   // not just for "real" DOM events (300015 P6, was conn-only before the
   // EventTarget relink).
-  // window.onerror is the exception: it takes (message, source, line, col,
-  // error) and runs only from the uncaught-error pipeline
-  // (__diting_reportUncaught), never from a dispatched ErrorEvent.
-  const h = (self === globalThis && ev.type === "error") ? null : self["on" + ev.type];
+  const h = self["on" + ev.type];
   if (typeof h === "function") { try { _invokeListener(h, self, ev); } catch (e) { globalThis.__diting_reportUncaughtError(e); } }
   return !ev.defaultPrevented;
 };
@@ -13230,34 +13225,6 @@ Object.setPrototypeOf(Node.prototype, _EventTarget.prototype);
 // are never own names of the first prototype.
 Object.setPrototypeOf(NetworkInformation.prototype, _EventTarget.prototype);
 globalThis.EventTarget = _EventTarget;
-// Chrome Window chain (verified face): window → Window.prototype →
-// WindowProperties → EventTarget.prototype → Object.prototype, with
-// Object.getPrototypeOf(window) === Window.prototype. Our named-access gate
-// stands in for WindowProperties. It was inserted early (before
-// Window/EventTarget existed) directly under globalThis; 52df046 rewired
-// holder → Window.prototype (fixoring instanceof EventTarget) but left the
-// gate BETWEEN window and Window.prototype — getPrototypeOf(window) !==
-// Window.prototype, which blanked the Qianfan login SPA (WeakMap key errors
-// in sellercustomer). Rewire to Chrome order now that EventTarget exists;
-// keep the gate empty (AEL resolves through EventTarget.prototype).
-try {
-  const _namedGate = Object.getPrototypeOf(globalThis);
-  Object.setPrototypeOf(globalThis, Window.prototype);
-  if (_namedHolder && _namedHolder !== globalThis && _namedGate && _namedGate !== globalThis) {
-    Object.setPrototypeOf(Window.prototype, _namedGate);
-    Object.setPrototypeOf(_namedHolder, _EventTarget.prototype);
-    ['addEventListener', 'removeEventListener', 'dispatchEvent', 'constructor'].forEach((k) => {
-      try { delete _namedHolder[k]; } catch (e) {}
-    });
-  } else {
-    Object.setPrototypeOf(Window.prototype, _EventTarget.prototype);
-  }
-  try {
-    Object.defineProperty(Window.prototype, 'constructor', {
-      value: Window, writable: true, configurable: true,
-    });
-  } catch (e) {}
-} catch (e) {}
 globalThis.HTMLCollection = class HTMLCollection extends Array {
   item(i) {
     i = i >>> 0;

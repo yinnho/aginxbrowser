@@ -21498,55 +21498,6 @@ fn window_named_access_invisible_to_enumeration() {
     );
 }
 
-/// Chrome: `window instanceof EventTarget` is true and
-/// `Object.getPrototypeOf(window) === Window.prototype`. Chain is
-/// window → Window.prototype → WindowProperties (named gate) →
-/// EventTarget.prototype. 52df046 fixed instanceof by linking ET but left
-/// the gate between window and Window.prototype (login SPA WeakMap crash);
-/// gate must sit under Window.prototype, empty like Chrome.
-#[test]
-fn window_instanceof_event_target_via_prototype_chain() {
-    let mut rt = setup_runtime("<html><body><div id=\"q\">x</div></body></html>");
-    let v = rt
-        .evaluate(
-            r#"(() => {
-                let reachesWP = false, reachesET = false;
-                let x = window;
-                for (let i = 0; i < 8 && x; i++) {
-                  if (x === Window.prototype) reachesWP = true;
-                  if (x === EventTarget.prototype) reachesET = true;
-                  x = Object.getPrototypeOf(x);
-                }
-                const wp = Object.getPrototypeOf(window);
-                const afterWp = Object.getPrototypeOf(Window.prototype);
-                const afterNamed = Object.getPrototypeOf(afterWp);
-                const wpOwn = Object.getOwnPropertyNames(wp);
-                const namedOwn = Object.getOwnPropertyNames(afterWp);
-                return [
-                  window instanceof EventTarget,
-                  window instanceof Window,
-                  wp === Window.prototype,
-                  afterWp !== EventTarget.prototype,
-                  afterNamed === EventTarget.prototype,
-                  reachesWP,
-                  reachesET,
-                  typeof window.addEventListener,
-                  wpOwn.includes('addEventListener'),
-                  namedOwn.includes('addEventListener'),
-                  namedOwn.includes('q'),
-                  typeof q === 'object' && q.tagName,
-                  (() => { window._webmsxyw = function () {}; return Object.getOwnPropertyNames(window).includes('_webmsxyw'); })()
-                ].join('|');
-            })()"#,
-        )
-        .unwrap();
-    assert_eq!(
-        v,
-        serde_json::json!("true|true|true|true|true|true|true|function|false|false|false|DIV|true"),
-        "window→Window.prototype→named→EventTarget; getPrototypeOf(window)===Window.prototype; gate empty"
-    );
-}
-
 
 /// #57: `input.files = singleFile` — Chrome accepts a bare File as a
 /// one-entry selection; the silent no-op cost the xhs send batch a debug
