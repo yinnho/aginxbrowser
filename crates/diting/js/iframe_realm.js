@@ -362,3 +362,30 @@ class _IframeWindow {
 
 globalThis.__ariaQuerySelector = function(root, selector) { return null; };
 globalThis.__ariaQuerySelectorAll = async function*(root, selector) { /* yields nothing */ };
+
+// Shadow-including "is this node in a document": `_nodeInDocument` stops at a
+// ShadowRoot (its parentNode is null), which is right for window-named
+// elements but wrong for browsing contexts — an iframe inside a connected
+// host's shadow tree is inserted into the document and loads.
+function __inDocShadowIncl(node) {
+  let cur = node;
+  for (let steps = 0; cur && steps < 200; steps++) {
+    if (cur.nodeType === 9) return true;
+    cur = cur.parentNode || (cur.nodeType === 11 ? cur._host : null);
+  }
+  return false;
+}
+
+// An iframe with nothing to navigate to (no src, src="about:blank", no
+// srcdoc) is created on its initial about:blank document, and Chrome fires its
+// load event synchronously inside every insertion — listeners attached before
+// the append hear it, ones attached after do not, and a re-insertion fires
+// again (a fresh browsing context). One insertion can reach this twice (a
+// fragment append registers per child and again per fragment), so a repeat
+// for the same parent within the same synchronous turn is swallowed.
+function __iframeBlankLoad(f) {
+  if (f._blankLoadedIn === f.parentNode) return;
+  __def(f, '_blankLoadedIn', f.parentNode);
+  queueMicrotask(() => { f._blankLoadedIn = null; });
+  try { f.dispatchEvent(new Event('load')); } catch (e) { globalThis.__diting_reportUncaughtError?.(e); }
+}

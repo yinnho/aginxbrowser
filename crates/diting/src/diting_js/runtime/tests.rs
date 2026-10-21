@@ -13014,7 +13014,10 @@
                 await fetch("http://127.0.0.1:" + pa + "/seed");
                 return await new Promise(resolve => {
                     const iframe = document.createElement('iframe');
-                    iframe.addEventListener('load', () => resolve('loaded'));
+                    // Chrome fires the initial about:blank load inside the
+                    // append; the navigation to src is the second load.
+                    let loads = 0;
+                    iframe.addEventListener('load', () => { if (++loads === 2) resolve('loaded'); });
                     document.body.appendChild(iframe);
                     iframe.src = "http://127.0.0.1:" + pb + "/preview.htm";
                 });
@@ -16761,12 +16764,14 @@
             return await new Promise(resolve => {
                 const iframe = document.createElement('iframe');
                 const events = [];
+                // Append first: the initial about:blank load fires inside the
+                // append (Chrome), before these handlers exist.
+                document.body.appendChild(iframe);
                 iframe.onload = () => {
                     events.push('property');
                     Promise.resolve().then(() => resolve(events));
                 };
                 iframe.addEventListener('load', () => events.push('listener'));
-                document.body.appendChild(iframe);
                 // Unroutable port: fetch rejects, the catch path still fires load.
                 iframe.src = 'http://127.0.0.1:1/';
             });
@@ -23012,4 +23017,39 @@ fn document_evaluate_xpath_subset() {
             .await
             .unwrap();
         assert_eq!(keys.value.unwrap(), "crv,d,ext,key_ops,kty,x,y");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_blank_and_shadow_iframes_fire_load() {
+        // #282: an iframe with nothing to navigate to loads its initial
+        // about:blank synchronously on insertion; iframes in a connected
+        // host's shadow tree load too.
+        let mut rt = setup_runtime("<html><body><div id=\"host\"></div></body></html>");
+        let v = rt
+            .evaluate(
+                "(() => { const r = {};
+                  const a = document.createElement('iframe'); a.onload = () => { r.before = (r.before || 0) + 1; };
+                  document.body.append(a);
+                  const b = document.createElement('iframe'); document.body.append(b);
+                  b.addEventListener('load', () => { r.after = true; });
+                  const c = document.createElement('div'); document.body.append(c);
+                  c.innerHTML = '<iframe id=q></iframe>'; r.inner = !!c.firstChild.contentWindow;
+                  const d = document.createElement('iframe'); d.src = 'about:blank'; d.onload = () => { r.explicit = true; };
+                  document.body.append(d);
+                  const box = document.createElement('div'); document.body.append(box); box.append(a);
+                  const sr = host.attachShadow({ mode: 'open' });
+                  const s = document.createElement('iframe'); s.srcdoc = '<p>x</p>'; s.onload = () => { globalThis.__shadowSrcdocLoaded = true; };
+                  sr.append(s);
+                  const t = document.createElement('iframe'); t.onload = () => { r.shadowBlank = true; }; sr.append(t);
+                  return r; })()",
+            )
+            .unwrap();
+        assert_eq!(v["before"], 2, "heard on insertion and again when moved to a new parent");
+        assert!(v["after"].is_null(), "listener added after the synchronous load hears nothing");
+        assert_eq!(v["explicit"], true, "src=about:blank is the same initial load");
+        assert_eq!(v["inner"], true);
+        assert_eq!(v["shadowBlank"], true, "blank iframe in a shadow tree loads on insertion");
+        let _ = rt.run_event_loop_bounded(200).await;
+        // The srcdoc frame in the shadow tree loads on a later turn.
+        assert_eq!(rt.evaluate("globalThis.__shadowSrcdocLoaded === true").unwrap(), true);
     }

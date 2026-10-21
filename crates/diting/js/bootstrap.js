@@ -2963,7 +2963,7 @@ class Node {
         globalThis.__notifyMutation('childList', this._nid, kids.map(k => k._nid), [],
           null, null, k0.previousSibling ? k0.previousSibling._nid : null, k1.nextSibling ? k1.nextSibling._nid : null);
       }
-      if (_nodeInDocument(this)) for (const k of kids) _registerIframesIn(k);
+      if (__inDocShadowIncl(this)) for (const k of kids) _registerIframesIn(k);
       // (#48) fragment children entering the document become window-named.
       if (_nodeInDocument(this)) for (const k of kids) _namedScanIn(k);
       return c;
@@ -2984,7 +2984,7 @@ class Node {
     }
     // Insertion into the document instantiates browsing contexts for any
     // iframes in the inserted subtree (window[N] / window.length).
-    if (_nodeInDocument(this)) _registerIframesIn(c);
+    if (__inDocShadowIncl(this)) _registerIframesIn(c);
     _namedScanIn(c);
     __prepareInsertedSubtree(c);
     return c;
@@ -3029,7 +3029,7 @@ class Node {
       globalThis.__notifyMutation('childList', this._nid, [newChild._nid], [oldChild._nid],
         null, null, newChild.previousSibling ? newChild.previousSibling._nid : null, newChild.nextSibling ? newChild.nextSibling._nid : null);
     }
-    if (_nodeInDocument(this)) _registerIframesIn(newChild);
+    if (__inDocShadowIncl(this)) _registerIframesIn(newChild);
     _namedScanIn(newChild);
     __prepareInsertedSubtree(newChild);
     return oldChild;
@@ -3057,7 +3057,7 @@ class Node {
       globalThis.__notifyMutation('childList', this._nid, [n._nid], [],
         null, null, n.previousSibling ? n.previousSibling._nid : null, n.nextSibling ? n.nextSibling._nid : null);
     }
-    if (_nodeInDocument(this)) _registerIframesIn(n);
+    if (__inDocShadowIncl(this)) _registerIframesIn(n);
     _namedScanIn(n);
     __prepareInsertedSubtree(n);
     return n;
@@ -7542,7 +7542,7 @@ function _registerIframesIn(node) {
     // srcdoc iframes navigate on insertion the same way (and win over src).
     if (f.hasAttribute('srcdoc')) { f._loadIframeSrc('about:srcdoc'); continue; }
     const s = f.getAttribute('src');
-    if (s && s !== 'about:blank') f._loadIframeSrc(s);
+    if (s && s !== 'about:blank') f._loadIframeSrc(s); else __iframeBlankLoad(f);
   }
 }
 function _nodeInDocument(node) {
