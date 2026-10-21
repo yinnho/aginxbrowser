@@ -79,7 +79,11 @@ pub(super) fn computed_style_value(
         if c.3 == 255 {
             format!("rgb({}, {}, {})", c.0, c.1, c.2)
         } else {
-            let a = format!("{:.3}", c.3 as f32 / 255.0);
+            // Chrome: two decimals when they round-trip to the same 8-bit
+            // alpha (26/255 -> 0.1), else three (0.102 style).
+            let exact = c.3 as f32 / 255.0;
+            let two = (exact * 100.0).round() / 100.0;
+            let a = if (two * 255.0).round() as u8 == c.3 { format!("{:.2}", two) } else { format!("{:.3}", exact) };
             let a = a.trim_end_matches('0').trim_end_matches('.');
             format!("rgba({}, {}, {}, {})", c.0, c.1, c.2, if a.is_empty() { "0" } else { a })
         }

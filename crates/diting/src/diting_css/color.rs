@@ -122,6 +122,14 @@ pub(super) fn parse_hex_color(v: &str) -> Option<Color> {
                 255,
             )
         }
+        4 => {
+            // #rgba: each digit doubles (CSS Color 4).
+            let n: Vec<u8> = hex.chars().filter_map(|c| c.to_digit(16).map(|d| d as u8)).collect();
+            if n.len() != 4 {
+                return None;
+            }
+            (n[0] * 17, n[1] * 17, n[2] * 17, n[3] * 17)
+        }
         6 | 8 => {
             let bytes = (0..hex.len())
                 .step_by(2)

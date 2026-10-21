@@ -191,6 +191,7 @@ impl JsRuntime {
     /// through `proxy_url` (#139). `None` is equivalent to `with_base_url`
     /// (direct connection).
     pub fn with_base_url_and_proxy(base_url: &str, proxy_url: Option<String>) -> Self {
+        crate::diting_css::props::clear_js(); // a new realm forgets script-registered properties
         let state = Rc::new(RefCell::new(JsState::new()));
         let state_clone = state.clone();
         let import_map = state.borrow().import_map.clone();

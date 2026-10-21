@@ -1,9 +1,10 @@
 // CSS.registerProperty (CSS Properties & Values API), split from bootstrap.js:
 // argument validation with the spec's error types, the registry, and the
 // registered initial value as the computed value of an unset custom property
-// (getComputedStyle falls through to __customPropInitial). Syntax-driven
-// cascade behaviour (typed parsing, inherits:false, animation) is not
-// modelled. Everything is call-time.
+// (getComputedStyle falls through to __customPropInitial) and mirrored into
+// the Rust cascade registry (diting_css/props.rs), which also owns @property
+// rules: initial-value fallback, inherits:false and syntax validation. Typed
+// animation is not modelled. Everything is call-time.
 (() => {
   const reg = new Map();
   globalThis.__customPropInitial = (name) => { const r = reg.get(name); return r === undefined ? undefined : r.initial; };
@@ -89,6 +90,7 @@
       }
     }
     reg.set(name, { syntax, inherits, initial });
+    _OPS.op_register_property(name, syntax, inherits, initial);
   };
   _markNative(CSS.registerProperty);
 })();

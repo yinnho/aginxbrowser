@@ -2138,6 +2138,9 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                     for (k, v) in target.custom.iter() {
                         obj.insert(k.clone(), serde_json::Value::String(v.clone()));
                     }
+                    for (k, v) in crate::diting_css::props::missing_initials(&target.custom) {
+                        obj.insert(k, serde_json::Value::String(v));
+                    }
                     serde_json::Value::Object(obj).to_string()
                 }
                 None => "null".into(),
@@ -3012,6 +3015,8 @@ fn sticky_shifts(gs: &JsState, dom: &DomTree) -> std::rc::Rc<HashMap<NodeId, [f3
 #[cfg(feature = "screenshot")]
 mod band;
 mod css;
+mod encoding;
+mod props;
 mod fetch_gate;
 mod fetch_walk;
 mod canvas;
@@ -4516,37 +4521,6 @@ fn op_add_import_map(
     result
 }
 
-/// Canonical (lowercased) WHATWG name for a TextDecoder label, or "" if the
-/// label is unknown (the JS constructor turns "" into a RangeError).
-#[diting_op]
-#[string]
-fn op_encoding_for_label(#[string] label: &str) -> String {
-    crate::diting_net::label_name(label).unwrap_or_default()
-}
-
-/// Decode bytes with a legacy/explicit encoding via encoding_rs. Returns
-/// {"ok":true,"v":<string>} or {"ok":false} (unknown label, or a fatal decode
-/// error). The UTF-8 non-fatal common case is handled in JS without this op.
-#[diting_op]
-#[string]
-fn op_text_decode(#[string] label: &str, #[buffer] bytes: &[u8], fatal: bool, ignore_bom: bool) -> String {
-    match crate::diting_net::decode_with_label(label, bytes, fatal, ignore_bom) {
-        Some(s) => serde_json::json!({ "ok": true, "v": s }).to_string(),
-        None => "{\"ok\":false}".to_string(),
-    }
-}
-
-/// Re-encode a URL query component using a non-UTF-8 document encoding override
-/// (the WHATWG "encoding override"). `query` is the already-UTF-8-decoded query
-/// string; `label` the target charset; `special` whether the URL has a special
-/// scheme (adds `'` to the percent-encode set). Returns the encoded query, or
-/// the input unchanged if the label is unknown. Only called by the JS anchor
-/// path when the document is non-UTF-8, so the UTF-8 hot path never reaches it.
-#[diting_op]
-#[string]
-fn op_url_encode_query(#[string] query: &str, #[string] label: &str, special: bool) -> String {
-    crate::diting_net::url_encode_query(query, label, special).unwrap_or_else(|| query.to_string())
-}
 
 /// 批240 / obscura#1100: SVGGeometryElement.getTotalLength() backing. Chrome
 /// measures through SkPathMeasure (circle r=25 → 156.0674, not 2πr), so these
@@ -4641,6 +4615,7 @@ fn op_clock_ms() -> f64 {
 pub fn our_decls() -> Vec<diting_runtime::op_reg::OpDecl> {
     let mut decls = vec![
         css::op_css_supports(),
+        props::op_register_property(),
         op_dom(),
         op_clock_ms(),
         op_svg_path_len(),
@@ -4695,9 +4670,9 @@ pub fn our_decls() -> Vec<diting_runtime::op_reg::OpDecl> {
         op_url_set(),
         op_url_resolve(),
         op_add_import_map(),
-        op_encoding_for_label(),
-        op_text_decode(),
-        op_url_encode_query(),
+        encoding::op_encoding_for_label(),
+        encoding::op_text_decode(),
+        encoding::op_url_encode_query(),
         crate::diting_js::ws::op_ws_send(),
         crate::diting_js::ws::op_ws_close(),
     ];

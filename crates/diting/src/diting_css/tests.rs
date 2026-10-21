@@ -3140,3 +3140,54 @@ fn text_transform_parses_keyword_family() {
     assert!(!apply_declarations(&mut s, "text-transform: full-width"));
     assert_eq!(s.text_transform, None);
 }
+
+#[test]
+fn at_property_initial_value_inherits_flag_and_syntax_validation() {
+    // Chrome truth (headless Chrome, 2026-10-22): initial-value is the
+    // fallback for var(); inherits:false stops the copy-down; a value that
+    // fails a data-type syntax is ignored (initial wins); calc(0px) is a
+    // valid zero length.
+    let (rules, _) = parse_stylesheet_timed(
+        r#"@property --bs { syntax: "*"; inherits: false; initial-value: solid; }
+           @property --len { syntax: "<length>"; inherits: false; initial-value: 7px; }
+           @property --inh { syntax: "<length>"; inherits: true; initial-value: 3px; }
+           @property --bad { syntax: "<length>"; inherits: false; }
+           .p { --len: 40px; --inh: 20px; --free: 5px; }
+           .a { border-style: var(--bs); width: var(--len); }
+           .bad { --len: red; width: var(--len); }
+           .z { width: calc(0 * 10px); }"#,
+        (1280.0, 720.0),
+        CssMediaType::Screen,
+    );
+    let tree = diting_dom::tree_sink::parse_html(
+        r#"<div class="a p"><div class="a" id="c">c</div></div><div class="bad" id="bad">b</div><div class="z" id="z">z</div>"#,
+    );
+    let style_of = |sel: &str, parent: Option<&ComputedStyle>| {
+        let id = tree.query_selector(sel).unwrap().unwrap();
+        let matched: Vec<(&ParsedRule, _)> = rules
+            .iter()
+            .filter(|r| tree.matches_selector(id, &r.selector).unwrap_or(false))
+            .map(|r| (r, tree.compile_rule_selector(&r.selector).unwrap().specificity()))
+            .collect();
+        cascade_element("div", &tree, id, &matched, parent, None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0))
+    };
+    let outer = style_of(".p", None);
+    assert_eq!(outer.border_style, Some(BorderStyle::Solid), "initial-value feeds var()");
+    assert_eq!(outer.width, Some(Length::Px(40.0)), "the element's own value beats the initial");
+    let inner = style_of("#c", Some(&outer));
+    assert_eq!(inner.width, Some(Length::Px(7.0)), "inherits:false: --len does not copy down, initial applies");
+    assert_eq!(inner.custom.get("--inh").map(String::as_str), Some("20px"), "inherits:true copies down");
+    assert_eq!(inner.custom.get("--free").map(String::as_str), Some("5px"), "unregistered properties inherit");
+    let bad = style_of("#bad", None);
+    assert_eq!(bad.width, Some(Length::Px(7.0)), "a value failing the syntax is ignored");
+    assert_eq!(style_of("#z", None).width, Some(Length::Px(0.0)), "calc(0 * 10px) is 0px, not invalid");
+    assert!(!props::value_acceptable("--len", "red") && props::value_acceptable("--len", "2in"));
+    assert!(props::lookup(&Default::default(), "--bad").is_none(), "a rule without initial-value is invalid for <length>");
+}
+
+#[test]
+fn four_digit_hex_colors_parse() {
+    assert_eq!(parse_color("#0000"), Some(Color(0, 0, 0, 0)));
+    assert_eq!(parse_color("#f008"), Some(Color(255, 0, 0, 136)));
+    assert_eq!(parse_color("#12"), None);
+}

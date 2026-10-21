@@ -23,6 +23,9 @@ pub use color::{parse_color, parse_linear_gradient, LinearGradient};
 mod animation;
 use animation::{parse_animation_shorthand, parse_keyframes_body};
 mod supports;
+pub(crate) mod props;
+mod vars;
+use vars::substitute_vars;
 mod transform;
 pub(crate) use transform::{parse_transform, parse_transform_with_vp};
 use transform::parse_transform_origin;
@@ -223,6 +226,7 @@ pub fn parse_stylesheet_timed_with(
     media_type: CssMediaType,
     overrides: &MediaOverrides,
 ) -> (Vec<ParsedRule>, KeyframesMap) {
+    props::reset_for_parse();
     parse_stylesheet_with_containers(css, viewport, media_type, overrides, &mut Vec::new())
 }
 
@@ -237,6 +241,7 @@ pub fn parse_stylesheet_full(
     overrides: &MediaOverrides,
 ) -> (Vec<ParsedRule>, KeyframesMap, Vec<ContainerRule>) {
     let mut containers = Vec::new();
+    props::reset_for_parse();
     let (rules, keyframes) =
         parse_stylesheet_with_containers(css, viewport, media_type, overrides, &mut containers);
     (rules, keyframes, containers)
@@ -368,6 +373,8 @@ fn flush_at_rule(
                 keyframes.insert(name.to_string(), kf);
             }
         }
+    } else if let Some(prelude) = at_rule_prelude(at, "property") {
+        props::define_from_rule(prelude, inner);
     } else if let Some(prelude) = at_rule_prelude(at, "container") {
         parse_container_rule(prelude, inner, viewport, media_type, overrides, containers);
     }
@@ -2876,9 +2883,9 @@ pub fn eval_calc(expr: &str, fonts: &FontCtx) -> Option<Length> {
 fn calcval_to_length(v: CalcVal) -> Option<Length> {
     match v {
         // A bare number is not a length; `calc(0)` has no unit context here.
-        CalcVal::Number(_) | CalcVal::Len { px: 0.0, percent: 0.0 } => None,
-        CalcVal::Len { px: 0.0, percent } => Some(Length::Percent(percent)),
+        CalcVal::Number(_) => None,
         CalcVal::Len { px, percent: 0.0 } => Some(Length::Px(px)),
+        CalcVal::Len { px: 0.0, percent } => Some(Length::Percent(percent)),
         CalcVal::Len { px, percent } => Some(Length::Calc { percent, px }),
     }
 }
@@ -3979,6 +3986,9 @@ pub(crate) fn apply_declarations_importance(
             // inherited by default, so unset = inherit), or empty when the
             // parent has nothing to give.
             let v = value.trim();
+            if !props::value_acceptable(&name, v) {
+                continue;
+            }
             let kw = v.to_ascii_lowercase();
             if kw == "initial" {
                 std::sync::Arc::make_mut(&mut style.custom).remove(&name);
@@ -4048,85 +4058,6 @@ fn strip_important(value: &str) -> (String, bool) {
     }
 }
 
-/// Replace every `var(--name[, fallback])` in `value` using `custom`.
-/// `None` when any reference is unresolvable (no such property AND no
-/// usable fallback) — the caller then drops the declaration (IACVT).
-/// Depth-capped to break `--a: var(--b); --b: var(--a)` cycles.
-fn substitute_vars(value: &str, custom: &std::collections::HashMap<String, String>, depth: usize) -> Option<String> {
-    const MAX_DEPTH: usize = 8;
-    if depth > MAX_DEPTH {
-        return None;
-    }
-    let lower = value.to_ascii_lowercase();
-    let Some(start) = lower.find("var(") else {
-        return Some(value.to_string());
-    };
-    // Walk to the matching close paren. `start`/`end` are byte offsets of
-    // ASCII chars, so slicing between them is char-boundary safe; interior
-    // UTF-8 bytes (>= 0x80) never match the ASCII delimiters.
-    let bytes = value.as_bytes();
-    let mut level = 0usize;
-    let mut end = None;
-    let mut i = start;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'(' => level += 1,
-            b')' => {
-                level -= 1;
-                if level == 0 {
-                    end = Some(i);
-                    break;
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    let end = end?;
-    // Inside the parens: `--name` + optional `, fallback`.
-    let inner = &value[start + 4..end];
-    let (name, fallback) = match split_top_comma(inner) {
-        Some((n, f)) => (n.trim(), Some(f)),
-        None => (inner.trim(), None),
-    };
-    let head = &value[..start];
-    let tail = &value[end + 1..];
-    let replacement = match custom.get(name) {
-        Some(v) => substitute_vars(v, custom, depth + 1)?,
-        None => match fallback {
-            Some(f) => substitute_vars(f.trim(), custom, depth + 1)?,
-            None => return None,
-        },
-    };
-    // The tail may contain further var() references.
-    let tail = substitute_vars(tail, custom, depth)?;
-    Some(format!("{head}{replacement}{tail}"))
-}
-
-/// Split at the first top-level comma (outside parens/quotes) — used to
-/// separate a var() fallback, which may itself contain commas and nested
-/// functions like `var(--x, 1px, 2px)` / `var(--y, rgb(0, 0, 0))`.
-fn split_top_comma(s: &str) -> Option<(&str, &str)> {
-    let bytes = s.as_bytes();
-    let mut paren = 0i32;
-    let mut quote: Option<u8> = None;
-    for (i, &b) in bytes.iter().enumerate() {
-        if let Some(q) = quote {
-            if b == q {
-                quote = None;
-            }
-            continue;
-        }
-        match b {
-            b'"' | b'\'' => quote = Some(b),
-            b'(' => paren += 1,
-            b')' => paren -= 1,
-            b',' if paren == 0 => return Some((&s[..i], &s[i + 1..])),
-            _ => {}
-        }
-    }
-    None
-}
 
 fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx) -> bool {
     let v = value.trim();
@@ -6337,7 +6268,7 @@ pub fn cascade_element(
         style.zoom = parent.zoom;
         // Custom properties inherit computed (already-substituted-where-
         // possible) values; author rules below may re-declare per element.
-        style.custom = parent.custom.clone();
+        style.custom = props::inherit_custom(&parent.custom);
         // lang inherits computed (the nearest ancestor's attribute, #139);
         // the element's own attribute read below overrides.
         style.lang = parent.lang.clone();
