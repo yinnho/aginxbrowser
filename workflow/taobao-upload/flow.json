@@ -1,0 +1,914 @@
+{
+ "args": [
+  "images"
+ ],
+ "vars": {
+  "publish_url": "https://item.upload.taobao.com/sell/v2/publish.htm",
+  "cat_id": "201305805",
+  "ready_ms": 60000,
+  "img_ms": 90000,
+  "done": {}
+ },
+ "create": {
+  "width": 1440,
+  "height": 900,
+  "persona_ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+ },
+ "steps": [
+  {
+   "op": "preload",
+   "args": {
+    "recipes": [
+     "taobao-block-everyhelp",
+     "taobao-block-qn-header"
+    ]
+   },
+   "note": "[everyhelp + qn_header] document-start via recipes `taobao-block-everyhelp` + `taobao-block-qn-header`. block qn_header/microapp-loader/workbench injections — the publish page pulls a dozen qn micro-mods; blocking them was part of the proven stable-boot recipe (fastlayout/witness stubs from the debug runs are deliberately NOT here: fake geometry has no place in a real publish). Also blocks everyhelp.* widget calls at fetch/XHR level: on 4/4 runs (2026-10-06, s_23/s_26/s_27/s_28) the publish page's getWidgetVersion response carried Set-Cookie deletions of unb/sn/uss on an otherwise-200 payload — a server-side session revocation that leaves every later submit.htm answered {sessionExpired:true}. everyhelp is help-center widget infra with zero role in publishing; refusing it keeps the SSO cookie set intact for the whole form fill + submit"
+  },
+  {
+   "op": "navigate",
+   "args": {
+    "url": "{{publish_url}}?catId={{cat_id}}"
+   },
+   "note": "only for the logged-in .taobao.com cookie context: the upload API is cross-origin from here and credentialed. Login expired lands on login.taobao.com and the next wait times out - run taobao-login first"
+  },
+  {
+   "op": "wait",
+   "args": {
+    "predicate": "location.hostname==='item.upload.taobao.com'&&document.readyState!=='loading'",
+    "timeout_ms": "{{ready_ms}}"
+   },
+   "save": "page_ready"
+  },
+  {
+   "id": "args_check",
+   "op": "eval",
+   "save": "img_count",
+   "args": {
+    "timeout_ms": 15000,
+    "script": "(function(){ var ALL={{args.images}}; if(!ALL||!ALL.length)throw new Error('images: pass a non-empty array of {name, content_base64, mime_type?}'); if(ALL.length>40)throw new Error('images: max 40 per call (img_0..img_39) - split larger sets'); var seen={},errs=[]; for(var i=0;i<ALL.length;i++){var im=ALL[i]||{}; if(!im.name){errs.push('images['+i+']: name required');continue} if(seen[im.name])errs.push('images['+i+']: duplicate name '+im.name);seen[im.name]=1; if(!/\\.(jpe?g|png)$/i.test(im.name))errs.push('images['+i+']: '+im.name+' must end .jpg/.jpeg/.png'); if(!im.content_base64&&!{{done}}[im.name])errs.push('images['+i+']: content_base64 required (or name in vars.done)'); } if(errs.length)throw new Error(errs.slice(0,8).join('; ')); window.__agxTbUp={};return ALL.length; })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 0
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_0",
+   "op": "eval",
+   "save": "img_0",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.0}},DONE={{done}},K=0,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 1
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_1",
+   "op": "eval",
+   "save": "img_1",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.1}},DONE={{done}},K=1,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 2
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_2",
+   "op": "eval",
+   "save": "img_2",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.2}},DONE={{done}},K=2,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 3
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_3",
+   "op": "eval",
+   "save": "img_3",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.3}},DONE={{done}},K=3,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 4
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_4",
+   "op": "eval",
+   "save": "img_4",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.4}},DONE={{done}},K=4,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 5
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_5",
+   "op": "eval",
+   "save": "img_5",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.5}},DONE={{done}},K=5,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 6
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_6",
+   "op": "eval",
+   "save": "img_6",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.6}},DONE={{done}},K=6,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 7
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_7",
+   "op": "eval",
+   "save": "img_7",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.7}},DONE={{done}},K=7,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 8
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_8",
+   "op": "eval",
+   "save": "img_8",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.8}},DONE={{done}},K=8,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 9
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_9",
+   "op": "eval",
+   "save": "img_9",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.9}},DONE={{done}},K=9,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 10
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_10",
+   "op": "eval",
+   "save": "img_10",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.10}},DONE={{done}},K=10,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 11
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_11",
+   "op": "eval",
+   "save": "img_11",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.11}},DONE={{done}},K=11,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 12
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_12",
+   "op": "eval",
+   "save": "img_12",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.12}},DONE={{done}},K=12,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 13
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_13",
+   "op": "eval",
+   "save": "img_13",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.13}},DONE={{done}},K=13,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 14
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_14",
+   "op": "eval",
+   "save": "img_14",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.14}},DONE={{done}},K=14,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 15
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_15",
+   "op": "eval",
+   "save": "img_15",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.15}},DONE={{done}},K=15,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 16
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_16",
+   "op": "eval",
+   "save": "img_16",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.16}},DONE={{done}},K=16,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 17
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_17",
+   "op": "eval",
+   "save": "img_17",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.17}},DONE={{done}},K=17,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 18
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_18",
+   "op": "eval",
+   "save": "img_18",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.18}},DONE={{done}},K=18,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 19
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_19",
+   "op": "eval",
+   "save": "img_19",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.19}},DONE={{done}},K=19,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 20
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_20",
+   "op": "eval",
+   "save": "img_20",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.20}},DONE={{done}},K=20,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 21
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_21",
+   "op": "eval",
+   "save": "img_21",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.21}},DONE={{done}},K=21,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 22
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_22",
+   "op": "eval",
+   "save": "img_22",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.22}},DONE={{done}},K=22,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 23
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_23",
+   "op": "eval",
+   "save": "img_23",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.23}},DONE={{done}},K=23,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 24
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_24",
+   "op": "eval",
+   "save": "img_24",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.24}},DONE={{done}},K=24,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 25
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_25",
+   "op": "eval",
+   "save": "img_25",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.25}},DONE={{done}},K=25,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 26
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_26",
+   "op": "eval",
+   "save": "img_26",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.26}},DONE={{done}},K=26,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 27
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_27",
+   "op": "eval",
+   "save": "img_27",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.27}},DONE={{done}},K=27,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 28
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_28",
+   "op": "eval",
+   "save": "img_28",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.28}},DONE={{done}},K=28,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 29
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_29",
+   "op": "eval",
+   "save": "img_29",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.29}},DONE={{done}},K=29,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 30
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_30",
+   "op": "eval",
+   "save": "img_30",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.30}},DONE={{done}},K=30,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 31
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_31",
+   "op": "eval",
+   "save": "img_31",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.31}},DONE={{done}},K=31,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 32
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_32",
+   "op": "eval",
+   "save": "img_32",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.32}},DONE={{done}},K=32,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 33
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_33",
+   "op": "eval",
+   "save": "img_33",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.33}},DONE={{done}},K=33,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 34
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_34",
+   "op": "eval",
+   "save": "img_34",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.34}},DONE={{done}},K=34,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 35
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_35",
+   "op": "eval",
+   "save": "img_35",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.35}},DONE={{done}},K=35,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 36
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_36",
+   "op": "eval",
+   "save": "img_36",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.36}},DONE={{done}},K=36,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 37
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_37",
+   "op": "eval",
+   "save": "img_37",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.37}},DONE={{done}},K=37,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 38
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_38",
+   "op": "eval",
+   "save": "img_38",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.38}},DONE={{done}},K=38,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 39
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "img_39",
+   "op": "eval",
+   "save": "img_39",
+   "note": "one continuation per eval (the doudian-upload shape): a lost continuation costs one image",
+   "args": {
+    "timeout_ms": "{{img_ms}}",
+    "script": "(async function(){ var im={{args.images.39}},DONE={{done}},K=39,R=(window.__agxTbUp=window.__agxTbUp||{}); var rec={i:K,name:im.name}; try{ if(DONE[im.name]){rec.skipped=1;rec.url=typeof DONE[im.name]==='string'?DONE[im.name]:DONE[im.name].url;rec.meta=DONE[im.name];R[K]=rec;return rec} var bin=[],CH=0x8000,b64=String(im.content_base64).replace(/\\s+/g,''); for(var p=0;p<b64.length;p+=CH){var s=atob(b64.slice(p,p+CH)),arr=new Array(s.length); for(var c=0;c<s.length;c++)arr[c]=s.charCodeAt(c);bin.push(String.fromCharCode.apply(null,arr))} var s2=bin.join(''),u8=new Uint8Array(s2.length);for(var j=0;j<s2.length;j++)u8[j]=s2.charCodeAt(j); var f=new File([u8],im.name,{type:im.mime_type||(/\\.png$/i.test(im.name)?'image/png':'image/jpeg')}); var fd=new FormData();fd.append('file',f,im.name);fd.append('name',im.name); var r=await fetch('https://stream-upload.taobao.com/api/upload.api?appkey=tu&folderId=0&_input_charset=utf-8',{method:'POST',body:fd,credentials:'include'}); var t=await r.text(),x;try{x=JSON.parse(t)}catch(e){rec.fatal={stage:'non-json',status:r.status,head:t.slice(0,120)};R[K]=rec;return rec} if(!x.success||!x.object||!x.object.url){rec.failed={stage:'upload',status:r.status,msg:String(x.message||'').slice(0,140)};R[K]=rec;return rec} var pm=/(\\d+)x(\\d+)/.exec(x.object.pix||''); rec.url=x.object.url;rec.meta={url:x.object.url,fileId:x.object.fileId,width:pm?Number(pm[1]):null,height:pm?Number(pm[2]):null,size:Number(x.object.size)}; R[K]=rec;return rec; }catch(e){rec.failed={stage:'exception',msg:String((e&&e.message)||e).slice(0,140)};R[K]=rec;return rec} })()"
+   }
+  },
+  {
+   "op": "branch",
+   "args": {
+    "when": {
+     "var": "img_count",
+     "is": "at_most",
+     "value": 40
+    },
+    "goto": "manifest"
+   }
+  },
+  {
+   "id": "manifest",
+   "op": "eval",
+   "save": "upload",
+   "args": {
+    "timeout_ms": 30000,
+    "script": "(function(){ var R=window.__agxTbUp||{},N={{img_count}},urls={},bad=[]; for(var i=0;i<N;i++){var r=R[i]; if(!r){bad.push('img_'+i+'(no-attempt)');continue} if(r.fatal||r.failed){bad.push(r.name+':'+JSON.stringify(r.fatal||r.failed));continue} urls[r.name]=r.meta||{url:r.url}; } if(bad.length)throw new Error('upload incomplete: '+(N-bad.length)+'/'+N+' ok; '+bad.slice(0,6).join(' | ')+' - rerun with vars.done set to the urls map saved so far'); return {count:N,urls:urls}; })()"
+   },
+   "note": "name -> {url (alicdn picture-space), fileId, width, height, size}; feed to taobao-publish-custom"
+  }
+ ]
+}
