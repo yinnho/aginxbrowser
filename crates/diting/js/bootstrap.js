@@ -1426,7 +1426,8 @@ class CSSStyleDeclaration {
       const v = String(value);
       // #148: invalid values are silent no-ops — the stored declaration
       // (and the read-back) keeps the previous value, like Chrome.
-      if (_cssDeclAccepted(k, v)) this._props[k] = v;
+      const c = k === "font-family" ? _cssFontFamilyCanon(v) : v;
+      if (c !== null && _cssDeclAccepted(k, v)) this._props[k] = c;
     }
     this._push();
   }
@@ -4778,7 +4779,7 @@ class Element extends Node {
   // and prototype introspection must all see it, and the click activation
   // steps clear/restore it as real state.
   get indeterminate() { return !!_formIndeterminate[this._nid]; }
-  set indeterminate(v) { _formIndeterminate[this._nid] = !!v; }
+  set indeterminate(v) { _formIndeterminate[this._nid] = !!v; _domRaw("set_live_indeterminate", String(this._nid), v ? "1" : "0"); }
   get selected() {
     if (this._selected !== undefined) return this._selected;
     return this.hasAttribute("selected");

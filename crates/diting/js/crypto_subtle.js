@@ -464,13 +464,14 @@ if (!globalThis.crypto.subtle) {
         }
         if (format === "jwk") {
           const coordLen = ECDSA_CURVES[m.curve];
-          const jwk = {
-            kty: "EC", crv: m.curve,
-            x: bytesToB64url(m.sec1.subarray(1, 1 + coordLen)),
-            y: bytesToB64url(m.sec1.subarray(1 + coordLen)),
-            ext: key.extractable, key_ops: key.usages.slice(),
-          };
+          // Chrome emits EC JWK fields in alphabetical insertion order.
+          const jwk = { crv: m.curve };
           if (key.type === "private") jwk.d = bytesToB64url(m.scalar);
+          jwk.ext = key.extractable;
+          jwk.key_ops = key.usages.slice();
+          jwk.kty = "EC";
+          jwk.x = bytesToB64url(m.sec1.subarray(1, 1 + coordLen));
+          jwk.y = bytesToB64url(m.sec1.subarray(1 + coordLen));
           return jwk;
         }
         throw new DOMException("Unsupported key format for EC keys export: " + format, "NotSupportedError");

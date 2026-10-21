@@ -780,7 +780,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             | "set_text_content"
             | "set_inner_html"
             | "set_live_value"
-            | "set_live_checked"
+            | "set_live_checked" | "set_live_indeterminate"
             | "set_focused"
             | "set_selection"
             | "document_write_reset"
@@ -1325,9 +1325,9 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         // set_live_value: paint reads it to draw the checkbox/radio widget
         // state, while getAttribute/outerHTML keep showing only the parsed
         // `checked` attribute like Chrome.
-        "set_live_checked" => {
+        "set_live_checked" | "set_live_indeterminate" => {
             let node_id = match parse_nid(&arg1) { Some(id) => id, None => return "false".into() };
-            dom.with_node_mut(node_id, |n| n.set_live_checked(arg2 == "1"));
+            dom.with_node_mut(node_id, |n| if cmd == "set_live_checked" { n.set_live_checked(arg2 == "1") } else { n.set_live_indeterminate(arg2 == "1") });
             "true".into()
         }
         // Focus mirror (blitz#839): the bootstrap's focus()/blur() keep the
@@ -1551,7 +1551,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 name: html5ever::QualName::new(None, ns, html5ever::LocalName::from(arg1.as_str())),
                 attrs: vec![], template_contents: None, mathml_annotation_xml_integration_point: false,
                 live_value: None,
-                live_checked: None,
+                live_checked: None, live_indeterminate: false,
             }).index().to_string()
         }
         "create_text_node" => {

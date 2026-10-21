@@ -16,6 +16,7 @@ mod tree_tests {
             mathml_annotation_xml_integration_point: false,
             live_value: None,
             live_checked: None,
+            live_indeterminate: false,
         })
     }
 
@@ -30,6 +31,7 @@ mod tree_tests {
             mathml_annotation_xml_integration_point: false,
             live_value: None,
             live_checked: None,
+            live_indeterminate: false,
         })
     }
 
@@ -111,6 +113,7 @@ mod tree_tests {
             mathml_annotation_xml_integration_point: false,
             live_value: None,
             live_checked: None,
+            live_indeterminate: false,
         });
         tree.append_child(doc, div);
 
@@ -136,6 +139,7 @@ mod tree_tests {
             mathml_annotation_xml_integration_point: false,
             live_value: None,
             live_checked: None,
+            live_indeterminate: false,
         });
         tree.append_child(doc, div);
 
@@ -159,6 +163,7 @@ mod tree_tests {
                 mathml_annotation_xml_integration_point: false,
                 live_value: None,
                 live_checked: None,
+                live_indeterminate: false,
             })
         };
         let html = mk("html");
@@ -203,6 +208,7 @@ mod tree_tests {
                 mathml_annotation_xml_integration_point: false,
                 live_value: None,
                 live_checked: None,
+                live_indeterminate: false,
             })
         };
         let parent = mk("div");
@@ -241,6 +247,7 @@ mod tree_tests {
             mathml_annotation_xml_integration_point: false,
             live_value: None,
             live_checked: None,
+            live_indeterminate: false,
         });
         tree.append_child(doc, div);
         let text = tree.new_node(NodeData::Text { contents: "hi".into() });
@@ -361,6 +368,7 @@ mod tree_tests {
             mathml_annotation_xml_integration_point: false,
             live_value: None,
             live_checked: None,
+            live_indeterminate: false,
         });
         tree.append_child(doc, el);
 
@@ -401,6 +409,7 @@ mod tree_tests {
             mathml_annotation_xml_integration_point: false,
             live_value: None,
             live_checked: None,
+            live_indeterminate: false,
         });
         dest.append_child(dest.document(), host);
 
@@ -1465,6 +1474,7 @@ mod selector_tests {
                     mathml_annotation_xml_integration_point: false,
                     live_value: None,
                     live_checked: None,
+                    live_indeterminate: false,
                 })
             };
 

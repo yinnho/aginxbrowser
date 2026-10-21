@@ -280,6 +280,7 @@ mod tests {
             mathml_annotation_xml_integration_point: false,
             live_value: None,
             live_checked: None,
+            live_indeterminate: false,
         });
         let text = tree.new_node(NodeData::Text { contents: "text".into() });
         tree.append_child(host, img);

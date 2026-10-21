@@ -249,6 +249,7 @@ mod incremental_match_tests {
             }],
             live_value: None,
             live_checked: Some(false),
+            live_indeterminate: false,
             mathml_annotation_xml_integration_point: false,
             template_contents: None,
         }

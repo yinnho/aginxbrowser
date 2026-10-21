@@ -22971,3 +22971,45 @@ fn document_evaluate_xpath_subset() {
         rt.evaluate("location.href = '/test'").unwrap();
         assert!(rt.take_pending_navigation().is_some(), "dropping the fragment reloads");
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_list_reflection_indeterminate_font_family_ec_jwk_order() {
+        // Chrome truth for the 2026-10-22 sweep gaps (checked against a
+        // local headless Chrome): ol.start/reversed/type, li.value,
+        // :indeterminate / live :checked, fontFamily read-back, EC JWK keys.
+        let mut rt = setup_runtime(
+            "<html><body><ol id=o start=5 reversed type=a><li id=l1 value=9>a<li id=l2 value=x>b</ol>\
+             <input type=checkbox id=cb><input type=checkbox id=cb2 checked><progress id=pg></progress></body></html>",
+        );
+        let v = rt
+            .evaluate(
+                "(() => { cb.indeterminate = true; const ff = (s) => { const d = document.createElement('div'); d.style.fontFamily = s; return d.style.fontFamily; };
+                  const r = { ol: [o.start, o.reversed, o.type, l1.value, l2.value].join(),
+                    ind: [cb.matches(':indeterminate'), cb2.matches(':indeterminate'), pg.matches(':indeterminate')].join() };
+                  cb.indeterminate = false; r.indOff = cb.matches(':indeterminate');
+                  cb.checked = true; cb2.checked = false;
+                  r.checked = [cb.matches(':checked'), cb2.matches(':checked')].join();
+                  r.ff = [ff('Foo Bar, serif'), ff(\"'Menlo',monospace\"), ff('Arial'), ff('\"Times New Roman\", \"serif\"'), ff('a b, 1x')].join('|');
+                  o.start = -3; o.reversed = false; r.set = [o.getAttribute('start'), o.hasAttribute('reversed')].join();
+                  return r; })()",
+            )
+            .unwrap();
+        assert_eq!(v["ol"], "5,true,a,9,0");
+        assert_eq!(v["ind"], "true,false,true");
+        assert_eq!(v["indOff"], false);
+        assert_eq!(v["checked"], "true,false", ":checked follows the dirty checkedness");
+        assert_eq!(v["ff"], "\"Foo Bar\", serif|Menlo, monospace|Arial|\"Times New Roman\", \"serif\"|",
+            "invalid unquoted family drops the whole declaration");
+        assert_eq!(v["set"], "-3,false");
+
+        let keys = rt
+            .evaluate_remote(
+                "(async () => { const k = await crypto.subtle.generateKey({name:'ECDSA',namedCurve:'P-256'}, true, ['sign','verify']);
+                   return Object.keys(await crypto.subtle.exportKey('jwk', k.privateKey)).join(); })()",
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(keys.value.unwrap(), "crv,d,ext,key_ops,kty,x,y");
+    }

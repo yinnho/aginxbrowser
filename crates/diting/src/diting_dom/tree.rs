@@ -72,6 +72,9 @@ pub enum NodeData {
         /// "never dirtied" and readers fall back to the parsed `checked`
         /// attribute — the exact precedence the JS getter resolves with.
         live_checked: Option<bool>,
+        /// A checkbox's `indeterminate` IDL state (`el.indeterminate = x`),
+        /// mirrored so `:indeterminate` can match; never an attribute.
+        live_indeterminate: bool,
     },
     Text {
         contents: String,
@@ -165,6 +168,19 @@ impl Node {
         match &self.data {
             NodeData::Element { live_checked, .. } => *live_checked,
             _ => None,
+        }
+    }
+
+    pub fn live_indeterminate(&self) -> bool {
+        match &self.data {
+            NodeData::Element { live_indeterminate, .. } => *live_indeterminate,
+            _ => false,
+        }
+    }
+
+    pub fn set_live_indeterminate(&mut self, v: bool) {
+        if let NodeData::Element { live_indeterminate, .. } = &mut self.data {
+            *live_indeterminate = v;
         }
     }
 

@@ -100,6 +100,7 @@ pub enum PseudoClass {
     Enabled,
     Disabled,
     Checked,
+    Indeterminate,
     Link,
     Visited,
     Root,
@@ -144,6 +145,7 @@ impl ToCss for PseudoClass {
             PseudoClass::Enabled => dest.write_str(":enabled"),
             PseudoClass::Disabled => dest.write_str(":disabled"),
             PseudoClass::Checked => dest.write_str(":checked"),
+            PseudoClass::Indeterminate => dest.write_str(":indeterminate"),
             PseudoClass::Link => dest.write_str(":link"),
             PseudoClass::Visited => dest.write_str(":visited"),
             PseudoClass::Root => dest.write_str(":root"),
@@ -208,6 +210,7 @@ impl<'i> parser::Parser<'i> for DitingSelectorParser {
             "enabled" => Ok(PseudoClass::Enabled),
             "disabled" => Ok(PseudoClass::Disabled),
             "checked" => Ok(PseudoClass::Checked),
+            "indeterminate" => Ok(PseudoClass::Indeterminate),
             "link" | "any-link" => Ok(PseudoClass::Link),
             "visited" => Ok(PseudoClass::Visited),
             "root" => Ok(PseudoClass::Root),
@@ -588,9 +591,35 @@ impl<'a> Element for DomElement<'a> {
             // rule silently inert.
             PseudoClass::Enabled => self.is_form_control() && !self.has_boolean_attr("disabled"),
             PseudoClass::Disabled => self.is_form_control() && self.has_boolean_attr("disabled"),
-            PseudoClass::Checked => {
-                self.has_boolean_attr("checked") || self.has_boolean_attr("selected")
-            }
+            PseudoClass::Checked => self
+                .tree
+                .with_node(self.node_id, |n| {
+                    let checkable = n.as_element().is_some_and(|e| e.local.as_str() == "input")
+                        && matches!(
+                            n.get_attribute("type").map(|t| t.to_ascii_lowercase()).as_deref(),
+                            Some("checkbox" | "radio")
+                        );
+                    // A checkbox/radio's dirty checkedness (el.checked = x)
+                    // beats the parsed attribute, as in the IDL getter.
+                    match n.live_checked() {
+                        Some(c) if checkable => c,
+                        _ => n.get_attribute("checked").is_some() || n.get_attribute("selected").is_some(),
+                    }
+                })
+                .unwrap_or(false),
+            // Checkbox with indeterminate = true, or a <progress> with no
+            // value (radio groups with nothing checked are not modelled).
+            PseudoClass::Indeterminate => self
+                .tree
+                .with_node(self.node_id, |n| match n.as_element().map(|e| e.local.as_str()) {
+                    Some("input") => {
+                        n.get_attribute("type").is_some_and(|t| t.eq_ignore_ascii_case("checkbox"))
+                            && n.live_indeterminate()
+                    }
+                    Some("progress") => n.get_attribute("value").is_none(),
+                    _ => false,
+                })
+                .unwrap_or(false),
             // Focus tracks the tree's live focused node (blitz#839): agents
             // focus() a control and then read :focus styles, and the old
             // unconditional false froze every focus-dependent rule inert.

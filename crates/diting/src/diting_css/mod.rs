@@ -785,7 +785,7 @@ fn eval_supports(condition: &str) -> Option<bool> {
                 | "active"
                 | "visited"
                 | "link"
-                | "checked"
+                | "checked" | "indeterminate"
                 | "disabled"
                 | "enabled"
                 | "placeholder-shown"

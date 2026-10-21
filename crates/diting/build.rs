@@ -30,6 +30,7 @@ const SNAPSHOT_SCRIPTS: &[(&str, &str)] = &[
     // precede xhr.js, whose send() rides __ditingFetchShim.
     ("webrtc.js", include_str!("js/webrtc.js")),
     ("location_nav.js", include_str!("js/location_nav.js")),
+    ("list_reflect.js", include_str!("js/list_reflect.js")),
     ("fetch.js", include_str!("js/fetch.js")),
     // Ratchet splits (pure moves): the audio/speechSynthesis faces, the
     // Worker family, media_source, iframe_realm, range_selection,
