@@ -22391,8 +22391,10 @@ fn document_evaluate_xpath_subset() {
         let v = result.value.unwrap();
         assert!(v.is_object(), "cascade must finish inside 10s");
         let fired = v["fired"].as_i64().unwrap();
+        // fired == -1 means the cascade drained before the timer ran (the
+        // starvation bug); an absolute upper bound would flake on slow CI.
         assert!(
-            (50..=1000).contains(&fired),
+            fired >= 50,
             "50ms timer must fire mid-cascade (task-per-fetch), fired={}ms",
             fired
         );

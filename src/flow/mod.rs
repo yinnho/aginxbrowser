@@ -31,6 +31,10 @@ use tokio::sync::oneshot;
 /// flow_install — pull a flow package from a DupHub remote into the
 /// workflow directory (issue #143, the ecosystem's consumption side).
 pub mod install;
+mod condition;
+mod timing;
+use condition::{eval_condition, js_truthy, CONDITION_OPS};
+use timing::{with_timing, StepStarts};
 
 // ---------------------------------------------------------------------------
 // Recording → flow.json
@@ -132,7 +136,7 @@ pub fn recorded_to_flow(jsonl: &str) -> Value {
 /// object keys (and array indices) so a step can read one field off an
 /// earlier step's saved response. Any miss is `None` — the caller reports it
 /// as an unknown var, keeping the fail-loudly contract.
-fn lookup_path<'a>(vars: &'a Map<String, Value>, path: &str) -> Option<&'a Value> {
+pub(super) fn lookup_path<'a>(vars: &'a Map<String, Value>, path: &str) -> Option<&'a Value> {
     let mut segments = path.split('.');
     let root = segments.next()?;
     let mut v = vars.get(root)?;
@@ -342,99 +346,6 @@ fn u64_arg(a: &Value, key: &str, op: &str) -> Result<u64, String> {
 
 fn opt_u32(a: &Value, key: &str) -> Option<u32> {
     a.get(key).and_then(|v| v.as_u64()).map(|n| n as u32)
-}
-
-/// JS truthiness for expect results (0, "", null, false, NaN are falsy —
-/// everything else truthy, arrays/objects included).
-fn js_truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().map(|f| f != 0.0 && !f.is_nan()).unwrap_or(true),
-        Value::String(s) => !s.is_empty(),
-        _ => true,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Branch steps (issue #72)
-// ---------------------------------------------------------------------------
-
-/// The condition operators a `when` may use.
-const CONDITION_OPS: &[&str] = &[
-    "equals", "not_equals", "in", "not_in", "contains", "at_least", "at_most", "truthy",
-    "falsy",
-];
-
-/// JSON equality with number looseness: 200 == 200.0 (serde_json's Value
-/// PartialEq is representation-sensitive; a flow author comparing an
-/// integer fact against a float literal shouldn't care).
-fn loose_eq(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
-        _ => a == b,
-    }
-}
-
-/// The branch step's condition — structured JSON, deliberately no
-/// expression parser: `{"var": "v.verdict", "is": "equals", "value":
-/// "landed"}`. `var` is a dotted path resolved by the same
-/// [`lookup_path`] `{{placeholders}}` use, so a branch reads one field
-/// off an earlier step's saved result. Unknown var and unknown `is` are
-/// loud step errors — the same fail-loudly contract as substitution; a
-/// condition that silently evaluated false on a typo would be a flow
-/// that skips its own retry loop.
-fn eval_condition(when: &Value, vars: &Map<String, Value>) -> Result<bool, String> {
-    let path = when
-        .get("var")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "when.var (a dotted var path) is required".to_string())?;
-    let is = when
-        .get("is")
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("when.is is required (one of {})", CONDITION_OPS.join(" | ")))?;
-    let value = when.get("value");
-    let val = lookup_path(vars, path).ok_or_else(|| {
-        format!("unknown var '{path}' — no step saved it and no var declared it")
-    })?;
-    match is {
-        "equals" => Ok(loose_eq(val, value.ok_or("equals needs a value")?)),
-        "not_equals" => Ok(!loose_eq(val, value.ok_or("not_equals needs a value")?)),
-        "in" => match value.ok_or("`in` needs a value")? {
-            Value::Array(a) => Ok(a.iter().any(|x| loose_eq(val, x))),
-            _ => Err("`in` requires an array value".into()),
-        },
-        "not_in" => match value.ok_or("`not_in` needs a value")? {
-            Value::Array(a) => Ok(!a.iter().any(|x| loose_eq(val, x))),
-            _ => Err("`not_in` requires an array value".into()),
-        },
-        "contains" => match val {
-            Value::String(hay) => {
-                let needle = value
-                    .and_then(Value::as_str)
-                    .ok_or("contains on a string var needs a string value")?;
-                Ok(hay.contains(needle))
-            }
-            Value::Array(a) => Ok(value.is_some_and(|v| a.iter().any(|x| loose_eq(x, v)))),
-            _ => Err("contains applies to string and array vars".into()),
-        },
-        "at_least" | "at_most" => {
-            let x = val
-                .as_f64()
-                .ok_or("at_least/at_most need a numeric var")?;
-            let y = value
-                .and_then(Value::as_f64)
-                .ok_or("at_least/at_most need a numeric value")?;
-            Ok(if is == "at_least" { x >= y } else { x <= y })
-        }
-        "truthy" => Ok(js_truthy(val)),
-        "falsy" => Ok(!js_truthy(val)),
-        other => Err(format!(
-            "unknown when.is {other:?} (one of {})",
-            CONDITION_OPS.join(" | ")
-        )),
-    }
 }
 
 /// Pre-flight for branch steps: collect step ids, then check every
@@ -1157,42 +1068,6 @@ pub async fn run_flow_global(
     session_id: Option<String>,
 ) -> Value {
     with_timing(|t| run_flow_inner(FlowSessions(None), flow, call_vars, session_id, t)).await
-}
-
-/// Step start offsets (ms since the run began) recorded by the executor:
-/// (pc, step id or op, start_ms). Durations are the gaps between starts, so a
-/// step that fails mid-flight still gets its time.
-type StepStarts = std::sync::Arc<std::sync::Mutex<Vec<(usize, String, u128)>>>;
-
-/// Run a flow and stamp the receipt with its wall clock (`elapsed_ms`) and a
-/// per-step breakdown (`timings`: [{step, id, ms}]) — the publish-speed
-/// numbers, present on ok AND failed receipts.
-async fn with_timing<F, Fut>(run: F) -> Value
-where
-    F: FnOnce(StepStarts) -> Fut,
-    Fut: std::future::Future<Output = Value>,
-{
-    let t: StepStarts = Default::default();
-    let started = std::time::Instant::now();
-    let mut receipt = run(t.clone()).await;
-    let total = started.elapsed().as_millis();
-    if let Some(obj) = receipt.as_object_mut() {
-        let starts = t.lock().map(|g| g.clone()).unwrap_or_default();
-        let mut rows = Vec::with_capacity(starts.len());
-        for (i, (pc, id, at)) in starts.iter().enumerate() {
-            let end = starts.get(i + 1).map(|n| n.2).unwrap_or(total);
-            rows.push(json!({ "step": pc, "id": id, "ms": end.saturating_sub(*at) as u64 }));
-        }
-        obj.insert("elapsed_ms".into(), json!(total as u64));
-        // A person scanning a login code needs the code the page shows NOW,
-        // not a screenshot that expired on the way: every receipt names the
-        // self-refreshing scan page of its session.
-        if let Some(sid) = obj.get("session_id").and_then(|v| v.as_str()).map(str::to_string) {
-            obj.insert("live_qr".into(), json!(format!("/session/{sid}/qr/live")));
-        }
-        obj.insert("timings".into(), Value::Array(rows));
-    }
-    receipt
 }
 
 async fn run_flow_inner(

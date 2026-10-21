@@ -28,6 +28,7 @@ const SNAPSHOT_SCRIPTS: &[(&str, &str)] = &[
     // helper it references (_docBase, __recordFetchTiming, Headers…) is
     // touched at call time, by which point bootstrap.js has run. Must
     // precede xhr.js, whose send() rides __ditingFetchShim.
+    ("webrtc.js", include_str!("js/webrtc.js")),
     ("fetch.js", include_str!("js/fetch.js")),
     // Ratchet splits (pure moves): the audio/speechSynthesis faces, the
     // Worker family, media_source, iframe_realm, range_selection,
