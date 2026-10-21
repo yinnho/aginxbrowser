@@ -10278,6 +10278,38 @@
         assert_eq!(result.value.unwrap(), serde_json::json!(["sw|a", "sw|b"]));
     }
 
+    // Window timer functions are native-shaped ("Illegal invocation" for a
+    // foreign receiver). A worker script runs under with(self), so its bare
+    // setTimeout/setInterval calls arrive with the worker scope as receiver —
+    // that must stay legal. 抖店's sif-dxs worker calls setInterval at boot;
+    // the receiver check broke it and the page never got past its skeleton.
+    #[tokio::test(flavor = "current_thread")]
+    async fn shared_worker_scope_can_call_window_timers() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate_remote(
+                r#"new Promise((resolve, reject) => {
+                    const body = "var ticks = 0;"
+                        + "var iv = setInterval(function() { ticks++; if (ticks === 2) clearInterval(iv); }, 5);"
+                        + "setTimeout(function() {}, 1);"
+                        + "self.onconnect = function(e) {"
+                        + "  const p = e.ports[0];"
+                        + "  p.onmessage = function() { setTimeout(function() { p.postMessage('ticks=' + ticks); }, 60); };"
+                        + "  p.start();"
+                        + "};";
+                    const w = new SharedWorker(URL.createObjectURL(new Blob([body])), 'timers');
+                    w.port.onmessage = e => resolve(e.data);
+                    w.port.postMessage('go');
+                    setTimeout(() => reject(new Error('worker timers broke')), 2000);
+                })"#,
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.value.unwrap(), serde_json::json!("ticks=2"));
+    }
+
     // #98: the with(self) wrapper only shadows names the scope object
     // carries — everything else fell through to the page realm, so PDD's
     // sharedWorker polyfill saw the page's MutationObserver, picked its DOM
@@ -20783,6 +20815,35 @@ fn can_play_type_follows_chromes_codec_table() {
             "onElementProto": false, "onMediaProto": true,
             "mrWebm": true, "mrOgg": false, "pip": true
         })
+    );
+}
+
+/// Key enumeration must not hide underscore names on document/performance.
+/// 1f6ede4 stripped every `_name` there (Chrome-parity for the engine's own
+/// slots) and also hid PAGE-defined keys; 抖店's React/Garfish mount path then
+/// failed hydration (publish page stayed a skeleton, no product requests).
+/// The XHS gate does not need the strip (xhs-merchant-publish is green without
+/// it), so page-defined keys stay visible.
+#[test]
+fn key_enumeration_keeps_page_underscore_keys_on_document_and_performance() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    let js = r##"
+        document._reactRootContainer = { page: true };
+        document.__pageMarker = 1;
+        performance.__pageNote = 2;
+        const has = (o, n) => [Object.keys(o), Object.getOwnPropertyNames(o), Reflect.ownKeys(o),
+            Object.keys(Object.getOwnPropertyDescriptors(o))].map((a) => a.includes(n));
+        ({
+            docMarker: has(document, '_reactRootContainer'),
+            docMarker2: has(document, '__pageMarker'),
+            perfNote: has(performance, '__pageNote')
+        })
+    "##;
+    let v = rt.evaluate(js).unwrap();
+    let t = serde_json::json!([true, true, true, true]);
+    assert_eq!(
+        v,
+        serde_json::json!({ "docMarker": t, "docMarker2": t, "perfNote": t })
     );
 }
 

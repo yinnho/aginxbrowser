@@ -16719,53 +16719,25 @@ globalThis.__diting_init = function() {
       _markNative(w);
       try { Object.defineProperty(obj, key, { value: w, writable: true, enumerable: false, configurable: true }); } catch(e) {}
     };
-    // Also strip engine `_` slots on Performance / Document. Chrome keeps
-    // those as internal slots (absent from gopn); our __hideOwn only clears
-    // enumerable. ark signV2Init/WASM probes that enumerate performance see
-    // `_noise`/`_marks`/… and document `_nid` — a face skew next to the
-    // mnsv2 install path (library-launcher fy → window.mnsv2 → XYS_).
-    const _isEngineSlotObj = (o) => {
-      try {
-        // performance is an instance of internal `_Performance`, NOT the
-        // public Performance ctor — instanceof Performance is false here.
-        if (o === globalThis.performance) return true;
-        if (o === globalThis.document) return true;
-      } catch (e) {}
-      return false;
-    };
-    const _stripEngineSlots = (names) => names.filter((n) => {
-      if (typeof n !== 'string' || n.charCodeAt(0) !== 95) return true;
-      return false;
-    });
     _patch(Object, 'getOwnPropertyNames', function(o) {
       const names = _gopn(o);
-      if (o === globalThis) return names.filter(n => !_isInternal(n));
-      if (_isEngineSlotObj(o)) return _stripEngineSlots(names);
-      return names;
+      if (o !== globalThis) return names;
+      return names.filter(n => !_isInternal(n));
     });
     _patch(Reflect, 'ownKeys', function(o) {
       const names = _ownKeys(o);
-      if (o === globalThis) return names.filter(n => !_isInternal(n));
-      if (_isEngineSlotObj(o)) return _stripEngineSlots(names);
-      return names;
+      if (o !== globalThis) return names;
+      return names.filter(n => !_isInternal(n));
     });
     _patch(Object, 'keys', function(o) {
       const names = _keys(o);
-      if (o === globalThis) return names.filter(n => !_isInternal(n));
-      if (_isEngineSlotObj(o)) return _stripEngineSlots(names);
-      return names;
+      if (o !== globalThis) return names;
+      return names.filter(n => !_isInternal(n));
     });
     _patch(Object, 'getOwnPropertyDescriptors', function(o) {
       const all = _gopds(o);
-      if (o === globalThis) {
-        for (const n of _gopn(all)) { if (_isInternal(n)) delete all[n]; }
-        return all;
-      }
-      if (_isEngineSlotObj(o)) {
-        for (const n of _gopn(all)) {
-          if (typeof n === 'string' && n.charCodeAt(0) === 95) delete all[n];
-        }
-      }
+      if (o !== globalThis) return all;
+      for (const n of _gopn(all)) { if (_isInternal(n)) delete all[n]; }
       return all;
     });
     globalThis.__diting_gopn_patched = true;
@@ -17662,7 +17634,11 @@ globalThis.__diting_name_sweep = function () {
   // constructible, no own `prototype`, correct arity, `getter/fn.call({})`
   // throws "Illegal invocation" (undefined/null receiver means the global),
   // accessors named "get <attr>". Table-built shims here failed every one.
-  const isWinLike = (t) => t === globalThis || (t !== null && typeof t === 'object' && t.window === t);
+  // Window or a worker global: both are valid receivers in Chrome. Worker code
+  // here runs under `with (chain)` (the chain proxy is `this` for bare calls),
+  // so a global-like is any object whose `self` is a self-referencing scope.
+  const isWinLike = (t) => t === globalThis || (t !== null && typeof t === 'object' &&
+    (t.window === t || t.self === t || (t.self !== null && typeof t.self === 'object' && t.self.self === t.self)));
   const illegal = () => new TypeError('Illegal invocation');
   const winFns = { setTimeout: 1, clearTimeout: 0, setInterval: 1, clearInterval: 0,
     requestAnimationFrame: 1, matchMedia: 1, getComputedStyle: 1, getSelection: 0, focus: 0, blur: 0 };
