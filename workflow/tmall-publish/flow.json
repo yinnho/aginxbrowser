@@ -196,10 +196,11 @@
   {
    "op": "eval",
    "args": {
-    "script": "(function(){var out={url:location.href.slice(0,160)};var u=location.href.match(/primaryId=(\\d+)/);if(location.href.indexOf('success.htm')>=0){out.success=true;if(u)out.item_id=u[1];out.page=document.body?document.body.innerText.slice(0,60):'';return JSON.stringify(out)}var m=window.GlobalStore&&window.GlobalStore.engine&&window.GlobalStore.engine.getModels();var gm=(m&&m.globalMessage)||{};out.successUrl=gm.successUrl||null;out.gmType=gm.type||null;var msg=gm.message;if(msg&&msg.length){out.errCode=msg[0].code;out.errMsg=String(msg[0].msg||'').slice(0,200)}var mm=String(out.successUrl||'').match(/primaryId=(\\d+)/);if(mm){out.item_id=mm[1];out.success=true}out.submits=window.__TMSUB;return JSON.stringify(out)})()"
+    "script": "(function(){var out={url:location.href.slice(0,160)};var u=location.href.match(/primaryId=(\\d+)/);if(location.href.indexOf('success.htm')>=0){out.success=true;if(u)out.item_id=u[1];return JSON.stringify(out)}var m=window.GlobalStore&&window.GlobalStore.engine&&window.GlobalStore.engine.getModels();var gm=(m&&m.globalMessage)||{};out.successUrl=gm.successUrl||null;out.gmType=gm.type||null;var msg=gm.message;if(msg&&msg.length){out.errCode=msg[0].code;out.errMsg=String(msg[0].msg||'').slice(0,200)}var mm=String(out.successUrl||'').match(/primaryId=(\\d+)/);if(mm){out.item_id=mm[1];out.success=true}out.submits=window.__TMSUB;return JSON.stringify(out)})()",
+    "timeout_ms": 60000
    },
    "save": "outcome",
-   "note": "receipt: successUrl primaryId = the live item id"
+   "note": "the success page is heavy and busy while it loads: no DOM reads on it, a generous eval budget"
   }
  ]
 }
