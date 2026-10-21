@@ -57,3 +57,10 @@ ttwid）。doudian-publish 用 `session_id` 复用直接组合。
   只在回 SSO 时有用。
 - 码是**客户端生成**的 data:png，不走网络图——probe 按
   `img[src^=data:image]`/background-image 找，别拦 get_qrcode 之类的 URL。
+
+## 登录要用新 account（2026-10-21 踩坑）
+
+默认共享 jar 里留着前几次扫码留下的 SSO cookie，之后再开登录页扫码，**cookie 会写进去但页面不跳转**
+（URL 一直停在 /login/common，看起来像"扫了没反应"）。连扫三次都落不了地，换成每次一个全新 account
+（`POST /session/create {account:"dd-fresh-<ts>", width:1440, height:900}` → navigate 登录页 → 跑本 flow 传 `session_id`）
+就 16 秒落地。给人扫的码别发静态图（60-100 秒过期，来回延迟就赶不上），起一个本机小页面按秒刷新当前二维码最稳。
