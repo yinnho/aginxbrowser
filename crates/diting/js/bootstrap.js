@@ -7394,7 +7394,7 @@ Object.defineProperty(globalThis, 'location', {
   // (matching Chrome's unforgeable Location), so the swap goes through this
   // data slot instead of redefining the accessor.
   get() { return globalThis.__diting_frame_location || _locationObj; },
-  set(url) { var r = _resolveUrl(String(url)); globalThis.__virtualUrl = r; _OPS.op_navigate(r, 'GET', ''); },
+  set(url) { globalThis.__diting_locNav(url, false); },
   configurable: false,
   enumerable: true,
 });

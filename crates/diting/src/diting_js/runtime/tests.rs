@@ -22933,3 +22933,41 @@ fn document_evaluate_xpath_subset() {
         let _ = rt.run_event_loop_bounded(300).await;
         assert!(rt.settle_quiet(500), "settled fetch is quiet again");
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_location_fragment_navigation_stays_in_document() {
+        // #280: location.hash writes used to be dropped (getter-only) and
+        // fragment-only href/assign/replace queued a full refetch.
+        let mut rt = setup_runtime("<html><body><p id=\"x\">x</p></body></html>");
+        rt.evaluate("globalThis.__hc = []; addEventListener('hashchange', e => __hc.push(e.newURL)); 1").unwrap();
+        let len0 = rt.evaluate("history.length").unwrap().as_f64().unwrap() as i64;
+
+        rt.evaluate("location.hash = 'a b'").unwrap();
+        assert_eq!(rt.evaluate("location.hash").unwrap(), "#a%20b");
+        assert_eq!(rt.evaluate("location.href").unwrap(), "http://example.com/test#a%20b");
+        assert!(rt.take_pending_navigation().is_none(), "fragment change must not refetch");
+        assert_eq!(rt.evaluate("history.length").unwrap().as_f64().unwrap() as i64, len0 + 1);
+
+        rt.evaluate("location.hash = '#a b'").unwrap();
+        assert_eq!(rt.evaluate("history.length").unwrap().as_f64().unwrap() as i64, len0 + 1,
+            "same fragment is a no-op");
+
+        rt.evaluate("location.hash = ''").unwrap();
+        assert_eq!(rt.evaluate("location.href").unwrap(), "http://example.com/test#",
+            "empty hash leaves the trailing #");
+
+        rt.evaluate("location.href = '#d'").unwrap();
+        rt.evaluate("location.replace('#e')").unwrap();
+        assert_eq!(rt.evaluate("location.hash").unwrap(), "#e");
+        assert_eq!(rt.evaluate("history.length").unwrap().as_f64().unwrap() as i64, len0 + 3,
+            "replace reuses the entry");
+        assert!(rt.take_pending_navigation().is_none());
+        assert_eq!(rt.evaluate("__hc.length").unwrap().as_f64().unwrap() as i64, 4, "hashchange per distinct fragment");
+
+        // Anything other than a fragment change is a real navigation.
+        rt.evaluate("location.search = '?q=1'").unwrap();
+        let nav = rt.take_pending_navigation().expect("search setter navigates");
+        assert_eq!(nav.0, "http://example.com/test?q=1#e", "search setter keeps the fragment");
+        rt.evaluate("location.href = '/test'").unwrap();
+        assert!(rt.take_pending_navigation().is_some(), "dropping the fragment reloads");
+    }
