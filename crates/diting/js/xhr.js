@@ -117,6 +117,22 @@ globalThis.__ditingSignerGateHold = function (xhr, url, body, gate) {
   });
 };
 
+// URL parsing in XHR.open() uses the document's encoding for the query
+// (WHATWG URL "encoding override"): in a GBK page `open('GET', '/q?名=值')`
+// sends %C3%FB=%D6%B5, not the UTF-8 bytes. Only raw non-ASCII characters are
+// re-encoded — an authored %E5%90%8D stays exactly as written. fetch() does
+// not use the override and keeps UTF-8.
+function _xhrQueryInDocCharset(url) {
+  const enc = _docEncoding();
+  if (enc === 'UTF-8') return url;
+  const m = /^([^?#]*)\?([^#]*)(#.*)?$/.exec(url);
+  if (!m || !/[^\x00-\x7f]/.test(m[2])) return url;
+  let q;
+  try { q = m[2].replace(/[^\x00-\x7f]+/g, (run) => _OPS.op_url_encode_query(run, enc, true)); }
+  catch (e) { return url; }
+  return m[1] + '?' + q + (m[3] || '');
+}
+
 globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarget {
   static UNSENT = 0;
   static OPENED = 1;
@@ -167,7 +183,7 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     this._method = /^(CONNECT|DELETE|GET|HEAD|OPTIONS|POST|PUT|TRACE)$/.test(up) ? up : String(method);
     // WebIDL USVString coercion: open(undefined) stores "undefined" in Chrome,
     // never a non-string — send() used to crash on .startsWith (#106).
-    this._url = String(url);
+    this._url = _xhrQueryInDocCharset(String(url));
     // obscura#908: open()'s third argument decides whether send() blocks for
     // the response or resolves it through the event loop.
     this._async = async_ === undefined ? true : !!async_;

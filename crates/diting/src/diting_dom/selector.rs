@@ -196,6 +196,13 @@ impl<'i> parser::Parser<'i> for DitingSelectorParser {
         true
     }
 
+    // `:nth-child(An+B of S)` / `:nth-last-child(… of S)`: same default-false
+    // gate, same swallowed-parse-error failure (the whole selector matched
+    // nothing). Matching (Component::NthOf) is built into the crate.
+    fn parse_nth_child_of(&self) -> bool {
+        true
+    }
+
     fn parse_non_ts_pseudo_class(
         &self,
         _location: cssparser::SourceLocation,

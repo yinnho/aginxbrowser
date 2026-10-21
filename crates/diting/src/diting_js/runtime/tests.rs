@@ -23082,3 +23082,53 @@ fn document_evaluate_xpath_subset() {
         let tg = rt.evaluate("__tg.slice().sort().join(',')").unwrap();
         assert_eq!(tg, "d:closed>open,e:open>closed,f:closed>open");
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_nth_child_of_selector_and_register_property() {
+        // Chrome truth (headless Chrome, 2026-10-22).
+        let mut rt = setup_runtime(
+            "<html><body><ul><li class=a>1<li>2<li class=a>3<li class=a>4</ul></body></html>",
+        );
+        let v = rt
+            .evaluate(
+                "(() => { const r = [];
+                  for (const sel of ['li:nth-child(2 of .a)', 'li:nth-child(2n of .a)', 'li:nth-child(odd of .a)', 'li:nth-last-child(1 of .a)'])
+                    r.push([...document.querySelectorAll(sel)].map(e => e.textContent).join());
+                  const T = (f) => { try { f(); return 'ok'; } catch (e) { return e.name; } };
+                  r.push(CSS.registerProperty.length);
+                  r.push(T(() => CSS.registerProperty({ name: '--a', syntax: '*' })));
+                  r.push(T(() => CSS.registerProperty({ name: 'a', syntax: '*', inherits: false })));
+                  r.push(T(() => CSS.registerProperty({ name: '--b', syntax: '*', inherits: false })));
+                  r.push(T(() => CSS.registerProperty({ name: '--b', syntax: '*', inherits: false })));
+                  r.push(T(() => CSS.registerProperty({ name: '--c', syntax: '<length>', inherits: false })));
+                  r.push(T(() => CSS.registerProperty({ name: '--d', syntax: '<length>', inherits: false, initialValue: 'red' })));
+                  r.push(T(() => CSS.registerProperty({ name: '--e', syntax: '<length>', inherits: false, initialValue: '2em' })));
+                  r.push(T(() => CSS.registerProperty({ name: '--f', syntax: '<bogus>', inherits: false, initialValue: '1' })));
+                  r.push(T(() => CSS.registerProperty({ name: '--g', syntax: '<length>|auto', inherits: true, initialValue: '10px' })));
+                  const cs = getComputedStyle(document.documentElement);
+                  r.push(cs.getPropertyValue('--g') + '|' + JSON.stringify(cs.getPropertyValue('--b')));
+                  return r.join('\\n'); })()",
+            )
+            .unwrap();
+        assert_eq!(
+            v,
+            "3\n3\n1,4\n4\n1\nTypeError\nSyntaxError\nok\nInvalidModificationError\nSyntaxError\nSyntaxError\nSyntaxError\nSyntaxError\nok\n10px|\"\""
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_xhr_open_encodes_query_in_document_charset() {
+        // moli 8c5ffea shape: XHR URLs use the document's encoding for raw
+        // non-ASCII query characters; already-percent-encoded bytes stay as
+        // authored, and a UTF-8 document is untouched.
+        let rt = setup_runtime("<html><body></body></html>");
+        rt.set_encoding("GBK");
+        let mut rt = rt;
+        let v = rt
+            .evaluate(
+                "(() => { const o = (u) => { const x = new XMLHttpRequest(); x.open('GET', u); return x._url; };
+                  return [o('/q?名=值'), o('/q?%E5%90%8D=1#名'), o('/q?a=b'), o('/path名?x=1')].join(' '); })()",
+            )
+            .unwrap();
+        assert_eq!(v, "/q?%C3%FB=%D6%B5 /q?%E5%90%8D=1#名 /q?a=b /path名?x=1");
+    }

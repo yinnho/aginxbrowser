@@ -10155,7 +10155,7 @@ globalThis.getComputedStyle = (el, pseudoElt) => {
     }
     if (defaultsKebab[rawProp]) return defaultsKebab[rawProp];
     if (defaultsKebab[kebab]) return defaultsKebab[kebab];
-    return '';
+    return globalThis.__customPropInitial?.(kebab) ?? '';
   };
 
   const target = style;
