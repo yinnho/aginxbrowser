@@ -151,7 +151,7 @@ curl -sS -X POST $BASE/fetch -H "Content-Type: application/json" -d '{
 ## Why aginxbrowser
 
 - Single Rust binary — no Chromium, no Playwright, no Puppeteer, no Docker
-- Real TLS fingerprinting (`chrome145` shape / Firefox133 / Safari / Edge; fleet UA Chrome/154) to get
+- Real TLS fingerprinting (`chrome145` shape / Firefox133 / Safari / Edge; fleet UA Chrome/145) to get
   through Cloudflare and other anti-bot defenses
 - 5-engine aggregated search including Baidu, Sogou, and WeChat — the Chinese
   web is first-class, not an afterthought

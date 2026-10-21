@@ -1,9 +1,0 @@
-{
-  "url": "https://example.com/",
-  "title": "Example Domain",
-  "content": "This domain is for use in documentation examples without needing permission. This is not a service; avoid relying on it for testing and monitoring purposes.",
-  "truncated": false,
-  "tier": "http",
-  "content_hash": "0a080719be9fbb82a86a45b80dc8c2a430fbe17dc93d23758debac092864d00f",
-  "changed_since_prev": true
-}

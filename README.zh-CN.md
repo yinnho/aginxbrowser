@@ -98,7 +98,7 @@ Agent 是照着浏览器说的话行事的，所以响应里要写清楚实际�
 - **截图渲染**：`/screenshot` 端点（`--features screenshot`），JS 渲染后的 DOM 用自有的 diting 引擎出 PNG——纯 CPU，无 Chromium，agent 的视觉输入
 - **时间线视频**：`/video` 端点把页面的动画渲成 MP4。约定���简单：页面脚本把时间线注册进 `window.__timelines`（GSAP 风格，带 `duration()` 和 `pause(t)` 就行），引擎每帧 seek 到 `t=i/fps`、画视口、RGBA 直接 pipe 给 ffmpeg 编 H.264/yuv420p。确定性是构造出来的——像素值里没有墙钟，同一页面渲两遍出同一个 MP4。服务器上要有 ffmpeg
 - **页集（PDF/PNG/PPTX/DOCX）**：`/pdf` 端点把渲好的页面切页打包——打印模式按顶层块边界分页（默认 96dpi A4，断点尽量落在块边，文字不拦腰截断），幻灯片模式每个选择器匹配自成一张页、按元素定高（HTML 写个 deck、一页一个 `.slide`，导出就是真能用的 deck）。图基 PDF：每页 JPEG 走 DCTDecode，PDF 1.4 手写打包器，零新依赖。PPTX 把同一叠页每页打一张幻灯片；DOCX 每页一个按页定尺寸的 section——两个 OOXML 容器都是手写的（stored-ZIP 打包器、时间戳写死），字节级确定性，零新依赖
-- **TLS 指纹伪装**：stealth 模式模拟 Chrome/Firefox/Safari/Edge 的 TLS 形状（默认预设 `chrome145`；舰队 UA 为 Chrome/154），可按请求切换
+- **TLS 指纹伪装**：stealth 模式模拟 Chrome/Firefox/Safari/Edge 的 TLS 形状（默认预设 `chrome145`；舰队 UA 为 Chrome/145），可按请求切换
 - **Firecrawl 兼容**：`/v1/scrape` 端点，现有 Firecrawl 客户端改 base URL 即可迁移
 - **DNS 重绑定防护**：内置 SSRF 防护 + 解析后 IP 校验
 
@@ -321,7 +321,7 @@ cargo build --release --features stealth,screenshot
 |------|------|------|
 | `AGINXBROWSER_BIND` | `0.0.0.0:8089` | 监听地址 |
 | `AGINXBROWSER_STEALTH` | 启用 | `0` 关闭 stealth（诊断用） |
-| `AGINXBROWSER_UA` | macOS Chrome/154 | 伪装 UA（TLS 默认预设仍为 `chrome145`） |
+| `AGINXBROWSER_UA` | macOS Chrome/145 | 伪装 UA（与 `chrome145` TLS 预设一致） |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language 头 |
 | `AGINXBROWSER_PROXY` | 无 | 可选回退代理。被墙源引擎（维基百科/Bing News/Hugging Face/RubyGems）先直连、失败才走此代理——海外部署无需配置；单次请求也可传 `use_proxy:true` 走代理。浏览器/session 导航到已知被墙域名（wikipedia.org、github.com 等）会自动走代理。引擎故意无视标准 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`（给别的工具设���问题），启动时见到会打警告 |
 | `AGINXBROWSER_NAV_CHAIN_LIMIT` | `10` | JS 导航链上限：页面经 `location`/表单连跳多少个文档后导航中止。计数含最初文档（10 = 首文档 + 9 跳）。合法长链（跨提供商 SSO 跳转）可调高；HTTP 3xx 重定向单独算额度（20，按 Fetch spec/浏览器对齐） |

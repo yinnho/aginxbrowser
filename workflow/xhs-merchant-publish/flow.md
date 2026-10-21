@@ -41,7 +41,7 @@
 ## 用法
 
 ```bash
-# flow 自建会话（account=xhs-qf-stable, persona_ua=Chrome/154）
+# flow 自建会话（account=xhs-qf-stable, persona_ua=Chrome/145）
 curl -sS -X POST "$BASE/flow/run" -H 'content-type: application/json' \
   -d '{"name":"xhs-merchant-publish"}'
 

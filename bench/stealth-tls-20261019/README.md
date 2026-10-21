@@ -40,3 +40,9 @@ curl -sS http://127.0.0.1:18089/health   # expect commit == tip, stealth true
 Do **not** treat JA3 as stable across GREASE; prefer JA4 + Akamai H2 hash.
 
 Chrome headless profile dirs `_chrome_profile*` are local scratch — not committed.
+
+> **2026-10-21 note.** These receipts were taken while the fleet UA still claimed Chrome/154 on a chrome145
+> handshake. The fleet UA is now Chrome/145 (matches the TLS preset) and request headers follow Chrome's
+> HTTP/2 order (`chrome_headers.rs`); the JA4 / Akamai hashes are unchanged, the UA/Sec-Ch-Ua columns and
+> the header-order result are not. Raw per-request dumps (`*.raw.json`, `*.fp.json`) were dropped from git —
+> the summaries and `INDEX.json` carry the numbers; re-run `run_probes.py` for fresh receipts.

@@ -1,8 +1,0 @@
-{
-  "url": "https://httpbin.org/headers",
-  "title": null,
-  "content": "{\n\"headers\": {\n\"Accept\": \"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7\",\n\"Accept-Encoding\": \"zstd,gzip,deflate,br\",\n\"Accept-Language\": \"zh-CN,zh;q=0.9\",\n\"Host\": \"httpbin.org\",\n\"Priority\": \"u=0, i\",\n\"Sec-Ch-Ua\": \"\\\"Not:A-Brand\\\";v=\\\"99\\\", \\\"Google Chrome\\\";v=\\\"145\\\", \\\"Chromium\\\";v=\\\"145\\\"\",\n\"Sec-Ch-Ua-Mobile\": \"?0\",\n\"Sec-Ch-Ua-Platform\": \"\\\"macOS\\\"\",\n\"Sec-Fetch-Dest\": \"document\",\n\"Sec-Fetch-Mode\": \"navigate\",\n\"Sec-Fetch-Site\": \"none\",\n\"Sec-Fetch-User\": \"?1\",\n\"Upgrade-Insecure-Requests\": \"1\",\n\"User-Agent\": \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36\",\n\"X-Amzn-Trace-Id\": \"Root=1-6ad56b2f-1a7a62f73a58463761c140ed\"\n}\n}",
-  "truncated": false,
-  "tier": "browser",
-  "content_hash": "71fa148b1f0a3d25959df9221d4d8b58efc5d00ca20743c7300813c029e6b6f2"
-}

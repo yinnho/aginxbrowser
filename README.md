@@ -98,7 +98,7 @@ The [local cache](#capabilities) builds on the same idea: search hits come back 
 - **Screenshot rendering**: `/screenshot` endpoint (opt-in `--features screenshot`) paints the JS-rendered DOM with the diting rendering engine — pure CPU, no Chromium — to PNG. Vision input for agents
 - **Timeline video**: `/video` renders a page's animation timelines to MP4 — the page's scripts register GSAP-style timelines in `window.__timelines` (`duration()` + `pause(t)`), each frame seeks to `t=i/fps` and paints the viewport, and the frames pipe into ffmpeg (H.264, yuv420p). Deterministic by construction: no wall clock in the pixel values, same render twice = same MP4. Needs ffmpeg on PATH
 - **Page set (PDF/PNG/PPTX/DOCX)**: `/pdf` cuts a rendered page into pages and packages them — print mode paginates at top-level block boundaries (default A4 @96dpi, no half-cut text where a break can land on a block edge), slides mode makes one page per CSS-selector match sized to the element (an HTML deck with one `.slide` per page exports as a real deck). Image-based PDF: per-page JPEG via DCTDecode, hand-rolled PDF 1.4 writer, zero new dependencies. PPTX packages the same pages as one slide per page; DOCX as one page-sized section per page — both hand-rolled OOXML (stored-ZIP writer, fixed timestamps), byte-deterministic, zero new dependencies
-- **TLS fingerprint spoofing**: stealth mode impersonates Chrome/Firefox/Safari/Edge TLS shapes (default preset `chrome145`; fleet UA Chrome/154), switchable per request
+- **TLS fingerprint spoofing**: stealth mode impersonates Chrome/Firefox/Safari/Edge TLS shapes (default preset `chrome145`; fleet UA Chrome/145), switchable per request
 - **Firecrawl compatible**: `/v1/scrape` endpoint — existing Firecrawl clients migrate by changing the base URL
 - **DNS rebinding protection**: built-in SSRF guard + post-resolution IP validation
 
@@ -322,7 +322,7 @@ If your network can't reach the rusty_v8 CDN (build hangs with zero progress aft
 |------|------|------|
 | `AGINXBROWSER_BIND` | `0.0.0.0:8089` | Listen address |
 | `AGINXBROWSER_STEALTH` | enabled | `0` disables stealth (for diagnostics) |
-| `AGINXBROWSER_UA` | macOS Chrome/154 | Spoofed User-Agent (TLS default preset stays `chrome145`) |
+| `AGINXBROWSER_UA` | macOS Chrome/145 | Spoofed User-Agent (matches the `chrome145` TLS preset) |
 | `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language header |
 | `AGINXBROWSER_PROXY` | none | Optional fallback proxy. Blocked-source engines (Wikipedia, Bing News, Hugging Face, RubyGems) connect directly first and fall through to this proxy only when the direct attempt fails — overseas deployments need no proxy at all; per-request `use_proxy:true` also routes fetch/search through it. Browser/session navigations to known-blocked domains (wikipedia.org, github.com, …) route through it automatically. Standard `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` are deliberately ignored by the engine (set them for other tools freely); startup logs a warning when it sees one |
 | `AGINXBROWSER_NAV_CHAIN_LIMIT` | `10` | JS navigation-chain cap: documents a page may chain via `location`/form hops before navigation aborts. The count includes the requested document (10 = initial doc + 9 hops). Raise for legit long chains (SSO handover across providers); HTTP 3xx redirects are budgeted separately (20, per Fetch spec / browser parity) |
