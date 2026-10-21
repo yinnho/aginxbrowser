@@ -20737,6 +20737,55 @@ fn media_face_lives_on_htmlmediaelement_not_element() {
     );
 }
 
+/// canPlayType / isTypeSupported answer Chrome 145's measured table (a
+/// 1068-string matrix compared against a real Chrome): a container knows a
+/// codec set, unknown codecs for a known container are "", bare known
+/// containers are "maybe", a miscased `Codecs=` parameter is "", and the
+/// method lives on HTMLMediaElement.prototype only.
+#[test]
+fn can_play_type_follows_chromes_codec_table() {
+    let mut rt = setup_runtime("<html><body></body></html>");
+    let js = r##"
+        const v = document.createElement('video');
+        const t = (x) => v.canPlayType(x);
+        ({
+            mp4Avc: t('video/mp4; codecs="avc1.42E01E, mp4a.40.2"'),
+            mp4Bare: t('video/mp4'),
+            mp4Vp9Alias: t('video/mp4; codecs="vp9"'),
+            webmVp9: t('video/webm; codecs="vp9"'),
+            webmAvc: t('video/webm; codecs="avc1.42E01E"'),
+            theora: t('video/ogg; codecs="theora"'),
+            wav: t('audio/wav'),
+            mp3: t('audio/mpeg'),
+            audioMp4Aac: t('audio/mp4; codecs="mp4a.40.2"'),
+            unquoted: t('video/webm; codecs=vp9, opus'),
+            miscased: t('video/webm; Codecs="VP9"'),
+            unknown: t('foo/bar'),
+            mseBare: MediaSource.isTypeSupported('video/mp4'),
+            mseAvc: MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E"'),
+            mseMpeg: MediaSource.isTypeSupported('audio/mpeg'),
+            onElementProto: 'canPlayType' in Element.prototype,
+            onMediaProto: Object.prototype.hasOwnProperty.call(HTMLMediaElement.prototype, 'canPlayType'),
+            mrWebm: MediaRecorder.isTypeSupported('video/webm;codecs=vp9'),
+            mrOgg: MediaRecorder.isTypeSupported('audio/ogg'),
+            pip: document.pictureInPictureEnabled
+        })
+    "##;
+    let v = rt.evaluate(js).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "mp4Avc": "probably", "mp4Bare": "maybe", "mp4Vp9Alias": "",
+            "webmVp9": "probably", "webmAvc": "", "theora": "", "wav": "maybe",
+            "mp3": "probably", "audioMp4Aac": "probably", "unquoted": "probably",
+            "miscased": "", "unknown": "",
+            "mseBare": false, "mseAvc": true, "mseMpeg": true,
+            "onElementProto": false, "onMediaProto": true,
+            "mrWebm": true, "mrOgg": false, "pip": true
+        })
+    );
+}
+
 /// #53: `indexedDB.open` used to resolve success immediately and never
 /// dispatch `onupgradeneeded`, so schema-installing openers (Dexie,
 /// localForage, Firebase) never settled their open promise and the app

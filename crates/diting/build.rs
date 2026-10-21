@@ -64,6 +64,7 @@ const SNAPSHOT_SCRIPTS: &[(&str, &str)] = &[
     // the file header). Loads after every behavior module, before the
     // sweeps.
     ("global_surface.js", include_str!("js/global_surface.js")),
+    ("media_late.js", include_str!("js/media_late.js")),
     // 300015 P3: Chrome-exact toDataURL/toBlob bytes for blank canvases
     // (generated — see the file header). Wraps bootstrap's toDataURL; must
     // load before the sweep so the wrappers get native-marked with the rest.

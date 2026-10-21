@@ -2,18 +2,73 @@
 // Split out of bootstrap.js wholesale (god-file ratchet, pure move): top level only
 // declares bindings; every bootstrap helper it names is touched at call time.
 
-// probes audio/video elements with canPlayType over a fixed codec list and
-// hashes the non-empty answers (real Chrome: 8 of 9).
-Element.prototype.canPlayType = function(type) {
-  const t = String(type || '').toLowerCase();
-  if (!t) return '';
-  if (/x-matroska/.test(t)) return '';
-  if (/audio\/x-m4a|audio\/mp4|audio\/aiff/.test(t)) return 'maybe';
-  if (/^audio\/(aac|mpeg|mp3|wav|ogg|flac)|^video\/(mp4|webm|ogg)/.test(t)) return 'probably';
-  if (/codecs=("|')?(vp8|vp9|avc1|vorbis|opus|theora|1)("|')?/.test(t)) return 'probably';
+// Chrome 145 (macOS, proprietary codecs) answers, measured as a 1068-string
+// matrix against a real Chrome: a container knows a set of codec families, a
+// type is "probably" when every listed codec is in its set, "maybe" for a
+// known container with no (or an empty) codec list, "" otherwise. Feature
+// probes hash these answers, so the whole table has to be right, not just
+// the common rows.
+const _CODEC_FAMILY = (c) => {
+  c = c.trim().toLowerCase();
+  if (/^avc[13]\.[0-9a-f]{6}$/.test(c)) return 'avc';
+  if (/^mp4a\.40\.(2|5)$/.test(c)) return 'aac';
+  if (/^mp4a\.(69|6b)$/.test(c)) return 'mp3a';
+  if (/^(hev1|hvc1)\./.test(c)) return 'hevc';
+  if (/^av01\./.test(c)) return 'av1';
+  if (/^vp09\./.test(c)) return 'vp09';
+  if (c === 'vp9') return 'vp9';
+  if (c === 'vp8' || c === 'vp8.0') return 'vp8';
+  if (c === 'vorbis' || c === 'opus' || c === 'flac' || c === 'mp3') return c;
   return '';
 };
-_markNative(Element.prototype.canPlayType);
+const _CPT_ALL = ['avc', 'aac', 'mp3a', 'hevc', 'av1', 'vp09', 'opus', 'flac', 'mp3'];
+const _CPT_MIME = {
+  'video/mp4': _CPT_ALL,
+  'video/webm': ['av1', 'vp8', 'vp9', 'vp09', 'vorbis', 'opus'],
+  'video/ogg': ['vp8', 'vorbis', 'opus', 'flac'],
+  'video/x-matroska': ['avc', 'aac', 'mp3a', 'hevc', 'av1', 'vp8', 'vp09', 'vorbis', 'opus', 'flac', 'mp3'],
+  'video/3gpp': ['avc', 'aac'],
+  'video/x-m4v': ['avc', 'aac'],
+  'audio/mp4': ['aac', 'mp3a', 'opus', 'flac', 'mp3'],
+  'audio/mpeg': ['mp3a', 'mp3'],
+  'audio/webm': ['vorbis', 'opus'],
+  'audio/ogg': ['vorbis', 'opus', 'flac'],
+  'audio/x-m4a': ['aac'],
+  'audio/mpegurl': ['avc', 'aac', 'mp3a', 'mp3'],
+  'audio/x-mpegurl': ['avc', 'aac', 'mp3a', 'mp3'],
+  'audio/wav': [], 'audio/x-wav': [],
+};
+const _CPT_BARE_PROBABLY = new Set(['audio/mpeg', 'audio/mp3', 'audio/flac', 'audio/aac']);
+function _parseMediaType(type) {
+  const parts = String(type).split(';');
+  const mime = parts[0].trim().toLowerCase();
+  let codecs = null;
+  for (let i = 1; i < parts.length; i++) {
+    if (/^\s*codecs\s*=/i.test(parts[i]) && !/^\s*codecs\s*=/.test(parts[i])) return { mime, codecs: null, bad: true };
+    const m = /^\s*codecs\s*=\s*(?:"([^"]*)"|(.*?))\s*$/.exec(parts[i]);
+    if (m) { codecs = (m[1] !== undefined ? m[1] : m[2]).split(',').map((x) => x.trim()).filter(Boolean); break; }
+  }
+  // A "codecs" parameter that is present but empty still counts as "none given".
+  return { mime, codecs };
+}
+function _cptAnswer(type) {
+  const { mime, codecs, bad } = _parseMediaType(type);
+  if (bad) return '';
+  const known = Object.prototype.hasOwnProperty.call(_CPT_MIME, mime);
+  if (!codecs || !codecs.length) {
+    if (_CPT_BARE_PROBABLY.has(mime)) return 'probably';
+    return known ? 'maybe' : '';
+  }
+  if (mime === 'audio/mp3') return '';
+  if (!known) return '';
+  const ok = _CPT_MIME[mime];
+  return codecs.every((c) => ok.indexOf(_CODEC_FAMILY(c)) >= 0 && _CODEC_FAMILY(c) !== '') ? 'probably' : '';
+}
+// Chrome's home is HTMLMediaElement.prototype; fall back to Element only when
+// the media interfaces are not defined yet at this point of the bundle.
+(globalThis.HTMLMediaElement ? globalThis.HTMLMediaElement.prototype : Element.prototype).canPlayType =
+  function canPlayType(type) { return _cptAnswer(type); };
+_markNative((globalThis.HTMLMediaElement ? globalThis.HTMLMediaElement.prototype : Element.prototype).canPlayType);
 
 // ---- MSE (MediaSource) surface ----------------------------------------
 //
@@ -322,9 +377,13 @@ globalThis.MediaSource = class MediaSource extends _MseEventTarget {
     if (arguments.length === 0) {
       throw new TypeError("Failed to execute 'isTypeSupported' on 'MediaSource': 1 argument required, but only 0 present.");
     }
-    // Generous by design: mount gates probe mp4/webm container strings
-    // (avc1/hevc/av01 codec variants all ride video/mp4).
-    return /^(?:audio|video)\/(?:mp4|webm)\b/i.test(String(type));
+    // Same codec table as canPlayType, but MSE wants an explicit codec list
+    // for mp4/webm (Chrome: bare "video/mp4" is false) and accepts audio/mpeg.
+    const { mime, codecs } = _parseMediaType(type);
+    if (mime === 'audio/mpeg') return !codecs || !codecs.length || _cptAnswer(type) === 'probably';
+    if (!/^(?:audio|video)\/(?:mp4|webm)$/.test(mime)) return false;
+    if (!codecs || !codecs.length) return false;
+    return _cptAnswer(type) === 'probably';
   }
   addSourceBuffer(mime) {
     if (this.readyState !== 'open') {
