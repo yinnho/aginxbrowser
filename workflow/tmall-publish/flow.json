@@ -187,16 +187,16 @@
   {
    "op": "wait",
    "args": {
-    "predicate": "(function(){var m=window.GlobalStore.engine.getModels();var gm=m.globalMessage||{};if(gm.type==='success'||String(gm.successUrl||'').indexOf('success.htm')>=0)return true;if(location.href.indexOf('success.htm')>=0)return true;var msg=gm.message;return !!(msg&&msg.length&&String(msg[0].code||'').indexOf('IC_')===0)})()",
+    "predicate": "(function(){if(location.href.indexOf('success.htm')>=0)return true;var m=window.GlobalStore&&window.GlobalStore.engine&&window.GlobalStore.engine.getModels();if(!m)return false;var gm=m.globalMessage||{};if(gm.type==='success'||String(gm.successUrl||'').indexOf('success.htm')>=0)return true;var msg=gm.message;return !!(msg&&msg.length&&String(msg[0].code||'').indexOf('IC_')===0)})()",
     "timeout_ms": "{{submit_timeout_ms}}"
    },
    "save": "answered",
-   "note": "verdict: globalMessage.successUrl (green), IC_* error (red), or success.htm redirect"
+   "note": "success lands on a NEW page (tmall/success.htm) where GlobalStore no longer exists — test the URL first, never touch GlobalStore before it"
   },
   {
    "op": "eval",
    "args": {
-    "script": "(function(){var out={url:location.href.slice(0,140)};var m=window.GlobalStore.engine.getModels();var gm=m.globalMessage||{};out.successUrl=gm.successUrl||null;out.gmType=gm.type||null;var msg=gm.message;if(msg&&msg.length){out.errCode=msg[0].code;out.errMsg=String(msg[0].msg||'').slice(0,200)}var mm=String(out.successUrl||'').match(/primaryId=(\\d+)/);if(mm)out.item_id=mm[1];out.submits=window.__TMSUB;return JSON.stringify(out)})()"
+    "script": "(function(){var out={url:location.href.slice(0,160)};var u=location.href.match(/primaryId=(\\d+)/);if(location.href.indexOf('success.htm')>=0){out.success=true;if(u)out.item_id=u[1];out.page=document.body?document.body.innerText.slice(0,60):'';return JSON.stringify(out)}var m=window.GlobalStore&&window.GlobalStore.engine&&window.GlobalStore.engine.getModels();var gm=(m&&m.globalMessage)||{};out.successUrl=gm.successUrl||null;out.gmType=gm.type||null;var msg=gm.message;if(msg&&msg.length){out.errCode=msg[0].code;out.errMsg=String(msg[0].msg||'').slice(0,200)}var mm=String(out.successUrl||'').match(/primaryId=(\\d+)/);if(mm){out.item_id=mm[1];out.success=true}out.submits=window.__TMSUB;return JSON.stringify(out)})()"
    },
    "save": "outcome",
    "note": "receipt: successUrl primaryId = the live item id"
