@@ -176,7 +176,7 @@ jobs:
         run: |
           curl -fsSL https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz | sudo tar -xJ -C /opt
           echo "/opt/zig-aarch64-linux-0.16.0" >> "$GITHUB_PATH"
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-zigbuild
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -204,7 +204,7 @@ jobs:
           grep -q "listening on" smoke.log || { echo "--- smoke output ---"; cat smoke.log; exit 1; }
           head -1 smoke.log
       - name: Upload actions artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: aginxbrowser-aarch64-musl
           path: |
@@ -243,7 +243,7 @@ jobs:
         run: |
           curl -fsSL https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz | sudo tar -xJ -C /opt
           echo "/opt/zig-aarch64-linux-0.16.0" >> "$GITHUB_PATH"
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-zigbuild
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -273,7 +273,7 @@ jobs:
           grep -q "listening on" smoke.log || { echo "--- smoke output ---"; cat smoke.log; exit 1; }
           head -1 smoke.log
       - name: Upload actions artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: aginxbrowser-aarch64-musl-screenshot
           path: |
