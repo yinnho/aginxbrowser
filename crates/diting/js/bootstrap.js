@@ -16725,13 +16725,9 @@ globalThis.__diting_init = function() {
     const _keys = Object.keys;
     const _gopds = Object.getOwnPropertyDescriptors;
     const _patch = (obj, key, impl) => {
-      // Method-shorthand shell: Chrome's Object.keys & co. are plain
-      // natives — not constructible and no own `prototype`. A bare
-      // `function(o){}` impl has both, which any hooked-native check reads
-      // (xhs b1 x45).
-      const w = ({ [key](o) { return impl.apply(this, arguments); } })[key];
-      _markNative(w);
-      try { Object.defineProperty(obj, key, { value: w, writable: true, enumerable: false, configurable: true }); } catch(e) {}
+      _markNative(impl);
+      try { Object.defineProperty(impl, 'name', { value: key }); } catch(e) {}
+      try { Object.defineProperty(obj, key, { value: impl, writable: true, enumerable: false, configurable: true }); } catch(e) {}
     };
     _patch(Object, 'getOwnPropertyNames', function(o) {
       const names = _gopn(o);
@@ -17597,29 +17593,6 @@ globalThis.__diting_name_sweep = function () {
   };
   sweep(globalThis);
   if (globalThis.Window && Window.prototype) sweep(Window.prototype);
-  // WebIDL accessors report "get <attr>" / "set <attr>" as their name, so
-  // toString() answers "function get webdriver() { [native code] }".
-  // Table-built accessors here were anonymous ("function () { [native code] }"),
-  // and anti-tamper loaders (xhs mnsv2 reads Navigator.prototype.webdriver's
-  // getter) treat that as a patched navigator and quietly skip installing.
-  // Only nameless functions are renamed: one function shared by several
-  // keys keeps whatever name it already has.
-  const nameAccessors = (o) => {
-    let keys;
-    try { keys = Object.getOwnPropertyNames(o); } catch (e) { return; }
-    for (let i = 0; i < keys.length; i++) {
-      const k = keys[i];
-      let d;
-      try { d = Object.getOwnPropertyDescriptor(o, k); } catch (e) { continue; }
-      if (!d) continue;
-      for (const w of ['get', 'set']) {
-        const f = d[w];
-        if (typeof f === 'function' && (f.name === '' || f.name === w)) {
-          try { Object.defineProperty(f, 'name', { value: w + ' ' + k, configurable: true }); } catch (e) {}
-        }
-      }
-    }
-  };
   // Detached EventTarget calls: `const add = document.addEventListener;
   // add(type, fn)` runs with `this` undefined, and Chrome falls back to the
   // global object instead of throwing. Here the registry keyed a WeakMap on
@@ -17642,61 +17615,6 @@ globalThis.__diting_name_sweep = function () {
       _globalThisFixed.add(w);
       try { Object.defineProperty(P, m, { value: w, writable: d.writable, enumerable: d.enumerable, configurable: d.configurable }); } catch (e) {}
     }
-  }
-  // Window operations/attributes the anti-bot lie detector (xhs b1 field
-  // x82 / mnsv2 siblings) probes for a native shape. Chrome: not
-  // constructible, no own `prototype`, correct arity, `getter/fn.call({})`
-  // throws "Illegal invocation" (undefined/null receiver means the global),
-  // accessors named "get <attr>". Table-built shims here failed every one.
-  // Window or a worker global: both are valid receivers in Chrome. Worker code
-  // here runs under `with (chain)` (the chain proxy is `this` for bare calls),
-  // so a global-like is any object whose `self` is a self-referencing scope.
-  const isWinLike = (t) => t === globalThis || (t !== null && typeof t === 'object' &&
-    (t.window === t || t.self === t || (t.self !== null && typeof t.self === 'object' && t.self.self === t.self)));
-  const illegal = () => new TypeError('Illegal invocation');
-  const winFns = { setTimeout: 1, clearTimeout: 0, setInterval: 1, clearInterval: 0,
-    requestAnimationFrame: 1, matchMedia: 1, getComputedStyle: 1, getSelection: 0, focus: 0, blur: 0 };
-  for (const k of Object.keys(winFns)) {
-    const d = Object.getOwnPropertyDescriptor(globalThis, k);
-    if (!d || typeof d.value !== 'function' || _globalThisFixed.has(d.value)) continue;
-    const orig = d.value;
-    const w = ({ [k]() {
-      if (this != null && !isWinLike(this)) throw illegal();
-      return orig.apply(this == null ? globalThis : this, arguments);
-    } })[k];
-    try { Object.defineProperty(w, 'length', { value: winFns[k], configurable: true }); } catch (e) {}
-    _markNative(w);
-    _globalThisFixed.add(w);
-    try { Object.defineProperty(globalThis, k, { value: w, writable: d.writable, enumerable: d.enumerable, configurable: d.configurable }); } catch (e) {}
-  }
-  for (const k of ['isSecureContext', 'scrollX', 'scrollY', 'pageXOffset', 'pageYOffset']) {
-    const d = Object.getOwnPropertyDescriptor(globalThis, k);
-    if (!d || typeof d.get !== 'function' || _globalThisFixed.has(d.get)) continue;
-    const og = d.get, os = d.set;
-    const g = Object.getOwnPropertyDescriptor({ get [k]() {
-      if (this != null && !isWinLike(this)) throw illegal();
-      return og.call(this == null ? globalThis : this);
-    } }, k).get;
-    _markNative(g); _globalThisFixed.add(g);
-    let st;
-    if (typeof os === 'function') {
-      st = Object.getOwnPropertyDescriptor({ set [k](v) {
-        if (this != null && !isWinLike(this)) throw illegal();
-        os.call(this == null ? globalThis : this, v);
-      } }, k).set;
-      _markNative(st); _globalThisFixed.add(st);
-    }
-    try { Object.defineProperty(globalThis, k, { get: g, set: st, enumerable: d.enumerable, configurable: d.configurable }); } catch (e) {}
-  }
-  const gnames = Object.getOwnPropertyNames(globalThis);
-  for (let i = 0; i < gnames.length; i++) {
-    const g = gnames[i];
-    if (g.startsWith('_') || g.includes('diting')) continue;
-    let C;
-    try { C = globalThis[g]; } catch (e) { continue; }
-    if (typeof C !== 'function') continue;
-    nameAccessors(C);
-    if (C.prototype && typeof C.prototype === 'object') nameAccessors(C.prototype);
   }
 };
 globalThis.__diting_name_sweep();

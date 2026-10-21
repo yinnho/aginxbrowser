@@ -232,9 +232,8 @@ class _IframeWindow {
     // `in` guard above skips them because the prototype chain already has
     // them. Anti-bot window-vs-clean-iframe diffs (xhs b1 field x82) list
     // every name that is own on the main window but not on a fresh frame.
-    // Functions are shared (their receiver check accepts any window-like
-    // `this`); accessors get frame-local getters so the frame never reads the
-    // main window's scroll state.
+    // Functions are shared; accessors get frame-local getters so the frame
+    // never reads the main window's scroll state.
     const __ownForced = ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
       'requestAnimationFrame', 'isSecureContext', 'scrollX', 'scrollY', 'pageXOffset',
       'pageYOffset', 'matchMedia', 'getComputedStyle', 'getSelection', 'focus', 'blur'];
