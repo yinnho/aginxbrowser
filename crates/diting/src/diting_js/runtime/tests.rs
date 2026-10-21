@@ -23132,3 +23132,32 @@ fn document_evaluate_xpath_subset() {
             .unwrap();
         assert_eq!(v, "/q?%C3%FB=%D6%B5 /q?%E5%90%8D=1#名 /q?a=b /path名?x=1");
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_radio_indeterminate_and_details_attribute_toggle() {
+        // Chrome truth (headless Chrome, 2026-10-22).
+        let mut rt = setup_runtime(
+            "<html><body><form id=f1><input type=radio name=g id=r1><input type=radio name=g id=r2 checked></form>\
+             <form id=f2><input type=radio name=g id=r3><input type=radio name=g id=r4></form>\
+             <input type=radio name=h id=r5><input type=radio id=r6><input type=radio id=r7 checked>\
+             <details id=d><summary>s</summary>x</details></body></html>",
+        );
+        let v = rt
+            .evaluate(
+                "(() => { const r = [];
+                  r.push(['r1','r2','r3','r4','r5','r6','r7'].map(i => document.getElementById(i).matches(':indeterminate')).join());
+                  r2.checked = false; r.push(r1.matches(':indeterminate') + ',' + r2.matches(':indeterminate'));
+                  r5.checked = true; r.push(r5.matches(':indeterminate'));
+                  globalThis.__tg = []; d.addEventListener('toggle', e => __tg.push(e.oldState + '>' + e.newState));
+                  d.setAttribute('open', '');
+                  return r.join('|'); })()",
+            )
+            .unwrap();
+        assert_eq!(v, "false,false,true,true,true,true,false|true,true|false");
+        let _ = rt.run_event_loop_bounded(100).await;
+        rt.evaluate("d.removeAttribute('open')").unwrap();
+        let _ = rt.run_event_loop_bounded(100).await;
+        rt.evaluate("(d.setAttribute('open', ''), d.removeAttribute('open'))").unwrap();
+        let _ = rt.run_event_loop_bounded(100).await;
+        assert_eq!(rt.evaluate("__tg.join()").unwrap(), "closed>open,open>closed,closed>closed");
+    }

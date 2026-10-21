@@ -259,6 +259,38 @@ impl<'a> DomElement<'a> {
         false
     }
 
+    /// A radio is :indeterminate when nothing in its group is checked. The
+    /// group is the same-named radios under the same form owner (nearest
+    /// ancestor <form>, else the whole tree); a nameless radio is its own group.
+    fn radio_group_unchecked(&self, me: &crate::diting_dom::tree::Node) -> bool {
+        let checked = |n: &crate::diting_dom::tree::Node| n.live_checked().unwrap_or_else(|| n.get_attribute("checked").is_some());
+        if checked(me) {
+            return false;
+        }
+        let name = me.get_attribute("name").unwrap_or("").to_string();
+        if name.is_empty() {
+            return true;
+        }
+        let form_of = |id: NodeId| {
+            self.tree.ancestors(id).into_iter().find(|a| {
+                self.tree.with_node(*a, |n| n.as_element().is_some_and(|e| e.local.as_str() == "form")).unwrap_or(false)
+            })
+        };
+        let owner = form_of(self.node_id);
+        let scope = owner.or_else(|| self.tree.tree_scope_root(self.node_id)).unwrap_or_else(|| self.tree.document());
+        !self.tree.descendants(scope).into_iter().any(|id| {
+            self.tree
+                .with_node(id, |n| {
+                    n.as_element().is_some_and(|e| e.local.as_str() == "input")
+                        && n.get_attribute("type").is_some_and(|t| t.eq_ignore_ascii_case("radio"))
+                        && n.get_attribute("name") == Some(name.as_str())
+                        && checked(n)
+                })
+                .unwrap_or(false)
+                && form_of(id) == owner
+        })
+    }
+
     /// Is this a form control element that `:enabled`/`:disabled` apply to?
     fn is_form_control(&self) -> bool {
         self.tree
@@ -619,10 +651,11 @@ impl<'a> Element for DomElement<'a> {
             PseudoClass::Indeterminate => self
                 .tree
                 .with_node(self.node_id, |n| match n.as_element().map(|e| e.local.as_str()) {
-                    Some("input") => {
-                        n.get_attribute("type").is_some_and(|t| t.eq_ignore_ascii_case("checkbox"))
-                            && n.live_indeterminate()
-                    }
+                    Some("input") => match n.get_attribute("type").map(|t| t.to_ascii_lowercase()).as_deref() {
+                        Some("checkbox") => n.live_indeterminate(),
+                        Some("radio") => self.radio_group_unchecked(n),
+                        _ => false,
+                    },
                     Some("progress") => n.get_attribute("value").is_none(),
                     _ => false,
                 })

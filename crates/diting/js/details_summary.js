@@ -13,10 +13,13 @@
       const oldState = pending.get(el);
       pending.delete(el);
       const newState = el.hasAttribute('open') ? 'open' : 'closed';
-      if (newState === oldState) return;
       try { el.dispatchEvent(new ToggleEvent('toggle', { oldState, newState })); } catch (e) {}
     }, 0);
   };
+  // setAttribute/removeAttribute('open') call this BEFORE the write, so the old
+  // state is still readable; the timer compares it with whatever the attribute
+  // is by then (a flip-flop within one turn still fires one event, closed>closed, as in Chrome).
+  globalThis.__detailsAttr = (el) => { if (el.localName === 'details') notify(el, el.hasAttribute('open')); };
   Object.defineProperty(D, 'open', {
     enumerable: true, configurable: true,
     get() { return this.hasAttribute('open'); },
