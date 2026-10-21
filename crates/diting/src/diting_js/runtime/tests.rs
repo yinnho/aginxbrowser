@@ -23053,3 +23053,32 @@ fn document_evaluate_xpath_subset() {
         // The srcdoc frame in the shadow tree loads on a later turn.
         assert_eq!(rt.evaluate("globalThis.__shadowSrcdocLoaded === true").unwrap(), true);
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_summary_click_toggles_details() {
+        // #283, shape checked against headless Chrome.
+        let mut rt = setup_runtime(
+            "<html><body><details id=d><summary id=s>sum <b id=bb>bold</b> <a id=lnk href=\"#x\">l</a></summary>body</details>\
+             <details id=e name=g open><summary>e</summary>x</details><details id=f name=g><summary>f</summary>y</details>\
+             <details id=n><div>no summary</div></details></body></html>",
+        );
+        let v = rt
+            .evaluate(
+                "(() => { const r = []; globalThis.__tg = [];
+                  for (const x of [d, e, f]) x.addEventListener('toggle', ev => __tg.push(x.id + ':' + ev.oldState + '>' + ev.newState));
+                  r.push(typeof d.open + d.open);
+                  s.click(); r.push(d.open);
+                  bb.click(); r.push(d.open);
+                  lnk.addEventListener('click', ev => ev.preventDefault()); lnk.click(); r.push(d.open);
+                  s.click();
+                  n.querySelector('div').click(); r.push('n' + n.open);
+                  f.open = true; r.push(e.open + ',' + f.open);
+                  const sm = document.createElement('summary'); d.append(sm); sm.click(); r.push('second' + d.open);
+                  return r.join('|'); })()",
+            )
+            .unwrap();
+        assert_eq!(v, "booleanfalse|true|false|false|nfalse|false,true|secondtrue");
+        let _ = rt.run_event_loop_bounded(100).await;
+        let tg = rt.evaluate("__tg.slice().sort().join(',')").unwrap();
+        assert_eq!(tg, "d:closed>open,e:open>closed,f:closed>open");
+    }

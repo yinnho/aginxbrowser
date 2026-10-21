@@ -1720,6 +1720,7 @@ function _commitPreClickFlip(st) {
 // ('label' | 'link' | 'submit') or null — the trusted CDP path uses the
 // return value to gate its triple-click select-all tail.
 function _postClickActivation(el) {
+  if (globalThis.__summaryActivation(el)) return 'summary';
   const tag = el.tagName;
   // Interactive elements keep their own activation, so a control nested
   // inside a label toggles once instead of forwarding through the label

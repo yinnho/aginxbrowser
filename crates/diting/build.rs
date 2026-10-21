@@ -31,6 +31,7 @@ const SNAPSHOT_SCRIPTS: &[(&str, &str)] = &[
     ("webrtc.js", include_str!("js/webrtc.js")),
     ("location_nav.js", include_str!("js/location_nav.js")),
     ("list_reflect.js", include_str!("js/list_reflect.js")),
+    ("details_summary.js", include_str!("js/details_summary.js")),
     ("fetch.js", include_str!("js/fetch.js")),
     // Ratchet splits (pure moves): the audio/speechSynthesis faces, the
     // Worker family, media_source, iframe_realm, range_selection,
