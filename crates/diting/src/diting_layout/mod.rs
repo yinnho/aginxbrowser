@@ -982,13 +982,6 @@ fn build_word_leaves(
         } else {
             line_height + shift_pad(shift, leaf_descent(fonts, seg_size, bold))
         };
-        let style = Style {
-            size: Size {
-                width: Dimension::length(width.max(0.0)),
-                height: Dimension::length(height.max(0.0)),
-            },
-            ..Style::default()
-        };
         let leaf = TextLeaf::Word {
             text: seg_text.to_string(),
             font_size: seg_size,
@@ -1000,7 +993,7 @@ fn build_word_leaves(
             mono,
             han,
         };
-        let id = taffy_tree.new_leaf_with_context(style, leaf).ok();
+        let id = Some(taffy_tree.new_word(width.max(0.0), height.max(0.0), leaf));
         if let (Some(id), Some(node)) = (id, src_node) {
             // The leaf paints one token; the node's chars begin `a` chars
             // before it, so node-local = leaf char + a.
@@ -1175,12 +1168,7 @@ fn run_wrapper_style(ws: WhiteSpace) -> Style {
 /// where Chrome lets the unbreakable content overflow instead.
 fn pin_leaf_widths(taffy_tree: &mut TaffyTree<TextLeaf>, leaves: &[taffy::tree::NodeId]) {
     for &l in leaves {
-        let mut st = match taffy_tree.style(l) {
-            Ok(s) => s.clone(),
-            Err(_) => continue,
-        };
-        st.flex_shrink = 0.0;
-        let _ = taffy_tree.set_style(l, st);
+        taffy_tree.pin_shrink(l);
     }
 }
 
