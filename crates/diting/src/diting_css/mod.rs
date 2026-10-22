@@ -2111,6 +2111,9 @@ pub enum Display {
     Table,
     TableRow,
     TableCell,
+    /// `display: table-caption`: a table's caption box. Its text counts toward
+    /// the table's minimum width only, never its maximum.
+    TableCaption,
     None,
 }
 
@@ -3860,6 +3863,7 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 "table" | "inline-table" => Some(Display::Table),
                 "table-row" => Some(Display::TableRow),
                 "table-cell" => Some(Display::TableCell),
+                "table-caption" => Some(Display::TableCaption),
                 "none" => Some(Display::None),
                 _ => return false,
             };

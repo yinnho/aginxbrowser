@@ -30,7 +30,7 @@ pub(super) fn to_taffy_style(style: &ComputedStyle, pct_h_resolves: bool) -> Sty
     s.display = match display {
         CssDisplay::Block if promote => Display::Flex,
         CssDisplay::TableCell if promote => Display::Flex,
-        CssDisplay::Block | CssDisplay::TableCell => Display::Block,
+        CssDisplay::Block | CssDisplay::TableCell | CssDisplay::TableCaption => Display::Block,
         CssDisplay::Flex => Display::Flex,
         CssDisplay::Grid => Display::Grid,
         // The inline/IFC stand-in is a wrapping flex row (upstream model).

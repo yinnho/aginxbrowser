@@ -7128,6 +7128,48 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn test_table_caption_sizes_the_table_by_its_longest_word_only() {
+        // Chrome truth (headless Chrome, 2026-10-22): a floated display:table
+        // figure with a long display:table-caption is as wide as its content
+        // (100), the caption fills that width; a caption holding one long
+        // unbreakable word widens the table to that word (292). Wikipedia's
+        // thumbnails are exactly this shape (#303).
+        let mut rt = setup_runtime(
+            "<html><head><style>body{margin:0;font:16px/20px serif}</style></head><body>
+              <figure id=f style=\"display:table;float:right;margin:0\"><div style=\"width:100px;height:50px\"></div><figcaption id=c style=\"display:table-caption;caption-side:bottom\">This is a fairly long caption sentence that would be much wider than the image if it counted toward the width of the table</figcaption></figure>
+              <figure id=g style=\"display:table;float:right;clear:right;margin:0\"><div style=\"width:30px;height:20px\"></div><figcaption id=h style=\"display:table-caption\">Unbreakableextraordinarilylongcaptionword</figcaption></figure>
+             </body></html>",
+        );
+        let v = rt
+            .evaluate(
+                "(() => { const w = id => Math.round(document.getElementById(id).getBoundingClientRect().width);
+                  return JSON.stringify([w('f'), w('c'), w('g') > 100 && w('h') === w('g'), getComputedStyle(document.getElementById('c')).display]); })()",
+            )
+            .unwrap();
+        assert_eq!(v, "[100,100,true,\"table-caption\"]");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_hidden_children_do_not_cut_the_text_run() {
+        // Chrome truth (headless Chrome, 2026-10-22): `<link>`, `<meta>` and a
+        // display:none <br> between words build no box, so the paragraph wraps
+        // exactly like the same text without them (2 lines at 500px); the
+        // engine broke the line at each one (5 lines) - Wikipedia's category
+        // <link>s sit inside paragraphs (#304).
+        let mut rt = setup_runtime(
+            "<html><head><style>body{margin:0;font:16px/20px serif} p{width:500px;margin:0} .h{display:none}</style></head><body>
+              <p id=a>alpha beta gamma <link rel=x href=./a> delta epsilon <meta name=y> zeta eta theta <br class=h> iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega</p>
+              <p id=b>alpha beta gamma  delta epsilon  zeta eta theta  iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega</p>
+             </body></html>",
+        );
+        let v = rt
+            .evaluate("(() => { const h = id => Math.round(document.getElementById(id).getBoundingClientRect().height); return h('a') + ':' + h('b'); })()")
+            .unwrap();
+        let (a, b) = v.as_str().unwrap().split_once(':').unwrap();
+        assert_eq!(a, b, "hidden children must not add lines (a={a}, b={b})");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn test_webcrypto_ed25519_vector_and_roundtrips() {
         // RFC 8032 section 7.1 test 1 (empty message) pins the curve math;
         // the rest exercises every import/export format and the usage rules.

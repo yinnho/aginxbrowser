@@ -89,7 +89,7 @@ pub(super) fn eligible(
             return false;
         }
         if s.float_side.is_some() {
-            if !matches!(s.width, Some(Length::Px(_)) | Some(Length::Percent(_))) {
+            if !matches!(s.width, None | Some(Length::Px(_)) | Some(Length::Percent(_))) {
                 return false;
             }
             floats += 1;

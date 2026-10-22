@@ -1848,6 +1848,7 @@ fn build_normal_sibling(
         .and_then(|s| s.display)
         .or(if is_text { Some(CssDisplay::Inline) } else { Some(CssDisplay::Block) });
     let inline_level = matches!(child_display, Some(CssDisplay::Inline));
+    if !is_text && child_display == Some(CssDisplay::None) { return; } // hidden: no box, must not cut the run
     let out_of_flow = styles.get(&child).is_some_and(|s| {
         matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
     });
@@ -2219,6 +2220,7 @@ fn build_flow_column(
             .and_then(|s| s.display)
             .or(if is_text { Some(CssDisplay::Inline) } else { Some(CssDisplay::Block) });
         let inline_level = matches!(child_display, Some(CssDisplay::Inline));
+        if !is_text && child_display == Some(CssDisplay::None) { continue; } // hidden: no box, must not cut the run
         let out_of_flow = styles.get(&child).is_some_and(|s| {
             matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
         });
@@ -2504,6 +2506,9 @@ fn build_table(
                 row_group.push(None);
             }
             "caption" => caption_id = caption_id.or(Some(child)),
+            _ if styles.get(&child).and_then(|s| s.display) == Some(CssDisplay::TableCaption) => {
+                caption_id = caption_id.or(Some(child))
+            }
             "colgroup" | "col" => col_nodes.push(child),
             "thead" | "tbody" | "tfoot" => {
                 flush_anon(&mut anon_pending, &mut rows, &mut row_group);
@@ -2938,10 +2943,14 @@ fn build_table(
     // of scope for v1). Previously the element was dropped entirely — no box
     // built — so wikipedia infobox captions were invisible.
     let mut table_children: Vec<taffy::tree::NodeId> = Vec::with_capacity(row_wrappers.len() + 1);
+    let mut caption_node: Option<taffy::tree::NodeId> = None;
     if let Some(cap) = caption_id {
         if let Some(cap_node) = build_element(
             tree, cap, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta,
         ) {
+            // A caption sizes the table by its longest word, not its line.
+            taffy_tree.mark_min_as_max(cap_node);
+            caption_node = Some(cap_node);
             table_children.push(cap_node);
         }
     }
@@ -3418,7 +3427,9 @@ fn build_table(
     // (the same fit-content idiom resolve_sizing_keywords uses).
     if style.width.is_none() && !col_max.is_empty() {
         let gaps = gap * col_max.len().saturating_sub(1) as f32;
-        let shrink = col_max.iter().sum::<f32>() + gaps;
+        // The caption's longest word is a floor: a table is never narrower.
+        let cap_min = caption_node.map_or(0.0, |c| measure_cell(taffy_tree, c, AvailableSpace::MinContent).0);
+        let shrink = (col_max.iter().sum::<f32>() + gaps).max(cap_min);
         if shrink > 0.0 {
             if let Ok(mut st) = taffy_tree.style(table_node).cloned() {
                 st.size.width = Dimension::length(shrink);
@@ -4580,6 +4591,7 @@ fn build_element_inner(
             .and_then(|s| s.display)
             .or(if is_text { Some(CssDisplay::Inline) } else { Some(CssDisplay::Block) });
         let inline_level = matches!(child_display, Some(CssDisplay::Inline));
+        if !is_text && child_display == Some(CssDisplay::None) { continue; } // hidden: no box, must not cut the run
         // Out-of-flow children (CSS blockification of abspos) never flatten
         // into an inline run — the reparent pass in layout_dom will move them
         // to their containing block anyway.

@@ -37,6 +37,9 @@ pub struct FlowTree<C = ()> {
     /// Slots are never reused: a stale id must not alias a newer node.
     nodes: Vec<Option<Node<C>>>,
     rounding: bool,
+    /// Boxes whose max-content width is their min-content width (table
+    /// captions: they widen a table to their longest word, never to a line).
+    min_as_max: std::collections::HashSet<NodeId>,
 }
 
 impl<C> Default for FlowTree<C> {
@@ -47,7 +50,12 @@ impl<C> Default for FlowTree<C> {
 
 impl<C> FlowTree<C> {
     pub fn new() -> Self {
-        FlowTree { nodes: Vec::new(), rounding: true }
+        FlowTree { nodes: Vec::new(), rounding: true, min_as_max: std::collections::HashSet::new() }
+    }
+
+    /// Size `node`'s max-content like its min-content (a table caption).
+    pub fn mark_min_as_max(&mut self, node: NodeId) {
+        self.min_as_max.insert(node);
     }
 
     pub fn enable_rounding(&mut self) {
@@ -246,7 +254,10 @@ impl<C, M> View<'_, C, M>
 where
     M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style, Option<&mut BlockContext<'_>>) -> LayoutOutput,
 {
-    fn compute(&mut self, id: NodeId, inputs: LayoutInput, block_ctx: Option<&mut BlockContext<'_>>) -> LayoutOutput {
+    fn compute(&mut self, id: NodeId, mut inputs: LayoutInput, block_ctx: Option<&mut BlockContext<'_>>) -> LayoutOutput {
+        if inputs.available_space.width == AvailableSpace::MaxContent && self.tree.min_as_max.contains(&id) {
+            inputs.available_space.width = AvailableSpace::MinContent;
+        }
         // An ancestor is `display:none`: lay this subtree out hidden.
         if inputs.run_mode == RunMode::PerformHiddenLayout {
             return compute_hidden_layout(self, id);

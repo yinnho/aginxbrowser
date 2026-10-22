@@ -114,6 +114,7 @@ pub(super) fn computed_style_value(
                     Some(Display::Table) => "table",
                     Some(Display::TableRow) => "table-row",
                     Some(Display::TableCell) => "table-cell",
+                    Some(Display::TableCaption) => "table-caption",
                     Some(Display::None) => "none",
                     _ => "block",
                 }
