@@ -1,0 +1,18 @@
+{
+  "engine": "aginxbrowser",
+  "client": "http-session",
+  "base": "http://127.0.0.1:18092",
+  "seed": "https://demo-browser.lightpanda.io/amiibo/",
+  "pool": 25,
+  "limit": 0,
+  "pages": 73,
+  "known": 548,
+  "elapsed_s": 77.877,
+  "error": "https://demo-browser.lightpanda.io/amiibo/04d81d02.html: HTTP Error 500: Internal Server Error",
+  "health": {
+    "version": "0.6.0",
+    "commit": "3dd366b",
+    "tls": "chrome145"
+  },
+  "provenance": "stdout of the first limits-off run (server pid 7410). A later successful run overwrote aginx-p25.json. The response body was not captured. A replay of this URL on a fresh session returned HTTP 200."
+}

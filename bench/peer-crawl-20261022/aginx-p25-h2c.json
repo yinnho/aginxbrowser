@@ -1,0 +1,27 @@
+{
+  "engine": "aginxbrowser",
+  "client": "http-session",
+  "base": "http://127.0.0.1:18092",
+  "seed": "https://demo-browser.lightpanda.io/amiibo/",
+  "pool": 25,
+  "limit": 0,
+  "pages": 940,
+  "known": 940,
+  "elapsed_s": 71.02,
+  "error": null,
+  "health": {
+    "version": "0.6.2",
+    "commit": "2426b37",
+    "tls": "chrome145"
+  },
+  "run": "h2-C",
+  "rss_peak_kb": 417344,
+  "cpu_seconds": 21.29,
+  "features": [
+    "stealth",
+    "screenshot"
+  ],
+  "change": "script src shares document wreq client",
+  "rss_note": "macOS ps RSS, sampled about every 0.1s. Not Linux PSS.",
+  "tree": "Uncommitted change on 2426b37: classic <script src> uses the stealth wreq client that already fetched the document. /health still reports 2426b37 because the commit hash is HEAD. Not a release build of the tag."
+}

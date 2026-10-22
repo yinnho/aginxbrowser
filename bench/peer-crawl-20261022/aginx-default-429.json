@@ -1,0 +1,25 @@
+{
+  "engine": "aginxbrowser",
+  "client": "http-session",
+  "base": "http://127.0.0.1:18092",
+  "seed": "https://demo-browser.lightpanda.io/amiibo/",
+  "pool": 25,
+  "limit": 0,
+  "pages": 20,
+  "known": 194,
+  "elapsed_s": 12.667,
+  "error": "https://demo-browser.lightpanda.io/amiibo/00650502.html: navigate HTTP 429: {\"error\":\"rate limit: lightpanda.io is capped at 20 pages/min — aginxbrowser does real-time lookups for agents, not site crawling. Slow down, or self-host and tune AGINXBROWSER_DOMAIN_RATE_PER_MIN.\"}",
+  "health": {
+    "version": "0.6.2",
+    "commit": "2426b37",
+    "tls": "chrome145"
+  },
+  "rss_peak_kb": 375984,
+  "cpu_seconds": 1.75,
+  "run": "default-limits",
+  "features": [
+    "stealth",
+    "screenshot"
+  ],
+  "rss_note": "macOS ps RSS, sampled about every 0.1s. Not Linux PSS. cpu_seconds is ps cputime at the end of the crawl and includes process start."
+}

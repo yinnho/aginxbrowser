@@ -1,0 +1,119 @@
+{
+  "date": "2026-10-22",
+  "machine": "macOS arm64, same machine as bench/peer-crawl-20261021",
+  "binary": {
+    "version": "0.6.2",
+    "commit": "2426b37",
+    "features": [
+      "stealth",
+      "screenshot"
+    ],
+    "tls": "chrome145"
+  },
+  "method": "bench/peer-crawl/crawl_http.py --pool 25, seed https://demo-browser.lightpanda.io/amiibo/. Fresh process and empty store per run. Proxies unset. User server 127.0.0.1:8089 left running and excluded by pid.",
+  "limits_off": [
+    {
+      "file": "aginx-p25.json",
+      "pages": 940,
+      "elapsed_s": 65.827,
+      "rss_peak_kb": 416048,
+      "cpu_seconds": 22.86,
+      "error": null
+    },
+    {
+      "file": "aginx-p25b.json",
+      "pages": 940,
+      "elapsed_s": 62.349,
+      "rss_peak_kb": 417424,
+      "cpu_seconds": 25.33,
+      "error": null
+    }
+  ],
+  "default_limits": {
+    "file": "aginx-default-429.json",
+    "pages": 20,
+    "known": 194,
+    "elapsed_s": 12.667,
+    "rss_peak_kb": 375984,
+    "http": 429
+  },
+  "not_rerun_today": "Lightpanda 1.0.1 and Obscura 0.2.5 stay at the 2026-10-21 receipts (54.83s, 59.01s, 67.76s). Their AWS 4.5s was not run.",
+  "did_not_reproduce": "bench/peer-crawl-20261021/aginx-p25-settle-quiet.json is 40.693s with health 0.6.1/153c2af. Commit 57844a7's message says 40.7s. Two fresh 0.6.2 release runs did not land there.",
+  "script_pool_uncommitted": {
+    "base": "2426b37",
+    "change": "classic script src fetched through StealthHttpClient::fetch_script",
+    "runs": [
+      {
+        "file": "aginx-p25-h2.json",
+        "elapsed_s": 50.139,
+        "rss_peak_kb": 410672,
+        "cpu_seconds": 17.01
+      },
+      {
+        "file": "aginx-p25-h2b.json",
+        "elapsed_s": 55.581,
+        "rss_peak_kb": 408736,
+        "cpu_seconds": 17.15
+      },
+      {
+        "file": "aginx-p25-h2c.json",
+        "elapsed_s": 71.02,
+        "rss_peak_kb": 417344,
+        "cpu_seconds": 21.29
+      }
+    ],
+    "reading": "All 940/940, no fetch-deadline lines. Spread 50.1–71.0s is wider than the gap to the 2026-10-21 Obscura 54.83s, so this cut does not yet win the row."
+  },
+  "cec3741": {
+    "commit": "cec3741",
+    "version": "0.6.2",
+    "features": [
+      "stealth",
+      "screenshot"
+    ],
+    "limits_off": [
+      {
+        "file": "aginx-p25-cec-a.json",
+        "pages": 940,
+        "elapsed_s": 52.4,
+        "rss_peak_kb": 414416,
+        "cpu_seconds": 17.57
+      },
+      {
+        "file": "aginx-p25-cec-b.json",
+        "pages": 940,
+        "elapsed_s": 51.568,
+        "rss_peak_kb": 408208,
+        "cpu_seconds": 17.75
+      },
+      {
+        "file": "aginx-p25-cec-c.json",
+        "pages": 940,
+        "elapsed_s": 51.816,
+        "rss_peak_kb": 414752,
+        "cpu_seconds": 21.99
+      }
+    ],
+    "default_limits": {
+      "file": "aginx-default-429-cec.json",
+      "pages": 20,
+      "known": 204,
+      "elapsed_s": 5.971,
+      "rss_peak_kb": 364176,
+      "http": 429
+    },
+    "reading": "Three cold runs agree within 0.9s. Peak RSS stays about 399-405 MiB, the same band as 0.6.0. Peers were not re-run; Oct 21 same-Mac walls were Obscura 54.83s and Lightpanda 59.01s/67.76s."
+  },
+  "v8_young_gen_flags": {
+    "file": "aginx-p25-v8flags.json",
+    "commit": "9df4dd8",
+    "flags": "--max-semi-space-size=4 --optimize-for-size",
+    "effective": "max-semi-space-size=1, optimize-for-size on, max-old-space-size stays 3072",
+    "pages": 940,
+    "elapsed_s": 53.402,
+    "rss_peak_kb": 409712,
+    "rss_end_kb": 409760,
+    "cpu_seconds": 19.4,
+    "reading": "One cold run, no source change. Peak stays in the cec3741 408-415 MiB band. This binary is the FlowTree layout commit, not cec3741. The young-gen cap did not move this crawl toward the Oct 21 Obscura 199 MiB."
+  }
+}

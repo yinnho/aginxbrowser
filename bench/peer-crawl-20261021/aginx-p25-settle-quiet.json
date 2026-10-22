@@ -1,0 +1,17 @@
+{
+  "engine": "aginxbrowser",
+  "client": "http-session",
+  "base": "http://127.0.0.1:18092",
+  "seed": "https://demo-browser.lightpanda.io/amiibo/",
+  "pool": 25,
+  "limit": 0,
+  "pages": 940,
+  "known": 940,
+  "elapsed_s": 40.693,
+  "error": null,
+  "health": {
+    "version": "0.6.1",
+    "commit": "153c2af",
+    "tls": "chrome145"
+  }
+}

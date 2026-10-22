@@ -1,0 +1,17 @@
+{
+  "engine": "aginxbrowser",
+  "client": "http-session",
+  "base": "http://127.0.0.1:18092",
+  "seed": "https://demo-browser.lightpanda.io/amiibo/",
+  "pool": 25,
+  "limit": 0,
+  "pages": 20,
+  "known": 201,
+  "elapsed_s": 6.602,
+  "error": "https://demo-browser.lightpanda.io/amiibo/01cd0502.html: navigate HTTP 429: {\"error\":\"rate limit: lightpanda.io is capped at 20 pages/min — aginxbrowser does real-time lookups for agents, not site crawling. Slow down, or self-host and tune AGINXBROWSER_DOMAIN_RATE_PER_MIN.\"}",
+  "health": {
+    "version": "0.6.1",
+    "commit": "153c2af",
+    "tls": "chrome145"
+  }
+}

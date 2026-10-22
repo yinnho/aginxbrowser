@@ -55,4 +55,20 @@
     <xhtml:link rel="alternate" hreflang="en" href="https://browser.aginx.net/blog/rendering-en.html"/>
     <xhtml:link rel="alternate" hreflang="x-default" href="https://browser.aginx.net/blog/rendering-en.html"/>
   </url>
+  <url>
+    <loc>https://browser.aginx.net/blog/amiibo-zh.html</loc>
+    <lastmod>2026-10-22</lastmod>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://browser.aginx.net/blog/amiibo-zh.html"/>
+    <xhtml:link rel="alternate" hreflang="en" href="https://browser.aginx.net/blog/amiibo-en.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://browser.aginx.net/blog/amiibo-en.html"/>
+  </url>
+  <url>
+    <loc>https://browser.aginx.net/blog/amiibo-en.html</loc>
+    <lastmod>2026-10-22</lastmod>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://browser.aginx.net/blog/amiibo-zh.html"/>
+    <xhtml:link rel="alternate" hreflang="en" href="https://browser.aginx.net/blog/amiibo-en.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://browser.aginx.net/blog/amiibo-en.html"/>
+  </url>
 </urlset>

@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The same 940 pages, on this Mac · AginxBrowser</title>
+<meta name="description" content="Lightpanda's 2026-10-19 from-scratch browser benchmark omitted AginxBrowser. On the same 940-page Amiibo crawl at pool 25, this Mac measured AginxBrowser 0.6.2 at 51.6–52.4s and about 400 MiB RSS. Peers were not re-run on Oct 22.">
+<meta property="og:title" content="The same 940 pages, on this Mac">
+<meta property="og:description" content="AginxBrowser 0.6.2 finished the 940-page Amiibo crawl on this Mac in 51.6–52.4s, peak RSS about 400 MiB. The 4.5s figure is their AWS table.">
+<link rel="canonical" href="https://browser.aginx.net/blog/amiibo-en.html">
+<link rel="alternate" hreflang="zh-CN" href="https://browser.aginx.net/blog/amiibo-zh.html">
+<link rel="alternate" hreflang="en" href="https://browser.aginx.net/blog/amiibo-en.html">
+<link rel="alternate" hreflang="x-default" href="https://browser.aginx.net/blog/amiibo-en.html">
+<link rel="stylesheet" href="/blog/blog.css">
+<style>
+  .rx-table { width: 100%; border-collapse: collapse; margin: 1.2em 0; font-size: 14px; }
+  .rx-table th, .rx-table td { text-align: left; padding: 8px 10px; border: 1px solid var(--border, #1e2b3d); vertical-align: top; }
+  .rx-table th { background: rgba(77,208,255,.08); font-size: 12px; letter-spacing: .3px; }
+  .scroll { overflow-x: auto; }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="/" class="brand"><span class="dot"></span>AginxBrowser</a>
+    <div class="nav-links">
+      <a href="/blog/en.html">Blog</a>
+      <a href="/blog/amiibo-zh.html">中文</a>
+      <a href="/" style="color:var(--text-dim)">← Home</a>
+    </div>
+  </div>
+</nav>
+
+<article class="article">
+  <h1>The same 940 pages, on this Mac</h1>
+  <div class="meta">AginxBrowser engineering notes · 2026-10-22 · <a href="/blog/amiibo-zh.html">中文</a></div>
+
+  <blockquote>
+    <p>Same Mac, same 940 pages, pool 25. AginxBrowser 0.6.2 / <code>cec3741</code>, three cold starts: 52.400s, 51.568s, 51.816s, peak RSS 399–405 MiB, one process. On 2026-10-21 this machine measured Obscura 0.2.5 at 54.83s and 199 MiB, one process, and Lightpanda 1.0.1 at 59.01s and 67.76s and 841 MiB, 25 processes. Those peers were not re-run on Oct 22. The 4.5s figure is their AWS table.</p>
+  </blockquote>
+
+  <p>On 2026-10-19 Pierre Tachoire published <a href="https://lightpanda.io/blog/posts/benchmarking-ai-native-headless-browsers">Benchmarking AI-native headless browsers built from scratch</a>. The table is Lightpanda, Obscura, Moli, and Cloudflare Kitesurf. AginxBrowser is absent. The task crawls the <a href="https://demo-browser.lightpanda.io/amiibo/">Amiibo demo</a>: follow same-host links from the index through 940 pages, 25 at a time. The method page is their <a href="https://github.com/lightpanda-io/demo/blob/main/BENCHMARKS.md">crawler benchmark</a>. The index only exposes links after <code>load.js</code> runs, so a client that reads the raw HTML never sees the next page.</p>
+
+  <p>This page adds our column on our machine, using their public task. The numbers stay in three blocks: claims from their machine, receipts from this machine, and tests we did not run.</p>
+
+  <h2>Who is in the table</h2>
+
+  <div class="scroll">
+  <table class="rx-table">
+    <tr><th></th><th>AginxBrowser</th><th>Lightpanda</th><th>Obscura</th><th>Moli</th><th>Kitesurf</th></tr>
+    <tr><td>Version we ran</td><td>0.6.2, <code>cec3741</code></td><td>1.0.1</td><td>0.2.5</td><td>Not run. Their article says 1.1.18</td><td>Not run</td></tr>
+    <tr><td>Public interface</td><td>HTTP</td><td>CDP, WebDriver, MCP</td><td>CDP, MCP</td><td>Their article says CDP, WebDriver</td><td>Their article says CDP through Browser Run</td></tr>
+    <tr><td>Screenshots</td><td>In-process paint. This crawl did not request one</td><td>Their README says there is no graphical rendering engine</td><td>Screenshots, screencast, PDF</td><td>Not checked</td><td>Not checked</td></tr>
+    <tr><td>License</td><td>Apache-2.0</td><td>AGPL-3.0</td><td>Apache-2.0</td><td>Their article says Apache-2.0 or MIT</td><td>Closed source</td></tr>
+  </table>
+  </div>
+
+  <p>Protocol and license cells for Moli and Kitesurf are restated from their 2026-10-19 article. This run did not start either product.</p>
+
+  <h2>Two machines</h2>
+
+  <div class="scroll">
+  <table class="rx-table">
+    <tr><th></th><th>Their article</th><th>Our receipts</th></tr>
+    <tr><td>Machine</td><td>They say AWS m5.xlarge</td><td>This Mac, macOS, arm64</td></tr>
+    <tr><td>Memory</td><td>Linux <code>smem</code> PSS, shared pages split</td><td><code>ps</code> RSS, about every 0.1s. Shared pages are counted again</td></tr>
+    <tr><td>Date</td><td>2026-10-19</td><td>Peers on 2026-10-21. Aginx 0.6.2 on 2026-10-22</td></tr>
+    <tr><td>Driver</td><td>Their crawler, CDP</td><td>Aginx over HTTP <code>/session</code>. Lightpanda and Obscura used a local darwin/arm64 build of the official crawler, chromedp v0.15.1</td></tr>
+  </table>
+  </div>
+
+  <h2>What this Mac measured</h2>
+
+  <p>One engine at a time. Proxies unset, as in the receipts. The full Aginx rows set the domain rate and the session page cap to 0. The default server returns HTTP 429 at 20 pages per minute per registrable domain. On 0.6.2 / <code>cec3741</code> that default stop was 20 pages, 204 URLs known, 5.971s, peak RSS 364176 KB. That row is the product rule, not the result below.</p>
+
+  <div class="scroll">
+  <table class="rx-table">
+    <tr><th>Date</th><th>Engine</th><th>Shape</th><th>Wall</th><th>Peak RSS</th></tr>
+    <tr>
+      <td>Oct 21</td>
+      <td>Aginx 0.6.0 <code>3dd366b</code></td>
+      <td>1 process, 25 HTTP sessions</td>
+      <td>88.425s</td>
+      <td>414912 KB (405 MiB)</td>
+    </tr>
+    <tr>
+      <td>Oct 22</td>
+      <td>Aginx 0.6.2 <code>2426b37</code></td>
+      <td>Same. <code>stealth</code> + <code>screenshot</code>, TLS chrome145</td>
+      <td>65.827s, 62.349s</td>
+      <td>416048 KB, 417424 KB</td>
+    </tr>
+    <tr>
+      <td>Oct 22</td>
+      <td>Aginx 0.6.2 <code>cec3741</code></td>
+      <td>Same</td>
+      <td>52.400s, 51.568s, 51.816s</td>
+      <td>414416 KB, 408208 KB, 414752 KB</td>
+    </tr>
+    <tr>
+      <td>Oct 22</td>
+      <td>Aginx 0.6.2 <code>9df4dd8</code></td>
+      <td>Same, plus the V8 flags below. One run</td>
+      <td>53.402s</td>
+      <td>409712 KB</td>
+    </tr>
+    <tr>
+      <td>Oct 21</td>
+      <td>Lightpanda 1.0.1</td>
+      <td>25 processes (<code>--fork</code>)</td>
+      <td>59.01s, 67.76s</td>
+      <td>861184 KB, 861712 KB (841 MiB)</td>
+    </tr>
+    <tr>
+      <td>Oct 21</td>
+      <td>Obscura 0.2.5</td>
+      <td>1 process, 25 CDP targets</td>
+      <td>54.83s</td>
+      <td>203424 KB (199 MiB)</td>
+    </tr>
+  </table>
+  </div>
+
+  <p>Quote 0.6.2 from the <code>cec3741</code> triple. The three runs sit within a second, 940/940, with no fetch-deadline lines and no <code>loadAmiibo is not defined</code>. Sampled CPU, including process start, was 17.57s, 17.75s, and 21.99s. The 0.6.0 run was 17.03s.</p>
+
+  <p>Lightpanda used <code>chromedp.Nodes</code>. The first CPU sample is void: it was 0 because the processes had already exited. The second run's CPU sum while the processes were alive is 11.62s, a lower bound. Obscura did not finish under official <code>chromedp.Nodes</code>. The finished 54.83s polled <code>Runtime.evaluate</code>, CPU 11.35s. That row and the Lightpanda rows are different link queries. Both finished 940/940.</p>
+
+  <p>The Oct 22 wall times sit under the Oct 21 same-Mac Obscura 54.83s and Lightpanda 59.01s / 67.76s. Those two were not re-run on Oct 22, so the order is only the finished receipts. Peak RSS stayed about 400 MiB. Obscura on this Mac was 199 MiB. Lightpanda was 841 MiB across 25 processes.</p>
+
+  <p>The crawl client did not request a screenshot. The 52 seconds do not include writing a PNG. Aginx paints screenshots in-process and does not start Chrome for that. This task did not time that path.</p>
+
+  <h3>One run with Obscura's young-generation flags</h3>
+
+  <p>Obscura 0.2.5's CLI sets <code>--max-semi-space-size=4 --optimize-for-size</code> before the first isolate. Their environment docs say <code>--optimize-for-size</code> then forces the semi-space cap to 1 MiB. We did not change source. <code>AGINXBROWSER_V8_FLAGS</code> passed that pair to the release binary already on disk. A throwaway start printed <code>--max-semi-space-size=1</code>, with <code>--optimize-for-size</code> on, and the old-space ceiling still at 3072.</p>
+
+  <p><code>/health</code> on that run was 0.6.2 / <code>9df4dd8</code>, one layout-tree commit after <code>cec3741</code>. 940/940, 53.402s, sampler peak 409712 KB, end-of-crawl <code>ps</code> 409760 KB, CPU 19.40s. The peak stayed in the 400 MiB band. Those flags did not move this crawl toward Obscura's 199 MiB. The 0.6.2 wall time to quote remains the triple above.</p>
+
+  <h2>Their published table stays on their machine</h2>
+
+  <p>These are the pool-25 claims in the article. We did not re-run them on AWS.</p>
+
+  <div class="scroll">
+  <table class="rx-table">
+    <tr><th>Engine</th><th>Wall</th><th>CPU</th><th>Peak memory</th></tr>
+    <tr><td>Lightpanda 1.0.1</td><td>4.5s</td><td>12s</td><td>109MB PSS</td></tr>
+    <tr><td>Obscura 0.2.5</td><td>11.5s</td><td>29s</td><td>201MB PSS</td></tr>
+    <tr><td>Moli 1.1.18</td><td>17.4s</td><td>40s</td><td>230MB PSS</td></tr>
+  </table>
+  </div>
+
+  <p>4.5 seconds and the 52 seconds on this Mac are not the same network or the same machine. RSS and PSS do not go in one cell. Kitesurf is closed source. Their article quotes Cloudflare's own Chrome comparison. We did not re-run those figures.</p>
+
+  <h2>Which from-scratch browser is faster</h2>
+
+  <p>On this Mac, for these 940 pages, the finished order is Aginx 0.6.2 / <code>cec3741</code> at 51.6–52.4s, Obscura 0.2.5 at 54.83s, and Lightpanda 1.0.1 at 59.01s and 67.76s. The first date is Oct 22. The other two are Oct 21. Moli and Kitesurf are not in the same-machine table.</p>
+
+  <h2>Which one uses less memory</h2>
+
+  <p>Same-machine peak RSS, low to high: Obscura 199 MiB, Aginx about 400 MiB, Lightpanda 841 MiB. Aginx and Obscura were one process. The Lightpanda row is 25 processes. A second Aginx run with Obscura's young-generation flags still peaked at 409712 KB. The 109MB, 201MB, and 230MB figures are PSS on another machine.</p>
+
+  <h2>Does Playwright attach by changing the endpoint</h2>
+
+  <p>No. Aginx's public interface is HTTP: <code>/fetch</code>, <code>/screenshot</code>, and navigate, click, and eval on a session. A public CDP server is not built. Lightpanda, Obscura, Moli, and Kitesurf present CDP. That is an interface choice.</p>
+
+  <h2>Is this the 7.6× Chrome number</h2>
+
+  <p>Different task. The README's 7.6× against Chrome is 20 text pages from 2026-08-28. This page compares from-scratch engines on the 940-page Amiibo crawl only. Those multiples do not belong in the same sentence.</p>
+
+  <h2>Does a default server crawl all 940 pages</h2>
+
+  <p>No. The default is 20 pages per minute per registrable domain, plus a session page cap. The full 940 needs <code>AGINXBROWSER_DOMAIN_RATE_PER_MIN=0</code> and <code>AGINXBROWSER_SESSION_PAGE_LIMIT=0</code>. The 429 body tells the operator to do that. The product default stays at 20.</p>
+
+  <h2>Not run</h2>
+
+  <ul>
+    <li>Moli, Kitesurf, Chrome, and Web Platform Tests.</li>
+    <li>Pool widths 1 and 5.</li>
+    <li>Obscura under <code>chromedp.Nodes</code>. The finished run used <code>Runtime.evaluate</code>.</li>
+    <li>A same-day re-run of the peers. The order uses their Oct 21 receipts.</li>
+    <li>Screenshot time. The speed table has no PNG.</li>
+    <li>A site-by-site "this origin works" matrix. Dated corners that are already published live in <a href="https://github.com/yinnho/aginxbrowser/blob/main/docs/RECEIPTS.md">docs/RECEIPTS.md</a>.</li>
+  </ul>
+
+  <p>Raw JSON is in <code>bench/peer-crawl-20261021/</code> and <code>bench/peer-crawl-20261022/</code>. The 0.6.0 full run is <code>aginx-p25.json</code>. The 0.6.2 triple is <code>aginx-p25-cec-a.json</code>, <code>aginx-p25-cec-b.json</code>, and <code>aginx-p25-cec-c.json</code>. The young-generation run is <code>aginx-p25-v8flags.json</code>.</p>
+
+  <div class="cta">
+    <p>After install, the health check is local port 8089.</p>
+    <pre><code>curl -fsSL https://browser.aginx.net/install.sh -o install.sh &amp;&amp; less install.sh &amp;&amp; bash install.sh</code></pre>
+    <a class="btn" href="https://github.com/yinnho/aginxbrowser">Repository</a>
+    <a class="btn ghost" href="/blog/receipts-en.html">Previous receipt</a>
+  </div>
+</article>
+
+<footer>
+  AginxBrowser · the agent's browser · Apache-2.0 · browser.aginx.net
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,28 @@
+{
+  "engine": "aginxbrowser",
+  "client": "http-session",
+  "base": "http://127.0.0.1:18093",
+  "seed": "https://demo-browser.lightpanda.io/amiibo/",
+  "pool": 25,
+  "limit": 0,
+  "pages": 940,
+  "known": 940,
+  "elapsed_s": 53.402,
+  "error": null,
+  "health": {
+    "version": "0.6.2",
+    "commit": "9df4dd8",
+    "tls": "chrome145"
+  },
+  "run": "v8-young-gen",
+  "rss_peak_kb": 409712,
+  "rss_end_kb": 409760,
+  "cpu_seconds": 19.4,
+  "features": [
+    "stealth",
+    "screenshot"
+  ],
+  "v8_flags": "--max-semi-space-size=4 --optimize-for-size",
+  "v8_flags_effective": "--max-semi-space-size=1 --optimize-for-size --max-old-space-size=3072",
+  "rss_note": "macOS ps RSS, sampled about every 0.1s. Not Linux PSS. cpu_seconds is ps cputime at the end of the crawl and includes process start. Same-process print-flag-values was not left on; a throwaway start of this binary printed max-semi-space-size=1 because optimize-for-size overrides the requested 4. rss_end_kb is the single ps sample after the crawl returned and before shutdown."
+}

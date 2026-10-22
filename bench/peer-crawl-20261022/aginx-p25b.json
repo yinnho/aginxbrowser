@@ -1,0 +1,25 @@
+{
+  "engine": "aginxbrowser",
+  "client": "http-session",
+  "base": "http://127.0.0.1:18092",
+  "seed": "https://demo-browser.lightpanda.io/amiibo/",
+  "pool": 25,
+  "limit": 0,
+  "pages": 940,
+  "known": 940,
+  "elapsed_s": 62.349,
+  "error": null,
+  "health": {
+    "version": "0.6.2",
+    "commit": "2426b37",
+    "tls": "chrome145"
+  },
+  "rss_peak_kb": 417424,
+  "cpu_seconds": 25.33,
+  "run": "B",
+  "features": [
+    "stealth",
+    "screenshot"
+  ],
+  "rss_note": "macOS ps RSS, sampled about every 0.1s. Not Linux PSS. cpu_seconds is ps cputime at the end of the crawl and includes process start."
+}

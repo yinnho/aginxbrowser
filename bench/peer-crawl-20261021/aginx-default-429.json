@@ -1,0 +1,18 @@
+{
+  "engine": "aginxbrowser",
+  "client": "http-session",
+  "base": "http://127.0.0.1:18092",
+  "seed": "https://demo-browser.lightpanda.io/amiibo/",
+  "pool": 25,
+  "limit": 0,
+  "pages": 20,
+  "known": 193,
+  "elapsed_s": 13.069,
+  "error": "https://demo-browser.lightpanda.io/amiibo/00ac0502.html: HTTP Error 429: Too Many Requests",
+  "health": {
+    "version": "0.6.0",
+    "commit": "3dd366b",
+    "tls": "chrome145"
+  },
+  "provenance": "stdout of the default-limiter run (server pid 7272). The crawler later overwrote its --out file; this copy is the printed JSON."
+}
