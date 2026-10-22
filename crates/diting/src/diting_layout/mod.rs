@@ -53,6 +53,7 @@ mod flow_tree;
 mod float_lines;
 mod inline_flow;
 pub(crate) mod float_flow;
+mod abs_rects;
 #[cfg(test)]
 mod float_probe;
 mod face_bytes;
@@ -3291,6 +3292,10 @@ fn build_table(
                     // Fixed columns don't clamp to their content: a long cell
                     // wraps or overflows its column instead of widening it.
                     st.min_size.width = LengthPercentageAuto::length(0.0);
+                } else if cell.phantom {
+                    // A rowspan placeholder holds the lifted cell's width: it counts
+                    // toward the row's intrinsic width (nested tables collapsed, #305).
+                    st.min_size.width = LengthPercentageAuto::length(basis);
                 }
                 // vertical-align (blitz#508): the declaration or the legacy
                 // valign attribute (same computed slot) moves cell CONTENT,
@@ -5668,21 +5673,8 @@ pub fn layout_solve_rooted(
                 .compute_layout_with_block_measure(icb_node, available, |inputs, id, ctx, style, block| float_lines::measure_node(fonts, inputs, id, ctx, style, block))
                 .is_ok();
             if laid_out {
-                fn abs_rects(
-                    taffy_tree: &TaffyTree<TextLeaf>,
-                    node: taffy::tree::NodeId,
-                    offset: (f32, f32),
-                    out: &mut HashMap<taffy::tree::NodeId, Rect>,
-                ) {
-                    let Ok(layout) = taffy_tree.layout(node) else { return };
-                    let abs = (offset.0 + layout.location.x, offset.1 + layout.location.y);
-                    out.insert(node, Rect { x: abs.0, y: abs.1, width: layout.size.width, height: layout.size.height });
-                    for child in taffy_tree.children(node).unwrap_or_default() {
-                        abs_rects(taffy_tree, child, abs, out);
-                    }
-                }
                 let mut now: HashMap<taffy::tree::NodeId, Rect> = HashMap::new();
-                abs_rects(&taffy_tree, icb_node, (0.0, 0.0), &mut now);
+                abs_rects::collect(&taffy_tree, icb_node, (0.0, 0.0), (0.0, 0.0), &mut now);
                 for (tnid, dom_id) in &needs_static {
                     if let Some(r) = now.get(tnid) {
                         static_pos.insert(*dom_id, (r.x, r.y));

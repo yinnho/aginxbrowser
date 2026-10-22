@@ -7170,6 +7170,54 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn test_nested_percent_width_tables_in_rowspan_cells_keep_their_width() {
+        // Wikipedia's clade trees: each level is a `td rowspan=2` holding a
+        // `width:100%` table. The rowspan placeholder added nothing to the
+        // row's intrinsic width, so every level squeezed the next (the
+        // innermost table collapsed to 0px, #305). Rowspan on or off, the
+        // widths must agree (Chrome: both 232/169/73 with its fonts).
+        let table = |rs: &str, ids: &str| {
+            format!(
+                "<table id=o{ids}><tr><td style=\"white-space:nowrap\">Felidae</td><td {rs}><div><table id=a{ids} style=\"width:100%\"><tr><td style=\"white-space:nowrap\">Pantherinae</td><td {rs}><div><table id=b{ids} style=\"width:100%\"><tr><td style=\"white-space:nowrap\">Jungle cat</td></tr></table></div></td></tr><tr><td></td></tr></table></div></td></tr><tr><td></td></tr></table>"
+            )
+        };
+        let html = format!(
+            "<html><head><style>body{{margin:0;font:16px/20px serif}} table{{border-spacing:0;margin:0}} td{{padding:0 4px;vertical-align:top}}</style></head><body>{}{}</body></html>",
+            table("rowspan=2", "1"),
+            table("", "2")
+        );
+        let mut rt = setup_runtime(&html);
+        let v = rt
+            .evaluate("(() => { const w = id => Math.round(document.getElementById(id).getBoundingClientRect().width); return [w('a1') - w('a2'), w('b1') - w('b2'), w('b1') > 60].join(','); })()")
+            .unwrap();
+        assert_eq!(v, "0,0,true");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_auto_inset_absolute_boxes_sit_at_their_static_position() {
+        // Chrome truth (headless Chrome, 2026-10-22): an absolute box with
+        // top/left auto sits where it would have been in flow - here the top of
+        // its static parent - however far down the page that is; the page is
+        // 3500 tall (the rotated box's overflow aside). The harvest added the parent chain on top of the
+        // containing-block-relative location, so it landed at 2x (6000) and
+        // doubled the page (#306: Wikipedia's navbox labels).
+        let mut rt = setup_runtime(
+            "<html><body style=\"margin:0\"><div style=\"height:3000px\"></div>
+              <div id=c1 style=\"height:100px\"><div id=d1 style=\"position:absolute\">abs</div>x</div>
+              <div id=c2 style=\"height:100px\"><div id=d2 style=\"position:absolute;transform:rotate(270deg)\">rot</div>x</div>
+              <div id=c3 style=\"height:100px;position:relative\"><div id=d3 style=\"position:absolute\">rel</div>x</div>
+              <div style=\"height:200px\"></div></body></html>",
+        );
+        let v = rt
+            .evaluate(
+                "(() => { const t = id => Math.round(document.getElementById(id).getBoundingClientRect().top + scrollY);
+                  return [t('d1') - t('c1'), Math.abs(t('d2') - t('c2')) < 80, t('d3') - t('c3'), document.documentElement.scrollHeight < 3700].join(','); })()",
+            )
+            .unwrap();
+        assert_eq!(v, "0,true,0,true");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn test_webcrypto_ed25519_vector_and_roundtrips() {
         // RFC 8032 section 7.1 test 1 (empty message) pins the curve math;
         // the rest exercises every import/export format and the usage rules.
