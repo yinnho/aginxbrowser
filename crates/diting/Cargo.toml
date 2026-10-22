@@ -169,6 +169,9 @@ hkdf = "0.13"
 ecdsa = { version = "0.17", default-features = false, features = ["digest", "pkcs8", "pem", "std"] }
 p256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdsa", "ecdh", "pkcs8", "std"] }
 p384 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdsa", "ecdh", "pkcs8", "std"] }
+# Ed25519 for crypto.subtle: core sign/verify only; DER wrapping is done by hand
+# in the JS shim (fixed 16/12-byte prefixes) and seeds come from op_random_bytes.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 # CSPRNG for getRandomValues / randomUUID (replaces Math.random).
 getrandom = "0.2"
 

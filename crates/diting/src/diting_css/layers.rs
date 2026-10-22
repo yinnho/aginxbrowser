@@ -130,9 +130,3 @@ pub(crate) fn rank(id: u32) -> u32 {
         t.ranks.as_ref().map(|r| r.get(id as usize).copied().unwrap_or(u32::MAX)).unwrap_or(u32::MAX)
     })
 }
-
-/// Whether any `@layer` was declared in the current pass (the cascade skips
-/// the layer ordering entirely for the common layer-free sheet).
-pub(crate) fn any() -> bool {
-    TABLE.with(|t| t.borrow().nodes.len() > 1)
-}

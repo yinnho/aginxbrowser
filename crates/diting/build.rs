@@ -52,6 +52,7 @@ const SNAPSHOT_SCRIPTS: &[(&str, &str)] = &[
     // Touches _OPS and __diting_clone_hooks only at call time; basic
     // getRandomValues/randomUUID stay in bootstrap.
     ("crypto_subtle.js", include_str!("js/crypto_subtle.js")),
+    ("ed25519.js", include_str!("js/ed25519.js")),
     // #236 absorption split: the XHR family moved out of bootstrap.js
     // wholesale — consumes the fetch shim closure and the initiator-hint
     // var fetch.js defined, both at class-definition and at send() time.

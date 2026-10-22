@@ -3031,6 +3031,7 @@ mod fetch_gate;
 mod fetch_walk;
 mod canvas;
 mod ecdsa;
+mod ed25519;
 mod node_order;
 
 pub(crate) use fetch_walk::{
@@ -3050,6 +3051,9 @@ pub(crate) use canvas::{op_canvas_store, op_canvas_text};
 pub(crate) use ecdsa::{
     op_subtle_ecdh_derive_bits, op_subtle_ecdsa_generate, op_subtle_ecdsa_import_private,
     op_subtle_ecdsa_import_public, op_subtle_ecdsa_sign, op_subtle_ecdsa_verify,
+};
+pub(crate) use ed25519::{
+    op_subtle_ed25519_check, op_subtle_ed25519_public, op_subtle_ed25519_sign, op_subtle_ed25519_verify,
 };
 mod crypto_secret;
 mod cors;
@@ -4675,6 +4679,10 @@ pub fn our_decls() -> Vec<diting_runtime::op_reg::OpDecl> {
         op_subtle_ecdh_derive_bits(),
         op_subtle_ecdsa_sign(),
         op_subtle_ecdsa_verify(),
+        op_subtle_ed25519_check(),
+        op_subtle_ed25519_public(),
+        op_subtle_ed25519_sign(),
+        op_subtle_ed25519_verify(),
         op_random_bytes(),
         op_url_parse(),
         op_url_set(),

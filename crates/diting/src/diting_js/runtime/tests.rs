@@ -7041,6 +7041,46 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn test_webcrypto_ed25519_vector_and_roundtrips() {
+        // RFC 8032 section 7.1 test 1 (empty message) pins the curve math;
+        // the rest exercises every import/export format and the usage rules.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"async () => {
+            const hex = (b) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('');
+            const unhex = (h) => Uint8Array.from(h.match(/../g).map((x) => parseInt(x, 16)));
+            const seed = '9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60';
+            const pub = 'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a';
+            const sigHex = 'e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b';
+            const pk8 = unhex('302e020100300506032b657004220420' + seed);
+            const priv = await crypto.subtle.importKey('pkcs8', pk8, 'Ed25519', true, ['sign']);
+            const sig = await crypto.subtle.sign('Ed25519', priv, new Uint8Array(0));
+            const pubKey = await crypto.subtle.importKey('raw', unhex(pub), { name: 'Ed25519' }, true, ['verify']);
+            const ok = await crypto.subtle.verify('Ed25519', pubKey, sig, new Uint8Array(0));
+            const jwk = await crypto.subtle.exportKey('jwk', priv);
+            const jwkBack = await crypto.subtle.importKey('jwk', jwk, 'Ed25519', true, ['sign']);
+            const spki = await crypto.subtle.exportKey('spki', pubKey);
+            const spkiKey = await crypto.subtle.importKey('spki', spki, 'Ed25519', true, ['verify']);
+            const g = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+            const msg = new TextEncoder().encode('hello');
+            const gs = await crypto.subtle.sign('Ed25519', g.privateKey, msg);
+            const gOk = await crypto.subtle.verify('Ed25519', g.publicKey, gs, msg);
+            const gBad = await crypto.subtle.verify('Ed25519', g.publicKey, gs, new TextEncoder().encode('hellp'));
+            let usage = '', badRaw = '';
+            try { await crypto.subtle.sign('Ed25519', g.publicKey, msg); } catch (e) { usage = e.name; }
+            try { await crypto.subtle.importKey('raw', new Uint8Array(31), 'Ed25519', true, ['verify']); } catch (e) { badRaw = e.name; }
+            return [hex(sig) === sigHex, ok, Object.keys(jwk).join(','), jwk.kty + '/' + jwk.crv, hex(await crypto.subtle.exportKey('pkcs8', jwkBack)) === hex(pk8),
+              hex(spki) === '302a300506032b6570032100' + pub, spkiKey.algorithm.name, gs.byteLength, gOk, gBad, usage, badRaw,
+              g.publicKey.usages.join(), g.privateKey.usages.join(), g.publicKey.extractable];
+        }"#;
+        let mut result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
+        let v = result.value.take().unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!([true, true, "crv,d,ext,key_ops,kty,x", "OKP/Ed25519", true, true, "Ed25519", 64, true, false, "InvalidAccessError", "DataError", "verify", "sign", true])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn test_webcrypto_ecdsa_roundtrips() {
         let mut rt = setup_runtime("<html><body></body></html>");
         // #103: ECDSA P-256/P-384 through the real face — generate → export

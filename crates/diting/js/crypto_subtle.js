@@ -762,6 +762,7 @@ if (!globalThis.crypto.subtle) {
   globalThis.SubtleCrypto = function SubtleCrypto() { throw new TypeError("Illegal constructor"); };
   Object.setPrototypeOf(subtle, globalThis.SubtleCrypto.prototype);
   globalThis.crypto.subtle = subtle;
+  globalThis.__diting_subtle_hooks = { makeKey, keyBytes, toBytes, bufferOf, b64urlToBytes, bytesToB64url, runOp };
 
   // A CryptoKey cloned via structuredClone or postMessage is a different
   // object, so the keyMaterial WeakMap lookup misses and crypto.subtle throws
