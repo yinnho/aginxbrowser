@@ -566,18 +566,22 @@ impl Vm {
     /// is validated first ([`crate::snapshot::deconstruct`]); a v8 blob
     /// that is valid V8 but not OUR shell (no `__diting_settle` face)
     /// panics loudly — that is a wrong-blob bug, not a runtime condition.
-    pub fn from_snapshot(bytes: &[u8]) -> Result<Self, SnapshotError> {
+    ///
+    /// Takes `&'static` so the v8 segment is handed to V8 as a borrowed
+    /// `Cow` — the blob must outlive the isolate, and a copy per isolate
+    /// was 4.4MiB of dead weight per session (#311).
+    pub fn from_snapshot(bytes: &'static [u8]) -> Result<Self, SnapshotError> {
         Self::build(Some(bytes))
     }
 
-    fn build(snapshot: Option<&[u8]>) -> Result<Self, SnapshotError> {
+    fn build(snapshot: Option<&'static [u8]>) -> Result<Self, SnapshotError> {
         ensure_v8();
         let mut isolate = match snapshot {
             None => v8::Isolate::new(Default::default()),
             Some(bytes) => {
                 let parts = snapshot::deconstruct(bytes)?;
                 let params = v8::Isolate::create_params()
-                    .snapshot_blob(v8::StartupData::from(parts.v8_blob.to_vec()))
+                    .snapshot_blob(v8::StartupData::from(parts.v8_blob))
                     .external_references(snapshot::external_references());
                 v8::Isolate::new(params)
             }

@@ -27,8 +27,9 @@ static ISOLATE_LOCK: Mutex<()> = Mutex::new(());
 fn dormant_shell_restores_and_drives() {
     let _g = ISOLATE_LOCK.lock().unwrap();
     let blob = create_snapshot(&[]);
+    let blob: &'static [u8] = Box::leak(blob.into());
 
-    let mut vm = Vm::from_snapshot(&blob).unwrap();
+    let mut vm = Vm::from_snapshot(blob).unwrap();
 
     // The baked heap came through: faces installed, table empty, the
     // script-context bindings (const/let prelude state) reachable.
@@ -112,8 +113,9 @@ fn dormant_shell_restores_and_drives() {
 fn one_blob_powers_two_independent_vms() {
     let _g = ISOLATE_LOCK.lock().unwrap();
     let blob = create_snapshot(&[]);
-    let mut a = Vm::from_snapshot(&blob).unwrap();
-    let mut b = Vm::from_snapshot(&blob).unwrap();
+    let blob: &'static [u8] = Box::leak(blob.into());
+    let mut a = Vm::from_snapshot(blob).unwrap();
+    let mut b = Vm::from_snapshot(blob).unwrap();
 
     // Both restart the baked id counter — same first id, proof each
     // restore got its own heap copy, not a shared one.
@@ -161,7 +163,7 @@ fn from_snapshot_rejects_broken_containers() {
     // Honest container, wrong sidecar generation.
     let bytes = diting_runtime::snapshot::serialize(b"not v8 data", &999u32.to_le_bytes());
     assert!(matches!(
-        Vm::from_snapshot(&bytes),
+        Vm::from_snapshot(Box::leak(bytes.into_boxed_slice())),
         Err(diting_runtime::snapshot::SnapshotError::BadVersion { found: 999, .. })
     ));
 }
@@ -187,7 +189,8 @@ fn embedder_scripts_bake_into_the_blob() {
              globalThis.__diting_baked_read = __diting_read_lexical();",
         ),
     ]);
-    let mut vm = Vm::from_snapshot(&blob).unwrap();
+    let blob: &'static [u8] = Box::leak(blob.into());
+    let mut vm = Vm::from_snapshot(blob).unwrap();
     assert_eq!(vm.eval_string("globalThis.__diting_shim_calls").unwrap(), "1");
     assert_eq!(vm.eval_string("globalThis.__diting_baked_read").unwrap(), "lex-val");
     assert_eq!(
