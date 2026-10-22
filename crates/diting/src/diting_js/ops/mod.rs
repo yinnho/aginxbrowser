@@ -1722,6 +1722,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         // feature because diting_layout pulls taffy/swash; without it the
         // bootstrap falls back to its synthetic hit-test grid.
         #[cfg(feature = "screenshot")]
+        "text_rects" | "elem_rects" => text_geom::run(&gs, dom, &cmd, &arg1, &arg2),
         "layout_rect" => {
             let nid = match parse_nid(&arg1) { Some(id) => id, None => return "null".into() };
             let epoch = dom.epoch();
@@ -3024,6 +3025,7 @@ fn sticky_shifts(gs: &JsState, dom: &DomTree) -> std::rc::Rc<HashMap<NodeId, [f3
 mod band;
 mod css;
 mod encoding;
+mod text_geom;
 mod props;
 mod fetch_gate;
 mod fetch_walk;

@@ -44,7 +44,7 @@ fn ink_extent_maps_bracketed_text_through_the_transform() {
             tokens: None,
             ws: WhiteSpace::Normal,
             text_shadow: None,
-small_caps: false, han: None, last_line_align: None },
+small_caps: false, han: None, last_line_align: None, src: None, },
         PaintItem::ClearXf,
     ];
     let (w, h) = text_ink_extent(&items);
@@ -73,7 +73,7 @@ fn ink_extent_clearxf_restores_identity() {
         tokens: None,
         ws: WhiteSpace::Normal,
         text_shadow: None,
-small_caps: false, han: None, last_line_align: None };
+small_caps: false, han: None, last_line_align: None, src: None, };
     let items = vec![
         PaintItem::SetXf { xf: [0.0, 1.0, -1.0, 0.0, 200.0, 0.0] },
         plain(10.0, 20.0),
@@ -109,7 +109,7 @@ fn ink_extent_canvas_bracket_resets_the_map() {
             tokens: None,
             ws: WhiteSpace::Normal,
             text_shadow: None,
-small_caps: false, han: None, last_line_align: None },
+small_caps: false, han: None, last_line_align: None, src: None, },
         PaintItem::ClearXf,
         PaintItem::ClearXf,
     ];
@@ -141,7 +141,7 @@ fn ink_extent_nested_brackets_compose() {
             tokens: None,
             ws: WhiteSpace::Normal,
             text_shadow: None,
-small_caps: false, han: None, last_line_align: None },
+small_caps: false, han: None, last_line_align: None, src: None, },
         PaintItem::ClearXf,
         PaintItem::ClearXf,
     ];
@@ -183,7 +183,7 @@ fn gradient_text_samples_gradient_at_glyph_positions() {
         tokens: None,
         ws: WhiteSpace::Normal,
         text_shadow: None,
-small_caps: false, han: None, last_line_align: None }];
+small_caps: false, han: None, last_line_align: None, src: None, }];
     let fonts = crate::diting_fonts::font_book();
     let mut c = Canvas::new_filled(120, 40, [255, 255, 255, 255]);
     execute(&items, &fonts, &mut c);
@@ -367,7 +367,7 @@ fn band_dy_zero_matches_execute() {
             caret: None,
             form_rtl: false,
         },
-        PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None, ws: WhiteSpace::Normal, text_shadow: None, small_caps: false, han: None, last_line_align: None },
+        PaintItem::Text { text: "hello".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 4.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None, ws: WhiteSpace::Normal, text_shadow: None, small_caps: false, han: None, last_line_align: None, src: None, },
     ];
     let fonts = crate::diting_fonts::font_book();
     let mut full = Canvas::new_filled(40, 60, [255, 255, 255, 255]);
@@ -401,7 +401,7 @@ fn text_decorations_paint_line_bands() {
             tokens: None,
             ws: WhiteSpace::Normal,
             text_shadow: None,
-small_caps: false, han: None, last_line_align: None }];
+small_caps: false, han: None, last_line_align: None, src: None, }];
         let mut c = Canvas::new_filled(80, 32, [255, 255, 255, 255]);
         execute(&items, &fonts, &mut c);
         c
@@ -445,7 +445,7 @@ small_caps: false, han: None, last_line_align: None }];
             mono: false,
             word_spacing: 0.0,
             truncate_at: None,
-            tokens: None,
+            tokens: None, src: None,
             ws: WhiteSpace::Normal,
             text_shadow: None,
 small_caps: false, han: None, last_line_align: None },
@@ -815,8 +815,8 @@ fn text_band_edges() {
     let fonts = crate::diting_fonts::font_book();
     // A tall low-content page: only two text leaves, one near the band.
     let items = vec![
-        PaintItem::Text { text: "edge".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 96.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None, ws: WhiteSpace::Normal, text_shadow: None, small_caps: false, han: None, last_line_align: None },
-        PaintItem::Text { text: "far".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 500.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None, ws: WhiteSpace::Normal, text_shadow: None, small_caps: false, han: None, last_line_align: None },
+        PaintItem::Text { text: "edge".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 96.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None, ws: WhiteSpace::Normal, text_shadow: None, small_caps: false, han: None, last_line_align: None, src: None, },
+        PaintItem::Text { text: "far".into(), font_size: 16.0, bold: false, color: [0, 0, 0, 255], line_height: 20.0, x: 2.0, y: 500.0, wrap_at: 36.0, gradient: None, decorations: TextDecorations::default(), mono: false, word_spacing: 0.0, truncate_at: None, tokens: None, ws: WhiteSpace::Normal, text_shadow: None, small_caps: false, han: None, last_line_align: None, src: None, },
     ];
     let mut band = Canvas::new_filled(40, 80, [255, 255, 255, 255]);
     execute_band(&items, &fonts, &mut band, 0.0, 100.0);
@@ -946,7 +946,7 @@ fn affine_text_paints_through_bracket() {
             tokens: None,
             ws: WhiteSpace::Normal,
             text_shadow: None,
-small_caps: false, han: None, last_line_align: None },
+small_caps: false, han: None, last_line_align: None, src: None, },
         PaintItem::ClearXf,
     ];
     let fonts = crate::diting_fonts::font_book();
@@ -1160,7 +1160,7 @@ fn ellipsis_truncates_paint_ink_at_the_limit() {
             tokens: None,
             ws: WhiteSpace::Normal,
             text_shadow: None,
-small_caps: false, han: None, last_line_align: None }];
+small_caps: false, han: None, last_line_align: None, src: None, }];
         let mut c = Canvas::new_filled(400, 32, [255, 255, 255, 255]);
         execute(&items, &fonts, &mut c);
         c
@@ -1325,7 +1325,7 @@ fn shadow_item(layers: Vec<TextShadow>) -> Vec<PaintItem> {
         tokens: None,
         ws: WhiteSpace::Normal,
         text_shadow: if layers.is_empty() { None } else { Some(layers) },
-small_caps: false, han: None, last_line_align: None }]
+small_caps: false, han: None, last_line_align: None, src: None, }]
 }
 
 fn reds(c: &Canvas) -> Vec<(usize, usize)> {
@@ -1513,8 +1513,7 @@ fn text_shadow_blur_clamped_and_budgeted() {
             text_shadow: Some(vec![TextShadow { dx: 0.0, dy: 0.0, blur, color: crate::diting_css::Color(255, 0, 0, 255) }]),
             small_caps: false,
             han: None,
-            last_line_align: None,
-        }];
+            last_line_align: None, src: None, }];
         let mut c = Canvas::new_filled(256, 64, [255, 255, 255, 255]);
         execute(&items, &fonts, &mut c);
         reds(&c)
@@ -1547,7 +1546,7 @@ fn text_shadow_underlines_are_shadowed() {
             mono: false,
             word_spacing: 0.0,
             truncate_at: None,
-            tokens: None,
+            tokens: None, src: None,
             ws: WhiteSpace::Normal,
             text_shadow: shadow.map(|sh| vec![sh]),
             small_caps: false,

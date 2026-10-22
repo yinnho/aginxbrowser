@@ -23411,3 +23411,42 @@ fn document_evaluate_xpath_subset() {
         rt.evaluate("document.getElementById('b').click()").unwrap();
         assert!(rt.take_pending_navigation().is_some(), "an un-intercepted link click still navigates");
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_range_client_rects_follow_the_painted_lines() {
+        // Chrome truth (headless Chrome, 2026-10-22): a wrapped block's text
+        // range yields one rect per line (equal line pitch, shared left edge),
+        // a sub-range sits inside its line, a collapsed range is a zero-width
+        // caret, selectNode(inline) = the element's per-line boxes PLUS its
+        // text rects, and a wrapped inline reports one box per line.
+        let mut rt = setup_runtime(
+            "<html><head><style>body{margin:0;font:16px/24px serif} #w{width:200px;padding:10px}</style></head><body>
+              <div id=w>aaa bbb ccc ddd eee fff ggg hhh iii jjj kkk lll mmm nnn ooo ppp qqq</div>
+              <p id=p3 style=\"width:300px;margin:0\">short line</p>
+              <div id=w2 style=\"width:200px\">start <span id=sp>one two three four five six seven eight nine ten eleven twelve thirteen</span> end</div>
+             </body></html>",
+        );
+        let v = rt
+            .evaluate(
+                "(() => { const r = []; const f = x => Math.round(x * 10) / 10;
+                  const t = document.getElementById('w').firstChild;
+                  const rg = document.createRange(); rg.selectNodeContents(document.getElementById('w'));
+                  const rs = [...rg.getClientRects()];
+                  r.push(rs.length >= 3);
+                  r.push(rs.every((x, i) => i === 0 || Math.abs((x.y - rs[i - 1].y) - 24) < 0.6));
+                  r.push([...new Set(rs.map(x => f(x.x)))].join('/'));
+                  const rg2 = document.createRange(); rg2.setStart(t, 4); rg2.setEnd(t, 7); const p = rg2.getClientRects();
+                  r.push(p.length + ':' + (p[0].x > 10) + ':' + (p[0].width > 0 && p[0].width < 60));
+                  const p3 = document.getElementById('p3').firstChild;
+                  const rg5 = document.createRange(); rg5.setStart(p3, 6); rg5.setEnd(p3, 10); const c = rg5.getClientRects();
+                  const rg6 = document.createRange(); rg6.setStart(p3, 3); rg6.collapse(true);
+                  r.push(c.length + ':' + (c[0].width > 0) + ':' + rg6.getClientRects().length + ':' + f(rg6.getBoundingClientRect().width));
+                  const sp = document.getElementById('sp'); const sr = [...sp.getClientRects()];
+                  const rg4 = document.createRange(); rg4.selectNode(sp);
+                  r.push((sr.length >= 3) + ':' + (rg4.getClientRects().length === 2 * sr.length) + ':' + (sp.getBoundingClientRect().height > 24));
+                  r.push(document.getElementById('w').getClientRects().length);
+                  return r.join('|'); })()",
+            )
+            .unwrap();
+        assert_eq!(v, "true|true|10|1:true:true|1:true:1:0|true:true:true|1");
+    }

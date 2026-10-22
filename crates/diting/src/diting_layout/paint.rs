@@ -1681,7 +1681,7 @@ pub(crate) fn pdf_text_ops(items: &[PaintItem], fonts: &FontBook) -> (Vec<PdfOp>
                 text_shadow,
                 small_caps,
                 han,
-                last_line_align,
+                last_line_align, ..
             } => {
                 // Vector gate: the shaper must cover every segment (fallback
                 // faces are emoji color bitmaps with no outlines), the fill
@@ -2487,7 +2487,7 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
                     super::svg::paint_svg(render, rect, fonts, out, dx, dy, *alpha);
                 }
             }
-            PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at, gradient, decorations, mono, word_spacing, truncate_at, tokens, ws, text_shadow, small_caps, han, last_line_align } => {
+            PaintItem::Text { text, font_size, bold, color, line_height, x, y, wrap_at, gradient, decorations, mono, word_spacing, truncate_at, tokens, ws, text_shadow, small_caps, han, last_line_align, .. } => {
                 // background-clip: text: the fill color is ignored entirely
                 // (CSS paints the background through the glyphs; the
                 // transparent-text-fill half of the idiom is free by

@@ -89,6 +89,7 @@ const SNAPSHOT_SCRIPTS: &[(&str, &str)] = &[
     ("adopted_sheets.js", include_str!("js/adopted_sheets.js")),
     ("web_api_gaps.js", include_str!("js/web_api_gaps.js")),
     ("navigation.js", include_str!("js/navigation.js")),
+    ("client_rects.js", include_str!("js/client_rects.js")),
 ];
 
 fn main() {

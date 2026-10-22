@@ -45,6 +45,9 @@ pub mod paint;
 pub mod sticky;
 pub mod svg;
 pub mod text;
+pub mod text_geom;
+mod text_src;
+use text_src::trim_run_edge_whitespace;
 pub use image::DecodedImage;
 pub use sticky::{apply_sticky_to_items, sticky_axis_shift, sticky_inset_px, StickySpan};
 pub use sticky::LayoutCollect;
@@ -953,6 +956,8 @@ fn build_word_leaves(
     fonts: &FontBook,
     taffy_tree: &mut TaffyTree<TextLeaf>,
 ) -> Vec<taffy::tree::NodeId> {
+    let src_node = text_src::cur();
+    let cur_range = std::cell::Cell::new((0u32, 0u32));
     let mut word_leaf = |seg_text: &str, seg_size: f32, is_space: bool| {
         // The separator token's advance carries the inherited
         // word-spacing (same token model measurement uses), so
@@ -984,11 +989,20 @@ fn build_word_leaves(
             mono,
             han,
         };
-        taffy_tree.new_leaf_with_context(style, leaf).ok()
+        let id = taffy_tree.new_leaf_with_context(style, leaf).ok();
+        if let (Some(id), Some(node)) = (id, src_node) {
+            let (a, b) = cur_range.get();
+            text_src::register(id, vec![(node, a, b - a)]);
+        }
+        id
     };
-    tokenize(text)
+    let toks = tokenize(text);
+    let ranges = if src_node.is_some() { text_src::token_ranges(text, &toks) } else { Vec::new() };
+    toks
         .into_iter()
-        .flat_map(|token| {
+        .enumerate()
+        .flat_map(|(ti, token)| {
+            cur_range.set(ranges.get(ti).copied().unwrap_or((0, 0)));
             let is_space = token.trim().is_empty();
             if small_caps && !is_space && token.chars().any(|c| c.is_lowercase()) {
                 // Synthesized small-caps: lowercase runs render as
@@ -1015,32 +1029,6 @@ fn build_word_leaves(
         .collect()
 }
 
-/// CSS §16.6.1: collapsible whitespace at the edges of an inline formatting
-/// context contributes no width. The pure-text path already trims edges
-/// (measure_text_leaf); the mixed-run path used to keep whitespace-only word
-/// leaves, and each tokenized space carried its full advance into
-/// shrink-to-fit/max-content widths — newline+indent text nodes between
-/// inline siblings added phantom space runs (obscura#764's +15px). Detached
-/// leaves are removed from the tree, like the flatten-path cleanup.
-fn trim_run_edge_whitespace(
-    taffy_tree: &mut TaffyTree<TextLeaf>,
-    leaves: &mut Vec<taffy::tree::NodeId>,
-) {
-    let is_ws = |tree: &TaffyTree<TextLeaf>, node: taffy::tree::NodeId| {
-        matches!(
-            tree.get_node_context(node),
-            Some(TextLeaf::Word { text, .. }) if text.trim().is_empty()
-        )
-    };
-    while leaves.first().copied().is_some_and(|n| is_ws(taffy_tree, n)) {
-        let _ = taffy_tree.remove(leaves.remove(0));
-    }
-    while leaves.last().copied().is_some_and(|n| is_ws(taffy_tree, n)) {
-        if let Some(n) = leaves.pop() {
-            let _ = taffy_tree.remove(n);
-        }
-    }
-}
 
 /// Shaped-token memo accessor for a run leaf: shape once, then hand every
 /// later probe a cheap Rc clone (obscura#983's measure half). The leaf owns
@@ -1931,7 +1919,9 @@ fn build_normal_sibling(
             let ws = word_spacing_context(tree, child, styles);
             let sc = small_caps_context(tree, child, styles);
             let han = han_context(tree, child, styles);
+            text_src::set_cur(Some(child));
             leaves.extend(build_word_leaves(&text, fs, b, col, lh, deco, vs, mono, ws, sc, han, fonts, taffy_tree));
+            text_src::set_cur(None);
         } else {
             let sub = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta);
             if let Some(sub) = sub {
@@ -2132,11 +2122,15 @@ fn build_flow_column(
     let mut flow_children: Vec<taffy::tree::NodeId> = Vec::new();
     let mut run: Vec<RunSeg> = Vec::new();
     let mut run_clip: Option<NodeId> = None;
+    let run_frame = text_src::new_frame();
     let flush_run = |run: &mut Vec<RunSeg>, flow_children: &mut Vec<taffy::tree::NodeId>, taffy_tree: &mut TaffyTree<TextLeaf>, run_wrappers: &mut Vec<taffy::tree::NodeId>, clip: Option<NodeId>| {
         if run.is_empty() {
             return;
         }
         let segs = std::mem::take(run);
+        let pending = text_src::drain_pending(run_frame);
+        let mut pending_it = pending.iter().copied();
+        let seg_lens: Vec<u32> = segs.iter().filter_map(|s| match s { RunSeg::Text(t, ..) => Some(t.chars().count() as u32), _ => None }).collect();
         if segs.iter().all(|s| matches!(s, RunSeg::Text(..))) {
             let text = segs
                 .iter()
@@ -2163,6 +2157,7 @@ fn build_flow_column(
                     Style::default(),
                     TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, ellipsis: run_ellipsis, line_clamp: run_clamp, tokens: std::cell::RefCell::new(None), small_caps: *sc, han: *han, clip_src: clip },
                 ) {
+                    text_src::register(leaf, text_src::seg_ranges(&pending, &seg_lens));
                     flow_children.push(leaf);
                 }
             }
@@ -2180,7 +2175,9 @@ fn build_flow_column(
         for seg in segs {
             match seg {
                 RunSeg::Text(text, fs, bold, color, lh, deco, vs, mono, wsp, _, sc, han) => {
-                    leaves.extend(build_word_leaves(&text, fs, bold, color, lh, deco, vs, mono, wsp, sc, han, fonts, taffy_tree))
+                    text_src::set_cur(pending_it.next());
+                    leaves.extend(build_word_leaves(&text, fs, bold, color, lh, deco, vs, mono, wsp, sc, han, fonts, taffy_tree));
+                    text_src::set_cur(None);
                 }
                 RunSeg::Nodes(nodes) => leaves.extend(nodes),
             }
@@ -2271,6 +2268,7 @@ fn build_flow_column(
             let sc = small_caps_context(tree, child, styles);
             let han = han_context(tree, child, styles);
             run_clip = Some(child);
+            text_src::note_seg(run_frame, child);
             run.push(RunSeg::Text(text, fs, b, col, lh, deco, vs, mono, ws, nws, sc, han));
         } else if child_display == Some(CssDisplay::InlineBlock) && !out_of_flow {
             // Atomic inline-level box (obscura#750 family): keeps its own
@@ -3925,16 +3923,20 @@ fn build_element_inner(
     let mut direct: Vec<taffy::tree::NodeId> = Vec::new();
     let mut run: Vec<RunSeg> = Vec::new();
     let mut run_clip: Option<NodeId> = None;
+    let run_frame = text_src::new_frame();
     let flush_run = |run: &mut Vec<RunSeg>, direct: &mut Vec<taffy::tree::NodeId>, taffy_tree: &mut TaffyTree<TextLeaf>, run_wrappers: &mut Vec<taffy::tree::NodeId>, clip: Option<NodeId>| {
         if run.is_empty() {
             return;
         }
         let segs = std::mem::take(run);
+        let pending = text_src::drain_pending(run_frame);
+        let mut pending_it = pending.iter().copied();
         // All-text run → one measured leaf (adjacent DOM text nodes
         // concatenate, which is also how CSS joins them). A run that is
         // ONLY formatting whitespace generates no box at all (CSS white-
         // space processing: it would otherwise sit between two blocks and
         // physically separate their adjoining margins, breaking collapse).
+        let seg_lens: Vec<u32> = segs.iter().filter_map(|s| match s { RunSeg::Text(t, ..) => Some(t.chars().count() as u32), _ => None }).collect();
         if segs.iter().all(|s| matches!(s, RunSeg::Text(..))) {
             let text = segs
                 .iter()
@@ -3963,6 +3965,7 @@ fn build_element_inner(
                 Style::default(),
                 TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, ellipsis: run_ellipsis, line_clamp: run_clamp, tokens: std::cell::RefCell::new(None), small_caps: *sc, han: *han, clip_src: clip },
             ) {
+                text_src::register(leaf, text_src::seg_ranges(&pending, &seg_lens));
                 direct.push(leaf);
                 return;
             }
@@ -3983,7 +3986,9 @@ fn build_element_inner(
         for seg in segs {
             match seg {
                 RunSeg::Text(text, fs, bold, color, lh, deco, vs, mono, wsp, _, sc, han) => {
-                    leaves.extend(build_word_leaves(&text, fs, bold, color, lh, deco, vs, mono, wsp, sc, han, fonts, taffy_tree))
+                    text_src::set_cur(pending_it.next());
+                    leaves.extend(build_word_leaves(&text, fs, bold, color, lh, deco, vs, mono, wsp, sc, han, fonts, taffy_tree));
+                    text_src::set_cur(None);
                 }
                 RunSeg::Nodes(nodes) => leaves.extend(nodes),
             }
@@ -4632,6 +4637,7 @@ fn build_element_inner(
             let sc = small_caps_context(tree, child, styles);
             let han = han_context(tree, child, styles);
             run_clip = Some(child);
+            text_src::note_seg(run_frame, child);
             run.push(RunSeg::Text(text, fs, b, col, lh, deco, vs, mono, ws, nws, sc, han));
         } else if child_display == Some(CssDisplay::InlineBlock) && !atomic_container && !out_of_flow {
             // An inline-level block is ATOMIC (Chrome line-box model): it keeps
@@ -4964,6 +4970,9 @@ pub enum PaintItem {
         /// LAST line inside its tile; word leaves carry None — the flex row
         /// breaks mixed runs, and per-line alignment there is a later face.
         last_line_align: Option<TextAlign>,
+        /// The DOM text node(s) (node, start char, char length) this item's text
+        /// carries — range / client-rect queries map fragments back through it.
+        src: Option<text_src::Segs>,
     },
 }
 
@@ -5385,6 +5394,8 @@ pub struct SolvedGeometry {
     /// (no element root, or a taffy error) — collect returns the same empty
     /// outputs the undivided pipeline returned on those paths.
     icb_node: Option<taffy::tree::NodeId>,
+    /// Which DOM text node(s) each text leaf carries (range / client-rect queries).
+    text_src: text_src::SrcMap,
 }
 
 impl SolvedGeometry {
@@ -5417,6 +5428,7 @@ impl SolvedGeometry {
             collapsed_edges: HashMap::new(),
             flattened: HashMap::new(),
             icb_node: None,
+            text_src: Default::default(),
         }
     }
 }
@@ -5437,6 +5449,7 @@ pub fn layout_solve(
     network_bytes: Option<&HashMap<String, std::sync::Arc<Vec<u8>>>>,
     base_url: Option<&str>,
 ) -> SolvedGeometry {
+    text_src::reset();
     // The document node is not an element; lay out from the first element
     // descendant (the <html> root), like upstream.
     let root = tree
@@ -6453,6 +6466,7 @@ pub fn layout_solve_rooted(
         collapsed_edges: table_meta.collapsed_edges,
         flattened,
         icb_node: Some(icb_node),
+        text_src: text_src::take(),
     }
 }
 
@@ -6591,6 +6605,7 @@ pub fn layout_collect_with_images(
     let Some(icb_node) = solved.icb_node else {
         return (rects, items, paint_order, local_geom, sticky_spans, scroller_spans);
     };
+    let _src_armed = text_src::arm(solved.text_src.clone());
     let SolvedGeometry {
         taffy_tree,
         node_map,
@@ -6823,6 +6838,7 @@ pub fn layout_collect_with_images(
             // A marker is a single line anchored at its own x — alignment
             // inside the tile never applies.
             last_line_align: None,
+            src: None,
         });
     }
 
@@ -7822,6 +7838,7 @@ pub fn layout_collect_with_images(
                     small_caps: *small_caps,
                     han: *han,
                     last_line_align,
+                    src: text_src::lookup(node),
                 });
             } else {
                 let wrap_at = taffy_tree
@@ -7851,6 +7868,7 @@ pub fn layout_collect_with_images(
                     small_caps: *small_caps,
                     han: *han,
                     last_line_align,
+                    src: text_src::lookup(node),
                 });
             }
         }
@@ -7881,6 +7899,7 @@ pub fn layout_collect_with_images(
                     small_caps: false,
                     han: *han,
                     last_line_align: None,
+                    src: text_src::lookup(node),
                 });
             } else {
                 items.push(PaintItem::Text {
@@ -7904,6 +7923,7 @@ pub fn layout_collect_with_images(
                     small_caps: false,
                     han: *han,
                     last_line_align: None,
+                    src: text_src::lookup(node),
                 });
             }
         }
