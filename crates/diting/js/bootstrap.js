@@ -12290,6 +12290,7 @@ globalThis.atob = globalThis.atob || ((s) => {
     back() { this.go(-1); },
     forward() { this.go(1); },
   };
+  Object.defineProperty(globalThis, '__diting_history', { value: () => { ensureSeed(); return { stack, index: idx }; } });
 })();
 globalThis.screenX = 0; globalThis.screenY = 0;
 globalThis.screenLeft = 0; globalThis.screenTop = 0;

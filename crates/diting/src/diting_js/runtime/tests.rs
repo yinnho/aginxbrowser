@@ -23349,3 +23349,65 @@ fn document_evaluate_xpath_subset() {
 |2 y { color: blue; }"
         );
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_navigation_api_intercept_flow() {
+        // Chrome truth (headless Chrome on a local http page, 2026-10-22):
+        // navigate() with an intercepting listener changes the URL at once,
+        // fires navigate -> currententrychange -> handler -> navigatesuccess,
+        // preventDefault aborts with AbortError, entries/state/keys behave.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let v = rt
+            .evaluate_remote(
+                "(async () => { const r = []; const nav = navigation; const evs = [];
+                  const n0 = nav.entries().length;
+                  r.push(typeof nav.currentEntry.key + nav.currentEntry.sameDocument + (nav.entries()[nav.currentEntry.index] === nav.currentEntry));
+                  nav.addEventListener('currententrychange', e => evs.push('cec:' + e.navigationType));
+                  nav.addEventListener('navigatesuccess', () => evs.push('success'));
+                  nav.addEventListener('navigateerror', () => evs.push('error'));
+                  nav.addEventListener('navigate', e => {
+                    evs.push('navigate:' + e.navigationType + ':' + e.destination.url.replace(location.origin, '') + ':' + e.canIntercept + ':' + JSON.stringify(e.info));
+                    if (e.destination.url.includes('/spa')) e.intercept({ handler: async () => { await new Promise(r => setTimeout(r, 10)); evs.push('handler'); } });
+                    if (e.destination.url.includes('/cancel')) e.preventDefault();
+                  });
+                  await new Promise(r => setTimeout(r, 0));
+                  const res = nav.navigate('/spa/1', { state: { s: 1 }, info: { i: 2 }, history: 'push' });
+                  r.push(location.pathname + ':' + (nav.entries().length - n0) + ':' + JSON.stringify(nav.currentEntry.getState()) + ':' + (nav.transition && nav.transition.navigationType));
+                  const c = await res.committed; r.push(c.url.replace(location.origin, ''));
+                  await res.finished; r.push(String(nav.transition));
+                  let err = 'none'; try { await nav.navigate('/cancel').finished; } catch (e) { err = e.name; }
+                  r.push(err + ':' + location.pathname);
+                  await nav.navigate('/spa/2', { history: 'replace' }).finished; r.push(location.pathname + ':' + (nav.entries().length - n0));
+                  let bad = 'none'; try { nav.navigate('http://[bad'); } catch (e) { bad = e.name; } r.push(bad);
+                  r.push(evs.join(','));
+                  return r.join('|'); })()",
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            v.value.unwrap(),
+            "stringtruetrue|/spa/1:1:{\"s\":1}:push|/spa/1|null|AbortError:/spa/1|/spa/2:1|SyntaxError|navigate:push:/spa/1:true:{\"i\":2},cec:push,handler,success,navigate:push:/cancel:true:undefined,error,navigate:replace:/spa/2:true:undefined,cec:replace,handler,success"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_navigation_api_intercepts_link_clicks_and_location_assign() {
+        // A same-origin link click / location.assign runs through the navigate
+        // event: an intercepting router keeps the document (no pending
+        // navigation), a non-intercepting listener lets the real navigation go.
+        let mut rt = setup_runtime("<html><body><a id=a href=\"/spa/page\">a</a><a id=b href=\"/real\">b</a></body></html>");
+        let v = rt
+            .evaluate(
+                "(() => { const log = [];
+                  navigation.addEventListener('navigate', e => { log.push(e.destination.url.replace(location.origin, '')); if (e.destination.url.includes('/spa')) e.intercept({ handler() {} }); });
+                  document.getElementById('a').click(); log.push(location.pathname);
+                  return log.join(','); })()",
+            )
+            .unwrap();
+        assert_eq!(v, "/spa/page,/spa/page");
+        assert!(rt.take_pending_navigation().is_none(), "an intercepted link click must not navigate");
+        rt.evaluate("document.getElementById('b').click()").unwrap();
+        assert!(rt.take_pending_navigation().is_some(), "an un-intercepted link click still navigates");
+    }

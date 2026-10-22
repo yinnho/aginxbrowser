@@ -16,7 +16,7 @@
       if (el) el.scrollIntoView();
     } catch {}
   };
-  const go = (url, replace) => {
+  const goRaw = (url, replace) => {
     const r = _resolveUrl(String(url));
     const cur = __currentUrl();
     if (r.indexOf('#') >= 0 && noFrag(r) === noFrag(cur)) {
@@ -32,6 +32,12 @@
     globalThis.__virtualUrl = r;
     _OPS.op_navigate(r, 'GET', '');
   };
+  // The Navigation API (navigation.js) may consume the navigation first.
+  const go = (url, replace) => {
+    if (globalThis.__navigationIntercept && globalThis.__navigationIntercept(_resolveUrl(String(url)), replace)) return;
+    goRaw(url, replace);
+  };
+  Object.defineProperty(globalThis, '__diting_locNavRaw', { value: goRaw, configurable: true, writable: true });
   Object.defineProperty(globalThis, '__diting_locNav', { value: go, configurable: true, writable: true });
   const L = _locationObj;
   const def = (name, desc) => Object.defineProperty(L, name, { enumerable: true, configurable: true, ...desc });
