@@ -22382,8 +22382,9 @@ fn document_evaluate_xpath_subset() {
                 const t0 = performance.now();
                 setTimeout(() => { fired = performance.now() - t0; }, 50);
                 (async () => {
-                    let n = 0;
-                    while (n < 2000) { await fetch('data:text/plain,x'); n += 1; }
+                    // Time-boxed, not count-boxed: a fixed 2000 fetches took
+                    // longer than the eval budget on a slow CI runner.
+                    while (performance.now() - t0 < 400) { await fetch('data:text/plain,x'); }
                     resolve({ fired: fired === null ? -1 : Math.round(fired) });
                 })();
             });
