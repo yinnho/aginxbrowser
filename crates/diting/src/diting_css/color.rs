@@ -5,6 +5,9 @@ use super::*;
 /// Named colors + #rgb/#rrggbbaa hex (the forms real sheets overwhelmingly use).
 pub fn parse_color(v: &str) -> Option<Color> {
     let v = v.trim().to_ascii_lowercase();
+    if let Some(c) = super::color_modern::parse(&v) {
+        return Some(c);
+    }
     // rgb()/rgba() — channels as 0-255 or %, alpha 0-1 (batch 4a: the most
     // common authored background format on real pages, and the one the
     // paint cross-checks style backgrounds with).

@@ -3273,3 +3273,86 @@ fn math_functions_units_and_percent_expressions() {
     assert_eq!(eval_width_expr(&min_expr, 600.0), Some(250.0));
     assert_eq!(eval_width_expr(&min_expr, 100.0), Some(100.0));
 }
+
+#[test]
+fn modern_colors_match_chrome_pixels() {
+    // Chrome truth: canvas fillStyle -> getImageData on headless Chrome
+    // (sRGB, out-of-gamut clipped). +-1 per channel absorbs float rounding.
+    let cases: &[(&str, (i32, i32, i32, i32))] = &[
+        ("rgb(0 0 0 / 50%)", (0, 0, 0, 128)),
+        ("rgb(255 0 0 / 0.5)", (255, 0, 0, 128)),
+        ("rgba(255,0,0,.5)", (255, 0, 0, 128)),
+        ("hsl(120 100% 25% / 0.5)", (0, 128, 0, 128)),
+        ("hsl(120, 100%, 25%)", (0, 128, 0, 255)),
+        ("hwb(120 0% 0%)", (0, 255, 0, 255)),
+        ("hwb(200 20% 30%)", (51, 136, 179, 255)),
+        ("lab(50% 40 59.5)", (191, 87, 0, 255)),
+        ("lch(50% 40 50)", (169, 101, 68, 255)),
+        ("oklab(0.7 0.1 0.1)", (229, 127, 78, 255)),
+        ("oklch(0.7 0.1 200)", (64, 177, 183, 255)),
+        ("oklch(63.7% 0.237 25.331)", (251, 44, 54, 255)),
+        ("oklch(97% 0.014 254.604)", (239, 246, 255, 255)),
+        ("color(srgb 1 0 0)", (255, 0, 0, 255)),
+        ("color(display-p3 1 0 0)", (255, 0, 0, 255)),
+        ("color(srgb-linear 0.5 0.5 0.5)", (188, 188, 188, 255)),
+        ("color(xyz-d65 0.3 0.4 0.5)", (92, 184, 181, 255)),
+        ("color-mix(in srgb, red 50%, blue)", (128, 0, 128, 255)),
+        ("color-mix(in oklab, red, blue)", (140, 83, 162, 255)),
+        ("color-mix(in oklch, red, blue)", (186, 0, 194, 255)),
+        ("color-mix(in hsl, red, blue 25%)", (255, 0, 128, 255)),
+        ("color-mix(in srgb, #000 50%, transparent)", (0, 0, 0, 128)),
+        ("color-mix(in oklab, oklch(0.5 0.2 30) 30%, white)", (243, 192, 183, 255)),
+        ("rgb(from red r g 255)", (255, 0, 255, 255)),
+        ("hsl(from #336699 h s calc(l + 20))", (102, 153, 204, 255)),
+        ("oklch(from oklch(0.5 0.2 30) l c calc(h + 90))", (87, 112, 0, 255)),
+        ("rgb(from rgb(10 20 30 / 0.5) r g b / alpha)", (10, 20, 30, 128)),
+        ("orange", (255, 165, 0, 255)),
+        ("rebeccapurple", (102, 51, 153, 255)),
+        ("navy", (0, 0, 128, 255)),
+        ("LightGoldenRodYellow", (250, 250, 210, 255)),
+        ("transparent", (0, 0, 0, 0)),
+        ("#0000", (0, 0, 0, 0)),
+        ("#f008", (255, 0, 0, 136)),
+        ("rgb(100% 0% 0%)", (255, 0, 0, 255)),
+        ("hsl(0deg 100% 50%)", (255, 0, 0, 255)),
+        ("hsl(0.5turn 100% 50%)", (0, 255, 255, 255)),
+    ];
+    let mut bad = Vec::new();
+    for (css, (r, g, b, a)) in cases {
+        match parse_color(css) {
+            Some(Color(pr, pg, pb, pa)) => {
+                let d = |x: u8, y: i32| (x as i32 - y).abs();
+                if d(pr, *r) > 1 || d(pg, *g) > 1 || d(pb, *b) > 1 || d(pa, *a) > 1 {
+                    bad.push(format!("{css}: got {pr},{pg},{pb},{pa} want {r},{g},{b},{a}"));
+                }
+            }
+            None => bad.push(format!("{css}: unparsed")),
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+    assert_eq!(parse_color("light-dark(red, blue)"), Some(Color(255, 0, 0, 255)), "light scheme");
+}
+
+#[test]
+fn modern_colors_work_inside_shorthands_and_gradients() {
+    // Space-separated colour functions must survive shorthand tokenising.
+    let mut s = ComputedStyle::default();
+    assert!(apply_declarations(&mut s, "border: 2px solid oklch(63.7% 0.237 25.331)"));
+    assert_eq!(s.border_color, Some(Color(251, 44, 54, 255)));
+    assert_eq!(s.border_width.top, Some(Length::Px(2.0)));
+    let mut s = ComputedStyle::default();
+    assert!(apply_declarations(&mut s, "border-left: 4px solid rgb(0 0 0 / 50%)"));
+    assert_eq!(s.border_color, Some(Color(0, 0, 0, 128)));
+    let mut s = ComputedStyle::default();
+    assert!(apply_declarations(&mut s, "padding-inline: clamp(1rem, 5px, 3rem) 2px"));
+    assert_eq!(s.padding.left, Some(Length::Px(16.0)));
+    let g = parse_linear_gradient("linear-gradient(to right, oklch(0.7 0.1 200), orange)").expect("gradient parses");
+    assert_eq!(g.stops.len(), 2);
+    assert_eq!(g.stops[0].1, Color(64, 177, 183, 255));
+    assert_eq!(g.stops[1].1, Color(255, 165, 0, 255));
+    let mut s = ComputedStyle::default();
+    assert!(apply_declarations(&mut s, "box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px color-mix(in srgb, red 50%, blue)"));
+    assert_eq!(s.box_shadow.as_ref().map(|v| v.len()), Some(2));
+    let mut s = ComputedStyle::default();
+    assert!(apply_declarations(&mut s, "text-shadow: 1px 1px 2px oklch(0.5 0.2 30)"));
+}

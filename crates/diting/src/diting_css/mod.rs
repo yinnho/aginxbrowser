@@ -19,6 +19,7 @@
 use crate::diting_dom;
 
 mod color;
+mod color_modern;
 pub use color::{parse_color, parse_linear_gradient, LinearGradient};
 mod animation;
 use animation::{parse_animation_shorthand, parse_keyframes_body};
@@ -1836,7 +1837,7 @@ impl TextDecorations {
 fn parse_text_decoration(v: &str, shorthand: bool) -> Option<TextDecorations> {
     let mut out = TextDecorations::default();
     let mut saw_line = false;
-    for tok in v.split_whitespace() {
+    for tok in split_sides(v) {
         let t = tok.to_ascii_lowercase();
         match t.as_str() {
             "underline" => {
@@ -4121,7 +4122,7 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             let mut width: Option<Length> = None;
             let mut line: Option<Option<BorderStyle>> = None; // Some(None) = explicit none
             let mut color: Option<Color> = None;
-            for tok in v.split_whitespace() {
+            for tok in split_sides(v) {
                 let w = len(tok).or(match tok {
                     "thin" => Some(Length::Px(1.0)),
                     "medium" => Some(Length::Px(3.0)),
@@ -4164,7 +4165,7 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             let mut width: Option<Length> = None;
             let mut line: Option<Option<BorderStyle>> = None;
             let mut color: Option<Color> = None;
-            for tok in v.split_whitespace() {
+            for tok in split_sides(v) {
                 let w = len(tok).or(match tok {
                     "thin" => Some(Length::Px(1.0)),
                     "medium" => Some(Length::Px(3.0)),
@@ -4607,7 +4608,7 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
         // two are (start, end) — NOT the physical TRBL rotation. Invalid
         // tokens drop the whole declaration.
         "margin-block" | "margin-inline" | "padding-block" | "padding-inline" => {
-            let parts: Vec<&str> = v.split_whitespace().collect();
+            let parts: Vec<&str> = split_sides(v);
             if parts.is_empty() || parts.len() > 2 {
                 return false;
             }
