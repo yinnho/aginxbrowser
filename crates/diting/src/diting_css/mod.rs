@@ -27,6 +27,7 @@ mod supports;
 pub(crate) mod props;
 mod layers;
 mod nesting;
+mod scope;
 mod vars;
 mod calc;
 pub use calc::{eval_calc, eval_math_call, eval_width_expr};
@@ -383,6 +384,18 @@ fn flush_at_rule(
         layers::enter(prelude);
         recurse(rules, keyframes, containers);
         layers::leave();
+    } else if let Some(prelude) = at_rule_prelude(at, "scope") {
+        if let Some((root, limit)) = scope::parse_prelude(prelude) {
+            let (mut inner_rules, inner_kf) =
+                parse_stylesheet_with_containers(inner, viewport, media_type, overrides, containers);
+            for r in &mut inner_rules {
+                r.selector = scope::rewrite(&r.selector, &root, limit.as_deref());
+            }
+            rules.extend(inner_rules);
+            for (k, v) in inner_kf {
+                keyframes.entry(k).or_insert(v);
+            }
+        }
     } else if let Some(prelude) = at_rule_prelude(at, "keyframes") {
         // `from`/`to`/`NN%` stops; a stop that fails to parse is skipped,
         // not fatal — the sampler works with however many stops survive.

@@ -23450,3 +23450,25 @@ fn document_evaluate_xpath_subset() {
             .unwrap();
         assert_eq!(v, "true|true|10|1:true:true|1:true:1:0|true:true:true|1");
     }
+
+    #[tokio::test]
+    async fn test_at_scope_roots_rules_and_honours_the_lower_bound() {
+        // Chrome truth: rules inside @scope (root) only hit descendants of the
+        // root, `:scope` is the root itself, and `to (limit)` stops at the limit.
+        let mut rt = setup_runtime(
+            "<html><head><style>
+              @scope (.s) { p { color: red } :scope { margin-top: 7px } }
+              @scope (.t) to (.lim) { em { color: blue } }
+             </style></head><body>
+              <div class=s id=r><p id=in>x</p></div><p id=out>y</p>
+              <div class=t><em id=e1>a</em><div class=lim><em id=e2>b</em></div></div>
+             </body></html>",
+        );
+        let v = rt
+            .evaluate(
+                "(() => { const c = i => getComputedStyle(document.getElementById(i));
+                  return [c('in').color, c('out').color, c('r').marginTop, c('e1').color, c('e2').color].join('|'); })()",
+            )
+            .unwrap();
+        assert_eq!(v, "rgb(255, 0, 0)|rgb(0, 0, 0)|7px|rgb(0, 0, 255)|rgb(0, 0, 0)");
+    }

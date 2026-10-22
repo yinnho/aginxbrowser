@@ -78,7 +78,7 @@ fn pieces(body: &str) -> Option<Vec<(String, Option<String>)>> {
     nested.then_some(out)
 }
 
-fn split_top_commas(s: &str) -> Vec<String> {
+pub(crate) fn split_top_commas(s: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut cur = String::new();
     let (mut paren, mut bracket) = (0i32, 0i32);
