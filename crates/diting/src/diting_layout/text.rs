@@ -1003,7 +1003,7 @@ fn colorize_layered(alpha: &[u8], layer: Option<&[u8]>, color: [u8; 4]) -> Vec<u
 // `text::Token` / `super::text::greedy_wrap` path working unchanged.
 mod wrap;
 
-pub use wrap::{greedy_wrap, last_line_offset, tokens_of, Token, WrapLine};
+pub use wrap::{greedy_wrap, greedy_wrap_by, last_line_offset, tokens_of, Token, WrapLine};
 pub(crate) use wrap::{caps_case_runs, line_clamp_bake, truncate_tokens, SMALL_CAPS_RATIO};
 
 /// 批240 / blitz#924: `text-transform` case mapping, Chrome-grounded via a

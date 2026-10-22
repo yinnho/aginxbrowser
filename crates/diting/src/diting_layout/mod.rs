@@ -50,6 +50,8 @@ pub mod text;
 pub mod text_geom;
 mod text_src;
 mod flow_tree;
+mod float_lines;
+pub(crate) mod float_flow;
 #[cfg(test)]
 mod float_probe;
 mod face_bytes;
@@ -1072,6 +1074,33 @@ fn ws_rank(ws: WhiteSpace) -> u8 {
         WhiteSpace::Normal => 0,
     }
 }
+
+/// Measure one layout leaf: text runs through the shared breaker (beside a
+/// float, into the float's free slots), everything else by its style.
+fn measure_node(
+    fonts: &FontBook,
+    inputs: taffy::tree::LayoutInput,
+    id: taffy::tree::NodeId,
+    ctx: Option<&mut TextLeaf>,
+    style: &Style,
+    block: Option<&mut taffy::BlockContext<'_>>,
+) -> taffy::tree::LayoutOutput {
+    match ctx {
+        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, han, line_clamp, .. }) => {
+            let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
+            let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han);
+            if let Some(b) = block.as_deref() {
+                if let Some(out) = float_lines::measure(id, &shaped, *line_height, pad, &inputs, *ws, *line_clamp, b) {
+                    return out;
+                }
+            }
+            measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws, *line_clamp)
+        }
+        // Word leaves keep their style-driven sizing.
+        _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
+    }
+}
+
 
 /// Taffy measure function for a pure-text run leaf (batch 3a). Reproduces
 /// the observable behavior of blitz's parley-measured text nodes:
@@ -2161,7 +2190,7 @@ fn build_flow_column(
                 let run_ellipsis = false;
                 let run_clamp = None;
                 if let Ok(leaf) = taffy_tree.new_leaf_with_context(
-                    Style::default(),
+                    float_flow::run_style(),
                     TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, ellipsis: run_ellipsis, line_clamp: run_clamp, tokens: std::cell::RefCell::new(None), small_caps: *sc, han: *han, clip_src: clip },
                 ) {
                     text_src::register(leaf, text_src::seg_ranges(&pending, &seg_lens));
@@ -3146,18 +3175,7 @@ fn build_table(
         // (fresh), otherwise it reads final_layout, which the skipped
         // round_layout never wrote — i.e. stale values.
         taffy_tree.disable_rounding();
-        let _ = taffy_tree.compute_layout_with_measure(node, space, |inputs, _id, ctx, style| {
-            match ctx {
-                Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, han, line_clamp, .. }) => {
-                    let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                    let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han);
-                    measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws, *line_clamp)
-                }
-                Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | Some(TextLeaf::Pseudo { .. }) | None => {
-                    taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)
-                }
-            }
-        });
+        let _ = taffy_tree.compute_layout_with_block_measure(node, space, |inputs, id, ctx, style, block| measure_node(fonts, inputs, id, ctx, style, block));
         let out = taffy_tree.layout(node).ok().map(|l| (l.size.width, l.size.height));
         taffy_tree.enable_rounding();
         out
@@ -3911,6 +3929,7 @@ fn build_element_inner(
     // Shadow hosts render their shadow tree here (composed-tree children;
     // unassigned light children and slot boxes never build).
     let child_ids: Vec<NodeId> = render_children(tree, id);
+    let wrap_v2 = float_flow::eligible(tree, styles, id, &style, &child_ids);
 
     // In a flex/grid container every element child is blockified into its own
     // item (CSS flex-item blockification); runs only form in block/inline
@@ -3969,7 +3988,7 @@ fn build_element_inner(
             });
             let run_clamp = styles.get(&id).and_then(|s| s.line_clamp);
             if let Ok(leaf) = taffy_tree.new_leaf_with_context(
-                Style::default(),
+                float_flow::run_style(),
                 TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, ellipsis: run_ellipsis, line_clamp: run_clamp, tokens: std::cell::RefCell::new(None), small_caps: *sc, han: *han, clip_src: clip },
             ) {
                 text_src::register(leaf, text_src::seg_ranges(&pending, &seg_lens));
@@ -4028,7 +4047,7 @@ fn build_element_inner(
             .get(cid)
             .is_some_and(|s| s.float_side.is_some() && s.display != Some(CssDisplay::None))
     };
-    if child_ids.iter().any(is_float_child) {
+    if !wrap_v2 && child_ids.iter().any(is_float_child) {
         let is_whitespace_text =
             |cid: &NodeId| -> bool { tree.with_node(*cid, |n| !n.is_element() && n.text_content_of_text_node().is_some_and(|t| t.trim().is_empty())).unwrap_or(false) };
         // An empty bridge sibling (upstream is_empty_bridge): whitespace
@@ -4679,6 +4698,9 @@ fn build_element_inner(
         } else {
             flush_run(&mut run, &mut direct, taffy_tree, run_wrappers, run_clip.take());
             if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta) {
+                if wrap_v2 {
+                    float_flow::mark(taffy_tree, node, styles.get(&child));
+                }
                 direct.push(node);
             }
         }
@@ -5457,6 +5479,7 @@ pub fn layout_solve(
     base_url: Option<&str>,
 ) -> SolvedGeometry {
     text_src::reset();
+    float_lines::reset();
     // The document node is not an element; lay out from the first element
     // descendant (the <html> root), like upstream.
     let root = tree
@@ -5643,16 +5666,7 @@ pub fn layout_solve_rooted(
             .collect();
         if !needs_static.is_empty() {
             let laid_out = taffy_tree
-                .compute_layout_with_measure(icb_node, available, |inputs, _id, ctx, style| {
-                    match ctx {
-                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, han, line_clamp, .. }) => {
-                            let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                            let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han);
-                            measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws, *line_clamp)
-                        }
-                        _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
-                    }
-                })
+                .compute_layout_with_block_measure(icb_node, available, |inputs, id, ctx, style, block| measure_node(fonts, inputs, id, ctx, style, block))
                 .is_ok();
             if laid_out {
                 fn abs_rects(
@@ -5869,20 +5883,7 @@ pub fn layout_solve_rooted(
     // through to taffy's own style-based sizing — the closure fires for ALL
     // childless nodes, so returning HIDDEN here would zero plain leaves
     // (that's exactly what stock compute_layout does below via the same fn).
-    let measured = taffy_tree.compute_layout_with_measure(icb_node, available, |inputs, _id, ctx, style| {
-        match ctx {
-            Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, han, line_clamp, .. }) => {
-                let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han);
-                measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws, *line_clamp)
-            }
-            // Word leaves keep their style-driven sizing (batch 4d only
-            // added paint context — zero layout change).
-            Some(TextLeaf::Word { .. }) | Some(TextLeaf::Replaced { .. }) | Some(TextLeaf::Pseudo { .. }) | None => {
-                taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO)
-            }
-        }
-    });
+    let measured = taffy_tree.compute_layout_with_block_measure(icb_node, available, |inputs, id, ctx, style, block| measure_node(fonts, inputs, id, ctx, style, block));
     if measured.is_err() {
         return SolvedGeometry::aborted();
     }
@@ -6089,17 +6090,10 @@ pub fn layout_solve_rooted(
                 }
             }
             if changed {
-                let re = taffy_tree.compute_layout_with_measure(
+                let re = taffy_tree.compute_layout_with_block_measure(
                     icb_node,
                     available,
-                    |inputs, _id, ctx, style| match ctx {
-                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, han, line_clamp, .. }) => {
-                            let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                            let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han);
-                            measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws, *line_clamp)
-                        }
-                        _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
-                    },
+                    |inputs, id, ctx, style, block| measure_node(fonts, inputs, id, ctx, style, block),
                 );
                 if re.is_err() {
                     return SolvedGeometry::aborted();
@@ -6218,17 +6212,10 @@ pub fn layout_solve_rooted(
                 }
                 let _ = taffy_tree.set_style(tnid, ts);
             }
-            let re = taffy_tree.compute_layout_with_measure(
+            let re = taffy_tree.compute_layout_with_block_measure(
                 icb_node,
                 available,
-                |inputs, _id, ctx, style| match ctx {
-                    Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, han, line_clamp, .. }) => {
-                        let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                        let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han);
-                        measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws, *line_clamp)
-                    }
-                    _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
-                },
+                |inputs, id, ctx, style, block| measure_node(fonts, inputs, id, ctx, style, block),
             );
             if re.is_err() {
                 return SolvedGeometry::aborted();
@@ -6365,17 +6352,10 @@ pub fn layout_solve_rooted(
                 }
                 let _ = taffy_tree.set_style(tnid, ts);
             }
-            let re = taffy_tree.compute_layout_with_measure(
+            let re = taffy_tree.compute_layout_with_block_measure(
                 icb_node,
                 available,
-                |inputs, _id, ctx, style| match ctx {
-                    Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, han, line_clamp, .. }) => {
-                        let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                        let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han);
-                        measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws, *line_clamp)
-                    }
-                    _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
-                },
+                |inputs, id, ctx, style, block| measure_node(fonts, inputs, id, ctx, style, block),
             );
             if re.is_err() {
                 return SolvedGeometry::aborted();
@@ -6437,17 +6417,10 @@ pub fn layout_solve_rooted(
                 }
             }
             if dirty {
-                let re = taffy_tree.compute_layout_with_measure(
+                let re = taffy_tree.compute_layout_with_block_measure(
                     icb_node,
                     available,
-                    |inputs, _id, ctx, style| match ctx {
-                        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, han, line_clamp, .. }) => {
-                            let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-                            let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han);
-                            measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws, *line_clamp)
-                        }
-                        _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
-                    },
+                    |inputs, id, ctx, style, block| measure_node(fonts, inputs, id, ctx, style, block),
                 );
                 if re.is_err() {
                     return SolvedGeometry::aborted();
@@ -7807,7 +7780,41 @@ pub fn layout_collect_with_images(
                 None => full_text.into(),
             };
             let clip_fill = |x: f32, y: f32, wrap_at: f32, lh: f32, s: (f32, f32)| clip_text::run_fill(text_gradient_fill.clone(), *clip_src, tree, styles, x, y, wrap_at, lh, &toks, *ws, last_line_align, alpha, s);
-            if xf.is_diagonal() {
+            // Beside a float the lines have different widths and starts: one
+            // item per line, so the painter needs no per-line state.
+            let slotted = if xf.is_diagonal() && clamped.is_none() && !matches!(last_line_align, Some(TextAlign::Center) | Some(TextAlign::Right)) {
+                float_lines::slots_of(node)
+            } else {
+                None
+            };
+            if let Some(slots) = slotted {
+                let src = text_src::lookup(node);
+                for (i, line) in float_lines::split(&text, &toks, *ws, &slots).into_iter().enumerate() {
+                    let (lx, ly) = ((abs.0 + line.slot.x) * xf.a + xf.e, (abs.1 + i as f32 * *line_height) * xf.d + xf.f);
+                    items.push(PaintItem::Text {
+                        text: line.text,
+                        font_size: font_size * xf.d,
+                        bold: *bold,
+                        color: with_alpha(*color, alpha),
+                        line_height: line_height * xf.d,
+                        x: lx,
+                        y: ly,
+                        wrap_at: f32::INFINITY,
+                        gradient: clip_fill(lx, ly, line.slot.width * xf.a, *line_height * xf.d, (xf.a, xf.d)),
+                        decorations: *decorations,
+                        mono: *mono,
+                        word_spacing: word_spacing * xf.d,
+                        truncate_at: None,
+                        tokens: if xf.d == 1.0 { Some(line.tokens) } else { None },
+                        ws: *ws,
+                        text_shadow: run_text_shadow.clone(),
+                        small_caps: *small_caps,
+                        han: *han,
+                        last_line_align: None,
+                        src: src.as_ref().map(|s| text_src::slice(s, line.from, line.to)),
+                    });
+                }
+            } else if xf.is_diagonal() {
                 let wrap_at = taffy_tree
                     .parent(node)
                     .and_then(|p| taffy_tree.layout(p).ok())

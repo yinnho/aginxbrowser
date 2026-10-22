@@ -202,9 +202,19 @@ impl<C> FlowTree<C> {
         Ok(())
     }
 
-    pub fn compute_layout_with_measure<M>(&mut self, node: NodeId, space: Size<AvailableSpace>, measure: M) -> Res<()>
+    pub fn compute_layout_with_measure<M>(&mut self, node: NodeId, space: Size<AvailableSpace>, mut measure: M) -> Res<()>
     where
         M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style) -> LayoutOutput,
+    {
+        self.compute_layout_with_block_measure(node, space, move |inputs, id, ctx, style, _| measure(inputs, id, ctx, style))
+    }
+
+    /// Like [`Self::compute_layout_with_measure`], but a leaf laid out as an
+    /// in-flow block child also receives the block formatting context it sits
+    /// in, so it can ask where the floats are (`find_content_slot`).
+    pub fn compute_layout_with_block_measure<M>(&mut self, node: NodeId, space: Size<AvailableSpace>, measure: M) -> Res<()>
+    where
+        M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style, Option<&mut BlockContext<'_>>) -> LayoutOutput,
     {
         self.get(node)?;
         let rounding = self.rounding;
@@ -233,7 +243,7 @@ impl<C, M> View<'_, C, M> {
 
 impl<C, M> View<'_, C, M>
 where
-    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style) -> LayoutOutput,
+    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style, Option<&mut BlockContext<'_>>) -> LayoutOutput,
 {
     fn compute(&mut self, id: NodeId, inputs: LayoutInput, block_ctx: Option<&mut BlockContext<'_>>) -> LayoutOutput {
         // An ancestor is `display:none`: lay this subtree out hidden.
@@ -252,7 +262,7 @@ where
                 (_, false) => {
                     let View { tree, measure } = view;
                     let n = tree.nodes[usize::from(id)].as_mut().expect("live node");
-                    measure(inputs, id, n.ctx.as_mut(), &n.style)
+                    measure(inputs, id, n.ctx.as_mut(), &n.style, block_ctx)
                 }
             };
             // Absolute / fixed boxes whose containing block is this node. Only
@@ -276,7 +286,7 @@ impl Iterator for ChildIter {
 
 impl<C, M> TraversePartialTree for View<'_, C, M>
 where
-    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style) -> LayoutOutput,
+    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style, Option<&mut BlockContext<'_>>) -> LayoutOutput,
 {
     type ChildIter<'a>
         = ChildIter
@@ -293,11 +303,11 @@ where
     }
 }
 
-impl<C, M> TraverseTree for View<'_, C, M> where M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style) -> LayoutOutput {}
+impl<C, M> TraverseTree for View<'_, C, M> where M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style, Option<&mut BlockContext<'_>>) -> LayoutOutput {}
 
 impl<C, M> LayoutPartialTree for View<'_, C, M>
 where
-    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style) -> LayoutOutput,
+    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style, Option<&mut BlockContext<'_>>) -> LayoutOutput,
 {
     type CoreContainerStyle<'a>
         = &'a Style
@@ -320,7 +330,7 @@ where
 
 impl<C, M> LayoutContainingBlock for View<'_, C, M>
 where
-    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style) -> LayoutOutput,
+    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style, Option<&mut BlockContext<'_>>) -> LayoutOutput,
 {
     type OofItemStyle<'a>
         = &'a Style
@@ -342,7 +352,7 @@ where
 
 impl<C, M> CacheTree for View<'_, C, M>
 where
-    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style) -> LayoutOutput,
+    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style, Option<&mut BlockContext<'_>>) -> LayoutOutput,
 {
     fn cache_get(&mut self, id: NodeId, input: &LayoutInput) -> Option<LayoutOutput> {
         self.n_mut(id).cache.get(input)
@@ -357,7 +367,7 @@ where
 
 impl<C, M> LayoutBlockContainer for View<'_, C, M>
 where
-    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style) -> LayoutOutput,
+    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style, Option<&mut BlockContext<'_>>) -> LayoutOutput,
 {
     type BlockContainerStyle<'a>
         = &'a Style
@@ -385,7 +395,7 @@ where
 
 impl<C, M> LayoutFlexboxContainer for View<'_, C, M>
 where
-    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style) -> LayoutOutput,
+    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style, Option<&mut BlockContext<'_>>) -> LayoutOutput,
 {
     type FlexboxContainerStyle<'a>
         = &'a Style
@@ -405,7 +415,7 @@ where
 
 impl<C, M> LayoutGridContainer for View<'_, C, M>
 where
-    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style) -> LayoutOutput,
+    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style, Option<&mut BlockContext<'_>>) -> LayoutOutput,
 {
     type GridContainerStyle<'a>
         = &'a Style
@@ -428,7 +438,7 @@ where
 
 impl<C, M> RoundTree for View<'_, C, M>
 where
-    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style) -> LayoutOutput,
+    M: FnMut(LayoutInput, NodeId, Option<&mut C>, &Style, Option<&mut BlockContext<'_>>) -> LayoutOutput,
 {
     fn get_unrounded_layout(&self, id: NodeId) -> Layout {
         self.n(id).unrounded

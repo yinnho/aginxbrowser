@@ -7041,6 +7041,30 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn test_float_wrap_lines_start_after_the_float_then_return_to_the_edge() {
+        // Chrome truth (headless Chrome, 2026-10-22): container 200px, a
+        // 50x50 left float, then a p of short words at line-height 20px. The
+        // p BOX starts at x=0 and overlaps the float; its line boxes start at
+        // 50, 50, 50 (their tops are above the float's bottom), then 0.
+        crate::diting_layout::float_flow::force(Some(true));
+        let mut rt = setup_runtime(
+            "<html><head><style>body{margin:0;font:16px/20px serif} p{margin:0}</style></head><body>
+              <div id=c style=\"width:200px\"><div style=\"float:left;width:50px;height:50px\"></div><p id=p>word word word word word word word word word word word word word word word word word word word word</p></div>
+             </body></html>",
+        );
+        let v = rt
+            .evaluate(
+                "(() => { const p = document.getElementById('p'); const b = p.getBoundingClientRect();
+                  const r = document.createRange(); r.selectNodeContents(p);
+                  const lefts = [...r.getClientRects()].map(x => Math.round(x.left));
+                  return JSON.stringify([Math.round(b.left), Math.round(b.width), lefts.slice(0, 5), Math.round(b.height) % 20]); })()",
+            )
+            .unwrap();
+        crate::diting_layout::float_flow::force(None);
+        assert_eq!(v, "[0,200,[50,50,50,0,0],0]");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn test_webcrypto_ed25519_vector_and_roundtrips() {
         // RFC 8032 section 7.1 test 1 (empty message) pins the curve math;
         // the rest exercises every import/export format and the usage rules.

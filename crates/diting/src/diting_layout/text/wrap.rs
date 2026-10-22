@@ -194,8 +194,19 @@ pub fn greedy_wrap(
     wrap_at: Option<f32>,
     ws: crate::diting_css::WhiteSpace,
 ) -> Vec<WrapLine> {
+    greedy_wrap_by(tokens, ws, |_| wrap_at)
+}
+
+/// [`greedy_wrap`] where the room on line `n` comes from `width_of(n)`: lines
+/// beside a float are shorter than those below it. The `pre` family keeps one
+/// width (line 0's).
+pub fn greedy_wrap_by(
+    tokens: &[Token],
+    ws: crate::diting_css::WhiteSpace,
+    mut width_of: impl FnMut(usize) -> Option<f32>,
+) -> Vec<WrapLine> {
     if ws.preserves_newlines() {
-        return greedy_wrap_preserved(tokens, wrap_at, ws);
+        return greedy_wrap_preserved(tokens, width_of(0), ws);
     }
     let mut lines = vec![WrapLine { token_idx: Vec::new(), width: 0.0 }];
     let mut pending_space = 0.0f32;
@@ -206,8 +217,9 @@ pub fn greedy_wrap(
             pending_idx.push(i);
             continue;
         }
+        let avail = width_of(lines.len() - 1);
         let cur = lines.last_mut().expect("always one line");
-        if let Some(avail) = wrap_at {
+        if let Some(avail) = avail {
             if cur.width > 0.0 && cur.width + pending_space + t.width > avail {
                 lines.push(WrapLine { token_idx: vec![i], width: t.width });
                 pending_space = 0.0;

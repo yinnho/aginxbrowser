@@ -14,7 +14,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 /// (DOM text node, start char in the leaf's text, char length).
-pub(crate) type Segs = Rc<[(NodeId, u32, u32)]>;
+/// (text node, char index in the item's text where the node's chars begin, char
+/// count). The start is signed: a line item cut from the middle of a run
+/// begins after some node's first chars.
+pub(crate) type Segs = Rc<[(NodeId, i32, u32)]>;
 pub(crate) type SrcMap = Rc<HashMap<taffy::tree::NodeId, Segs>>;
 
 thread_local! {
@@ -73,6 +76,7 @@ pub(crate) fn cur() -> Option<NodeId> {
 
 pub(crate) fn register(leaf: taffy::tree::NodeId, segs: Vec<(NodeId, u32, u32)>) {
     if !segs.is_empty() {
+        let segs: Vec<(NodeId, i32, u32)> = segs.into_iter().map(|(n, s, l)| (n, s as i32, l)).collect();
         BUILDING.with(|b| b.borrow_mut().insert(leaf, segs.into()));
     }
 }
@@ -117,6 +121,17 @@ impl Drop for Armed {
 
 pub(crate) fn lookup(leaf: taffy::tree::NodeId) -> Option<Segs> {
     ACTIVE.with(|a| a.borrow().as_ref().and_then(|m| m.get(&leaf).cloned()))
+}
+
+/// The part of `segs` (run coordinates) a line item covering run chars
+/// `[from, to)` needs, re-based to the line's own text.
+pub(crate) fn slice(segs: &Segs, from: u32, to: u32) -> Segs {
+    let (from, to) = (from as i64, to as i64);
+    segs.iter()
+        .filter(|(_, s, l)| (*s as i64) < to && *s as i64 + *l as i64 > from)
+        .map(|(n, s, l)| (*n, (*s as i64 - from) as i32, *l))
+        .collect::<Vec<_>>()
+        .into()
 }
 
 /// Pair a flushed run's text nodes with the char lengths of their segments.

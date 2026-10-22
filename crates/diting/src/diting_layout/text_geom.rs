@@ -81,7 +81,7 @@ impl Frag {
 /// words advance by their length (after the whitespace the tokenizer
 /// trimmed), whitespace tokens swallow the collapsed run (or their own
 /// length when spaces are preserved), a preserved break takes one char.
-fn token_chars(text: &[char], toks: &[Token], ws: WhiteSpace) -> Vec<(u32, u32)> {
+pub(super) fn token_chars(text: &[char], toks: &[Token], ws: WhiteSpace) -> Vec<(u32, u32)> {
     let mut cur = 0usize;
     let mut out = Vec::with_capacity(toks.len());
     for t in toks {
@@ -153,7 +153,8 @@ pub fn node_frags(items: &[PaintItem], fonts: &FontBook, target: NodeId) -> Vec<
         let ranges = token_chars(&chars, &toks, *ws);
         let (asc, desc) = fonts.metrics(*font_size, *bold).map(|m| (m.ascent, m.descent)).unwrap_or((*font_size * 0.8, *font_size * 0.2));
         let content_h = asc + desc;
-        let seg_end = seg_start + seg_len;
+        let seg_start = seg_start as i64;
+        let seg_end = seg_start + seg_len as i64;
         for (li, line) in lines.iter().enumerate() {
             let (Some(&first), Some(&last)) = (line.token_idx.first(), line.token_idx.last()) else { continue };
             let line_x = *x + text::last_line_offset(&lines, li, *last_line_align);
@@ -169,20 +170,26 @@ pub fn node_frags(items: &[PaintItem], fonts: &FontBook, target: NodeId) -> Vec<
             }
             let run_cs = ranges[first].0;
             let run_ce = ranges[last].1;
-            let lo = run_cs.max(seg_start);
-            let hi = run_ce.min(seg_end);
+            let lo = (run_cs as i64).max(seg_start);
+            let hi = (run_ce as i64).min(seg_end);
             if hi <= lo {
                 continue;
             }
             // Node-local spans clipped to the node's slice of the run.
             let spans: Vec<Span> = spans_run
                 .iter()
-                .filter(|(cs, ce, ..)| *ce > seg_start && *cs < seg_end)
-                .map(|(cs, ce, sx, w, t)| Span { cs: cs.max(&seg_start) - seg_start, ce: ce.min(&seg_end) - seg_start, x: *sx, w: *w, text: t.clone() })
+                .filter(|(cs, ce, ..)| *ce as i64 > seg_start && (*cs as i64) < seg_end)
+                .map(|(cs, ce, sx, w, t)| Span {
+                    cs: ((*cs as i64).max(seg_start) - seg_start) as u32,
+                    ce: ((*ce as i64).min(seg_end) - seg_start) as u32,
+                    x: *sx,
+                    w: *w,
+                    text: t.clone(),
+                })
                 .collect();
             let mut f = Frag {
-                start: lo - seg_start,
-                end: hi - seg_start,
+                start: (lo - seg_start) as u32,
+                end: (hi - seg_start) as u32,
                 x: line_x,
                 y: line_y + (*line_height - content_h) / 2.0,
                 w: line.width,
@@ -194,7 +201,7 @@ pub fn node_frags(items: &[PaintItem], fonts: &FontBook, target: NodeId) -> Vec<
                 han: *han,
             };
             // Cut the line to the node's chars when siblings share it.
-            if lo > run_cs || hi < run_ce {
+            if lo > run_cs as i64 || hi < run_ce as i64 {
                 let x0 = f.x_at(fonts, 0).max(f.x_at(fonts, f.start));
                 let x1 = f.x_at(fonts, f.end);
                 f.x += x0;
