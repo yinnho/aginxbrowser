@@ -105,8 +105,14 @@ class _IframeDocument {
   createRange() { return new Range(); }
   hasFocus() { return false; }
 
-  get cookie() { return ''; }
-  set cookie(v) {}
+  // Same-origin/srcdoc/blank frames share the parent's cookie jar — the
+  // frame inherits the parent origin, and Chrome pins `d.cookie = x` from
+  // a srcdoc frame landing in the parent's read-back. The ops resolve
+  // against the session URL, which for these frames IS the inherited
+  // origin; cross-origin frames never reach here (contentDocument reads
+  // null for them). About:blank parents gate-throw like Chrome (#274).
+  get cookie() { __cookieGate(false); return _OPS.op_get_cookies(); }
+  set cookie(v) { __cookieGate(true); if (!v) return; _OPS.op_set_cookie(v); }
   get implementation() { return document.implementation; }
   get styleSheets() { return []; }
 

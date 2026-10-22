@@ -10216,6 +10216,74 @@
         assert_eq!(result.as_str().unwrap(), "");
     }
 
+    /// #274, re-diagnosed: about:blank initial documents have no cookie
+    /// origin, and Chrome THROWS SecurityError on both document.cookie read
+    /// and write (different prepositions) — it never silently no-ops. The
+    /// 10-18 probe saw a silent drop here and filed it as a UTF-8 value
+    /// face; the value face was always fine — the stub document was the drop.
+    #[test]
+    fn test_document_cookie_about_blank_throws_security_error() {
+        let (mut rt, _jar) = setup_runtime_with_cookies("<html><body></body></html>");
+        rt.set_url("about:blank");
+        let get = rt
+            .evaluate(r#"try { document.cookie; "no-throw" } catch (e) { e.name + "|" + e.message }"#)
+            .unwrap();
+        assert_eq!(
+            get.as_str().unwrap(),
+            "SecurityError|Failed to read the 'cookie' property from 'Document': Access is denied for this document."
+        );
+        let set = rt
+            .evaluate(r#"try { document.cookie = "mb=你好世界; path=/"; "no-throw" } catch (e) { e.name + "|" + e.message }"#)
+            .unwrap();
+        assert_eq!(
+            set.as_str().unwrap(),
+            "SecurityError|Failed to set the 'cookie' property on 'Document': Access is denied for this document."
+        );
+    }
+
+    /// #274: multi-byte UTF-8 values round-trip on a real origin — the jar
+    /// stores raw bytes and Chrome accepts any UTF-8 in values. Pinned so a
+    /// future "strict cookie-octet" pass cannot regress the value face.
+    #[test]
+    fn test_document_cookie_multibyte_utf8_roundtrip() {
+        let (mut rt, _jar) = setup_runtime_with_cookies("<html><body></body></html>");
+        rt.evaluate(r#"document.cookie = "mb=你好世界; path=/"; document.cookie = "emoji=😀🎉; path=/";"#)
+            .unwrap();
+        let read = rt.evaluate("document.cookie").unwrap();
+        let s = read.as_str().unwrap();
+        assert!(s.contains("mb=你好世界"), "CJK value must round-trip: {s}");
+        assert!(s.contains("emoji=😀🎉"), "emoji value must round-trip: {s}");
+    }
+
+    /// #274, the real second face: same-origin/srcdoc iframes share the
+    /// parent's cookie jar — the frame inherits the parent origin, and
+    /// Chrome pins `d.cookie = x` set inside a srcdoc frame landing in the
+    /// parent's read-back. The old iframe-document stub silently dropped
+    /// every cookie.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_iframe_document_cookie_shares_parent_jar() {
+        let (mut rt, _jar) = setup_runtime_with_cookies("<html><body></body></html>");
+        let script = r##"async () => {
+            const f = document.createElement('iframe');
+            f.setAttribute('srcdoc', '<p>x</p>');
+            document.body.appendChild(f);
+            await new Promise(r => setTimeout(r, 50));
+            const d = f.contentDocument;
+            d.cookie = 'ifmb=iframe值; path=/';
+            d.cookie = 'ifascii=ok; path=/';
+            return { inFrame: d.cookie, parentSees: document.cookie };
+        }"##;
+        let result = rt.call_function_on_remote(script, None, &[], true, true).await.unwrap();
+        let v = result.value.unwrap();
+        let in_frame = v["inFrame"].as_str().unwrap_or("");
+        assert!(in_frame.contains("ifmb=iframe值"), "iframe read-back must see its CJK cookie: {v}");
+        assert!(in_frame.contains("ifascii=ok"), "iframe read-back must see its ascii cookie: {v}");
+        assert!(
+            v["parentSees"].as_str().unwrap_or("").contains("ifmb=iframe值"),
+            "parent must see the iframe's cookie (shared jar): {v}"
+        );
+    }
+
     #[test]
     fn queued_navigation_does_not_move_the_cookie_context() {
         // obscura #940 shape: op_navigate must only queue the navigation —
