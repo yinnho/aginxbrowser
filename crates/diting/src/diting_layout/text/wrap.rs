@@ -211,7 +211,23 @@ pub fn greedy_wrap_by(
     let mut lines = vec![WrapLine { token_idx: Vec::new(), width: 0.0 }];
     let mut pending_space = 0.0f32;
     let mut pending_idx: Vec<usize> = Vec::new();
+    // #275: a <br> folded into a clamped run arrives as an is_break token
+    // even under Normal white-space. It ends the line like the pre
+    // family's preserved newline (collapsible spaces before a forced break
+    // drop with the line), and a TRAILING break opens a line that never
+    // got content — Chrome's trailing-<br> rule keeps it only when
+    // something follows the break (`ab<br>` is one line, `<br><br>ab` is
+    // three). `break_opened_last` clears only when a token COMMITS to a
+    // line, so collapsible spaces after the break can't resurrect it.
+    let mut break_opened_last = false;
     for (i, t) in tokens.iter().enumerate() {
+        if t.is_break {
+            pending_space = 0.0;
+            pending_idx.clear();
+            lines.push(WrapLine { token_idx: Vec::new(), width: 0.0 });
+            break_opened_last = true;
+            continue;
+        }
         if t.is_space {
             pending_space += t.width;
             pending_idx.push(i);
@@ -224,6 +240,7 @@ pub fn greedy_wrap_by(
                 lines.push(WrapLine { token_idx: vec![i], width: t.width });
                 pending_space = 0.0;
                 pending_idx.clear();
+                break_opened_last = false;
                 continue;
             }
         }
@@ -231,6 +248,10 @@ pub fn greedy_wrap_by(
         cur.token_idx.append(&mut pending_idx);
         cur.token_idx.push(i);
         pending_space = 0.0;
+        break_opened_last = false;
+    }
+    if break_opened_last {
+        lines.pop();
     }
     lines
 }
@@ -411,11 +432,13 @@ pub(crate) fn line_clamp_bake(
         return None;
     }
     let mut out: Vec<Token> = Vec::new();
-    if ws.preserves_newlines() {
-        // Hard breaks don't join WrapLines — copy the kept span VERBATIM
-        // from the source (interior break tokens and their blank lines
-        // included) so the downstream re-wrap reproduces the same line
-        // count instead of fusing the kept lines into one.
+    // Hard breaks don't join WrapLines — copy the kept span VERBATIM from
+    // the source (interior break tokens and their blank lines included) so
+    // the downstream re-wrap reproduces the same line count instead of
+    // fusing the kept lines into one. The pre family gets here via
+    // white-space; #275's folded <br> markers arrive as is_break tokens
+    // under Normal white-space and need the same treatment.
+    if ws.preserves_newlines() || tokens.iter().any(|t| t.is_break) {
         let start = lines[0].token_idx.first().copied().unwrap_or(0);
         let end = lines[n - 1].token_idx.last().copied().unwrap_or(start);
         out.extend(tokens[start..=end].iter().cloned());

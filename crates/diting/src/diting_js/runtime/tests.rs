@@ -19162,13 +19162,19 @@ fn computed_style_and_geometry_for_nowrap_ellipsis() {
 /// by line count — count-only, never the content height (takumi #1965's
 /// exactly-fits edge: a run wrapping to exactly N lines keeps all of them),
 /// the computed style serializes "2"/"none", and it does not inherit.
+/// #275 moved the gate onto Chrome's real face: the clamp only acts on
+/// `display:-webkit-box` + `-webkit-box-orient:vertical`, so the clamped
+/// boxes here wear the full legacy idiom card templates ship, and the
+/// plain-block twin pins that the same declaration WITHOUT that display
+/// no longer clamps (it never did in Chrome).
 #[cfg(feature = "screenshot")]
 #[test]
 fn line_clamp_caps_height_by_line_count() {
     let mut rt = setup_runtime(
         r#"<div style="width:120px;line-height:20px;font-size:16px">
-             <div id="clamped" style="-webkit-line-clamp:2">alpha beta gamma delta epsilon zeta eta theta</div>
-             <div id="exact" style="line-clamp:2">alpha beta gamma</div>
+             <div id="clamped" style="-webkit-line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical">alpha beta gamma delta epsilon zeta eta theta</div>
+             <div id="exact" style="line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical">alpha beta gamma</div>
+             <div id="plain" style="-webkit-line-clamp:2">alpha beta gamma delta epsilon zeta eta theta</div>
              <div id="free">alpha beta gamma delta epsilon zeta eta theta</div>
              <div id="kid"><span>alpha beta gamma</span></div>
            </div>"#,
@@ -19178,6 +19184,7 @@ fn line_clamp_caps_height_by_line_count() {
             r#"
             const clamped = document.getElementById("clamped"),
                   exact = document.getElementById("exact"),
+                  plain = document.getElementById("plain"),
                   free = document.getElementById("free"),
                   kid = document.getElementById("kid");
             return [
@@ -19187,6 +19194,7 @@ fn line_clamp_caps_height_by_line_count() {
                 getComputedStyle(kid).getPropertyValue("line-clamp"),
                 clamped.getBoundingClientRect().height,
                 exact.getBoundingClientRect().height,
+                plain.getBoundingClientRect().height,
                 free.getBoundingClientRect().height,
             ];
         "#,
@@ -19197,14 +19205,76 @@ fn line_clamp_caps_height_by_line_count() {
     assert_eq!(parts[1], serde_json::json!("2"), "the standard spelling answers from the same slot (alias)");
     assert_eq!(parts[2], serde_json::json!("2"), "standard line-clamp reads back");
     assert_eq!(parts[3], serde_json::json!("none"), "line-clamp does not inherit");
-    let (h_clamped, h_exact, h_free) =
-        (parts[4].as_f64().unwrap(), parts[5].as_f64().unwrap(), parts[6].as_f64().unwrap());
+    let (h_clamped, h_exact, h_plain, h_free) =
+        (parts[4].as_f64().unwrap(), parts[5].as_f64().unwrap(), parts[6].as_f64().unwrap(), parts[7].as_f64().unwrap());
     assert!((h_clamped - 40.0).abs() < 2.0, "clamped box is exactly 2 lines tall ({h_clamped})");
     assert!((h_exact - 40.0).abs() < 2.0, "exactly-2-line text is NOT clamped shorter ({h_exact}) — takumi #1965");
+    assert!((h_plain - h_free).abs() < 2.0, "plain block ignores the clamp without -webkit-box ({h_plain} vs {h_free}) — Chrome parity (#275)");
     assert!(h_free > 60.0, "unclamped sibling wraps taller ({h_free})");
     // The count-only rule: the clamped box is 2 lines even though its
     // content height (h_free) is taller — clamped == 40 no matter what.
     assert!(h_clamped < h_free - 20.0, "clamp cut lines away ({h_clamped} < {h_free})");
+}
+
+/// #275: the clamp face Chrome actually ships (every height CDP-pinned on
+/// Chrome 155): `-webkit-line-clamp` acts ONLY on `display:-webkit-box`
+/// (inline-box included) with `-webkit-box-orient:vertical`, needs no
+/// `overflow:hidden`, counts <br> lines and wrapped lines alike, and never
+/// fires on plain blocks, flex, or a horizontal/unoriented box. A <br>
+/// inside the armed box folds into the run as one line stack, so
+/// `ab<br>cd<br>ef` clamps to 2 lines — and the br edge rules match too:
+/// a leading br keeps its blank line under the clamp, a trailing br never
+/// adds one.
+#[cfg(feature = "screenshot")]
+#[test]
+fn line_clamp_webkit_box_faces() {
+    let mut rt = setup_runtime(
+        r#"<div style="font:20px/20px monospace">
+             <div id="blk" style="-webkit-line-clamp:2;overflow:hidden">ab<br>cd<br>ef</div>
+             <div id="wkb" style="-webkit-line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden">ab<br>cd<br>ef</div>
+             <div id="flex" style="-webkit-line-clamp:2;display:flex;flex-direction:column;overflow:hidden">ab<br>cd<br>ef</div>
+             <div id="free" style="overflow:hidden">ab<br>cd<br>ef</div>
+             <div id="noorient" style="-webkit-line-clamp:2;display:-webkit-box;overflow:hidden">ab<br>cd<br>ef</div>
+             <div id="horiz" style="-webkit-line-clamp:2;display:-webkit-box;-webkit-box-orient:horizontal;overflow:hidden">ab<br>cd<br>ef</div>
+             <div id="ibox" style="-webkit-line-clamp:2;display:-webkit-inline-box;-webkit-box-orient:vertical;overflow:hidden">ab<br>cd<br>ef</div>
+             <div id="nooverflow" style="-webkit-line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical">ab<br>cd<br>ef</div>
+             <div id="wrapped" style="-webkit-line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden;width:40px">aa bb cc dd ee</div>
+             <div id="wexactly" style="-webkit-line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden;width:40px">aa bb</div>
+             <div id="lead" style="-webkit-line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden"><br>ab<br>cd</div>
+             <div id="trail" style="display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden">ab<br></div>
+           </div>"#,
+    );
+    let out = rt
+        .evaluate(
+            r#"
+            const g = i => document.getElementById(i).getBoundingClientRect().height;
+            return ["blk","wkb","flex","free","noorient","horiz","ibox","nooverflow","wrapped","wexactly","lead","trail"].map(g);
+        "#,
+        )
+        .unwrap();
+    let h = out.as_array().expect("array result");
+    // Chrome 155, same markup, same 20px/20px font: [60,40,60,60,60,60,40,40,40,40,40,20]
+    let want: &[(usize, f64, &str)] = &[
+        (0, 60.0, "plain block ignores the clamp"),
+        (1, 40.0, "-webkit-box+vertical clamps br-mixed lines"),
+        (2, 60.0, "modern flex ignores the clamp"),
+        (3, 60.0, "unclamped sibling keeps 3 lines"),
+        (4, 60.0, "-webkit-box without orient ignores the clamp"),
+        (5, 60.0, "horizontal orient ignores the clamp"),
+        (6, 40.0, "-webkit-inline-box clamps too"),
+        (7, 40.0, "the clamp needs no overflow:hidden"),
+        (8, 40.0, "wrapped lines count against the clamp"),
+        (9, 40.0, "exactly N wrapped lines are kept, not cut"),
+        (10, 40.0, "a leading br keeps its blank line under the clamp"),
+        (11, 20.0, "a trailing br adds no line (unclamped legacy face)"),
+    ];
+    for (i, target, why) in want {
+        let got = h[*i].as_f64().unwrap();
+        assert!(
+            (got - target).abs() < 2.0,
+            "face #{i} ({why}): got {got}, want {target} — full heights {h:?}"
+        );
+    }
 }
 
 /// #272: MutationRecord alignment with Chrome (obscura #1266's checklist

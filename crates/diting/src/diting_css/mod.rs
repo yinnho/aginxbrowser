@@ -1036,8 +1036,17 @@ pub struct ComputedStyle {
     /// this slot): keep at most N line boxes, ellipsize the Nth. Count-only
     /// by design (takumi #1965): the clamp never consults the box's content
     /// height, so N lines that sum a hair past a rounded height all stay.
-    /// `None` = `none`.
+    /// `None` = `none`. Chrome only HONORS the clamp on the legacy
+    /// `-webkit-box` display with vertical orient — see [`Self::clamp_lines`].
     pub line_clamp: Option<u32>,
+    /// `display: -webkit-box` / `-webkit-inline-box` (#275), non-inherited:
+    /// which legacy-flexbox display the cascade declared. Layout maps both
+    /// to plain Block/InlineBlock geometry, but the flag arms the clamp.
+    pub webkit_box: Option<WebkitBoxKind>,
+    /// `-webkit-box-orient: vertical` (or its `block-axis` synonym), parsed
+    /// independently of `display` so declaration order never matters — the
+    /// clamp gate reads the conjunction at layout time.
+    pub webkit_box_vertical: bool,
     pub text_align: Option<TextAlign>,
     /// Inline base direction (#188-3, blitz#981): `direction: ltr|rtl`,
     /// inherited; the `dir` attribute hint fills the same slot below author
@@ -1854,6 +1863,15 @@ enum BorderStyleKw {
 }
 
 impl ComputedStyle {
+    /// The line-clamp face Chrome actually ships (#275, CDP-pinned on 155):
+    /// `-webkit-line-clamp` only acts on the legacy `-webkit-box` display
+    /// with `-webkit-box-orient: vertical` — plain blocks, flex containers
+    /// and horizontal boxes all ignore the clamp, and `overflow` plays no
+    /// part. Returns the clamped line count when that face is armed.
+    pub fn clamp_lines(&self) -> Option<u32> {
+        self.line_clamp.filter(|_| self.webkit_box.is_some() && self.webkit_box_vertical)
+    }
+
     /// css-overflow-3 §3.1 pair rule: when one axis is `visible` and the
     /// other is not, the visible side computes to `auto`. Chrome reports the
     /// coerced pair (body{overflow-x:hidden} → y reads "auto"), so the
@@ -2095,6 +2113,16 @@ impl AlignMode {
             AlignMode::FlexEnd => free,
         }
     }
+}
+
+/// Which legacy-flexbox display the cascade declared (#275). Kept besides
+/// the Block/InlineBlock geometry mapping so the clamp gate knows the box
+/// was declared as `-webkit-box` at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WebkitBoxKind {
+    #[default]
+    Box,
+    InlineBox,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -3854,6 +3882,17 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             // only needs the container mode, so they map onto plain
             // Flex/Grid/Table; the outer inline participation is a
             // refinement, not a correctness requirement.
+            // -webkit-box (#275): the legacy-flexbox line-clamp display.
+            // Before this arm existed the declaration DROPPED, so every
+            // -webkit-box page already lived with plain block geometry —
+            // mapping to Block/InlineBlock changes nothing about layout,
+            // it only arms the clamp gate (see clamp_lines). The flag
+            // resets on any later valid display declaration.
+            let webkit_box = match v {
+                "-webkit-box" => Some(WebkitBoxKind::Box),
+                "-webkit-inline-box" => Some(WebkitBoxKind::InlineBox),
+                _ => None,
+            };
             style.display = match v {
                 "block" => Some(Display::Block),
                 "inline" => Some(Display::Inline),
@@ -3865,8 +3904,11 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 "table-cell" => Some(Display::TableCell),
                 "table-caption" => Some(Display::TableCaption),
                 "none" => Some(Display::None),
+                "-webkit-box" => Some(Display::Block),
+                "-webkit-inline-box" => Some(Display::InlineBlock),
                 _ => return false,
             };
+            style.webkit_box = webkit_box;
             style.display_from_ua = false;
             true
         }
@@ -4494,6 +4536,19 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                     Ok(n) if n >= 1 => Some(n),
                     _ => return false,
                 }
+            };
+            true
+        }
+        // #275: the legacy-flexbox orient — the second half of Chrome's
+        // clamp idiom (`display:-webkit-box; -webkit-box-orient:vertical;
+        // -webkit-line-clamp:N`). Only `vertical` (and its block-axis
+        // synonym) arms the clamp; horizontal/inline-axis is the initial
+        // value and disarms it.
+        "-webkit-box-orient" => {
+            style.webkit_box_vertical = match v {
+                "vertical" | "block-axis" => true,
+                "horizontal" | "inline-axis" => false,
+                _ => return false,
             };
             true
         }

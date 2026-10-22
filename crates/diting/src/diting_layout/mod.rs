@@ -1054,7 +1054,33 @@ fn run_tokens(
     han: Option<text::HanSlot>,
 ) -> std::rc::Rc<[text::Token]> {
     memo.borrow_mut()
-        .get_or_insert_with(|| text::tokens_of(text, font_size, bold, fonts, mono, word_spacing, ws, small_caps, han).into())
+        .get_or_insert_with(|| {
+            // #275: a <br> folded into a clamped run rides as U+2028
+            // markers. They must never reach tokenize_ws — under Normal
+            // the marker is Unicode whitespace and would collapse to a
+            // space — so split on it first, tokenize each span under the
+            // run's own white-space, and splice zero-width forced-break
+            // tokens between (the same is_break the pre family rides).
+            if !text.contains('\u{2028}') {
+                text::tokens_of(text, font_size, bold, fonts, mono, word_spacing, ws, small_caps, han).into()
+            } else {
+                let mut out: Vec<text::Token> = Vec::new();
+                for (i, piece) in text.split('\u{2028}').enumerate() {
+                    if i > 0 {
+                        out.push(text::Token {
+                            text: "\u{2028}".to_string(),
+                            width: 0.0,
+                            is_space: false,
+                            is_break: true,
+                            scale: 1.0,
+                            is_ellipsis: false,
+                        });
+                    }
+                    out.extend(text::tokens_of(piece, font_size, bold, fonts, mono, word_spacing, ws, small_caps, han));
+                }
+                out.into()
+            }
+        })
         .clone()
 }
 
@@ -3959,7 +3985,10 @@ fn build_element_inner(
                 .iter()
                 .map(|s| match s { RunSeg::Text(t, ..) => t.as_str(), _ => "" })
                 .collect::<String>();
-            if text.trim().is_empty() && !segs.iter().any(|s| matches!(s, RunSeg::Text(.., w, _, _) if w.preserves_spaces() || w.preserves_newlines())) {
+            if text.trim().is_empty()
+                && !text.contains('\u{2028}')
+                && !segs.iter().any(|s| matches!(s, RunSeg::Text(.., w, _, _) if w.preserves_spaces() || w.preserves_newlines()))
+            {
                 return;
             }
             let RunSeg::Text(_, fs, bold, color, lh, deco, vs, mono, wsp, _, sc, han) = &segs[0] else { unreachable!() };
@@ -3977,7 +4006,9 @@ fn build_element_inner(
             let run_ellipsis = styles.get(&id).is_some_and(|s| {
                 s.clips_descendants() && s.text_overflow == Some(TextOverflow::Ellipsis)
             });
-            let run_clamp = styles.get(&id).and_then(|s| s.line_clamp);
+            // line-clamp shares the owner-block precedent (#271) — but only
+            // on the legacy -webkit-box face Chrome honors it on (#275).
+            let run_clamp = styles.get(&id).and_then(|s| s.clamp_lines());
             if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                 float_flow::run_style(),
                 TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, ellipsis: run_ellipsis, line_clamp: run_clamp, tokens: std::cell::RefCell::new(None), small_caps: *sc, han: *han, clip_src: clip },
@@ -4592,6 +4623,42 @@ fn build_element_inner(
             matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
         });
         if child_tag == "br" && !out_of_flow {
+            // #275: inside an armed clamp the br folds into the run as a
+            // U+2028 marker instead of flushing. The flush model splits
+            // `ab<br>cd<br>ef` into three 1-line leaves, and a per-leaf
+            // clamp can never see past one leaf — one run means one line
+            // stack the clamp counts across, like Chrome. run_tokens
+            // translates the marker to a zero-width forced break; the
+            // params mirror the text-node branch so a LEADING br (marker
+            // as first segment) still donates the run's real font. The
+            // unclamped path keeps the block-model flush below (#146).
+            if styles.get(&id).is_some_and(|s| s.clamp_lines().is_some()) {
+                let (fs, b, lh) = font_context(tree, child, styles, fonts);
+                let fs = if styles.get(&child).is_some() { fs } else { font_size };
+                let lh = if styles.get(&child).is_some() { lh } else { lh_elem };
+                let nws = tree
+                    .with_node(child, |n| n.parent)
+                    .flatten()
+                    .and_then(|p| styles.get(&p))
+                    .and_then(|s| s.white_space)
+                    .unwrap_or(WhiteSpace::Normal);
+                text_src::note_seg(run_frame, child);
+                run.push(RunSeg::Text(
+                    "\u{2028}".to_string(),
+                    fs,
+                    b,
+                    color_context(tree, child, styles),
+                    lh,
+                    decoration_context(tree, child, styles),
+                    valign_shift(tree, child, styles, fonts),
+                    mono_context(tree, child, styles),
+                    word_spacing_context(tree, child, styles),
+                    nws,
+                    small_caps_context(tree, child, styles),
+                    han_context(tree, child, styles),
+                ));
+                continue;
+            }
             // #146: the forced break ends the current line. Flush as the
             // block model always did (the following content is its own
             // line), and give the br a line box only when the line it ends
