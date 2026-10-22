@@ -7112,6 +7112,22 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn test_collapsed_display_table_with_only_anonymous_cells_lays_out() {
+        // docs.python.org: a `display:table` box (no <table>) with
+        // border-collapse:collapse whose children become anonymous cells. The
+        // collapsed-border gutters were sized from real cells only, so the
+        // anonymous cell indexed past them and every layout panicked (#301).
+        let mut rt = setup_runtime(
+            "<html><head><style>body{margin:0} #t{display:table;border-collapse:collapse;width:200px}</style></head><body>
+              <div id=t><div id=c>cell text</div></div><p id=after>after</p></body></html>",
+        );
+        let v = rt
+            .evaluate("(() => { const b = document.getElementById('after').getBoundingClientRect(); return (Math.round(b.width) === innerWidth) + ':' + (b.top > 0); })()")
+            .unwrap();
+        assert_eq!(v, "true:true");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn test_webcrypto_ed25519_vector_and_roundtrips() {
         // RFC 8032 section 7.1 test 1 (empty message) pins the curve math;
         // the rest exercises every import/export format and the usage rules.

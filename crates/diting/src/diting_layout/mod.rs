@@ -3070,10 +3070,13 @@ fn build_table(
                           row: usize,
                           rspan: usize| {
             let Ok(mut st) = taffy_tree.style(node).cloned() else { return };
-            let gl = col_gutter[col] / 2.0;
-            let gr = col_gutter[col + cspan] / 2.0;
-            let gt = row_gutter[row] / 2.0;
-            let gb = row_gutter[row + rspan] / 2.0;
+            // Anonymous / phantom cells own no border, so the gutters (sized
+            // from real cells) may not reach them.
+            let half = |g: &[f32], i: usize| g.get(i).copied().unwrap_or(0.0) / 2.0;
+            let gl = half(&col_gutter, col);
+            let gr = half(&col_gutter, col + cspan);
+            let gt = half(&row_gutter, row);
+            let gb = half(&row_gutter, row + rspan);
             st.border = taffy::geometry::Rect {
                 top: LengthPercentage::length(0.0),
                 right: LengthPercentage::length(0.0),
