@@ -1715,6 +1715,7 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 .collect();
             serde_json::Value::Array(arr).to_string()
         }
+        "text_rects" | "elem_rects" => text_geom::run(&gs, dom, &cmd, &arg1, &arg2),
         // Real layout geometry for one element, from the diting_css +
         // diting_layout pipeline. Memoized per tree epoch; a stale epoch
         // (any node allocation/free since the last run) re-lays-out. Returns
@@ -1722,7 +1723,6 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
         // feature because diting_layout pulls taffy/swash; without it the
         // bootstrap falls back to its synthetic hit-test grid.
         #[cfg(feature = "screenshot")]
-        "text_rects" | "elem_rects" => text_geom::run(&gs, dom, &cmd, &arg1, &arg2),
         "layout_rect" => {
             let nid = match parse_nid(&arg1) { Some(id) => id, None => return "null".into() };
             let epoch = dom.epoch();
