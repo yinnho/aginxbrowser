@@ -47,6 +47,8 @@ pub mod svg;
 pub mod text;
 pub mod text_geom;
 mod text_src;
+#[cfg(test)]
+mod float_probe;
 mod face_bytes;
 pub use face_bytes::FaceBytes;
 use text_src::trim_run_edge_whitespace;

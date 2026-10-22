@@ -77,6 +77,9 @@ taffy = { version = "0.15", optional = true, default-features = false, features 
     "content_size",
     "calc",
     "detailed_layout_info",
+    # Probe (#299): taffy's own float placement engine; unused by production
+    # layout until the probe proves it.
+    "float_layout",
 ] }
 # Shaped advances + font metrics (batch 3a) and glyph rasterization (3b) for
 # diting_layout text leaves. Same stack upstream obscura-render builds on.
