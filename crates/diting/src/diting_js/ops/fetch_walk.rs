@@ -692,6 +692,13 @@ pub(crate) async fn fetch_url_walk(
         if let Some(ref counter) = in_flight {
             counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        // #309: Drop-decrement — the three manual subs below only ran on
+        // hop completion; a fetch() op future cancelled mid-send by the
+        // next navigation's realm swap never reached any of them and the
+        // page's counter leaked +1, permanently disarming the settle fast
+        // paths for the session.
+        let _in_flight =
+            crate::diting_net::client::InFlightDecrement(in_flight.clone());
         // #116: register the hop so a hung scripted request is observable
         // while it hangs (fetch/XHR promises that never settle read on the
         // surface as a silent EVAL_TIMEOUT). Dropped — i.e. removed — on
@@ -743,9 +750,7 @@ pub(crate) async fn fetch_url_walk(
         };
         match stealth_hop {
             Some(Ok(buffered)) => {
-                if let Some(ref counter) = in_flight {
-                    counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                }
+                drop(_in_flight);
                 // #231: the stealth walk resolved its redirects inside the
                 // client — adopt the trail (target+status hops and the
                 // url-only chain) so the network face reports the wander
@@ -764,9 +769,7 @@ pub(crate) async fn fetch_url_walk(
         let resp = match req.send().await {
             Ok(r) => r,
             Err(e) => {
-                if let Some(ref counter) = in_flight {
-                    counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                }
+                drop(_in_flight);
                 // Scripted fetch()/XHR walked this far on a raw reqwest
                 // client with no retry of its own — the one subresource path
                 // the Tier2 fallback didn't cover (the g.alicdn.com shape:
@@ -845,9 +848,7 @@ pub(crate) async fn fetch_url_walk(
             }
         };
 
-        if let Some(ref counter) = in_flight {
-            counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        }
+        drop(_in_flight);
 
         if credentials_allowed {
             if let Some(ref jar) = cookie_jar {

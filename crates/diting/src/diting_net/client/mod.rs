@@ -59,6 +59,29 @@ pub(crate) fn epoch_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Drop-decrement twin of the manual `in_flight` fetch_add (#309): the
+/// add/sub pairs leaked a count whenever the enclosing future was
+/// cancelled between them — a realm swap (init_js drops the old Vm)
+/// mid-send kills a page's fetch() op future, none of the exit paths run
+/// the sub, and the session's settle fast paths (both require
+/// `active_requests() == 0`) stay dead for its remaining life. In the
+/// 940-page crawl the leak climbed monotonically per session and every
+/// settle window burned its full budget. `drop(guard)` at the old sub
+/// sites keeps the counted window identical; cancellation lands on Drop
+/// instead of on nothing. `None` (a runtime with no owning HttpClient)
+/// is a no-op, matching the old `if let Some(counter)` subs.
+pub(crate) struct InFlightDecrement(
+    pub(crate) Option<Arc<std::sync::atomic::AtomicU32>>,
+);
+
+impl Drop for InFlightDecrement {
+    fn drop(&mut self) {
+        if let Some(counter) = self.0.take() {
+            counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 /// A reqwest builder with reqwest's implicit system/env proxy matcher turned
 /// off. Every HTTP client the engine builds goes through here.
 ///
@@ -1053,10 +1076,14 @@ impl HttpClient {
             }
 
             self.in_flight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // #309: the counter decrements on Drop, so a cancelled
+            // navigation (this future dropped mid-send by a newer goto)
+            // can no longer strand it at +1 for the session's life.
+            let _in_flight = InFlightDecrement(Some(self.in_flight.clone()));
             let resp = match req_builder.send().await {
                 Ok(resp) => resp,
                 Err(e) => {
-                    self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    drop(_in_flight);
                     // Connect-phase (DNS/TCP/TLS) is the only failure regime
                     // where a non-idempotent retry is safe — the request
                     // never left the machine. Classify before the error is
@@ -1075,7 +1102,7 @@ impl HttpClient {
                     });
                 }
             };
-            self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            drop(_in_flight);
 
             let status = resp.status();
 

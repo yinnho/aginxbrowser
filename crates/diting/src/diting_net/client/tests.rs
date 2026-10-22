@@ -1193,3 +1193,53 @@ async fn fetch_metadata_follows_resource_type_and_site() {
     assert_eq!(echoed(&echo, "upgrade-insecure-requests"), vec!["1"], "{echo}");
     server.abort();
 }
+
+/// #309: the `in_flight` counter must survive cancellation. A navigation
+/// that swaps realms mid-send drops the page's fetch() future — before
+/// the Drop guard the paired fetch_sub never ran on that path, the
+/// counter stranded at +1, and both settle fast paths (they require
+/// `active_requests() == 0`) stayed dead for the session's remaining
+/// life. In the 940-page crawl the leak climbed per session and every
+/// settle window burned its full budget.
+#[tokio::test]
+async fn in_flight_counter_survives_cancelled_send() {
+    // A TCP endpoint that accepts and never answers: the send future
+    // parks awaiting response headers, the slow-subresource shape.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind loopback sink");
+    let addr = listener.local_addr().unwrap();
+    let sink = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream); // hold the socket open, never respond
+        }
+    });
+    let client = referrer_client();
+    let url = Url::parse(&format!("http://{addr}/slow.json")).unwrap();
+
+    // Box::pin, not tokio::pin!: the test must be able to DROP the
+    // future (a stack pin would only drop the borrowed handle).
+    let mut fut = Box::pin(client.fetch_subresource(&url, None));
+    let mut saw_in_flight = false;
+    for _ in 0..100 {
+        if client.active_requests() >= 1 {
+            saw_in_flight = true;
+            break;
+        }
+        tokio::select! {
+            _ = fut.as_mut() => panic!("sink never answers; the fetch cannot complete"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+        }
+    }
+    assert!(saw_in_flight, "the parked request must register as in flight");
+
+    // Drop the future mid-send — the realm-swap cancellation shape.
+    drop(fut);
+    assert_eq!(
+        client.active_requests(),
+        0,
+        "a cancelled send must return its in-flight count (#309)"
+    );
+    sink.abort();
+}
