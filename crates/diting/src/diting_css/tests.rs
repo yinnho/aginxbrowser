@@ -2025,10 +2025,14 @@ fn math_calls_flow_through_declarations_and_sides() {
     let mut s = ComputedStyle::default();
     assert!(apply_declarations(&mut s, "width: min(50%, 80%)"));
     assert_eq!(s.width, Some(Length::Percent(50.0)));
-    // Mixed px with percent drops the whole declaration.
+    // Mixed px with percent cannot be ordered here: the declaration is kept
+    // as a placeholder plus an expression layout evaluates against the
+    // containing block (Chrome resolves it too, it does not drop it).
     let mut s = ComputedStyle::default();
-    assert!(!apply_declarations(&mut s, "width: min(400px, 90%)"));
-    assert_eq!(s.width, None);
+    assert!(apply_declarations(&mut s, "width: min(400px, 90%)"));
+    assert!(matches!(s.width, Some(Length::Calc { .. })));
+    assert_eq!(eval_width_expr(s.width_expr.as_deref().unwrap(), 1000.0), Some(400.0));
+    assert_eq!(eval_width_expr(s.width_expr.as_deref().unwrap(), 300.0), Some(270.0));
     // expand_sides keeps call tokens whole across the whitespace split.
     let mut s = ComputedStyle::default();
     assert!(apply_declarations(&mut s, "padding: max(4px, 2px) min(8px, 6px)"));
@@ -3233,4 +3237,39 @@ fn layers_and_nesting_follow_chrome_cascade() {
     for id in ["#m1", "#m2", "#m3", "#m5"] {
         assert_eq!(color_of(id), red, "nested rule {id}");
     }
+}
+
+#[test]
+fn math_functions_units_and_percent_expressions() {
+    // Chrome truth (headless Chrome, 2026-10-22).
+    let fonts = FontCtx::default();
+    let px = |s: &str| match eval_math_call(s, &fonts) {
+        Some(Length::Px(v)) => Some((v * 100.0).round() / 100.0),
+        _ => None,
+    };
+    assert_eq!(px("round(up, 10.5px, 5px)"), Some(15.0));
+    assert_eq!(px("round(10.5px, 5px)"), Some(10.0), "nearest, ties up handled by f32 rounding");
+    assert_eq!(px("mod(7px, 3px)"), Some(1.0));
+    assert_eq!(px("rem(-7px, 3px)"), Some(-1.0));
+    assert_eq!(px("calc(sin(90deg) * 10px)"), Some(10.0));
+    assert_eq!(px("abs(-4px)"), Some(4.0));
+    assert_eq!(px("calc(0 * 10px)"), Some(0.0));
+    assert_eq!(px("hypot(3px, 4px)"), Some(5.0));
+    // Units: viewport variants and absolute lengths.
+    for (decl, want) in [("50dvh", 360.0), ("10svw", 128.0), ("2vmin", 14.4), ("1vmax", 12.8), ("1in", 96.0), ("12pt", 16.0), ("2.54cm", 96.0)] {
+        let mut s = ComputedStyle::default();
+        apply_declarations_with(&mut s, &format!("margin-left: {decl}"), &FontCtx { own: 16.0, root: 16.0, viewport_w: 1280.0, viewport_h: 720.0 });
+        match s.margin.left {
+            Some(Length::Px(v)) => assert!((v - want).abs() < 0.01, "{decl} -> {v}, want {want}"),
+            other => panic!("{decl} -> {other:?}"),
+        }
+    }
+    // Percent mixed into min/max/clamp resolves once the containing block is known.
+    let (_, expr) = calc::pct_math("clamp(300px, 50%, 800px)", &fonts).expect("valid percent math");
+    assert_eq!(eval_width_expr(&expr, 1000.0), Some(500.0));
+    assert_eq!(eval_width_expr(&expr, 400.0), Some(300.0));
+    assert_eq!(eval_width_expr(&expr, 3000.0), Some(800.0));
+    let (_, min_expr) = calc::pct_math("min(100%, 250px)", &fonts).unwrap();
+    assert_eq!(eval_width_expr(&min_expr, 600.0), Some(250.0));
+    assert_eq!(eval_width_expr(&min_expr, 100.0), Some(100.0));
 }

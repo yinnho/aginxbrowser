@@ -54,6 +54,8 @@ pub(crate) use counters::q_quote_pair;
 use sticky::establishes_stacking_context;
 pub use text::FontBook;
 mod style_map;
+mod container_units;
+use container_units::bake_container_units;
 use style_map::{resolve_sizing_keywords, side_px, to_taffy_style};
 
 /// Absolute (page-relative) border-box rect of a DOM element after layout.
@@ -6092,18 +6094,27 @@ pub fn layout_solve_rooted(
     // content-box width — CSS never re-samples a resolved value against a
     // re-sampled basis, so this single deterministic pass replaces the
     // value instead of feeding it back through another percent resolution.
-    // Sorted shallow-first, a calc width inside a calc-width parent
-    // cascades through the arithmetic `repaired` map without another layout
-    // round-trip. height and the margin/padding/inset slots keep the
-    // percent-only placeholder (documented approximation). `repaired` lives
-    // OUTSIDE this block: the #245 pass below continues the same arithmetic
-    // basis for percent-padding content-box fixes under a calc-width parent.
+    // Sorted shallow-first, a calc width inside a calc-width parent cascades
+    // through the `repaired` map (also read by the #245 pass below) without
+    // another round-trip. height and margin/padding/inset keep the
+    // percent-only placeholder (documented approximation).
     let mut repaired: HashMap<taffy::tree::NodeId, f32> = HashMap::new();
     {
+        // A content-box percent width with padding/border is also repaired:
+        // the box is pct * containing-block + the px edges (taffy resolves a
+        // percent size as the border box), which is what Chrome lays out.
+        let edges_px = |s: &crate::diting_css::ComputedStyle| {
+            side_px(s.padding.left) + side_px(s.padding.right)
+                + if s.border_style.is_some() { side_px(s.border_width.left) + side_px(s.border_width.right) } else { 0.0 }
+        };
+        let is_pct = |l: Option<crate::diting_css::Length>| matches!(l, Some(crate::diting_css::Length::Percent(_)));
         let has_calc_width = |s: &crate::diting_css::ComputedStyle| {
             matches!(s.width, Some(crate::diting_css::Length::Calc { .. }))
                 || matches!(s.min_width, Some(crate::diting_css::Length::Calc { .. }))
                 || matches!(s.max_width, Some(crate::diting_css::Length::Calc { .. }))
+                || ((is_pct(s.width) || is_pct(s.min_width) || is_pct(s.max_width))
+                    && !matches!(s.box_sizing, Some(crate::diting_css::BoxSizing::BorderBox))
+                    && edges_px(s) > 0.0)
         };
         let mut fixups: Vec<(taffy::tree::NodeId, NodeId)> = node_map
             .iter()
@@ -6163,20 +6174,26 @@ pub fn layout_solve_rooted(
                 let border_box = matches!(st.box_sizing, Some(crate::diting_css::BoxSizing::BorderBox));
                 let infl = if border_box { 0.0 } else { pb };
                 let Some(mut ts) = taffy_tree.style(tnid).ok().cloned() else { continue };
-                if let Some(crate::diting_css::Length::Calc { percent, px }) = st.width {
-                    let content = (cbw * percent / 100.0 + px).max(0.0);
+                let as_calc = |l: Option<crate::diting_css::Length>| match l {
+                    Some(crate::diting_css::Length::Calc { percent, px }) => Some((percent, px)),
+                    Some(crate::diting_css::Length::Percent(p)) if infl > 0.0 => Some((p, 0.0)),
+                    _ => None,
+                };
+                let calc_px = |e: Option<&str>, percent: f32, px: f32| e.and_then(|e| crate::diting_css::eval_width_expr(e, cbw)).unwrap_or(cbw * percent / 100.0 + px).max(0.0);
+                if let Some((percent, px)) = as_calc(st.width) {
+                    let content = calc_px(st.width_expr.as_deref(), percent, px);
                     ts.size.width = Dimension::length(content + infl);
                     // Children resolve percents against this element's CONTENT
                     // box — under border-box the calc result is the border
                     // box, so strip padding+border for the child basis.
                     repaired.insert(tnid, if border_box { (content - pb).max(0.0) } else { content });
                 }
-                if let Some(crate::diting_css::Length::Calc { percent, px }) = st.min_width {
-                    let content = (cbw * percent / 100.0 + px).max(0.0);
+                if let Some((percent, px)) = as_calc(st.min_width) {
+                    let content = calc_px(st.min_width_expr.as_deref(), percent, px);
                     ts.min_size.width = LengthPercentageAuto::length(content + infl);
                 }
-                if let Some(crate::diting_css::Length::Calc { percent, px }) = st.max_width {
-                    let content = (cbw * percent / 100.0 + px).max(0.0);
+                if let Some((percent, px)) = as_calc(st.max_width) {
+                    let content = calc_px(st.max_width_expr.as_deref(), percent, px);
                     ts.max_size.width = LengthPercentageAuto::length(content + infl);
                 }
                 let _ = taffy_tree.set_style(tnid, ts);
@@ -8695,58 +8712,6 @@ pub(crate) fn container_plan(
     ContainerPlan { extra_rules, gates }
 }
 
-/// Rewrite container-query lengths (`10cqw`, `2.5cqh`, ...) against the
-/// answering container's border box into px, so the ordinary declaration
-/// parser never sees the units. Non-container tokens (including hex colors
-/// and URLs containing digit+letter runs) pass through byte-identical.
-fn bake_container_units(text: &str, w: f32, h: f32) -> String {
-    fn push_px(out: &mut String, px: f32) {
-        if px.fract() == 0.0 && px.abs() < 1e15 {
-            out.push_str(&format!("{}px", px as i64));
-        } else {
-            out.push_str(&format!("{:.3}", px));
-            out.push_str("px");
-        }
-    }
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        let num_start = c.is_ascii_digit()
-            || (c == '-' && chars.get(i + 1).is_some_and(|n| n.is_ascii_digit()))
-            || (c == '.' && chars.get(i + 1).is_some_and(|n| n.is_ascii_digit()));
-        if !num_start {
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        let start = i;
-        if chars[i] == '-' {
-            i += 1;
-        }
-        while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
-            i += 1;
-        }
-        let ustart = i;
-        while i < chars.len() && chars[i].is_ascii_alphabetic() {
-            i += 1;
-        }
-        let unit: String = chars[ustart..i].iter().collect();
-        match unit.as_str() {
-            "cqw" | "cqi" => {
-                let v: f32 = chars[start..ustart].iter().collect::<String>().parse().unwrap_or(0.0);
-                push_px(&mut out, v * w / 100.0);
-            }
-            "cqh" | "cqb" => {
-                let v: f32 = chars[start..ustart].iter().collect::<String>().parse().unwrap_or(0.0);
-                push_px(&mut out, v * h / 100.0);
-            }
-            _ => out.extend(chars[start..i].iter()),
-        }
-    }
-    out
-}
 
 pub fn compute_styles(
     tree: &DomTree,

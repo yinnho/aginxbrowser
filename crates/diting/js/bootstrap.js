@@ -1213,9 +1213,9 @@ globalThis.setInterval = (fn, delay = 0, ...args) => {
 };
 
 globalThis.clearInterval = (id) => { _intervals.delete(id); _clearedTimers.add(id); };
-globalThis.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+globalThis.requestAnimationFrame = (fn) => __diting_raf(fn);
 globalThis.webkitRequestAnimationFrame = globalThis.requestAnimationFrame;
-globalThis.cancelAnimationFrame = globalThis.clearTimeout;
+globalThis.cancelAnimationFrame = (id) => __diting_caf(id);
 globalThis.queueMicrotask = globalThis.queueMicrotask || ((fn) => Promise.resolve().then(fn));
 
 
@@ -10072,6 +10072,8 @@ globalThis.getComputedStyle = (el, pseudoElt) => {
       const dim = dimensionFor(kebab);
       if (dim != null) return dim;
     }
+    const used = pseudoName ? null : globalThis.__usedSize?.(el, kebab, lookup);
+    if (used != null) return used;
     // Inline value next — CSSOM writes not yet folded into a snapshot
     // (or no layout run at all); pseudo-elements carry no inline style.
     if (!pseudoName) {

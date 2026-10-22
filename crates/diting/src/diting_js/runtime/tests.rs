@@ -23161,3 +23161,34 @@ fn document_evaluate_xpath_subset() {
         let _ = rt.run_event_loop_bounded(100).await;
         assert_eq!(rt.evaluate("__tg.join()").unwrap(), "closed>open,open>closed,closed>closed");
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_computed_width_height_and_percent_box_model() {
+        // Chrome truth (headless Chrome, 2026-10-22): getComputedStyle width/
+        // height are the USED content-box size (border-box under
+        // box-sizing:border-box), untransformed; display:none has no box; and
+        // a content-box percent width adds its padding+border on top.
+        let mut rt = setup_runtime(
+            "<html><head><style>body{margin:0}
+              #w{width:600px}
+              #a{width:100px;padding:10px;border:2px solid red;height:30px}
+              #c{box-sizing:border-box;width:100px;padding:10px;border:2px solid red;height:30px}
+              #e{width:100px;height:20px;transform:scale(2)}
+              #f{display:none;width:70px}
+              #p{width:50%;padding:0 5px;border:3px solid red;height:10px}
+              #q{width:50%;padding:0 5px;border:3px solid red;height:10px;box-sizing:border-box}
+              #m{max-width:50%;padding:10px;height:10px}
+             </style></head><body><div id=w>
+              <div id=a>a</div><div id=c>c</div><div id=e>e</div><div id=f>f</div>
+              <div id=h style=\"width:calc(100% - 10px);height:calc(2*10px)\">h</div>
+              <div id=p></div><div id=q></div><div id=m></div></div></body></html>",
+        );
+        let v = rt
+            .evaluate(
+                "(() => { const cs = (i) => { const c = getComputedStyle(document.getElementById(i)); return c.width + ' ' + c.height; };
+                  const bw = (i) => Math.round(document.getElementById(i).getBoundingClientRect().width * 100) / 100;
+                  return [cs('a'), cs('c'), cs('e'), cs('f'), cs('h'), bw('p'), bw('q'), bw('m')].join('|'); })()",
+            )
+            .unwrap();
+        assert_eq!(v, "100px 30px|100px 30px|100px 20px|auto auto|590px 20px|316|300|320");
+    }

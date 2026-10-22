@@ -27,6 +27,8 @@ pub(crate) mod props;
 mod layers;
 mod nesting;
 mod vars;
+mod calc;
+pub use calc::{eval_calc, eval_math_call, eval_width_expr};
 use vars::substitute_vars;
 mod transform;
 pub(crate) use transform::{parse_transform, parse_transform_with_vp};
@@ -998,6 +1000,11 @@ pub struct ComputedStyle {
     /// Interpretation (content-box vs border-box edges) is `box_sizing`'s
     /// call — the layout layer does the edge mapping at taffy hand-off.
     pub width: Option<Length>,
+    /// Percent-bearing math for width/min-width/max-width that only layout
+    /// can evaluate (see `calc::pct_math`); the Length slot holds a placeholder.
+    pub width_expr: Option<std::sync::Arc<str>>,
+    pub min_width_expr: Option<std::sync::Arc<str>>,
+    pub max_width_expr: Option<std::sync::Arc<str>>,
     pub height: Option<Length>,
     /// `box-sizing` (non-inherited; the `*` reset idiom sets it per element).
     /// `None` = the CSS initial `content-box`.
@@ -2734,6 +2741,8 @@ pub enum CssLength {
     Percent(f32),
     Vw(f32),
     Vh(f32),
+    Vmin(f32),
+    Vmax(f32),
     Ch(f32),
     Ex(f32),
 }
@@ -2820,6 +2829,8 @@ fn resolve_len(l: CssLength, fonts: &FontCtx) -> Length {
         CssLength::Percent(p) => Length::Percent(p),
         CssLength::Vw(n) => Length::Px(n * fonts.viewport_w / 100.0),
         CssLength::Vh(n) => Length::Px(n * fonts.viewport_h / 100.0),
+        CssLength::Vmin(n) => Length::Px(n * fonts.viewport_w.min(fonts.viewport_h) / 100.0),
+        CssLength::Vmax(n) => Length::Px(n * fonts.viewport_w.max(fonts.viewport_h) / 100.0),
     }
 }
 
@@ -2835,6 +2846,9 @@ fn parse_css_length(v: &str) -> Option<CssLength> {
     }
     if let Some(r) = v.strip_suffix("rem") {
         return r.css_f32().map(CssLength::Rem);
+    }
+    if let Some(l) = calc::parse_extra_unit(v) {
+        return Some(l);
     }
     // "vw" before "vh" is arbitrary (no suffix overlap like rem/em), but
     // both must precede nothing else — no other unit ends in w/h.
@@ -2861,268 +2875,6 @@ fn parse_css_length(v: &str) -> Option<CssLength> {
     None
 }
 
-/// A calc() intermediate value: a plain number (only legal as a `*`/`/`
-/// operand) or a length carrying its px and percent parts accumulated
-/// independently (percent in CSS 0-100 scale).
-#[derive(Debug, Clone, Copy)]
-enum CalcVal {
-    Number(f32),
-    Len { px: f32, percent: f32 },
-}
-
-impl CalcVal {
-    fn parts(self) -> (f32, f32) {
-        match self {
-            CalcVal::Len { px, percent } => (px, percent),
-            CalcVal::Number(_) => (0.0, 0.0),
-        }
-    }
-}
-
-/// Evaluate a calc() expression body (the text BETWEEN the parentheses) into
-/// a [`Length`]: pure px arithmetic folds to [`Length::Px`], percent-only to
-/// [`Length::Percent`], and a mix to [`Length::Calc`]. em/rem fold against
-/// the font context like bare declarations. The grammar is the CSS one —
-/// `+`/`-` need whitespace on both sides, `*`/`/` take one number operand,
-/// parentheses and nested calc() group.
-pub fn eval_calc(expr: &str, fonts: &FontCtx) -> Option<Length> {
-    let mut p = CalcParser { s: expr.as_bytes(), i: 0, fonts };
-    let v = p.expr_value()?;
-    p.skip_ws();
-    if p.i != p.s.len() {
-        return None;
-    }
-    calcval_to_length(v)
-}
-
-/// Fold a fully-evaluated calc intermediate into a [`Length`].
-fn calcval_to_length(v: CalcVal) -> Option<Length> {
-    match v {
-        // A bare number is not a length; `calc(0)` has no unit context here.
-        CalcVal::Number(_) => None,
-        CalcVal::Len { px, percent: 0.0 } => Some(Length::Px(px)),
-        CalcVal::Len { px: 0.0, percent } => Some(Length::Percent(percent)),
-        CalcVal::Len { px, percent } => Some(Length::Calc { percent, px }),
-    }
-}
-
-/// Which math function a `min(`/`max(`/`clamp(` call reduces as. clamp keeps
-/// the CSS form `max(MIN, min(VAL, MAX))`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum MathFn {
-    Min,
-    Max,
-    Clamp,
-}
-
-/// Evaluate a property-level value that is one math call: `calc(…)`,
-/// `min(…)`, `max(…)` or `clamp(…)`. min/max take one or more
-/// comma-separated sums; clamp takes exactly three. Comparing operands
-/// needs one unit family — all-px or all-percent (percents share the
-/// property's reference). A call mixing px with percent, or a number with
-/// either, is unorderable at parse time and drops (declaration falls out,
-/// same posture as calc's mixed-fold staying symbolic).
-pub fn eval_math_call(v: &str, fonts: &FontCtx) -> Option<Length> {
-    let t = v.trim();
-    if t.len() >= 6 && t[..5].eq_ignore_ascii_case("calc(") && t.ends_with(')') {
-        return eval_calc(&t[5..t.len() - 1], fonts);
-    }
-    for (prefix, f) in [("min(", MathFn::Min), ("max(", MathFn::Max), ("clamp(", MathFn::Clamp)] {
-        let pl = prefix.len();
-        if t.len() > pl && t[..pl].eq_ignore_ascii_case(prefix) && t.ends_with(')') {
-            let mut p = CalcParser { s: &t.as_bytes()[pl..], i: 0, fonts };
-            let v = p.math_args_value(f)?;
-            p.skip_ws();
-            if p.i != p.s.len() {
-                return None;
-            }
-            return calcval_to_length(v);
-        }
-    }
-    None
-}
-
-struct CalcParser<'a> {
-    s: &'a [u8],
-    i: usize,
-    fonts: &'a FontCtx,
-}
-
-impl CalcParser<'_> {
-    fn skip_ws(&mut self) {
-        while self.i < self.s.len() && self.s[self.i].is_ascii_whitespace() {
-            self.i += 1;
-        }
-    }
-
-    fn eat(&mut self, c: u8) -> bool {
-        self.skip_ws();
-        if self.i < self.s.len() && self.s[self.i] == c {
-            self.i += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn starts_with_ignore_case(&self, prefix: &str) -> bool {
-        let end = self.i + prefix.len();
-        end <= self.s.len() && self.s[self.i..end].eq_ignore_ascii_case(prefix.as_bytes())
-    }
-
-    /// sum: term (( '+' | '-' ) term)* — both sides must carry units.
-    fn expr_value(&mut self) -> Option<CalcVal> {
-        let mut acc = self.term_value()?;
-        loop {
-            self.skip_ws();
-            let plus = match self.s.get(self.i) {
-                Some(b'+') => true,
-                Some(b'-') => false,
-                _ => break,
-            };
-            self.i += 1;
-            let rhs = self.term_value()?;
-            if matches!(acc, CalcVal::Number(_)) || matches!(rhs, CalcVal::Number(_)) {
-                return None;
-            }
-            let (a, ap) = acc.parts();
-            let (b, bp) = rhs.parts();
-            acc = CalcVal::Len {
-                px: if plus { a + b } else { a - b },
-                percent: if plus { ap + bp } else { ap - bp },
-            };
-        }
-        Some(acc)
-    }
-
-    /// product: factor (( '*' | '/' ) factor)*, one side a number.
-    fn term_value(&mut self) -> Option<CalcVal> {
-        let mut acc = self.factor_value()?;
-        loop {
-            self.skip_ws();
-            let div = match self.s.get(self.i) {
-                Some(b'*') => false,
-                Some(b'/') => true,
-                _ => break,
-            };
-            self.i += 1;
-            let rhs = self.factor_value()?;
-            let (n, val) = match (acc, rhs) {
-                (CalcVal::Number(n), v) => (n, v),
-                (v, CalcVal::Number(n)) => (n, v),
-                _ => return None,
-            };
-            acc = match val {
-                CalcVal::Len { px, percent } if !div => CalcVal::Len { px: px * n, percent: percent * n },
-                CalcVal::Len { px, percent } if div && n != 0.0 => CalcVal::Len { px: px / n, percent: percent / n },
-                _ => return None,
-            };
-        }
-        Some(acc)
-    }
-
-    /// Parse and reduce the argument list of a math call (`i` sits just
-    /// past the function name's `(`): sum (`,` sum)* `)`, one or more for
-    /// min/max, exactly three for clamp.
-    fn math_args_value(&mut self, f: MathFn) -> Option<CalcVal> {
-        let mut args = Vec::new();
-        loop {
-            args.push(self.expr_value()?);
-            if !self.eat(b',') {
-                break;
-            }
-        }
-        if !self.eat(b')') {
-            return None;
-        }
-        if args.is_empty() || (f == MathFn::Clamp && args.len() != 3) {
-            return None;
-        }
-        // One unit family only (see eval_math_call): all-px or all-percent.
-        let all_px = args.iter().all(|a| matches!(a, CalcVal::Len { percent: 0.0, .. }));
-        let all_pct = args.iter().all(|a| matches!(a, CalcVal::Len { px: 0.0, .. }));
-        if !(all_px || all_pct) {
-            return None;
-        }
-        let key = |a: &CalcVal| -> f32 {
-            match a {
-                CalcVal::Number(n) => *n,
-                CalcVal::Len { px, percent } => {
-                    if all_px {
-                        *px
-                    } else {
-                        *percent
-                    }
-                }
-            }
-        };
-        let pick = |lo: bool, a: &CalcVal, b: &CalcVal| {
-            let (x, y) = (key(a), key(b));
-            let take_b = if lo { y < x } else { y > x };
-            if take_b { *b } else { *a }
-        };
-        let mut acc = args[0];
-        match f {
-            MathFn::Min | MathFn::Max => {
-                let lo = f == MathFn::Min;
-                for a in &args[1..] {
-                    acc = pick(lo, &acc, a);
-                }
-            }
-            MathFn::Clamp => {
-                let (min, val, max) = (&args[0], &args[1], &args[2]);
-                // max(MIN, min(VAL, MAX))
-                let inner = pick(true, val, max);
-                acc = pick(false, min, &inner);
-            }
-        }
-        Some(acc)
-    }
-
-    fn factor_value(&mut self) -> Option<CalcVal> {
-        self.skip_ws();
-        if self.eat(b'(') {
-            let v = self.expr_value()?;
-            return self.eat(b')').then_some(v);
-        }
-        if self.starts_with_ignore_case("calc(") {
-            self.i += 5;
-            let v = self.expr_value()?;
-            return self.eat(b')').then_some(v);
-        }
-        for (prefix, f) in [("min(", MathFn::Min), ("max(", MathFn::Max), ("clamp(", MathFn::Clamp)] {
-            if self.starts_with_ignore_case(prefix) {
-                self.i += prefix.len();
-                return self.math_args_value(f);
-            }
-        }
-        // number | length token. '+/-/"/("/")/',' end a token but may START
-        // one (a signed number), so only delimit when past the first byte.
-        let start = self.i;
-        while self.i < self.s.len() {
-            let c = self.s[self.i];
-            if self.i > start
-                && (c.is_ascii_whitespace() || matches!(c, b'+' | b'-' | b'*' | b'/' | b'(' | b')' | b','))
-            {
-                break;
-            }
-            self.i += 1;
-        }
-        if self.i == start {
-            return None;
-        }
-        let tok = std::str::from_utf8(&self.s[start..self.i]).ok()?;
-        if let Ok(n) = tok.parse::<f32>() {
-            return n.is_finite().then_some(CalcVal::Number(n));
-        }
-        let resolved = parse_css_length(tok).map(|l| resolve_len(l, self.fonts))?;
-        match resolved {
-            Length::Px(px) => Some(CalcVal::Len { px, percent: 0.0 }),
-            Length::Percent(p) => Some(CalcVal::Len { px: 0.0, percent: p }),
-            _ => None,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Sides {
@@ -4501,6 +4253,10 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
         }
         "width" => {
             style.width = len_sizing(v);
+            style.width_expr = None;
+            if let (None, Some((l, e))) = (style.width, calc::pct_math(v, fonts)) {
+                (style.width, style.width_expr) = (Some(l), Some(e));
+            }
             style.width.is_some()
         }
         // `height: auto` must APPLY as Length::Auto, not drop: `auto` is a
@@ -4535,6 +4291,8 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                     LineHeightRaw::Len(CssLength::Percent(p)) => LineHeightSpec::Number(p / 100.0),
                     LineHeightRaw::Len(CssLength::Vw(n)) => LineHeightSpec::Px(n * fonts.viewport_w / 100.0),
                     LineHeightRaw::Len(CssLength::Vh(n)) => LineHeightSpec::Px(n * fonts.viewport_h / 100.0),
+                    LineHeightRaw::Len(CssLength::Vmin(n)) => LineHeightSpec::Px(n * fonts.viewport_w.min(fonts.viewport_h) / 100.0),
+                    LineHeightRaw::Len(CssLength::Vmax(n)) => LineHeightSpec::Px(n * fonts.viewport_w.max(fonts.viewport_h) / 100.0),
                     // ch/ex fold at the same 0.5em fallback as resolve_len.
                     LineHeightRaw::Len(CssLength::Ch(n)) | LineHeightRaw::Len(CssLength::Ex(n)) => {
                         LineHeightSpec::Px(n * 0.5 * fonts.own)
@@ -5419,10 +5177,18 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
         // parse-into-nothing.
         "min-width" => {
             style.min_width = len(v);
+            style.min_width_expr = None;
+            if let (None, Some((l, e))) = (style.min_width, calc::pct_math(v, fonts)) {
+                (style.min_width, style.min_width_expr) = (Some(l), Some(e));
+            }
             style.min_width.is_some()
         }
         "max-width" => {
             style.max_width = len(v);
+            style.max_width_expr = None;
+            if let (None, Some((l, e))) = (style.max_width, calc::pct_math(v, fonts)) {
+                (style.max_width, style.max_width_expr) = (Some(l), Some(e));
+            }
             style.max_width.is_some()
         }
         "min-height" => {
@@ -5776,6 +5542,8 @@ fn font_size_px(l: CssLength, parent_fs: f32, root_fs: f32, viewport: (f32, f32)
         CssLength::Percent(p) => p / 100.0 * parent_fs,
         CssLength::Vw(n) => n * viewport.0 / 100.0,
         CssLength::Vh(n) => n * viewport.1 / 100.0,
+        CssLength::Vmin(n) => n * viewport.0.min(viewport.1) / 100.0,
+        CssLength::Vmax(n) => n * viewport.0.max(viewport.1) / 100.0,
         // font-size in ch/ex is self-referential; the 0.5em fallback basis
         // is the parent font-size, same as Em here.
         CssLength::Ch(n) | CssLength::Ex(n) => n * 0.5 * parent_fs,
@@ -5908,6 +5676,8 @@ fn parse_font_shorthand(v: &str, fonts: &FontCtx) -> Option<FontShorthand> {
         LineHeightRaw::Len(CssLength::Percent(p)) => LineHeightSpec::Number(p / 100.0),
         LineHeightRaw::Len(CssLength::Vw(n)) => LineHeightSpec::Px(n * fonts.viewport_w / 100.0),
         LineHeightRaw::Len(CssLength::Vh(n)) => LineHeightSpec::Px(n * fonts.viewport_h / 100.0),
+        LineHeightRaw::Len(CssLength::Vmin(n)) => LineHeightSpec::Px(n * fonts.viewport_w.min(fonts.viewport_h) / 100.0),
+        LineHeightRaw::Len(CssLength::Vmax(n)) => LineHeightSpec::Px(n * fonts.viewport_w.max(fonts.viewport_h) / 100.0),
         // ch/ex fold at the 0.5em fallback, basis = the shorthand's new size.
         LineHeightRaw::Len(CssLength::Ch(n)) | LineHeightRaw::Len(CssLength::Ex(n)) => {
             LineHeightSpec::Px(n * 0.5 * size)
