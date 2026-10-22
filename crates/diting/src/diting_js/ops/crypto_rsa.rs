@@ -235,3 +235,90 @@ pub(crate) fn op_subtle_rsa_oaep(
         _ => return Err(crypto_err("unsupported RSA-OAEP hash")),
     })
 }
+
+// RSASSA-PKCS1-v1_5 (#273) — the JWT RS256 family. PKCS#1 v1.5 signatures
+// are deterministic, so the parity pin in runtime/tests.rs bakes a
+// Chrome-produced signature over a fixed jwk and asserts byte equality.
+// The padding scheme types ride rsa's own digest line (`rsa::sha2`,
+// `rsa_sha1` — AssociatedOid lives there), while the prehash is computed
+// with the top-level 0.11 sha crates: identical output bytes, and the
+// scheme only reads D's constants.
+fn rsassa_prehash(hash: &str, data: &[u8]) -> Result<Vec<u8>, deno_error::JsErrorBox> {
+    use sha2::Digest as _;
+    Ok(match hash {
+        "SHA-1" => sha1::Sha1::digest(data).to_vec(),
+        "SHA-256" => sha2::Sha256::digest(data).to_vec(),
+        "SHA-384" => sha2::Sha384::digest(data).to_vec(),
+        "SHA-512" => sha2::Sha512::digest(data).to_vec(),
+        _ => return Err(crypto_err("unsupported RSASSA hash")),
+    })
+}
+
+/// RSASSA-PKCS1-v1_5 sign. Takes the private components; returns the
+/// modulus-length signature. Crypto failures surface as an empty-message
+/// OperationError, matching Chrome.
+#[diting_op]
+#[buffer]
+pub(crate) fn op_subtle_rsa_pkcs1v15_sign(
+    #[string] hash: &str,
+    #[buffer] n: &[u8],
+    #[buffer] e: &[u8],
+    #[buffer] d: &[u8],
+    #[buffer] p: &[u8],
+    #[buffer] q: &[u8],
+    #[buffer] data: &[u8],
+) -> Result<Vec<u8>, deno_error::JsErrorBox> {
+    let prehash = rsassa_prehash(hash, data)?;
+    let sk = private_from_components(
+        rsa::BigUint::from_bytes_be(n),
+        rsa::BigUint::from_bytes_be(e),
+        rsa::BigUint::from_bytes_be(d),
+        rsa::BigUint::from_bytes_be(p),
+        rsa::BigUint::from_bytes_be(q),
+    )?;
+    macro_rules! run {
+        ($digest:ty) => {{
+            sk.sign(rsa::Pkcs1v15Sign::new::<$digest>(), &prehash)
+                .map_err(|_| crypto_err(""))?
+        }};
+    }
+    Ok(match hash {
+        "SHA-1" => run!(rsa_sha1::Sha1),
+        "SHA-256" => run!(rsa::sha2::Sha256),
+        "SHA-384" => run!(rsa::sha2::Sha384),
+        "SHA-512" => run!(rsa::sha2::Sha512),
+        _ => return Err(crypto_err("unsupported RSASSA hash")),
+    })
+}
+
+/// RSASSA-PKCS1-v1_5 verify. Takes only (n, e). Any failure — corrupt
+/// signature, wrong key, wrong length — is `false`, never an error: a bad
+/// verify is a normal outcome, not an exception (Chrome pinned).
+#[diting_op]
+pub(crate) fn op_subtle_rsa_pkcs1v15_verify(
+    #[string] hash: &str,
+    #[buffer] n: &[u8],
+    #[buffer] e: &[u8],
+    #[buffer] signature: &[u8],
+    #[buffer] data: &[u8],
+) -> Result<bool, deno_error::JsErrorBox> {
+    let prehash = rsassa_prehash(hash, data)?;
+    let pk = rsa::RsaPublicKey::new(
+        rsa::BigUint::from_bytes_be(n),
+        rsa::BigUint::from_bytes_be(e),
+    )
+    .map_err(crypto_err)?;
+    macro_rules! run {
+        ($digest:ty) => {{
+            pk.verify(rsa::Pkcs1v15Sign::new::<$digest>(), &prehash, signature)
+                .is_ok()
+        }};
+    }
+    Ok(match hash {
+        "SHA-1" => run!(rsa_sha1::Sha1),
+        "SHA-256" => run!(rsa::sha2::Sha256),
+        "SHA-384" => run!(rsa::sha2::Sha384),
+        "SHA-512" => run!(rsa::sha2::Sha512),
+        _ => return Err(crypto_err("unsupported RSASSA hash")),
+    })
+}

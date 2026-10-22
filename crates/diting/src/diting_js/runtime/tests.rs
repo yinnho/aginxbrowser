@@ -7672,6 +7672,108 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn test_webcrypto_rsassa_pkcs1v15_sign_verify() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        // #273: RSASSA-PKCS1-v1_5 (JWT RS256) faces pinned from Chrome 155.
+        // The parity anchor is a Chrome-generated jwk and its deterministic
+        // signature over a fixed payload — PKCS#1 v1.5 has no randomness, so
+        // a byte-equal signature is a true cross-engine pin.
+        let script = r#"async () => {
+            const enc = new TextEncoder();
+            const hex = (u8) => Array.from(u8, b => b.toString(16).padStart(2, '0')).join('');
+            const face = async (p) => { try { await p; return 'no-throw'; } catch (e) { return e.name + ': ' + e.message; } };
+            const S = crypto.subtle;
+            const RS = { name: 'RSASSA-PKCS1-v1_5', modulusLength: 1024, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' };
+
+            // Chrome-produced key + signature (file:// secure-context probe, 155.0.8059.85).
+            const jwk = {
+                alg: "RS256",
+                d: "A4r4UbUtFzx_3Lvth6-pd7ql8KbX8Cz3nqBKyL0craxc573Pa6a4Rbz1OtwqHcwU9K1Tz0r6j3r5NPeXduDEJctQ3Zkp_tYFihnWE1l5tz3mb5yH3aeUQAbUsBtbUC9feWoKJGQ2rlKcAWYznD-RoUdvA6w-47W5N_ft98ys8OU",
+                dp: "lMezCGqwOujUF8CxhvrrwT7_9UOFXVSD9NS5SuxUKK-z9O68EOpPYujkCuAWVOTZAyW1GpXFDa3qhTIBKOFbBw",
+                dq: "AQn-NwSMVYvab0tmCoxzyZsdmBZo8KbjgzwAF8bLKwERgm2XUHD0deAltjWDCv9ego4Zv7sVNfaqeNTiZin9-Q",
+                e: "AQAB", ext: true, key_ops: ["sign"], kty: "RSA",
+                n: "x2NyImdHbX-jD3PNWkkFCET0vo0Li69-pYSKuUy0cFiAaFwlsYyRofXhZxSMr-m9_vaLSwccyiW-QXeTgPwolIJ9_uTR_eK8x7hfWNtaTba7va5u9BTKpgKI94ivic1mkSAEQILne5Oyhy94ZmkEP0_pL0V7sTTab6GZsOPQEpM",
+                p: "_VxtcENSa-oznBECyPVJ4l0s1EX4JJ_ypuAJyhBDuTjwMUulWFIB1KvMpTwwKqWUW7Vd67Q-ymlocxUEDpI47w",
+                q: "yXcahF1tIvtw9sj23wxfed4RkvAdldW13k5Ce16h7gBjmFAWvxFYfKxfs6weroNp-mc8dsiqcwfnYflbrn9YnQ",
+                qi: "eypHU8uJ6aj3DgL1XOlmP-vSdfN8x0s2rer4ejYB1TZkhjoDnzfmTo7qlQRMtwem99HvgPaWNGloFD48c7aRKw",
+            };
+            const PAYLOAD = 'diting-parity-payload';
+            const CHROME_SIG = 'ad6bdc117e0c285dccc4236dda58aafd1b5605a9abbf79da4fbf7bc949b970d5051d6bea1544a7f1182e0d11a3e9385912d0682f44c5a89c9d8d42300e16fdf7b22a3b427ea664719fe3b76d1b0c5624d60188ec2c9de1e6827147fb97f629f4fd8849ff8f7d6dbc5519c02603b6190c87a9576d2027da036f10c92032ea5e87';
+
+            const key = await S.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, true, ['sign']);
+            const sig = new Uint8Array(await S.sign('RSASSA-PKCS1-v1_5', key, enc.encode(PAYLOAD)));
+            const parity = hex(sig) === CHROME_SIG;
+
+            const pub = await S.importKey('jwk', { kty: 'RSA', n: jwk.n, e: jwk.e }, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, true, ['verify']);
+            const vOk = await S.verify('RSASSA-PKCS1-v1_5', pub, sig, enc.encode(PAYLOAD));
+            const vOther = await S.verify('RSASSA-PKCS1-v1_5', pub, sig, enc.encode('other'));
+            const flipped = sig.slice(); flipped[7] ^= 1;
+            const vFlip = await S.verify('RSASSA-PKCS1-v1_5', pub, flipped, enc.encode(PAYLOAD));
+
+            // JWT shape: libraries verify header.payload with a jwk-imported key.
+            const signingInput = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJkaXRpbmcifQ';
+            const jwtSig = new Uint8Array(await S.sign('RSASSA-PKCS1-v1_5', key, enc.encode(signingInput)));
+            const jwtOk = await S.verify('RSASSA-PKCS1-v1_5', pub, jwtSig, enc.encode(signingInput));
+
+            const pair = await S.generateKey(RS, true, ['sign', 'verify']);
+            const genShape = [
+                pair.publicKey.type, pair.publicKey.usages.join(','),
+                pair.privateKey.type, pair.privateKey.usages.join(','),
+                pair.publicKey.algorithm.name, pair.publicKey.algorithm.modulusLength,
+                pair.publicKey.algorithm.hash.name,
+            ];
+            const jwkOut = await S.exportKey('jwk', key);
+            const jwkOrder = Object.keys(jwkOut);
+            const pubOut = await S.exportKey('jwk', pub);
+            const algs = [];
+            for (const h of ['SHA-1', 'SHA-384', 'SHA-512']) {
+                const p = await S.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 1024, publicExponent: new Uint8Array([1, 0, 1]), hash: h }, true, ['sign', 'verify']);
+                algs.push((await S.exportKey('jwk', p.publicKey)).alg);
+            }
+            // A hash param on sign() is ignored — the key's hash decides.
+            const sig2 = new Uint8Array(await S.sign({ name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-1' }, key, enc.encode(PAYLOAD)));
+            const hashIgnored = hex(sig2) === CHROME_SIG;
+
+            const errors = {
+                signPub: await face(S.sign('RSASSA-PKCS1-v1_5', pair.publicKey, enc.encode('x'))),
+                verifyPriv: await face(S.verify('RSASSA-PKCS1-v1_5', pair.privateKey, sig, enc.encode(PAYLOAD))),
+                genEmpty: await face(S.generateKey(RS, true, [])),
+                genEncrypt: await face(S.generateKey(RS, true, ['encrypt'])),
+                importSpkiSign: await face(S.importKey('spki', await S.exportKey('spki', pub), { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, true, ['sign'])),
+                jwkAlgMismatch: await face(S.importKey('jwk', pubOut, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-1' }, true, ['verify'])),
+            };
+            return { parity, sigLen: sig.length, vOk, vOther, vFlip, jwtOk, genShape, jwkOrder, pubAlg: pubOut.alg, algs, hashIgnored, errors };
+        }"#;
+        let result = rt
+            .call_function_on_remote(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        assert_eq!(v["parity"], serde_json::json!(true), "signature bytes identical to Chrome's over the same key and payload");
+        assert_eq!(v["sigLen"], serde_json::json!(128), "1024-bit modulus signature");
+        assert_eq!(v["vOk"], serde_json::json!(true));
+        assert_eq!(v["vOther"], serde_json::json!(false));
+        assert_eq!(v["vFlip"], serde_json::json!(false), "one flipped byte must fail verification");
+        assert_eq!(v["jwtOk"], serde_json::json!(true), "JWT signing-input shape (header.payload) verifies");
+        assert_eq!(
+            v["genShape"],
+            serde_json::json!(["public", "verify", "private", "sign", "RSASSA-PKCS1-v1_5", 1024, "SHA-256"]),
+            "generateKey splits usages verify/sign exactly like Chrome"
+        );
+        assert_eq!(v["jwkOrder"], serde_json::json!(["alg", "d", "dp", "dq", "e", "ext", "key_ops", "kty", "n", "p", "q", "qi"]), "private jwk fields in Chrome's alphabetical order");
+        assert_eq!(v["pubAlg"], serde_json::json!("RS256"));
+        assert_eq!(v["algs"], serde_json::json!(["RS1", "RS384", "RS512"]));
+        assert_eq!(v["hashIgnored"], serde_json::json!(true), "sign()'s hash param is ignored, the key's hash decides");
+        let e = &v["errors"];
+        assert_eq!(e["signPub"], serde_json::json!("InvalidAccessError: key.usages does not permit this operation"), "Chrome's RSA sign failure wording (not the ECDSA one)");
+        assert_eq!(e["verifyPriv"], serde_json::json!("InvalidAccessError: key.usages does not permit this operation"));
+        assert_eq!(e["genEmpty"], serde_json::json!("SyntaxError: Usages cannot be empty when creating a key."));
+        assert_eq!(e["genEncrypt"], serde_json::json!("SyntaxError: Cannot create a key using the specified key usages."));
+        assert_eq!(e["importSpkiSign"], serde_json::json!("SyntaxError: Cannot create a key using the specified key usages."));
+        assert_eq!(e["jwkAlgMismatch"], serde_json::json!("DataError: The JWK \"alg\" member was inconsistent with that specified by the Web Crypto call"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn test_webcrypto_jwk_oct_field_validation() {
         let mut rt = setup_runtime("<html><body></body></html>");
         // #269: JWK import field validation for symmetric keys — kty/k

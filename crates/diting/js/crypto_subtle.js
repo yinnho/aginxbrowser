@@ -238,6 +238,16 @@ if (!globalThis.crypto.subtle) {
   const RSA_OAEP_JWK_ALG = { "SHA-1": "RSA-OAEP", "SHA-256": "RSA-OAEP-256", "SHA-384": "RSA-OAEP-384", "SHA-512": "RSA-OAEP-512" };
   const RSA_OAEP_PUB_USAGES = ["encrypt", "wrapKey"];
   const RSA_OAEP_PRIV_USAGES = ["decrypt", "unwrapKey"];
+  // #273: RSASSA-PKCS1-v1_5 (JWT RS256) — usages split sign/verify, JWK
+  // algs RS1/RS256/RS384/RS512, pinned from Chrome 155.
+  const RSASSA_JWK_ALG = { "SHA-1": "RS1", "SHA-256": "RS256", "SHA-384": "RS384", "SHA-512": "RS512" };
+  const RSASSA_PUB_USAGES = ["verify"];
+  const RSASSA_PRIV_USAGES = ["sign"];
+  function rsaFace(name) {
+    return name === "RSASSA-PKCS1-v1_5"
+      ? { pub: RSASSA_PUB_USAGES, priv: RSASSA_PRIV_USAGES, alg: RSASSA_JWK_ALG }
+      : { pub: RSA_OAEP_PUB_USAGES, priv: RSA_OAEP_PRIV_USAGES, alg: RSA_OAEP_JWK_ALG };
+  }
   function rsaUnflat(buf) {
     const parts = [];
     let off = 0;
@@ -255,19 +265,22 @@ if (!globalThis.crypto.subtle) {
     }
     return keyMaterial.get(key);
   }
-  // RSA-OAEP import (spki / pkcs8 / jwk). The jwk ladder follows Chrome's
-  // order: kty → usage set (which depends on d's presence) → required
-  // members n,e,d,p,q,dp,dq,qi → strict b64url → alg/use/key_ops/ext.
+  // RSA import (spki / pkcs8 / jwk), shared by the OAEP and RSASSA faces
+  // (the key DER is algorithm-agnostic; only the usage sets and JWK alg
+  // names differ). The jwk ladder follows Chrome's order: kty → usage set
+  // (which depends on d's presence) → required members n,e,d,p,q,dp,dq,qi
+  // → strict b64url → alg/use/key_ops/ext.
   function rsaImportKey(format, keyData, alg, extractable, usages) {
     checkUsageStrings("importKey", usages);
     const hash = requireHashParam(alg, "importKey", "RsaHashedImportParams");
+    const face = rsaFace(alg.name);
     let m, type;
     if (format === "spki") {
-      checkKeyUsages(usages, RSA_OAEP_PUB_USAGES, true);
+      checkKeyUsages(usages, face.pub, true);
       m = rsaUnflat(runOp(() => _OPS.op_subtle_rsa_import_spki(toBytes(keyData))));
       type = "public";
     } else if (format === "pkcs8") {
-      checkKeyUsages(usages, RSA_OAEP_PRIV_USAGES, false);
+      checkKeyUsages(usages, face.priv, false);
       m = rsaUnflat(runOp(() => _OPS.op_subtle_rsa_import_pkcs8(toBytes(keyData))));
       type = "private";
     } else if (format === "jwk") {
@@ -276,12 +289,12 @@ if (!globalThis.crypto.subtle) {
         throw new DOMException("The JWK \"kty\" member was not \"RSA\"", "DataError");
       }
       const isPriv = typeof jwk.d === "string";
-      checkKeyUsages(usages, isPriv ? RSA_OAEP_PRIV_USAGES : RSA_OAEP_PUB_USAGES, !isPriv);
+      checkKeyUsages(usages, isPriv ? face.priv : face.pub, !isPriv);
       jwkRequire(jwk, "n");
       jwkRequire(jwk, "e");
       const n = jwkMemberBytes(jwk, "n");
       const e = jwkMemberBytes(jwk, "e");
-      const expected = RSA_OAEP_JWK_ALG[hash];
+      const expected = face.alg[hash];
       if (isPriv) {
         for (const mem of ["d", "p", "q", "dp", "dq", "qi"]) jwkRequire(jwk, mem);
         const d = jwkMemberBytes(jwk, "d");
@@ -299,19 +312,20 @@ if (!globalThis.crypto.subtle) {
       throw new DOMException("Unsupported key format for RSA keys: " + format, "NotSupportedError");
     }
     const algorithm = {
-      name: "RSA-OAEP", modulusLength: m.n.length * 8,
+      name: alg.name, modulusLength: m.n.length * 8,
       publicExponent: new Uint8Array(m.e), hash: { name: hash },
     };
     return makeKey(type, extractable, algorithm, usages, m);
   }
-  // Chrome's RSA-OAEP generateKey policy (pinned from 155): exponent must be
-  // 3 or 65537, modulus a multiple of 8 in [256, 8192], and the usages split
-  // into encrypt/wrapKey on the public half and decrypt/unwrapKey on the
-  // private half (the public key is always extractable).
+  // Chrome's RSA generateKey policy (pinned from 155, both faces): exponent
+  // must be 3 or 65537, modulus a multiple of 8 in [256, 8192], and the
+  // usages split across the halves — encrypt/wrapKey+decrypt/unwrapKey on
+  // OAEP, verify/sign on RSASSA (the public key is always extractable).
   function rsaGenerateKey(alg, extractable, usages) {
     checkUsageStrings("generateKey", usages);
     const hash = requireHashParam(alg, "generateKey", "RsaHashedKeyGenParams");
-    const combined = RSA_OAEP_PUB_USAGES.concat(RSA_OAEP_PRIV_USAGES);
+    const face = rsaFace(alg.name);
+    const combined = face.pub.concat(face.priv);
     checkKeyUsages(usages, combined, false);
     const bits = alg.modulusLength;
     if (!Number.isInteger(bits) || bits < 256 || bits > 8192 || bits % 8 !== 0) {
@@ -325,11 +339,11 @@ if (!globalThis.crypto.subtle) {
     }
     const m = rsaUnflat(runOp(() => _OPS.op_subtle_rsa_generate(bits, eBytes)));
     const algorithm = {
-      name: "RSA-OAEP", modulusLength: bits,
+      name: alg.name, modulusLength: bits,
       publicExponent: new Uint8Array(m.e), hash: { name: hash },
     };
-    const pub = makeKey("public", true, algorithm, usages.filter((u) => RSA_OAEP_PUB_USAGES.includes(u)), m);
-    const priv = makeKey("private", extractable, algorithm, usages.filter((u) => RSA_OAEP_PRIV_USAGES.includes(u)), m);
+    const pub = makeKey("public", true, algorithm, usages.filter((u) => face.pub.includes(u)), m);
+    const priv = makeKey("private", extractable, algorithm, usages.filter((u) => face.priv.includes(u)), m);
     return { publicKey: pub, privateKey: priv };
   }
 
@@ -411,7 +425,7 @@ if (!globalThis.crypto.subtle) {
         }
         return makeKey(type, extractable, { name: alg.name, namedCurve: crv }, usages, m);
       }
-      if (alg.name === "RSA-OAEP") {
+      if (alg.name === "RSA-OAEP" || alg.name === "RSASSA-PKCS1-v1_5") {
         return rsaImportKey(format, keyData, alg, extractable, keyUsages || []);
       }
       checkUsageStrings("importKey", keyUsages || []);
@@ -476,7 +490,7 @@ if (!globalThis.crypto.subtle) {
         }
         throw new DOMException("Unsupported key format for EC keys export: " + format, "NotSupportedError");
       }
-      if (key.algorithm && key.algorithm.name === "RSA-OAEP") {
+      if (key.algorithm && (key.algorithm.name === "RSA-OAEP" || key.algorithm.name === "RSASSA-PKCS1-v1_5")) {
         const m = rsaMaterial(key);
         if (format === "spki") {
           if (key.type !== "public") throw new DOMException("The key is not of the expected type", "InvalidAccessError");
@@ -487,9 +501,10 @@ if (!globalThis.crypto.subtle) {
           return bufferOf(m.pkcs8);
         }
         if (format === "jwk") {
-          // Chrome emits RSA JWK fields in alphabetical insertion order.
+          // Chrome emits RSA JWK fields in alphabetical insertion order; the
+          // alg name is face-specific (RSA-OAEP-256 vs RS256).
           const jwk = {};
-          const algName = key.algorithm.hash && RSA_OAEP_JWK_ALG[key.algorithm.hash.name];
+          const algName = key.algorithm.hash && rsaFace(key.algorithm.name).alg[key.algorithm.hash.name];
           if (algName) jwk.alg = algName;
           if (key.type === "private") {
             jwk.d = bytesToB64url(m.d);
@@ -533,7 +548,7 @@ if (!globalThis.crypto.subtle) {
 
     async generateKey(algorithm, extractable, keyUsages) {
       const alg = normalizeAlgo(algorithm);
-      if (alg.name === "RSA-OAEP") {
+      if (alg.name === "RSA-OAEP" || alg.name === "RSASSA-PKCS1-v1_5") {
         return rsaGenerateKey(alg, extractable, keyUsages || []);
       }
       if (alg.name === "HMAC") {
@@ -589,6 +604,18 @@ if (!globalThis.crypto.subtle) {
         const hash = normalizeHash(alg.hash || (key.algorithm.hash && key.algorithm.hash.name));
         return bufferOf(runOp(() => _OPS.op_subtle_ecdsa_sign(m.curve, hash, m.pkcs8, toBytes(data))));
       }
+      if (alg.name === "RSASSA-PKCS1-v1_5") {
+        const m = rsaMaterial(key);
+        // Chrome pins one message for every failure shape here — public key,
+        // missing usage — unlike the ECDSA wording above.
+        if (key.type !== "private" || !key.usages.includes("sign")) {
+          throw new DOMException("key.usages does not permit this operation", "InvalidAccessError");
+        }
+        // The hash rides the key; a hash param on sign() is ignored
+        // (Chrome-pinned: same signature with and without).
+        const hash = key.algorithm.hash && key.algorithm.hash.name;
+        return bufferOf(runOp(() => _OPS.op_subtle_rsa_pkcs1v15_sign(hash, m.n, m.e, m.d, m.p, m.q, toBytes(data))));
+      }
       const bytes = keyBytes(key);
       if (alg.name === "HMAC") {
         const hash = key.algorithm && key.algorithm.hash ? key.algorithm.hash.name : normalizeHash(alg.hash);
@@ -605,6 +632,14 @@ if (!globalThis.crypto.subtle) {
         if (!key.usages.includes("verify")) throw new DOMException("This CryptoKey cannot be used for verifying", "InvalidAccessError");
         const hash = normalizeHash(alg.hash || (key.algorithm.hash && key.algorithm.hash.name));
         return runOp(() => _OPS.op_subtle_ecdsa_verify(m.curve, hash, m.sec1, toBytes(signature), toBytes(data)));
+      }
+      if (alg.name === "RSASSA-PKCS1-v1_5") {
+        const m = rsaMaterial(key);
+        if (key.type !== "public" || !key.usages.includes("verify")) {
+          throw new DOMException("key.usages does not permit this operation", "InvalidAccessError");
+        }
+        const hash = key.algorithm.hash && key.algorithm.hash.name;
+        return runOp(() => _OPS.op_subtle_rsa_pkcs1v15_verify(hash, m.n, m.e, toBytes(signature), toBytes(data)));
       }
       const bytes = keyBytes(key);
       if (alg.name === "HMAC") {
