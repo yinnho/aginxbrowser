@@ -254,7 +254,7 @@ impl<'a> DomElement<'a> {
             if id == self.node_id {
                 return true;
             }
-            cur = self.tree.get_node(id).and_then(|n| n.parent);
+            cur = self.tree.with_node(id, |n| n.parent).flatten();
         }
         false
     }
@@ -425,7 +425,7 @@ impl<'a> DomElement<'a> {
             if hit {
                 return true;
             }
-            cur = self.tree.get_node(id).and_then(|n| n.parent);
+            cur = self.tree.with_node(id, |n| n.parent).flatten();
         }
         false
     }
@@ -464,14 +464,9 @@ impl<'a> Element for DomElement<'a> {
     }
 
     fn parent_element(&self) -> Option<Self> {
-        let node = self.tree.get_node(self.node_id)?;
-        let parent_id = node.parent?;
-        let parent = self.tree.get_node(parent_id)?;
-        if parent.is_element() {
-            Some(DomElement::new(self.tree, parent_id))
-        } else {
-            None
-        }
+        let parent_id = self.tree.with_node(self.node_id, |n| n.parent)??;
+        let is_element = self.tree.with_node(parent_id, |p| p.is_element())?;
+        is_element.then(|| DomElement::new(self.tree, parent_id))
     }
 
     fn parent_node_is_shadow_root(&self) -> bool {
@@ -490,41 +485,40 @@ impl<'a> Element for DomElement<'a> {
         false
     }
 
+    // Walk by borrowing: the matcher takes a step per combinator, and cloning
+    // the whole node (attributes and all) at each one was ~70% of a restyle.
     fn prev_sibling_element(&self) -> Option<Self> {
-        let node = self.tree.get_node(self.node_id)?;
-        let mut current = node.prev_sibling;
+        let mut current = self.tree.with_node(self.node_id, |n| n.prev_sibling)?;
         while let Some(sibling_id) = current {
-            let sibling = self.tree.get_node(sibling_id)?;
-            if sibling.is_element() {
+            let (is_element, prev) = self.tree.with_node(sibling_id, |s| (s.is_element(), s.prev_sibling))?;
+            if is_element {
                 return Some(DomElement::new(self.tree, sibling_id));
             }
-            current = sibling.prev_sibling;
+            current = prev;
         }
         None
     }
 
     fn next_sibling_element(&self) -> Option<Self> {
-        let node = self.tree.get_node(self.node_id)?;
-        let mut current = node.next_sibling;
+        let mut current = self.tree.with_node(self.node_id, |n| n.next_sibling)?;
         while let Some(sibling_id) = current {
-            let sibling = self.tree.get_node(sibling_id)?;
-            if sibling.is_element() {
+            let (is_element, next) = self.tree.with_node(sibling_id, |s| (s.is_element(), s.next_sibling))?;
+            if is_element {
                 return Some(DomElement::new(self.tree, sibling_id));
             }
-            current = sibling.next_sibling;
+            current = next;
         }
         None
     }
 
     fn first_element_child(&self) -> Option<Self> {
-        let node = self.tree.get_node(self.node_id)?;
-        let mut current = node.first_child;
+        let mut current = self.tree.with_node(self.node_id, |n| n.first_child)?;
         while let Some(child_id) = current {
-            let child = self.tree.get_node(child_id)?;
-            if child.is_element() {
+            let (is_element, next) = self.tree.with_node(child_id, |c| (c.is_element(), c.next_sibling))?;
+            if is_element {
                 return Some(DomElement::new(self.tree, child_id));
             }
-            current = child.next_sibling;
+            current = next;
         }
         None
     }
