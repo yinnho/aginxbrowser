@@ -141,6 +141,20 @@ impl JsRuntime {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// The page just settled: hand V8 a low-memory notification (full GC, free
+    /// pages returned) when the load left a big heap behind. Scripts allocate
+    /// freely while a page boots and nothing collects until pressure arrives;
+    /// a JS-heavy page sat at ~175 MB of mostly dead heap (#307).
+    pub fn trim_heap(&mut self) {
+        const WORTH_A_GC: usize = 48 << 20;
+        let used = self.runtime.with_isolate(|isolate| {
+            isolate.get_heap_statistics().used_heap_size()
+        });
+        if used > WORTH_A_GC {
+            self.runtime.with_isolate(|isolate| isolate.low_memory_notification());
+        }
+    }
+
     /// Safe-point recovery, run at evaluate / run_event_loop entry (same
     /// thread as the isolate). If the guard only flagged pressure, run the
     /// full low-memory GC and re-arm the guard at the real limit — the page

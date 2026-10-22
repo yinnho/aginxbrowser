@@ -79,6 +79,7 @@ impl Page {
             }
         }
         js.disarm_watchdog(settle_wd);
+        js.trim_heap();
     }
 
     pub async fn navigate(&mut self, url_str: &str) -> Result<(), PageError> {
