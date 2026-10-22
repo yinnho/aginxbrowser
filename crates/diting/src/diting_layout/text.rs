@@ -100,6 +100,8 @@ pub struct FontBook {
     /// once at construction, which is once per process for the production
     /// book ([`crate::diting_fonts::font_book`] caches its instance).
     fingerprint: u64,
+    /// swash cache identity of each face, made once (see `font_ref`).
+    keys: std::sync::OnceLock<Vec<(usize, usize, u32, swash::CacheKey)>>,
 }
 
 /// Hash a book's whole face set into the cache identity (see
@@ -173,6 +175,7 @@ impl FontBook {
             primary_slot,
             fallback_slots: Vec::new(),
             fingerprint,
+            keys: std::sync::OnceLock::new(),
         })
     }
 
@@ -197,6 +200,7 @@ impl FontBook {
         self.fallbacks.extend(kept);
         self.fingerprint =
             face_fingerprint(&self.regular, &self.bold, self.mono.as_deref(), &self.fallbacks);
+        self.keys = std::sync::OnceLock::new();
         self
     }
 
@@ -244,6 +248,29 @@ impl FontBook {
         uses_fallback.then(|| vec![0u8; width * height * 4])
     }
 
+    /// The swash font for one of this book's faces. swash keys its shaping
+    /// caches (the OpenType feature tables, by far the costliest part of
+    /// shaping a word) on `FontRef::key`, and `FontRef::from_index` mints a
+    /// fresh key on every call - so a ref made per word never hit and the
+    /// tables were rebuilt per word (~60% of a full layout, #308). One key per
+    /// face, made once.
+    fn font_ref<'a>(&'a self, bytes: &'a [u8]) -> Option<FontRef<'a>> {
+        let table = self.keys.get_or_init(|| {
+            let faces = [Some(&self.regular[..]), Some(&self.bold[..]), self.mono.as_deref()];
+            faces
+                .into_iter()
+                .flatten()
+                .chain(self.fallbacks.iter().map(|f| &f[..]))
+                .filter_map(|b| FontRef::from_index(b, 0).map(|f| (b.as_ptr() as usize, b.len(), f.offset, f.key)))
+                .collect()
+        });
+        let at = bytes.as_ptr() as usize;
+        match table.iter().find(|(p, l, ..)| *p == at && *l == bytes.len()) {
+            Some(&(_, _, offset, key)) => Some(FontRef { data: bytes, offset, key }),
+            None => FontRef::from_index(bytes, 0),
+        }
+    }
+
     fn face(&self, bold: bool) -> &Vec<u8> {
         if bold { &self.bold } else { &self.regular }
     }
@@ -282,14 +309,14 @@ impl FontBook {
         // Parse each candidate face once per call — the cmap probes below run
         // per char, and re-parsing a face (table-directory walk) per char
         // would dominate measurement on long pages.
-        let primary = FontRef::from_index(self.face(bold), 0);
+        let primary = self.font_ref(self.face(bold));
         let mono_face = if mono {
-            self.mono.as_deref().and_then(|b| FontRef::from_index(b, 0))
+            self.mono.as_deref().and_then(|b| self.font_ref(b))
         } else {
             None
         };
         let fallbacks: Vec<Option<FontRef>> =
-            self.fallbacks.iter().map(|b| FontRef::from_index(b, 0)).collect();
+            self.fallbacks.iter().map(|b| self.font_ref(b)).collect();
         let covers = |f: Option<FontRef>, ch: char| -> bool {
             // GlyphId is a plain u16 alias; 0 is .notdef.
             f.map(|f| f.charmap().map(ch) != 0).unwrap_or(false)
@@ -400,7 +427,7 @@ impl FontBook {
         let mut total = 0.0f32;
         for (sel, seg) in self.segments(text, bold, mono, han) {
             let bytes = self.face_bytes(sel, bold);
-            let Some(font) = FontRef::from_index(bytes, 0) else { continue };
+            let Some(font) = self.font_ref(bytes) else { continue };
             SHAPE_CTX.with_borrow_mut(|ctx| {
                 let mut shaper = ctx.builder(font).size(font_size).build();
                 shaper.add_str(seg);
@@ -439,7 +466,7 @@ impl FontBook {
                 FaceSel::Fallback(_) => return None,
             };
             let bytes = self.face_bytes(sel, bold);
-            let Some(font) = FontRef::from_index(bytes, 0) else { continue };
+            let Some(font) = self.font_ref(bytes) else { continue };
             SHAPE_CTX.with_borrow_mut(|ctx| {
                 let mut shaper = ctx.builder(font).size(font_size).build();
                 shaper.add_str(seg);
@@ -477,7 +504,7 @@ impl FontBook {
             PdfFace::Mono => FaceSel::Mono,
         };
         let bytes = self.face_bytes(sel, face == PdfFace::Bold);
-        let font = FontRef::from_index(bytes, 0)?;
+        let font = self.font_ref(bytes)?;
         let m = MetricsProxy::from_font(&font).materialize_metrics(&font, &[]);
         // swash reports the descender as a positive magnitude (see
         // `metrics`); PDF /Descent is negative below the baseline.
@@ -505,7 +532,7 @@ impl FontBook {
     /// convention can't leak).
     pub fn metrics(&self, font_size: f32, bold: bool) -> Option<ScaledMetrics> {
         let bytes = self.face(bold);
-        let font = FontRef::from_index(bytes, 0)?;
+        let font = self.font_ref(bytes)?;
         let m = MetricsProxy::from_font(&font).materialize_metrics(&font, &[]);
         let scale = font_size / m.units_per_em as f32;
         Some(ScaledMetrics {
@@ -871,7 +898,7 @@ impl FontBook {
         let mut pen = x0;
         for (sel, seg) in self.segments(text, bold, mono, han) {
             let bytes = self.face_bytes(sel, bold);
-            let Some(font) = FontRef::from_index(bytes, 0) else { continue };
+            let Some(font) = self.font_ref(bytes) else { continue };
 
             // Shape once: absolute x per glyph + y offset from the baseline.
             let mut glyphs: Vec<(f32, f32, GlyphId)> = Vec::new();
