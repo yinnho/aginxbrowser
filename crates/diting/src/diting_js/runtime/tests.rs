@@ -23291,3 +23291,61 @@ fn document_evaluate_xpath_subset() {
             "functionfunction|7|function|3|<div xmlns=\"http://www.w3.org/1999/xhtml\"></div>|running11|finished0|functionfunctiontrue|updated|true,true,false"
         );
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_cssom_rule_tree_and_style_sheet_writes_reach_the_cascade() {
+        // Chrome truth (headless Chrome, 2026-10-22): rule classes/types,
+        // cssText spelling, nested rules, insertRule errors, and insertRule on a
+        // <style> sheet restyling the page (the CSS-in-JS path).
+        let mut rt = setup_runtime(
+            "<html><head><style id=st>
+              @import url(\"other.css\") screen;
+              a,b  >  i{color:red}
+              @media (min-width:100px) and (max-width:9000px){p{margin-top:3px}}
+              @layer base,theme;
+              @layer base{d{color:green}}
+              @keyframes spin{from{opacity:0}to{opacity:1}}
+              @property --x{syntax:\"<length>\";inherits:false;initial-value:0px}
+             </style></head><body><p id=p>x</p></body></html>",
+        );
+        let v = rt
+            .evaluate(
+                "(() => { const sh = document.getElementById('st').sheet; const r = [];
+                  r.push([...sh.cssRules].map(x => x.constructor.name + ':' + x.type).join());
+                  const F = n => [...sh.cssRules].find(x => x.constructor.name === n);
+                  r.push(sh.cssRules[1].cssText);
+                  const m = F('CSSMediaRule');
+                  r.push(m.cssText.replace(/\\n/g, '~'));
+                  r.push(m.conditionText + '|' + m.cssRules.length + '|' + m.cssRules[0].selectorText + '|' + (m.parentStyleSheet === sh));
+                  r.push(F('CSSLayerStatementRule').cssText + '|' + F('CSSLayerBlockRule').name);
+                  r.push(F('CSSKeyframesRule').name + '|' + F('CSSKeyframesRule').cssRules[0].keyText + '|' + F('CSSKeyframesRule').cssRules[1].keyText);
+                  r.push(F('CSSPropertyRule').name + '|' + F('CSSPropertyRule').syntax + '|' + F('CSSPropertyRule').inherits + '|' + F('CSSPropertyRule').initialValue);
+                  r.push(F('CSSImportRule').href + '|' + F('CSSImportRule').media.mediaText);
+                  const T = f => { try { return String(f()); } catch (e) { return e.name; } };
+                  r.push(T(() => sh.insertRule('not a rule')) + ',' + T(() => sh.insertRule('p{color:red}', 999)) + ',' + T(() => sh.deleteRule(999)) + ',' + T(() => sh.insertRule('p{color:red}', 0)));
+                  const p = document.getElementById('p'); const before = getComputedStyle(p).color;
+                  sh.insertRule('#p{color:rgb(1,2,3)}', sh.cssRules.length);
+                  r.push(before + '->' + getComputedStyle(p).color);
+                  sh.deleteRule(sh.cssRules.length - 1); r.push(getComputedStyle(p).color);
+                  m.insertRule('#p{margin-top:7px}'); r.push(getComputedStyle(p).marginTop);
+                  const cs = new CSSStyleSheet(); cs.replaceSync('x{color:red}y{color:blue}'); r.push(cs.cssRules.length + ' ' + cs.cssRules[1].cssText);
+                  return r.join('|'); })()",
+            )
+            .unwrap();
+        assert_eq!(
+            v,
+            "CSSImportRule:3,CSSStyleRule:1,CSSMediaRule:4,CSSLayerStatementRule:0,CSSLayerBlockRule:0,CSSKeyframesRule:7,CSSPropertyRule:0\
+|a, b > i { color: red; }\
+|@media (min-width: 100px) and (max-width: 9000px) {~  p { margin-top: 3px; }~}\
+|(min-width: 100px) and (max-width: 9000px)|1|p|true\
+|@layer base, theme;|base\
+|spin|0%|100%\
+|--x|<length>|false|0px\
+|other.css|screen\
+|SyntaxError,IndexSizeError,IndexSizeError,HierarchyRequestError\
+|rgb(0, 0, 0)->rgb(1, 2, 3)\
+|rgb(0, 0, 0)\
+|7px\
+|2 y { color: blue; }"
+        );
+    }

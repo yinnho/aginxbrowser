@@ -36,7 +36,6 @@ const SNAPSHOT_SCRIPTS: &[(&str, &str)] = &[
     ("css_decl_door.js", include_str!("js/css_decl_door.js")),
     ("raf.js", include_str!("js/raf.js")),
     ("computed_size.js", include_str!("js/computed_size.js")),
-    ("adopted_sheets.js", include_str!("js/adopted_sheets.js")),
     ("form_validation.js", include_str!("js/form_validation.js")),
     ("fetch.js", include_str!("js/fetch.js")),
     // Ratchet splits (pure moves): the audio/speechSynthesis faces, the
@@ -84,7 +83,10 @@ const SNAPSHOT_SCRIPTS: &[(&str, &str)] = &[
     // globals, enumerable members, WebIDL toStringTag brands) — running last
     // is the point, so every earlier script's globals get swept.
     ("interface_sweep.js", include_str!("js/interface_sweep.js")),
-    // Loads after the sweep: scheduler & friends are minted by global_surface.
+    // Load after the sweep: the CSSOM rule classes, scheduler & friends are minted by
+    // global_surface; adopted_sheets wraps the sheet methods css_rules installs.
+    ("css_rules.js", include_str!("js/css_rules.js")),
+    ("adopted_sheets.js", include_str!("js/adopted_sheets.js")),
     ("web_api_gaps.js", include_str!("js/web_api_gaps.js")),
 ];
 

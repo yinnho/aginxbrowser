@@ -2283,7 +2283,12 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
             let Some((tag, rel, href)) = meta.flatten() else { continue };
             match &*tag {
                 "style" => {
-                    css.push_str(&dom.text_content(el));
+                    // A sheet edited through CSSOM (insertRule on style.sheet — how
+                    // CSS-in-JS libraries style) overrides the element's text.
+                    match gs.ext_sheets.borrow().get(&format!("\u{0}style:{}", el.index())).and_then(|v| v.strip_prefix('\u{2}')) {
+                        Some(edited) => css.push_str(edited),
+                        None => css.push_str(&dom.text_content(el)),
+                    }
                     css.push('\n');
                 }
                 "link" => {

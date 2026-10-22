@@ -18,6 +18,7 @@
     }
     try { _domRaw('ext_sheet_put', '\u0000adopted', text); } catch (e) {}
   };
+  globalThis.__adoptedResync = () => { if (owners.size) sync(); };
   // Called by the Document/ShadowRoot adoptedStyleSheets setters (bootstrap).
   globalThis.__adoptedSet = (owner, sheets) => {
     for (const s of sheets || []) {

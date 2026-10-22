@@ -10186,35 +10186,13 @@ globalThis.StyleSheet = class StyleSheet {
 
 globalThis.CSSStyleSheet = class CSSStyleSheet {
   constructor(options) {
-    this.cssRules = [];
+    this._rules = [];
+    this.cssRules = this._rules;
     this.ownerRule = null;
     this.disabled = false;
-    this._rules = [];
     __hideOwn(this);
   }
-  insertRule(rule, index) {
-    const idx = index ?? 0; // CSSOM: insertRule's index defaults to 0, addRule's to the end
-    this._rules.splice(idx, 0, { cssText: rule, type: 1 });
-    this.cssRules = this._rules;
-    return idx;
-  }
-  deleteRule(index) {
-    this._rules.splice(index, 1);
-    this.cssRules = this._rules;
-  }
-  addRule(selector, style, index) {
-    return this.insertRule(selector + '{' + style + '}', index ?? this._rules.length);
-  }
-  removeRule(index) { this.deleteRule(index); }
-  replace(text) {
-    this._rules = [{ cssText: text, type: 1 }];
-    this.cssRules = this._rules;
-    return Promise.resolve(this);
-  }
-  replaceSync(text) {
-    this._rules = [{ cssText: text, type: 1 }];
-    this.cssRules = this._rules;
-  }
+  // insertRule/deleteRule/replace/... live in css_rules.js (real CSSRule tree).
 };
 Object.setPrototypeOf(globalThis.CSSStyleSheet.prototype, globalThis.StyleSheet.prototype);
 
@@ -10233,29 +10211,12 @@ function _extSheetBodies() {
 // Rule records per css text, from the engine-side parser via the
 // `parse_css_rules` op. Cached by text so identical bodies parse once.
 const _sheetRulesCache = new Map();
-function _parseSheetRules(cssText) {
-  let rules = _sheetRulesCache.get(cssText);
-  if (rules) return rules;
-  rules = [];
-  try {
-    for (const r of JSON.parse(_domRaw("parse_css_rules", cssText, "")) || []) {
-      const style = new CSSStyleDeclaration(null);
-      style.cssText = r.declarations || "";
-      rules.push({
-        type: 1,
-        selectorText: r.selectorText,
-        get cssText() { return r.cssText; },
-        style,
-      });
-    }
-  } catch (e) { /* unreadable sheet: empty rule list, like a failed load */ }
-  _sheetRulesCache.set(cssText, rules);
-  return rules;
+function _parseSheetRules(cssText, sheet) {
+  try { return globalThis.__cssParseRules(cssText, sheet); } catch (e) { return []; }
 }
 function _sheetFromCssText(ownerNode, href, cssText) {
   const sheet = new CSSStyleSheet();
-  sheet._rules = _parseSheetRules(cssText);
-  sheet.cssRules = sheet._rules;
+  globalThis.__cssSetRules(sheet, _parseSheetRules(cssText, sheet));
   sheet.href = href;
   sheet.ownerNode = ownerNode;
   sheet.type = "text/css";
