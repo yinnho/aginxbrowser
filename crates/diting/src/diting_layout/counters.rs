@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use taffy::prelude::*;
+use super::flow_tree::FlowTree as TaffyTree;
 
 use crate::diting_css::ComputedStyle;
 use crate::diting_dom::tree::{DomTree, NodeId};

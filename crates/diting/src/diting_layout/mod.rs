@@ -28,6 +28,8 @@
 use std::collections::{HashMap, HashSet};
 
 use taffy::prelude::*;
+// Our own tree (flow_tree.rs) answers to the stock tree's name and methods.
+use flow_tree::FlowTree as TaffyTree;
 
 use crate::diting_css::{
     AlignContentMode, AlignMode, ComputedStyle, Display as CssDisplay, FlexDirection as CssFlexDirection,
@@ -47,6 +49,7 @@ pub mod svg;
 pub mod text;
 pub mod text_geom;
 mod text_src;
+mod flow_tree;
 #[cfg(test)]
 mod float_probe;
 mod face_bytes;

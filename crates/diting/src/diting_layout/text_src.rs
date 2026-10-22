@@ -135,7 +135,7 @@ pub(crate) fn seg_ranges(nodes: &[NodeId], lens: &[u32]) -> Vec<(NodeId, u32, u3
 
 // Moved out of mod.rs (god-file ratchet): inline-run edge whitespace trimming.
 use super::TextLeaf;
-use taffy::TaffyTree;
+use super::flow_tree::FlowTree as TaffyTree;
 
 /// CSS §16.6.1: collapsible whitespace at the edges of an inline formatting
 /// context contributes no width. The pure-text path already trims edges
