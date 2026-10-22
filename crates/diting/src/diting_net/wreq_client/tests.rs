@@ -233,6 +233,40 @@
         assert_eq!(resp.status, 200);
     }
 
+    // #310: connect_timeout must bound the dial itself. read_timeout only
+    // starts its window once the handshake completes, so an unroutable
+    // target used to park in SYN_SENT until the OS abandons TCP retries
+    // (~75s on macOS). 10.255.255.1 is inside 10/8 — most networks
+    // blackhole it, which is the hang shape; a network that RSTs it makes
+    // the test pass trivially fast without weakening the bound claim.
+    //   cargo test --features stealth connect_timeout_caps_syn_sent -- --ignored
+    #[tokio::test]
+    #[ignore = "live network (needs a blackholed 10/8 address); run explicitly with --ignored"]
+    #[allow(clippy::await_holding_lock)] // env-lock guard spans the fetch, same as above
+    async fn connect_timeout_caps_syn_sent() {
+        let _guard = crate::diting_net::PRIVATE_NET_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("AGINXBROWSER_ALLOW_PRIVATE_NETWORK");
+        let client = StealthHttpClient::new(Arc::new(CookieJar::new()));
+        client.allow_private_network
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let url = Url::parse("http://10.255.255.1:81/").unwrap();
+        let started = std::time::Instant::now();
+        let outcome = client.fetch(&url).await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(35),
+            "dial to a blackholed 10/8 address must fail within connect_timeout's 10s window (plus slack), took {elapsed:?}"
+        );
+        // Either shape is acceptable — an Err, or the engine's 0-status
+        // empty-response convention for failed dials. What is NOT
+        // acceptable is silence for 75s, which the elapsed bound above
+        // already excludes.
+        match outcome {
+            Ok(resp) => assert_eq!(resp.status, 0, "a failed dial must surface as status 0"),
+            Err(_) => {}
+        }
+    }
+
     // fetch_subresource carries the document as Referer under the same
     // strict-origin-when-cross-origin trim as the plain client's subresource
     // path — same-origin sends the full URL, cross-origin (a port difference

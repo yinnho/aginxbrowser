@@ -317,6 +317,12 @@ impl StealthHttpClient {
             // read_timeout (per-chunk stall, #49), not a total-duration cap:
             // `.timeout()` kills a large-but-live body (32MB wasm over a slow
             // CDN) mid-stream at 30s while browsers stream it to completion.
+            // connect_timeout (#310): the read window only starts after the
+            // handshake — without this, an unreachable host parks in SYN_SENT
+            // until the OS gives up on TCP retries (~75s on macOS) with the
+            // in_flight count pinned the whole time. Aligned with the reqwest
+            // side's 10s (fetch_client.rs).
+            .connect_timeout(Duration::from_secs(10))
             .read_timeout(Duration::from_secs(30))
             .redirect(wreq::redirect::Policy::none());
 
