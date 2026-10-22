@@ -7065,6 +7065,53 @@
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn test_float_wrap_clearfix_and_clear_siblings() {
+        // Chrome truth (headless Chrome, 2026-10-22): a clearfix row holds its
+        // floats (height 60 = the taller right float), the next paragraph
+        // starts below it, and a `clear:left` sibling drops under the float.
+        crate::diting_layout::float_flow::force(Some(true));
+        let mut rt = setup_runtime(
+            "<html><head><style>body{margin:0;font:16px/20px serif}
+              .row::after{content:\"\";display:table;clear:both}
+              .l{float:left;width:50px;height:40px}.r{float:right;width:30px;height:60px} p{margin:0}</style></head><body>
+              <div class=row id=row style=\"width:300px\"><div class=l></div><div class=r></div></div>
+              <p id=after>after</p>
+              <div id=host style=\"width:300px\"><div class=l></div><div id=cl style=\"clear:left;height:10px\"></div><p id=below>below</p></div>
+             </body></html>",
+        );
+        let v = rt
+            .evaluate(
+                "(() => { const t = id => { const b = document.getElementById(id).getBoundingClientRect(); return [Math.round(b.top), Math.round(b.height)]; };
+                  return JSON.stringify({ row: t('row'), after: t('after'), cl: t('cl'), below: t('below'), host: t('host') }); })()",
+            )
+            .unwrap();
+        crate::diting_layout::float_flow::force(None);
+        assert_eq!(v, "{\"row\":[0,60],\"after\":[60,20],\"cl\":[120,10],\"below\":[130,20],\"host\":[80,70]}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_float_wrap_inline_elements_take_the_slots_too() {
+        // Chrome truth (headless Chrome, 2026-10-22): a paragraph with <b>,
+        // <a> and <i> beside a 50x50 left float: box left 0, and the leftmost
+        // fragment of each line sits at 50, 50, 50, 0, 0.
+        crate::diting_layout::float_flow::force(Some(true));
+        let mut rt = setup_runtime(
+            "<html><head><style>body{margin:0;font:16px/20px serif}</style></head><body>
+              <div id=c style=\"width:200px\"><div style=\"float:left;width:50px;height:50px\"></div><p id=p style=\"margin:0\">word word <b>bold</b> word word <a href=\"#\">link text</a> word word word word <i>ital</i> word word word word word word word word word word</p></div>
+             </body></html>",
+        );
+        let v = rt
+            .evaluate(
+                "(() => { const p = document.getElementById('p'); const r = document.createRange(); r.selectNodeContents(p);
+                  const by = {}; for (const x of r.getClientRects()) { const k = Math.floor((x.top + 2) / 20); by[k] = Math.min(by[k] ?? 1e9, Math.round(x.left)); }
+                  return JSON.stringify({ boxLeft: Math.round(p.getBoundingClientRect().left), lines: Object.keys(by).sort((a, c) => a - c).map(k => by[k]).slice(0, 5) }); })()",
+            )
+            .unwrap();
+        crate::diting_layout::float_flow::force(None);
+        assert_eq!(v, "{\"boxLeft\":0,\"lines\":[50,50,50,0,0]}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn test_webcrypto_ed25519_vector_and_roundtrips() {
         // RFC 8032 section 7.1 test 1 (empty message) pins the curve math;
         // the rest exercises every import/export format and the usage rules.

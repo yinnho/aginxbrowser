@@ -124,3 +124,29 @@ pub(super) fn split(text: &str, toks: &[Token], ws: WhiteSpace, slots: &[Slot]) 
         })
         .collect()
 }
+
+/// Measure one layout leaf: text runs through the shared breaker (beside a
+/// float, into the float's free slots), everything else by its style.
+pub(super) fn measure_node(
+    fonts: &super::FontBook,
+    inputs: taffy::tree::LayoutInput,
+    id: taffy::tree::NodeId,
+    ctx: Option<&mut super::TextLeaf>,
+    style: &taffy::Style,
+    block: Option<&mut taffy::BlockContext<'_>>,
+) -> taffy::tree::LayoutOutput {
+    match ctx {
+        Some(super::TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, han, line_clamp, .. }) => {
+            let pad = super::shift_pad(*baseline_shift, super::leaf_descent(fonts, *font_size, *bold));
+            let shaped = super::run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han);
+            if let Some(b) = block.as_deref() {
+                if let Some(out) = measure(id, &shaped, *line_height, pad, &inputs, *ws, *line_clamp, b) {
+                    return out;
+                }
+            }
+            super::measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws, *line_clamp)
+        }
+        // Word leaves keep their style-driven sizing.
+        _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| taffy::geometry::Size::ZERO),
+    }
+}

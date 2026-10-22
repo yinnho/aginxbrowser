@@ -74,9 +74,8 @@ pub(crate) fn cur() -> Option<NodeId> {
     CUR.with(|c| c.get())
 }
 
-pub(crate) fn register(leaf: taffy::tree::NodeId, segs: Vec<(NodeId, u32, u32)>) {
+pub(crate) fn register(leaf: taffy::tree::NodeId, segs: Vec<(NodeId, i32, u32)>) {
     if !segs.is_empty() {
-        let segs: Vec<(NodeId, i32, u32)> = segs.into_iter().map(|(n, s, l)| (n, s as i32, l)).collect();
         BUILDING.with(|b| b.borrow_mut().insert(leaf, segs.into()));
     }
 }
@@ -135,14 +134,14 @@ pub(crate) fn slice(segs: &Segs, from: u32, to: u32) -> Segs {
 }
 
 /// Pair a flushed run's text nodes with the char lengths of their segments.
-pub(crate) fn seg_ranges(nodes: &[NodeId], lens: &[u32]) -> Vec<(NodeId, u32, u32)> {
-    let mut start = 0u32;
+pub(crate) fn seg_ranges(nodes: &[NodeId], lens: &[u32]) -> Vec<(NodeId, i32, u32)> {
+    let mut start = 0i32;
     nodes
         .iter()
         .zip(lens.iter())
         .map(|(n, l)| {
             let r = (*n, start, *l);
-            start += *l;
+            start += *l as i32;
             r
         })
         .collect()

@@ -51,6 +51,7 @@ pub mod text_geom;
 mod text_src;
 mod flow_tree;
 mod float_lines;
+mod inline_flow;
 pub(crate) mod float_flow;
 #[cfg(test)]
 mod float_probe;
@@ -1000,8 +1001,10 @@ fn build_word_leaves(
         };
         let id = taffy_tree.new_leaf_with_context(style, leaf).ok();
         if let (Some(id), Some(node)) = (id, src_node) {
-            let (a, b) = cur_range.get();
-            text_src::register(id, vec![(node, a, b - a)]);
+            // The leaf paints one token; the node's chars begin `a` chars
+            // before it, so node-local = leaf char + a.
+            let (a, _) = cur_range.get();
+            text_src::register(id, vec![(node, -(a as i32), text.chars().count() as u32)]);
         }
         id
     };
@@ -1072,32 +1075,6 @@ fn ws_rank(ws: WhiteSpace) -> u8 {
         WhiteSpace::PreLine => 2,
         WhiteSpace::Nowrap => 1,
         WhiteSpace::Normal => 0,
-    }
-}
-
-/// Measure one layout leaf: text runs through the shared breaker (beside a
-/// float, into the float's free slots), everything else by its style.
-fn measure_node(
-    fonts: &FontBook,
-    inputs: taffy::tree::LayoutInput,
-    id: taffy::tree::NodeId,
-    ctx: Option<&mut TextLeaf>,
-    style: &Style,
-    block: Option<&mut taffy::BlockContext<'_>>,
-) -> taffy::tree::LayoutOutput {
-    match ctx {
-        Some(TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, han, line_clamp, .. }) => {
-            let pad = shift_pad(*baseline_shift, leaf_descent(fonts, *font_size, *bold));
-            let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han);
-            if let Some(b) = block.as_deref() {
-                if let Some(out) = float_lines::measure(id, &shaped, *line_height, pad, &inputs, *ws, *line_clamp, b) {
-                    return out;
-                }
-            }
-            measure_text_leaf(&shaped, *line_height, pad, &inputs, *ws, *line_clamp)
-        }
-        // Word leaves keep their style-driven sizing.
-        _ => taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |_, _| Size::ZERO),
     }
 }
 
@@ -1182,7 +1159,9 @@ fn measure_text_leaf(
 /// never compresses its atoms to fit).
 fn run_wrapper_style(ws: WhiteSpace) -> Style {
     Style {
-        display: Display::Flex,
+        // With float wrap on, a wrapping row is a block-level box the tree
+        // lays out as a flex row (or, beside a float, into the float's slots).
+        display: if float_flow::enabled() && !ws.no_soft_wrap() { Display::Block } else { Display::Flex },
         flex_direction: FlexDirection::Row,
         flex_wrap: if ws.no_soft_wrap() { FlexWrap::NoWrap } else { FlexWrap::Wrap },
         align_items: AlignItems::FLEX_START,
@@ -3175,7 +3154,7 @@ fn build_table(
         // (fresh), otherwise it reads final_layout, which the skipped
         // round_layout never wrote — i.e. stale values.
         taffy_tree.disable_rounding();
-        let _ = taffy_tree.compute_layout_with_block_measure(node, space, |inputs, id, ctx, style, block| measure_node(fonts, inputs, id, ctx, style, block));
+        let _ = taffy_tree.compute_layout_with_block_measure(node, space, |inputs, id, ctx, style, block| float_lines::measure_node(fonts, inputs, id, ctx, style, block));
         let out = taffy_tree.layout(node).ok().map(|l| (l.size.width, l.size.height));
         taffy_tree.enable_rounding();
         out
@@ -3811,7 +3790,12 @@ fn pseudo_leaf(
             // Pseudo-element content leaf: no DOM id to walk a containing-
             // block chain from, and content strings aren't height-sized —
             // keep percent passthrough (the pre-fold behavior).
-            let taffy_style = to_taffy_style(p, true);
+            let mut taffy_style = to_taffy_style(p, true);
+            if float_flow::enabled() && p.clear_side.is_some() && content.is_empty() {
+                // A clearfix box sits in its host's block flow and clears.
+                taffy_style.display = Display::Block;
+                taffy_style.clear = float_flow::clear_of(p.clear_side);
+            }
             let leaf = if content.trim().is_empty() {
                 // The empty decoration box (#172): a tagged leaf, so the
                 // paint walk can find the pseudo's own ComputedStyle
@@ -5666,7 +5650,7 @@ pub fn layout_solve_rooted(
             .collect();
         if !needs_static.is_empty() {
             let laid_out = taffy_tree
-                .compute_layout_with_block_measure(icb_node, available, |inputs, id, ctx, style, block| measure_node(fonts, inputs, id, ctx, style, block))
+                .compute_layout_with_block_measure(icb_node, available, |inputs, id, ctx, style, block| float_lines::measure_node(fonts, inputs, id, ctx, style, block))
                 .is_ok();
             if laid_out {
                 fn abs_rects(
@@ -5883,7 +5867,7 @@ pub fn layout_solve_rooted(
     // through to taffy's own style-based sizing — the closure fires for ALL
     // childless nodes, so returning HIDDEN here would zero plain leaves
     // (that's exactly what stock compute_layout does below via the same fn).
-    let measured = taffy_tree.compute_layout_with_block_measure(icb_node, available, |inputs, id, ctx, style, block| measure_node(fonts, inputs, id, ctx, style, block));
+    let measured = taffy_tree.compute_layout_with_block_measure(icb_node, available, |inputs, id, ctx, style, block| float_lines::measure_node(fonts, inputs, id, ctx, style, block));
     if measured.is_err() {
         return SolvedGeometry::aborted();
     }
@@ -6093,7 +6077,7 @@ pub fn layout_solve_rooted(
                 let re = taffy_tree.compute_layout_with_block_measure(
                     icb_node,
                     available,
-                    |inputs, id, ctx, style, block| measure_node(fonts, inputs, id, ctx, style, block),
+                    |inputs, id, ctx, style, block| float_lines::measure_node(fonts, inputs, id, ctx, style, block),
                 );
                 if re.is_err() {
                     return SolvedGeometry::aborted();
@@ -6215,7 +6199,7 @@ pub fn layout_solve_rooted(
             let re = taffy_tree.compute_layout_with_block_measure(
                 icb_node,
                 available,
-                |inputs, id, ctx, style, block| measure_node(fonts, inputs, id, ctx, style, block),
+                |inputs, id, ctx, style, block| float_lines::measure_node(fonts, inputs, id, ctx, style, block),
             );
             if re.is_err() {
                 return SolvedGeometry::aborted();
@@ -6355,7 +6339,7 @@ pub fn layout_solve_rooted(
             let re = taffy_tree.compute_layout_with_block_measure(
                 icb_node,
                 available,
-                |inputs, id, ctx, style, block| measure_node(fonts, inputs, id, ctx, style, block),
+                |inputs, id, ctx, style, block| float_lines::measure_node(fonts, inputs, id, ctx, style, block),
             );
             if re.is_err() {
                 return SolvedGeometry::aborted();
@@ -6420,7 +6404,7 @@ pub fn layout_solve_rooted(
                 let re = taffy_tree.compute_layout_with_block_measure(
                     icb_node,
                     available,
-                    |inputs, id, ctx, style, block| measure_node(fonts, inputs, id, ctx, style, block),
+                    |inputs, id, ctx, style, block| float_lines::measure_node(fonts, inputs, id, ctx, style, block),
                 );
                 if re.is_err() {
                     return SolvedGeometry::aborted();

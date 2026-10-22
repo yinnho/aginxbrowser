@@ -13,9 +13,9 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use taffy::prelude::*;
-use taffy::Float;
+use taffy::{Clear, Float};
 
-use crate::diting_css::{ComputedStyle, Display as CssDisplay, FloatSide, Length, PositionMode, TextAlign};
+use crate::diting_css::{ClearSide, ComputedStyle, ContentValue, Display as CssDisplay, FloatSide, Length, PositionMode, TextAlign};
 use crate::diting_dom::tree::{DomTree, NodeId};
 
 thread_local! {
@@ -62,8 +62,7 @@ pub(super) fn eligible(
     }
     // A box whose width comes from its content (floated, absolutely
     // positioned, or a flex/grid item) needs the float-aware intrinsic sizing
-    // that is not wired yet; so does generated content (a `::after` clearfix
-    // is a `clear`).
+    // that is not wired yet. Generated content must be clearfix boxes.
     let parent_is_block = tree
         .with_node(id, |n| n.parent)
         .flatten()
@@ -72,7 +71,7 @@ pub(super) fn eligible(
     if container.float_side.is_some()
         || matches!(container.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
         || !parent_is_block
-        || container.pseudos.is_some()
+        || !container.pseudos.as_deref().is_none_or(|p| [&p.before, &p.after].into_iter().flatten().all(clearfix_box))
     {
         return false;
     }
@@ -86,7 +85,7 @@ pub(super) fn eligible(
         if display == CssDisplay::None {
             continue;
         }
-        if s.clear_side.is_some() || matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed)) {
+        if matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed)) {
             return false;
         }
         if s.float_side.is_some() {
@@ -94,22 +93,43 @@ pub(super) fn eligible(
                 return false;
             }
             floats += 1;
-        } else if display != CssDisplay::Block {
-            // Inline content beside a float needs the inline-run machinery.
+        } else if !matches!(display, CssDisplay::Block | CssDisplay::Inline | CssDisplay::InlineBlock) {
             return false;
         }
     }
     floats > 0
 }
 
-/// Give a built float child taffy's `float`.
+/// An empty generated box that exists to clear floats (`content:""; clear:both`,
+/// the Bootstrap clearfix), or one that is not rendered.
+fn clearfix_box(p: &ComputedStyle) -> bool {
+    p.display == Some(CssDisplay::None)
+        || (p.clear_side.is_some() && matches!(&p.content, Some(ContentValue::Str(t)) if t.is_empty()))
+}
+
+/// taffy's `clear` for a CSS one (logical sides are left/right in this LTR engine).
+pub(super) fn clear_of(side: Option<ClearSide>) -> Clear {
+    match side {
+        Some(ClearSide::Left) | Some(ClearSide::InlineStart) => Clear::Left,
+        Some(ClearSide::Right) | Some(ClearSide::InlineEnd) => Clear::Right,
+        Some(ClearSide::Both) => Clear::Both,
+        None => Clear::None,
+    }
+}
+
+/// Give a built child taffy's `float` / `clear`.
 pub(super) fn mark(taffy_tree: &mut super::flow_tree::FlowTree<super::TextLeaf>, node: taffy::tree::NodeId, style: Option<&ComputedStyle>) {
-    let Some(side) = style.and_then(|s| s.float_side) else { return };
+    let Some(style) = style else { return };
+    if style.float_side.is_none() && style.clear_side.is_none() {
+        return;
+    }
     if let Ok(mut st) = taffy_tree.style(node).cloned() {
-        st.float = match side {
-            FloatSide::Left => Float::Left,
-            FloatSide::Right => Float::Right,
+        st.float = match style.float_side {
+            Some(FloatSide::Left) => Float::Left,
+            Some(FloatSide::Right) => Float::Right,
+            None => Float::None,
         };
+        st.clear = clear_of(style.clear_side);
         let _ = taffy_tree.set_style(node, st);
     }
 }
