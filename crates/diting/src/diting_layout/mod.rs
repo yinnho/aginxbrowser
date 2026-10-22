@@ -6414,6 +6414,8 @@ pub fn layout_solve_rooted(
     // Baseline alignment of inline runs (blitz#750 family): per-line shifts
     // computed against the FINAL layout, applied during the collect walk.
     let baseline_shifts = compute_baseline_shifts(&taffy_tree, &run_wrappers, fonts);
+    // Layout is final: the result caches only cost memory from here on.
+    taffy_tree.drop_caches();
 
     SolvedGeometry {
         taffy_tree,

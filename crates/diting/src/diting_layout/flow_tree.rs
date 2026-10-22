@@ -69,7 +69,10 @@ struct Node<C> {
     ctx: Option<C>,
     children: Vec<NodeId>,
     parent: Option<NodeId>,
-    cache: Cache,
+    /// Allocated on first use and dropped for the whole tree once layout is
+    /// done (`drop_caches`): the tree is rebuilt every run, so a result cache
+    /// is dead weight (408 B a node) afterwards.
+    cache: Option<Box<Cache>>,
     /// Always unrounded; rounding reads this so it never rounds twice.
     unrounded: Layout,
     final_layout: Layout,
@@ -133,6 +136,15 @@ impl<C> FlowTree<C> {
         self.min_as_max.insert(node);
     }
 
+    /// Layout is done: free every node's result cache.
+    pub fn drop_caches(&mut self) {
+        for chunk in &mut self.nodes.chunks {
+            for n in chunk.iter_mut().flatten() {
+                n.cache = None;
+            }
+        }
+    }
+
     pub fn enable_rounding(&mut self) {
         self.rounding = true;
     }
@@ -147,7 +159,7 @@ impl<C> FlowTree<C> {
             ctx,
             children,
             parent: None,
-            cache: Cache::new(),
+            cache: None,
             unrounded: Layout::new(),
             final_layout: Layout::new(),
             hoisted: Vec::new(),
@@ -362,7 +374,9 @@ impl<C> FlowTree<C> {
                 continue;
             }
             let n = self.get_mut(id)?;
-            if matches!(n.cache.clear(), taffy::ClearState::AlreadyEmpty) {
+            let was_empty = n.cache.as_ref().is_none_or(|c| c.is_empty());
+            n.cache = None;
+            if was_empty {
                 break;
             }
             cur = n.parent;
@@ -677,16 +691,16 @@ where
         if word_index(id).is_some() {
             return None;
         }
-        self.n_mut(id).cache.get(input)
+        self.n_mut(id).cache.as_mut()?.get(input)
     }
     fn cache_store(&mut self, id: NodeId, input: &LayoutInput, out: LayoutOutput) {
         if word_index(id).is_none() {
-            self.n_mut(id).cache.store(input, out)
+            self.n_mut(id).cache.get_or_insert_with(|| Box::new(Cache::new())).store(input, out)
         }
     }
     fn cache_clear(&mut self, id: NodeId) {
         if word_index(id).is_none() {
-            self.n_mut(id).cache.clear();
+            self.n_mut(id).cache = None;
         }
     }
 }
