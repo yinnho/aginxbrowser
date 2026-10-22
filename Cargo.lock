@@ -1229,6 +1229,7 @@ dependencies = [
  "html5ever 0.40.1",
  "http",
  "image",
+ "memmap2",
  "p256",
  "p384",
  "parley",

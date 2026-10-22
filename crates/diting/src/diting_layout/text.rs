@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use super::face_bytes::FaceBytes;
 use swash::proxy::MetricsProxy;
 use swash::scale::image::{Content, Image};
 use swash::scale::{Render, ScaleContext, Scaler, Source, StrikeWith};
@@ -85,7 +86,7 @@ pub struct FontBook {
     regular: Vec<u8>,
     bold: Vec<u8>,
     mono: Option<Vec<u8>>,
-    fallbacks: Vec<Vec<u8>>,
+    fallbacks: Vec<FaceBytes>,
     /// Han-slot classification of the faces (#139): the primary pair's and,
     /// parallel to `fallbacks`, each tail's. Pure functions of the bytes, so
     /// they ride construction like the fingerprint. `None` = the face claims
@@ -103,7 +104,7 @@ pub struct FontBook {
 
 /// Hash a book's whole face set into the cache identity (see
 /// [`FontBook::fingerprint`]).
-fn face_fingerprint(regular: &[u8], bold: &[u8], mono: Option<&[u8]>, fallbacks: &[Vec<u8>]) -> u64 {
+fn face_fingerprint(regular: &[u8], bold: &[u8], mono: Option<&[u8]>, fallbacks: &[FaceBytes]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     regular.hash(&mut h);
@@ -180,8 +181,13 @@ impl FontBook {
     /// primary pair doesn't map resolves through the first fallback that
     /// covers it; measure and paint segment identically, so a mixed
     /// "text 🚀 text" run advances the same bytes it rasterizes.
-    pub fn with_fallbacks(mut self, faces: Vec<Vec<u8>>) -> Self {
-        let kept: Vec<Vec<u8>> = faces
+    pub fn with_fallbacks(self, faces: Vec<Vec<u8>>) -> Self {
+        self.with_fallback_faces(faces.into_iter().map(FaceBytes::from).collect())
+    }
+
+    /// [`Self::with_fallbacks`] over faces that may be memory-mapped.
+    pub fn with_fallback_faces(mut self, faces: Vec<FaceBytes>) -> Self {
+        let kept: Vec<FaceBytes> = faces
             .into_iter()
             .filter(|b| FontRef::from_index(b, 0).is_some())
             .collect();
@@ -242,7 +248,7 @@ impl FontBook {
         if bold { &self.bold } else { &self.regular }
     }
 
-    fn face_bytes(&self, sel: FaceSel, bold: bool) -> &Vec<u8> {
+    fn face_bytes(&self, sel: FaceSel, bold: bool) -> &[u8] {
         match sel {
             FaceSel::Primary => self.face(bold),
             // Minted only when the mono face parsed (see `segments`); bold

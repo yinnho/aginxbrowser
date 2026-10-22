@@ -1158,6 +1158,8 @@ pub(super) fn session_thread(
             })
             .await;
     });
+    // The page and its isolate are gone: return their pages to the OS.
+    crate::release_mem::release_to_os();
 }
 
 

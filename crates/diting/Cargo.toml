@@ -172,6 +172,9 @@ p384 = { version = "0.14", default-features = false, features = ["arithmetic", "
 # Ed25519 for crypto.subtle: core sign/verify only; DER wrapping is done by hand
 # in the JS shim (fixed 16/12-byte prefixes) and seeds come from op_random_bytes.
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+# Memory-mapped system fonts (the 183 MB color-emoji face stays on disk until
+# glyphs are touched). Already in the tree via fontique/parley.
+memmap2 = "0.9"
 # CSPRNG for getRandomValues / randomUUID (replaces Math.random).
 getrandom = "0.2"
 

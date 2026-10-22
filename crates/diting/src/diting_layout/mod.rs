@@ -47,6 +47,8 @@ pub mod svg;
 pub mod text;
 pub mod text_geom;
 mod text_src;
+mod face_bytes;
+pub use face_bytes::FaceBytes;
 use text_src::trim_run_edge_whitespace;
 pub use image::DecodedImage;
 pub use sticky::{apply_sticky_to_items, sticky_axis_shift, sticky_inset_px, StickySpan};

@@ -25,6 +25,7 @@
 use std::sync::Arc;
 
 use crate::diting_layout::text::FontBook;
+use crate::diting_layout::FaceBytes;
 
 /// Real family name, on purpose: pages that style `font-family: "Noto Sans
 /// SC"` (common on Chinese sites) hit the bundled bytes directly, and the
@@ -180,14 +181,14 @@ fn build_book(dir_faces: Vec<Vec<u8>>) -> Arc<FontBook> {
     let book = FontBook::from_pairs(REGULAR.to_vec(), BOLD.to_vec())
         .expect("bundled CJK fonts parse (regenerate via scripts/make_font_bundle.py)")
         .with_mono(MONO.to_vec());
-    let mut fallbacks = dir_faces;
+    let mut fallbacks: Vec<FaceBytes> = dir_faces.into_iter().map(FaceBytes::from).collect();
     if let Some(emoji) = platform_emoji_font() {
         fallbacks.push(emoji);
     }
     if fallbacks.is_empty() {
         Arc::new(book)
     } else {
-        Arc::new(book.with_fallbacks(fallbacks))
+        Arc::new(book.with_fallback_faces(fallbacks))
     }
 }
 
@@ -200,7 +201,7 @@ fn build_book(dir_faces: Vec<Vec<u8>>) -> Arc<FontBook> {
 ///
 /// `pub(crate)` for the gated raster tests, which skip when it returns
 /// `None` (a font-less CI container must stay green).
-pub(crate) fn platform_emoji_font() -> Option<Vec<u8>> {
+pub(crate) fn platform_emoji_font() -> Option<FaceBytes> {
     #[cfg(target_os = "macos")]
     const CANDIDATES: &[&str] = &["/System/Library/Fonts/Apple Color Emoji.ttc"];
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -215,12 +216,8 @@ pub(crate) fn platform_emoji_font() -> Option<Vec<u8>> {
         r"C:\Windows\Fonts\seguiemj.ttf",
     ];
 
-    for path in CANDIDATES {
-        if let Ok(bytes) = std::fs::read(path) {
-            return Some(bytes);
-        }
-    }
-    None
+    // Mapped, not read: Apple's file is 183 MB and a page touches a sliver.
+    CANDIDATES.iter().find_map(|path| FaceBytes::map_file(std::path::Path::new(path)))
 }
 
 /// The bundled pair as owned bytes — the raster-cache tests in

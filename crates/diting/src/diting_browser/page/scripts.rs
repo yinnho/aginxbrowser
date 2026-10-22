@@ -241,10 +241,16 @@ impl Page {
         }
 
         let client = self.http_client.clone();
+        // Stealth pages already fetched the document on this client. Classic
+        // script src joins it so load.js does not open a second HTTP stack.
+        #[cfg(feature = "stealth")]
+        let stealth = self.stealth_client.clone();
         let script_callbacks = self.callbacks.clone();
         let doc_referrer = self.url.as_ref().map(|u| u.to_string());
         let fetch_futures: Vec<_> = fetch_tasks.iter().map(|(idx, url)| {
             let client = client.clone();
+            #[cfg(feature = "stealth")]
+            let stealth = stealth.clone();
             let script_callbacks = script_callbacks.clone();
             let url = url.clone();
             let idx = *idx;
@@ -279,11 +285,47 @@ impl Page {
                 }
                 // #126: monotonic anchor for the live-fetch duration below.
                 let rt_t0 = std::time::Instant::now();
-                match client
-                    .fetch_with_callbacks(&parsed, Some(script_callbacks.as_ref()), crate::diting_net::ResourceType::Script, doc_referrer.as_deref())
-                    .await
-                {
+                #[cfg(feature = "stealth")]
+                let fetched = if let Some(stealth) = stealth.as_ref() {
+                    stealth.fetch_script(&parsed, doc_referrer.as_deref()).await
+                } else {
+                    client
+                        .fetch_with_callbacks(
+                            &parsed,
+                            Some(script_callbacks.as_ref()),
+                            crate::diting_net::ResourceType::Script,
+                            doc_referrer.as_deref(),
+                        )
+                        .await
+                };
+                #[cfg(not(feature = "stealth"))]
+                let fetched = client
+                    .fetch_with_callbacks(
+                        &parsed,
+                        Some(script_callbacks.as_ref()),
+                        crate::diting_net::ResourceType::Script,
+                        doc_referrer.as_deref(),
+                    )
+                    .await;
+                match fetched {
                     Ok(resp) => {
+                        // The reqwest path already notified observers. The
+                        // wreq path has no callback hook, so fire them here
+                        // with the headers that actually went out.
+                        #[cfg(feature = "stealth")]
+                        if stealth.is_some()
+                            && (script_callbacks.has_request_callbacks().await
+                                || script_callbacks.has_response_callbacks().await)
+                        {
+                            let info = crate::diting_net::RequestInfo {
+                                url: parsed.clone(),
+                                method: "GET".to_string(),
+                                headers: resp.request_headers.clone(),
+                                resource_type: crate::diting_net::ResourceType::Script,
+                            };
+                            script_callbacks.fire_request(&info).await;
+                            script_callbacks.fire_response(&info, &resp).await;
+                        }
                         // #126: real timing around the live fetch only —
                         // data: URIs never touched the wire, so they carry
                         // no record. Epoch stamp feeds the JS resource

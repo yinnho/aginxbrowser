@@ -479,6 +479,27 @@ impl StealthHttpClient {
             .await
     }
 
+    /// Classic `<script src>` on a stealth page. Uses the same `wreq::Client`
+    /// as [`fetch_navigation`], so a same-origin script reuses the document's
+    /// HTTP/2 connection instead of opening a second stack.
+    pub async fn fetch_script(
+        &self,
+        url: &Url,
+        referrer: Option<&str>,
+    ) -> Result<Response, NetError> {
+        self.fetch_inner(
+            url,
+            referrer,
+            wreq::Method::GET,
+            None,
+            None,
+            None,
+            true,
+            ResourceType::Script,
+        )
+        .await
+    }
+
     /// Non-GET transport for the legacy-TLS fallback (`retry_via_legacy_tls`):
     /// the escape hatch used to be GET-only, which stranded scripted POSTs on
     /// CBC-only servers — now a connect-stage POST failure rides here with its

@@ -40,6 +40,7 @@ mod risk_markers;
 // `crate::` paths.
 mod routers;
 mod render;
+mod release_mem;
 mod robots;
 mod sanitize;
 #[cfg(feature = "screenshot")]
