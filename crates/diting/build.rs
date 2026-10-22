@@ -36,6 +36,8 @@ const SNAPSHOT_SCRIPTS: &[(&str, &str)] = &[
     ("css_decl_door.js", include_str!("js/css_decl_door.js")),
     ("raf.js", include_str!("js/raf.js")),
     ("computed_size.js", include_str!("js/computed_size.js")),
+    ("adopted_sheets.js", include_str!("js/adopted_sheets.js")),
+    ("form_validation.js", include_str!("js/form_validation.js")),
     ("fetch.js", include_str!("js/fetch.js")),
     // Ratchet splits (pure moves): the audio/speechSynthesis faces, the
     // Worker family, media_source, iframe_realm, range_selection,

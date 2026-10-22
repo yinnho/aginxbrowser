@@ -5372,6 +5372,7 @@ class Element extends Node {
         );
       }
     }
+    if (!globalThis.__interactiveValidate(this, submitter)) return;
     const cancelled = !this.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     if (cancelled) return;
     this._navigateSubmit(submitter);
@@ -10192,7 +10193,7 @@ globalThis.CSSStyleSheet = class CSSStyleSheet {
     __hideOwn(this);
   }
   insertRule(rule, index) {
-    const idx = index ?? this._rules.length;
+    const idx = index ?? 0; // CSSOM: insertRule's index defaults to 0, addRule's to the end
     this._rules.splice(idx, 0, { cssText: rule, type: 1 });
     this.cssRules = this._rules;
     return idx;
@@ -10202,7 +10203,7 @@ globalThis.CSSStyleSheet = class CSSStyleSheet {
     this.cssRules = this._rules;
   }
   addRule(selector, style, index) {
-    return this.insertRule(selector + '{' + style + '}', index);
+    return this.insertRule(selector + '{' + style + '}', index ?? this._rules.length);
   }
   removeRule(index) { this.deleteRule(index); }
   replace(text) {
@@ -10325,7 +10326,7 @@ function _sheetList(sheets) {
 
 Object.defineProperty(Document.prototype, 'adoptedStyleSheets', {
   get() { return this._adoptedStyleSheets || []; },
-  set(sheets) { this._adoptedStyleSheets = sheets; },
+  set(sheets) { this._adoptedStyleSheets = globalThis.__adoptedSet(this, sheets); },
 });
 
 globalThis.__mutationObservers = [];
@@ -10534,7 +10535,7 @@ globalThis.ShadowRoot = class ShadowRoot extends DocumentFragment {
 // Constructible-stylesheet adoption, mirroring Document.adoptedStyleSheets.
 Object.defineProperty(globalThis.ShadowRoot.prototype, 'adoptedStyleSheets', {
   get() { return this._adoptedStyleSheets || []; },
-  set(sheets) { this._adoptedStyleSheets = sheets; },
+  set(sheets) { this._adoptedStyleSheets = globalThis.__adoptedSet(this, sheets); },
   configurable: true,
 });
 globalThis.__diting_shadowHostNames = new Set(['article','aside','blockquote','body','div','footer','h1','h2','h3','h4','h5','h6','header','main','nav','p','section','span']);
@@ -16688,97 +16689,7 @@ if (!Element.prototype.removeAttributeNode) {
 
 // ---- form control validity and text selection ----
 
-// ValidityState class for form validation state reporting
-if (typeof ValidityState === 'undefined') {
-  globalThis.ValidityState = class ValidityState {
-    constructor() {
-      this.badInput = false;
-      this.customError = false;
-      this.patternMismatch = false;
-      this.rangeOverflow = false;
-      this.rangeUnderflow = false;
-      this.stepMismatch = false;
-      this.tooLong = false;
-      this.tooShort = false;
-      this.typeMismatch = false;
-      this.valueMissing = false;
-      this.valid = true;
-    }
-  };
-}
-
-// Validity and validation message storage on elements
-const _ns_validityCache = new WeakMap();
-const _ns_customValidityMsg = new WeakMap();
-
-// Element.prototype.validity - returns cached ValidityState for the element
-if (!Element.prototype.validity) {
-  Object.defineProperty(Element.prototype, 'validity', {
-    get: function() {
-      if (!_ns_validityCache.has(this)) {
-        _ns_validityCache.set(this, new ValidityState());
-      }
-      return _ns_validityCache.get(this);
-    },
-    enumerable: true,
-    configurable: true
-  });
-}
-
-// Element.prototype.willValidate - whether element is subject to constraint validation
-if (!Element.prototype.willValidate) {
-  Object.defineProperty(Element.prototype, 'willValidate', {
-    get: function() {
-      return true;
-    },
-    enumerable: true,
-    configurable: true
-  });
-}
-
-// Element.prototype.validationMessage - custom validation message if set
-if (!Element.prototype.validationMessage) {
-  Object.defineProperty(Element.prototype, 'validationMessage', {
-    get: function() {
-      return _ns_customValidityMsg.get(this) || '';
-    },
-    enumerable: true,
-    configurable: true
-  });
-}
-
-// Element.prototype.checkValidity - stub returns true
-if (!Element.prototype.checkValidity) {
-  Element.prototype.checkValidity = function checkValidity() {
-    return true;
-  };
-  _markNative(Element.prototype.checkValidity);
-}
-
-// Element.prototype.reportValidity - stub returns true
-if (!Element.prototype.reportValidity) {
-  Element.prototype.reportValidity = function reportValidity() {
-    return true;
-  };
-  _markNative(Element.prototype.reportValidity);
-}
-
-// Element.prototype.setCustomValidity - set custom validation message
-if (!Element.prototype.setCustomValidity) {
-  Element.prototype.setCustomValidity = function setCustomValidity(msg) {
-    const validity = this.validity;
-    if (msg && msg.length > 0) {
-      _ns_customValidityMsg.set(this, msg);
-      validity.customError = true;
-      validity.valid = false;
-    } else {
-      _ns_customValidityMsg.delete(this);
-      validity.customError = false;
-      validity.valid = true;
-    }
-  };
-  _markNative(Element.prototype.setCustomValidity);
-}
+// Constraint validation (ValidityState, checkValidity, …) lives in form_validation.js.
 
 // Text selection on Element.prototype
 const _ns_selectionStart = new WeakMap();

@@ -2316,6 +2316,9 @@ fn layout_run_all(gs: &JsState, dom: &DomTree) -> LayoutRun {
         css.push_str(&text);
         css.push('\n');
     }
+    if let Some(adopted) = gs.ext_sheets.borrow().get("\u{0}adopted") {
+        css.push_str(adopted);
+    }
     let t_css = t0.elapsed();
     // Identity of the collected css bytes PLUS everything else that shapes
     // the parsed rules (media emulation re-filters @media arms with the

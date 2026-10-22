@@ -23192,3 +23192,70 @@ fn document_evaluate_xpath_subset() {
             .unwrap();
         assert_eq!(v, "100px 30px|100px 30px|100px 20px|auto auto|590px 20px|316|300|320");
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_adopted_stylesheets_join_the_cascade() {
+        // Chrome truth (headless Chrome, 2026-10-22): constructable sheets
+        // adopted by the document / a shadow root style the page; edits to an
+        // adopted sheet and removal from the list are live; insertRule
+        // defaults to index 0.
+        let mut rt = setup_runtime("<html><body><p id=p>x</p><div id=host></div></body></html>");
+        let v = rt
+            .evaluate(
+                "(() => { const r = []; const c = (i) => getComputedStyle(document.getElementById(i)).color;
+                  r.push(c('p'));
+                  const s = new CSSStyleSheet(); s.replaceSync('#p{color:red}');
+                  document.adoptedStyleSheets = [s]; r.push(c('p'));
+                  s.replaceSync('#p{color:blue}'); r.push(c('p'));
+                  s.insertRule('#p{color:green}'); r.push(c('p'));
+                  document.adoptedStyleSheets = []; r.push(c('p'));
+                  const sr = host.attachShadow({ mode: 'open' }); sr.innerHTML = '<b id=q>q</b>';
+                  const t = new CSSStyleSheet(); t.replaceSync('b{color:red}'); sr.adoptedStyleSheets = [t];
+                  r.push(getComputedStyle(sr.getElementById('q')).color);
+                  let err = 'none'; try { document.adoptedStyleSheets = [{}]; } catch (e) { err = e.name; }
+                  r.push(err);
+                  return r.join('|'); })()",
+            )
+            .unwrap();
+        assert_eq!(
+            v,
+            "rgb(0, 0, 0)|rgb(255, 0, 0)|rgb(0, 0, 255)|rgb(0, 0, 255)|rgb(0, 0, 0)|rgb(255, 0, 0)|TypeError"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_constraint_validation_matches_chrome() {
+        // Chrome truth (headless Chrome, 2026-10-22): flags, willValidate,
+        // radio-group required, custom validity, invalid events, and
+        // requestSubmit blocked by interactive validation unless novalidate.
+        let mut rt = setup_runtime(
+            "<html><body><form id=f>
+              <input id=a required><input id=b type=email value=x><input id=c type=email value='a@'>
+              <input id=d type=number min=5 max=10 step=2 value=3><input id=e type=number min=5 max=10 step=2 value=11>
+              <input id=g type=number min=5 step=2 value=8><input id=h pattern='[a-z]+' value=AB><input id=i type=url value=nope>
+              <input id=j type=checkbox required><input id=k type=date min='2024-01-01' value='2023-05-05'>
+              <input id=l disabled required><input id=m readonly required>
+              <select id=n required><option value=''>pick</option><option>x</option></select><textarea id=o required></textarea>
+              <input id=p type=radio name=r required><input id=q type=radio name=r><input id=ok value=fine required>
+             </form></body></html>",
+        );
+        let v = rt
+            .evaluate(
+                "(() => { const r = [];
+                  for (const i of 'abcdeghijklmnopq'.split('').concat(['ok'])) { const e = document.getElementById(i); const v = e.validity;
+                    r.push(i + ':' + (['valueMissing','typeMismatch','patternMismatch','rangeUnderflow','rangeOverflow','stepMismatch','customError'].filter(k => v[k]).join('+') || '-') + ':' + e.willValidate); }
+                  const a = document.getElementById('a'); a.setCustomValidity('boo');
+                  r.push(a.validity.customError + a.validationMessage + a.checkValidity()); a.setCustomValidity('');
+                  const log = []; document.getElementById('b').addEventListener('invalid', e => log.push(e.cancelable + '' + e.bubbles));
+                  r.push(document.getElementById('b').checkValidity() + log.join());
+                  const f = document.getElementById('f'); let n = 0; f.addEventListener('submit', e => { n++; e.preventDefault(); });
+                  f.requestSubmit(); r.push('blocked' + n); f.noValidate = true; f.requestSubmit(); r.push('novalidate' + n);
+                  r.push(typeof document.createElement('div').validity);
+                  return r.join('|'); })()",
+            )
+            .unwrap();
+        assert_eq!(
+            v,
+            "a:valueMissing:true|b:typeMismatch:true|c:typeMismatch:true|d:rangeUnderflow:true|e:rangeOverflow:true|g:stepMismatch:true|h:patternMismatch:true|i:typeMismatch:true|j:valueMissing:true|k:rangeUnderflow:true|l:-:false|m:-:false|n:valueMissing:true|o:valueMissing:true|p:valueMissing:true|q:valueMissing:true|ok:-:true|trueboofalse|falsetruefalse|blocked0|novalidate1|undefined"
+        );
+    }
