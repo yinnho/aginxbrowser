@@ -802,45 +802,7 @@ fn eval_supports(condition: &str) -> Option<bool> {
         .unwrap_or(probe);
     if let Some(pseudo) = selector_probe.strip_prefix(':') {
         let head = pseudo.split('(').next().unwrap_or(pseudo);
-        let known = matches!(
-            head,
-            "hover"
-                | "focus"
-                | "focus-visible"
-                | "focus-within"
-                | "active"
-                | "visited"
-                | "link"
-                | "checked" | "indeterminate"
-                | "disabled"
-                | "enabled"
-                | "placeholder-shown"
-                | "read-only"
-                | "read-write"
-                | "required"
-                | "optional"
-                | "first-child"
-                | "last-child"
-                | "only-child"
-                | "first-of-type"
-                | "last-of-type"
-                | "only-of-type"
-                | "root"
-                | "empty"
-                | "nth-child"
-                | "nth-last-child"
-                | "nth-of-type"
-                | "nth-last-of-type"
-                | "not"
-                | "is"
-                | "where"
-                | "has"
-                | "before"
-                | "after"
-                | "first-line"
-                | "first-letter"
-                | "selection"
-        );
+        let known = supports::pseudo_known(head.trim_start_matches(':'));
         return Some(known);
     }
     // Leaf: `(prop: value)` declaration probe.

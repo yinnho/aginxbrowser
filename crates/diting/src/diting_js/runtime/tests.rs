@@ -23260,3 +23260,34 @@ fn document_evaluate_xpath_subset() {
             "a:valueMissing:true|b:typeMismatch:true|c:typeMismatch:true|d:rangeUnderflow:true|e:rangeOverflow:true|g:stepMismatch:true|h:patternMismatch:true|i:typeMismatch:true|j:valueMissing:true|k:rangeUnderflow:true|l:-:false|m:-:false|n:valueMissing:true|o:valueMissing:true|p:valueMissing:true|q:valueMissing:true|ok:-:true|trueboofalse|falsetruefalse|blocked0|novalidate1|undefined"
         );
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_small_web_api_gaps_from_the_chrome_battery() {
+        // Chrome truth (headless Chrome, 2026-10-22).
+        let mut rt = setup_runtime("<html><body><div id=host></div></body></html>");
+        let v = rt
+            .evaluate_remote(
+                "(async () => { const r = [];
+                  r.push(typeof scheduler.postTask + typeof scheduler.yield);
+                  r.push(await scheduler.postTask(() => 7, { priority: 'background' }));
+                  r.push(typeof Blob.prototype.stream);
+                  const rd = new Blob(['abc']).stream().getReader(); const c = await rd.read(); r.push(c.value.length);
+                  r.push(new XMLSerializer().serializeToString(document.createElement('div')));
+                  const d = document.createElement('div'); document.body.append(d);
+                  const a = d.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 40 });
+                  r.push(a.playState + document.getAnimations().length + d.getAnimations().length);
+                  await a.finished; r.push(a.playState + document.getAnimations().length);
+                  r.push(typeof document.startViewTransition + typeof document.queryCommandSupported + document.queryCommandSupported('bold'));
+                  const vt = document.startViewTransition(() => { r.push('updated'); }); await vt.finished;
+                  r.push(CSS.supports('caret-color', 'red') + ',' + CSS.supports('selector(::selection)') + ',' + CSS.supports('grid-template-columns', 'subgrid'));
+                  return r.join('|'); })()",
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            v.value.unwrap(),
+            "functionfunction|7|function|3|<div xmlns=\"http://www.w3.org/1999/xhtml\"></div>|running11|finished0|functionfunctiontrue|updated|true,true,false"
+        );
+    }

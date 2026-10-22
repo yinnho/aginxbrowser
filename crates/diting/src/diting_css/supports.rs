@@ -48,6 +48,11 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
     if name_l.starts_with("--") {
         return !value.is_empty();
     }
+    if CHROME_EXTRA_PROPS.contains(&name_l.as_str()) && !SUPPORTED.contains(&name_l.as_str()) {
+        // Parsed-and-ignored properties: true for any sane value (never
+        // `subgrid`, whose layout this engine does not do).
+        return !value.is_empty() && !value.eq_ignore_ascii_case("subgrid") && !value.contains("subgrid");
+    }
     if !SUPPORTED.contains(&name_l.as_str()) {
         return false;
     }
@@ -177,3 +182,85 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         _ => true, // remaining modeled properties accept any non-empty value here
     }
 }
+
+/// Pseudo-class / pseudo-element names `CSS.supports('selector(...)')` answers
+/// true for — Chrome's answer for a UA claiming Chrome 145, minus the ones
+/// whose behaviour is invisible-by-design here are kept true (feature
+/// detection reads the answer, not the rendering).
+pub(super) fn pseudo_known(head: &str) -> bool {
+    matches!(
+        head,
+        "hover" | "focus" | "focus-visible" | "focus-within" | "active" | "visited" | "link" | "any-link"
+            | "checked" | "indeterminate" | "disabled" | "enabled" | "placeholder-shown" | "read-only"
+            | "read-write" | "required" | "optional" | "default" | "valid" | "invalid" | "in-range"
+            | "out-of-range" | "user-valid" | "user-invalid" | "autofill" | "target" | "target-within"
+            | "first-child" | "last-child" | "only-child" | "first-of-type" | "last-of-type" | "only-of-type"
+            | "root" | "empty" | "nth-child" | "nth-last-child" | "nth-of-type" | "nth-last-of-type"
+            | "not" | "is" | "where" | "has" | "lang" | "dir" | "scope" | "defined" | "popover-open" | "modal"
+            | "fullscreen" | "host" | "host-context" | "slotted" | "part" | "before" | "after" | "first-line"
+            | "first-letter" | "selection" | "placeholder" | "marker" | "backdrop" | "file-selector-button"
+            | "cue" | "highlight" | "spelling-error" | "grammar-error" | "target-text" | "view-transition"
+    )
+}
+
+/// Properties Chrome 145 supports that this cascade does not model (they
+/// parse and are ignored). `CSS.supports` and `@supports` answer true for a
+/// non-empty value so feature detection takes the same branch as Chrome —
+/// except the ones whose JS/CSS fallback matters for layout: anchor
+/// positioning, scroll/view timelines, which stay false so pages use their
+/// fallbacks.
+pub(super) const CHROME_EXTRA_PROPS: &[&str] = &[
+    "all", "animation", "animation-delay", "animation-direction", "animation-duration", "animation-fill-mode",
+    "animation-iteration-count", "animation-name", "animation-play-state", "animation-timing-function",
+    "animation-composition", "appearance", "backdrop-filter", "backface-visibility", "background-attachment",
+    "background-blend-mode", "background-clip", "background-image", "background-origin", "background-position",
+    "background-position-x", "background-position-y", "background-repeat", "background-size", "block-size",
+    "border-bottom-color", "border-bottom-left-radius", "border-bottom-right-radius", "border-bottom-style",
+    "border-image", "border-image-outset", "border-image-repeat", "border-image-slice", "border-image-source",
+    "border-image-width", "border-left-color", "border-left-style", "border-right-color", "border-right-style",
+    "border-spacing", "border-top-color", "border-top-left-radius", "border-top-right-radius", "border-top-style",
+    "border-block", "border-inline", "border-start-start-radius", "border-start-end-radius",
+    "border-end-start-radius", "border-end-end-radius", "box-decoration-break", "box-shadow", "break-after",
+    "break-before", "break-inside", "caption-side", "caret-color", "clip", "clip-path", "color-scheme",
+    "column-count", "column-fill", "column-gap", "column-rule", "column-rule-color", "column-rule-style",
+    "column-rule-width", "column-span", "column-width", "columns", "contain", "contain-intrinsic-size",
+    "contain-intrinsic-width", "contain-intrinsic-height", "container", "container-name", "container-type",
+    "content-visibility", "counter-increment", "counter-reset", "counter-set", "direction", "empty-cells",
+    "field-sizing", "fill", "fill-opacity", "fill-rule", "filter", "flex", "flex-basis", "flex-flow", "font",
+    "font-family", "font-feature-settings", "font-kerning", "font-language-override", "font-optical-sizing",
+    "font-palette", "font-size-adjust", "font-stretch", "font-style", "font-synthesis", "font-variant",
+    "font-variant-alternates", "font-variant-caps", "font-variant-east-asian", "font-variant-ligatures",
+    "font-variant-numeric", "font-variant-position", "font-variation-settings", "forced-color-adjust",
+    "grid", "grid-area", "grid-auto-columns", "grid-auto-flow", "grid-auto-rows", "grid-column",
+    "grid-column-end", "grid-column-start", "grid-row", "grid-row-end", "grid-row-start", "grid-template",
+    "grid-template-areas", "grid-template-columns", "grid-template-rows", "column-gap", "row-gap",
+    "hyphens", "hyphenate-character", "image-rendering", "initial-letter", "inline-size", "inset-block",
+    "inset-block-end", "inset-block-start", "inset-inline", "inset-inline-end", "inset-inline-start",
+    "interpolate-size", "isolation", "justify-items", "justify-self", "align-self", "align-tracks",
+    "letter-spacing", "line-break", "line-clamp", "list-style-image", "list-style-position",
+    "mask", "mask-clip", "mask-composite", "mask-image", "mask-mode", "mask-origin", "mask-position",
+    "mask-repeat", "mask-size", "mask-type", "max-block-size", "max-inline-size", "min-block-size",
+    "min-inline-size", "mix-blend-mode", "offset", "offset-anchor", "offset-distance", "offset-path",
+    "offset-position", "offset-rotate", "order", "orphans", "outline", "outline-color", "outline-offset",
+    "outline-style", "outline-width", "overflow-anchor", "overflow-block", "overflow-clip-margin",
+    "overflow-inline", "overflow-wrap", "overscroll-behavior", "overscroll-behavior-block",
+    "overscroll-behavior-inline", "overscroll-behavior-x", "overscroll-behavior-y", "padding-inline",
+    "page", "page-break-after", "page-break-before", "page-break-inside", "paint-order", "perspective",
+    "perspective-origin", "place-content", "place-items", "place-self", "print-color-adjust", "quotes",
+    "resize", "rotate", "ruby-position", "scale", "scroll-behavior", "scroll-margin", "scroll-margin-block",
+    "scroll-margin-bottom", "scroll-margin-inline", "scroll-margin-left", "scroll-margin-right",
+    "scroll-margin-top", "scroll-padding", "scroll-padding-block", "scroll-padding-bottom",
+    "scroll-padding-inline", "scroll-padding-left", "scroll-padding-right", "scroll-padding-top",
+    "scroll-snap-align", "scroll-snap-stop", "scroll-snap-type", "scrollbar-color", "scrollbar-gutter",
+    "scrollbar-width", "shape-image-threshold", "shape-margin", "shape-outside", "stroke", "stroke-dasharray",
+    "stroke-dashoffset", "stroke-linecap", "stroke-linejoin", "stroke-miterlimit", "stroke-opacity",
+    "stroke-width", "tab-size", "table-layout", "text-decoration-color", "text-decoration-line",
+    "text-decoration-skip-ink", "text-decoration-style", "text-decoration-thickness", "text-emphasis",
+    "text-emphasis-color", "text-emphasis-position", "text-emphasis-style", "text-indent", "text-justify",
+    "text-orientation", "text-rendering", "text-shadow", "text-size-adjust", "text-transform",
+    "text-underline-offset", "text-underline-position", "text-wrap-mode", "text-wrap-style", "touch-action",
+    "transform-box", "transform-style", "transition", "transition-behavior", "transition-delay",
+    "transition-duration", "transition-property", "transition-timing-function", "translate",
+    "unicode-bidi", "view-transition-name", "will-change", "word-break", "word-spacing", "word-wrap",
+    "writing-mode", "zoom", "align-content", "align-items", "justify-content", "flex-direction",
+];

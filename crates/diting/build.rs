@@ -84,6 +84,8 @@ const SNAPSHOT_SCRIPTS: &[(&str, &str)] = &[
     // globals, enumerable members, WebIDL toStringTag brands) — running last
     // is the point, so every earlier script's globals get swept.
     ("interface_sweep.js", include_str!("js/interface_sweep.js")),
+    // Loads after the sweep: scheduler & friends are minted by global_surface.
+    ("web_api_gaps.js", include_str!("js/web_api_gaps.js")),
 ];
 
 fn main() {
