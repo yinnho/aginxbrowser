@@ -12,7 +12,8 @@ use selectors::context::QuirksMode;
 use selectors::matching::{MatchingContext, MatchingForInvalidation, MatchingMode, NeedsSelectorFlags};
 use selectors::parser::{self, SelectorList};
 
-use super::{parse_selector, DomElement, DitingSelector, PseudoKind};
+use super::{parse_selector, DomElement, DitingSelector};
+use crate::diting_css::split_top_level_commas;
 use crate::diting_dom::tree::{DomTree, NodeId};
 
 impl DomTree {
@@ -65,7 +66,6 @@ impl DomTree {
         RuleMatchSets {
             hits,
             specificity: index.specificity,
-            pseudo_kinds: index.pseudo_kinds,
             pseudo_hits,
         }
     }
@@ -91,7 +91,8 @@ impl DomTree {
         // both spellings there. Over-bucketing is always safe (the matcher
         // has the final word); a bucket the probe cannot reach never is.
         let quirks = self.selector_quirks_mode() == QuirksMode::Quirks;
-        let mut pseudo_kinds: HashMap<usize, PseudoKind> = HashMap::new();
+        let mut pseudo_routing: Vec<Option<PseudoRouting>> =
+            Vec::with_capacity(rule_selectors.len());
         let mut bears_has = false;
         let mut has_subject_ids: HashSet<String> = HashSet::new();
         let mut has_subject_classes: HashSet<String> = HashSet::new();
@@ -99,53 +100,82 @@ impl DomTree {
         let mut has_subject_unkeyed = false;
 
         for (ri, selector) in rule_selectors.iter().enumerate() {
-            // A trailing pseudo-element suffix routes the rule to the
-            // pseudo cascade instead of the normal one. Only a suffix at
-            // the very end of a comma-free selector is recognized; anything
-            // else (`a::before b`, `a::before:hover`, comma lists) parses
-            // with the suffix attached and stays dead — exactly what
-            // MatchingMode::Normal did to it before pseudo support.
-            let mut base_selector = *selector;
-            let sel_trim = selector.trim();
-            if !sel_trim.contains(',') {
-                let lower = sel_trim.to_ascii_lowercase();
+            // A trailing pseudo-element suffix routes that sub-selector to
+            // the pseudo cascade instead of the normal one — decided per
+            // SUB-SELECTOR, because comma lists mix them freely
+            // (`.row:after,.row:before` is every legacy clearfix,
+            // Bootstrap 3's whole grid). Each part is split, its
+            // `::before`/`::after` suffix stripped, and the plain
+            // remainder keeps cascading normally: `.d3 p,.d3:after`
+            // styles `p` exactly like Chrome and routes only the ::after.
+            let mut plain_parts: Vec<String> = Vec::new();
+            let mut before_parts: Vec<String> = Vec::new();
+            let mut after_parts: Vec<String> = Vec::new();
+            for part in split_top_level_commas(selector) {
+                let p = part.trim();
+                let lower = p.to_ascii_lowercase();
+                // ::before strips before :before, or `.x::before` would
+                // leave a dangling colon on the base.
                 let stripped = lower
                     .strip_suffix("::before")
-                    .map(|rest| (rest.len(), PseudoKind::Before))
-                    .or_else(|| {
-                        lower
-                            .strip_suffix("::after")
-                            .map(|rest| (rest.len(), PseudoKind::After))
-                    })
-                    .or_else(|| {
-                        lower
-                            .strip_suffix(":before")
-                            .map(|rest| (rest.len(), PseudoKind::Before))
-                    })
-                    .or_else(|| {
-                        lower
-                            .strip_suffix(":after")
-                            .map(|rest| (rest.len(), PseudoKind::After))
-                    });
+                    .map(|rest| (rest.len(), 0))
+                    .or_else(|| lower.strip_suffix("::after").map(|rest| (rest.len(), 1)))
+                    .or_else(|| lower.strip_suffix(":before").map(|rest| (rest.len(), 0)))
+                    .or_else(|| lower.strip_suffix(":after").map(|rest| (rest.len(), 1)));
                 // to_ascii_lowercase is byte-for-byte, so slicing the
                 // original by the lowered length keeps the author's case.
-                if let Some((base_len, kind)) = stripped {
-                    if let Some(base) = sel_trim.get(..base_len) {
-                        base_selector = base;
-                        pseudo_kinds.insert(ri, kind);
-                    }
+                match stripped {
+                    Some((base_len, slot)) => match p.get(..base_len) {
+                        Some(base) if !base.trim().is_empty() => {
+                            if slot == 0 {
+                                before_parts.push(base.to_string());
+                            } else {
+                                after_parts.push(base.to_string());
+                            }
+                        }
+                        // A bare pseudo (base empty) parses as nothing;
+                        // let it die in the plain pile like a parse error.
+                        _ => plain_parts.push(p.to_string()),
+                    },
+                    None => plain_parts.push(p.to_string()),
                 }
             }
-            let Ok(list) = parse_selector(base_selector) else {
-                entries.push(None);
-                specificity.push(None);
-                continue;
+            let routing = (!before_parts.is_empty() || !after_parts.is_empty()).then(|| {
+                PseudoRouting {
+                    before: parse_selector(&before_parts.join(",")).ok(),
+                    after: parse_selector(&after_parts.join(",")).ok(),
+                }
+            });
+            let plain = if plain_parts.is_empty() {
+                None
+            } else {
+                parse_selector(&plain_parts.join(",")).ok()
             };
-            specificity.push(list.slice().first().map(|s| s.specificity()));
+            // Base-spec semantics, unchanged: the rule keeps one
+            // specificity from its first surviving list (the pseudo bit
+            // itself stays uncounted).
+            let first_list = plain
+                .as_ref()
+                .or(routing.as_ref().and_then(|r| r.before.as_ref()))
+                .or(routing.as_ref().and_then(|r| r.after.as_ref()));
+            specificity.push(first_list.and_then(|l| l.slice().first().map(|s| s.specificity())));
             // A comma list matches if ANY sub-selector matches, so every
-            // sub-selector contributes its own bucket entry.
+            // sub-selector of every list — plain and pseudo bases alike —
+            // contributes its own bucket entry.
+            let mut lists: Vec<&SelectorList<DitingSelector>> = Vec::new();
+            if let Some(list) = plain.as_ref() {
+                lists.push(list);
+            }
+            if let Some(r) = routing.as_ref() {
+                if let Some(list) = r.before.as_ref() {
+                    lists.push(list);
+                }
+                if let Some(list) = r.after.as_ref() {
+                    lists.push(list);
+                }
+            }
             let mut bucketed = false;
-            for sel in list.slice() {
+            for sel in lists.iter().flat_map(|l| l.slice()) {
                 match rightmost_key(sel) {
                     Some(RuleKey::Id(id)) => {
                         by_id.entry(id.clone()).or_default().push(ri);
@@ -174,14 +204,17 @@ impl DomTree {
             if !bucketed {
                 unkeyed.push(ri);
             }
-            if list.slice().iter().any(selector_bears_has) {
+            if lists
+                .iter()
+                .any(|l| l.slice().iter().any(selector_bears_has))
+            {
                 bears_has = true;
                 // Subject keys for the transitive re-probe: every
                 // sub-selector's rightmost compound, because a comma list
                 // matches when any sub-selector does. A keyless subject
                 // compound (`:has(a) *`) leaves every element a candidate,
                 // which the candidate gate converts to a full rebuild.
-                for sel in list.slice() {
+                for sel in lists.iter().flat_map(|l| l.slice()) {
                     match rightmost_key(sel) {
                         Some(RuleKey::Id(id)) => {
                             has_subject_ids.insert(id.clone());
@@ -202,7 +235,8 @@ impl DomTree {
                     }
                 }
             }
-            entries.push(Some(list));
+            entries.push(plain);
+            pseudo_routing.push(routing);
         }
         RuleIndex {
             entries,
@@ -211,7 +245,7 @@ impl DomTree {
             by_class,
             by_tag,
             unkeyed,
-            pseudo_kinds,
+            pseudo_routing,
             quirks,
             bears_has,
             has_subject_ids,
@@ -229,7 +263,7 @@ impl DomTree {
         index: &RuleIndex,
         probe_ids: impl IntoIterator<Item = NodeId>,
         hits: &mut HashMap<usize, Vec<usize>>,
-        pseudo_hits: &mut HashMap<usize, Vec<usize>>,
+        pseudo_hits: &mut HashMap<usize, [Vec<usize>; 2]>,
     ) {
         let mut caches = selectors::context::SelectorCaches::default();
         let mut context = MatchingContext::new(
@@ -286,19 +320,30 @@ impl DomTree {
             candidates.dedup();
             let element = DomElement::new(self, desc_id);
             for ri in candidates.drain(..) {
-                let Some(list) = index.entries[ri].as_ref() else { continue };
-                if selectors::matching::matches_selector_list(list, &element, &mut context) {
-                    if index.pseudo_kinds.contains_key(&ri) {
-                        pseudo_hits.entry(ri).or_default().push(desc_id.index());
-                    } else {
+                if let Some(list) = index.entries[ri].as_ref() {
+                    if selectors::matching::matches_selector_list(list, &element, &mut context) {
                         hits.entry(ri).or_default().push(desc_id.index());
+                    }
+                }
+                if let Some(routing) = index.pseudo_routing[ri].as_ref() {
+                    let slots = [routing.before.as_ref(), routing.after.as_ref()];
+                    for (slot, list) in slots.into_iter().enumerate() {
+                        if let Some(list) = list {
+                            if selectors::matching::matches_selector_list(list, &element, &mut context)
+                            {
+                                pseudo_hits.entry(ri).or_default()[slot].push(desc_id.index());
+                            }
+                        }
                     }
                 }
             }
         }
         // The walk is document order, not node-index order; the cascade
         // binary-searches these, so each rule's hit set ends ascending.
-        for rule_hits in hits.values_mut().chain(pseudo_hits.values_mut()) {
+        for rule_hits in hits
+            .values_mut()
+            .chain(pseudo_hits.values_mut().flat_map(|rule_slots| rule_slots.iter_mut()))
+        {
             rule_hits.sort_unstable();
         }
     }
@@ -365,7 +410,6 @@ impl DomTree {
                 let sets = RuleMatchSets {
                     hits,
                     specificity: index.specificity.clone(),
-                    pseudo_kinds: index.pseudo_kinds.clone(),
                     pseudo_hits,
                 };
                 self.set_match_cache(MatchCacheBox {
@@ -396,7 +440,6 @@ impl DomTree {
             let sets = RuleMatchSets {
                 hits,
                 specificity: cache.index.specificity.clone(),
-                pseudo_kinds: cache.index.pseudo_kinds.clone(),
                 pseudo_hits,
             };
             tree.set_match_cache(MatchCacheBox { sets: sets.clone(), ..cache });
@@ -514,13 +557,22 @@ impl DomTree {
         // rebuild probes only document+shadow descendants), and a freed
         // slot's stale hits die here too.
         let candidates_len = candidates.len();
-        for rule_hits in cache.sets.hits.values_mut().chain(cache.sets.pseudo_hits.values_mut()) {
+        for rule_hits in cache
+            .sets
+            .hits
+            .values_mut()
+            .chain(cache.sets.pseudo_hits.values_mut().flat_map(|s| s.iter_mut()))
+        {
             rule_hits.retain(|&i| !(i < slots && seen[i]));
         }
         // A fresh build only keys rules that matched at least one element;
-        // drop the vectors the purge emptied so the shapes stay identical.
+        // drop the rule entries both slots of which the purge emptied so
+        // the shapes stay identical.
         cache.sets.hits.retain(|_, v| !v.is_empty());
-        cache.sets.pseudo_hits.retain(|_, v| !v.is_empty());
+        cache
+            .sets
+            .pseudo_hits
+            .retain(|_, s| s.iter().any(|v| !v.is_empty()));
         let attached: Vec<NodeId> = candidates
             .into_iter()
             .filter(|&c| self.match_probe_attached(c))
@@ -688,14 +740,20 @@ pub struct RuleMatchSets {
     /// instead of re-parsed per matched element (the old cascade called
     /// `compile_rule_selector` per element x matched rule).
     pub specificity: Vec<Option<u32>>,
-    /// Pseudo-element rules (`div::before { ... }`), keyed by rule index.
-    /// A rule carries at most one kind (the suffix sits on the single
-    /// selector), and its hits live in [`RuleMatchSets::pseudo_hits`] so
-    /// the normal cascade never applies the base compound to real elements.
-    pub pseudo_kinds: HashMap<usize, PseudoKind>,
-    /// Pseudo-element rule hit sets, same shape as `hits` but keyed by the
-    /// rule indexes present in `pseudo_kinds`.
-    pub pseudo_hits: HashMap<usize, Vec<usize>>,
+    /// Pseudo-element rule hit sets, slot-indexed (0 = `::before`, 1 =
+    /// `::after`): each rule's comma list routes its pseudo sub-selectors
+    /// per slot, so `.row:after,.row:before` fills both slots from one
+    /// rule while `.d3 p,.d3:after` feeds the normal cascade its `p`.
+    pub pseudo_hits: HashMap<usize, [Vec<usize>; 2]>,
+}
+
+/// Per-rule pseudo-element routing after comma-list splitting: the bases
+/// of the rule's `::before`/`::after` sub-selectors with their suffixes
+/// stripped, kept apart from [`RuleIndex::entries`]' plain sub-selectors so
+/// the normal cascade never applies a pseudo base to real elements.
+struct PseudoRouting {
+    before: Option<SelectorList<DitingSelector>>,
+    after: Option<SelectorList<DitingSelector>>,
 }
 
 /// The compiled selector-side state a match run probes against: parsed
@@ -709,7 +767,7 @@ pub(crate) struct RuleIndex {
     by_class: HashMap<String, Vec<usize>>,
     by_tag: HashMap<String, Vec<usize>>,
     unkeyed: Vec<usize>,
-    pseudo_kinds: HashMap<usize, PseudoKind>,
+    pseudo_routing: Vec<Option<PseudoRouting>>,
     quirks: bool,
     /// Some rule bears `:has()` (see [`selector_bears_has`]): matching is
     /// transitive, so the incremental sync widens its ancestor-chain

@@ -9215,19 +9215,15 @@ fn compute_styles_impl(
                 node_rules[hi].push((ri, spec));
             }
         }
-        if let Some(kind) = sets.pseudo_kinds.get(&ri) {
-            if let (Some(spec), Some(hits)) = (spec, sets.pseudo_hits.get(&ri)) {
-                let slot = match kind {
-                    crate::diting_dom::selector::PseudoKind::Before => 0,
-                    crate::diting_dom::selector::PseudoKind::After => 1,
-                };
+        if let (Some(spec), Some(slots)) = (spec, sets.pseudo_hits.get(&ri)) {
+            for (slot, hits) in slots.iter().enumerate() {
                 for &hi in hits {
                     node_pseudo[hi][slot].push((ri, spec));
                 }
             }
         }
     }
-    let has_pseudo = !sets.pseudo_kinds.is_empty();
+    let has_pseudo = !sets.pseudo_hits.is_empty();
     let t_buckets = t_styles.elapsed();
 
     let mut out = HashMap::new();

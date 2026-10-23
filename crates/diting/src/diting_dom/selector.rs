@@ -1041,12 +1041,3 @@ pub use match_index::RuleMatchSets;
 pub(crate) use match_index::{MatchCacheBox, MatchDirty};
 
 
-/// The pseudo-element suffix a rule selector may end with. Single-colon
-/// legacy spellings (`:before`/`:after`) fold into the same kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PseudoKind {
-    Before,
-    After,
-}
-
-

@@ -1622,15 +1622,18 @@ mod selector_tests {
         assert!(!sets.hits.contains_key(&2));
     }
 
-    // ---- pseudo-element rule routing (::before/::after v1) ----
-    use crate::diting_dom::selector::PseudoKind;
+    // ---- pseudo-element rule routing (::before/::after v1, #312) ----
 
     #[test]
     fn pseudo_element_rules_route_out_of_normal_hits() {
         let tree = parse_html(r#"<div class="row">x</div><p class="row">y</p>"#);
         let sets = tree.rule_match_sets(&[".row:after"]);
-        assert_eq!(sets.pseudo_kinds.get(&0), Some(&PseudoKind::After));
-        assert_eq!(sets.pseudo_hits.get(&0).map(|v| v.len()), Some(2));
+        let slots = sets.pseudo_hits.get(&0);
+        assert_eq!(
+            slots.map(|s| (s[0].len(), s[1].len())),
+            Some((0, 2)),
+            "::after routes to slot 1 alone"
+        );
         assert!(
             !sets.hits.contains_key(&0),
             "pseudo rule must never reach the normal cascade"
@@ -1641,27 +1644,56 @@ mod selector_tests {
     fn pseudo_suffix_spellings_and_case() {
         let tree = parse_html(r#"<ul><li id="a">one</li><li id="b">two</li></ul>"#);
         let sets = tree.rule_match_sets(&["li::before", "li:after", ".LI:BEFORE"]);
-        assert_eq!(sets.pseudo_kinds.get(&0), Some(&PseudoKind::Before));
-        assert_eq!(sets.pseudo_kinds.get(&1), Some(&PseudoKind::After));
-        assert_eq!(sets.pseudo_hits.get(&0).map(|v| v.len()), Some(2));
+        assert_eq!(sets.pseudo_hits.get(&0).map(|s| s[0].len()), Some(2));
+        assert_eq!(sets.pseudo_hits.get(&1).map(|s| s[1].len()), Some(2));
         // The suffix matches case-insensitively but the base keeps the
         // author's case, so class matching stays case-sensitive: routing
         // is orthogonal to matching.
-        assert_eq!(sets.pseudo_kinds.get(&2), Some(&PseudoKind::Before));
         assert!(!sets.pseudo_hits.contains_key(&2), ".LI matches nothing");
     }
 
     #[test]
-    fn comma_lists_and_non_trailing_suffixes_stay_dead() {
-        let tree = parse_html(r##"<a id="x" href="#">l</a><b class="b">t</b>"##);
-        let sets = tree.rule_match_sets(&["a::before, b", ".b a::before:hover", "a::before .b"]);
-        assert!(
-            sets.pseudo_kinds.is_empty(),
-            "comma list / non-trailing suffix must not route"
+    fn comma_lists_route_per_sub_selector() {
+        // Bootstrap 3's clearfix family: giant comma lists where SOME
+        // sub-selectors carry ::after/::before. Pre-#312 the whole rule
+        // stayed dead; now each part routes by itself.
+        let tree = parse_html(r#"<div class="row"><p>hi</p></div><section class="s"></section>"#);
+        let sets = tree.rule_match_sets(&[".row:after,.row:before", ".row p,.row:after"]);
+        // Rule 0: both slots carry the .row div, nothing in normal hits.
+        let r0 = sets.pseudo_hits.get(&0).expect("clearfix rule routed");
+        assert_eq!(r0[0].len(), 1, "before slot");
+        assert_eq!(r0[1].len(), 1, "after slot");
+        assert!(!sets.hits.contains_key(&0), "no plain part in rule 0");
+        // Rule 1: the `p` part feeds the normal cascade, the ::after part
+        // the pseudo one — same rule, two cascades.
+        assert_eq!(sets.hits.get(&1).map(|v| v.len()), Some(1), "plain p hits");
+        assert_eq!(
+            sets.pseudo_hits.get(&1).map(|s| s[1].len()),
+            Some(1),
+            "after slot of the mixed rule"
         );
-        assert!(sets.pseudo_hits.is_empty());
-        assert!(!sets.hits.contains_key(&0), "comma'd pseudo list never matches real elements");
-        assert!(!sets.hits.contains_key(&2), "descendant-of-pseudo never matches real elements");
+        assert_eq!(
+            sets.pseudo_hits.get(&1).map(|s| s[0].len()),
+            Some(0),
+            "mixed rule has no before part"
+        );
+        // The never-matching section stays out of every set.
+        let section = tree
+            .query_selector_all_from(tree.document(), "section")
+            .unwrap()[0]
+            .index();
+        for slots in sets.pseudo_hits.values() {
+            assert!(!slots.iter().any(|v| v.contains(&section)));
+        }
+    }
+
+    #[test]
+    fn non_trailing_suffixes_stay_dead() {
+        let tree = parse_html(r##"<a id="x" href="#">l</a><b class="b">t</b>"##);
+        let sets = tree.rule_match_sets(&[".b a::before:hover", "a::before .b"]);
+        assert!(sets.pseudo_hits.is_empty(), "no trailing suffix, no routing");
+        assert!(!sets.hits.contains_key(&0), "pseudo-class after pseudo-element is invalid CSS");
+        assert!(!sets.hits.contains_key(&1), "descendant-of-pseudo never matches real elements");
     }
 }
 }

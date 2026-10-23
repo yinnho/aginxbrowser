@@ -5883,8 +5883,9 @@ fn resolve_shadow_len(val: &str, fonts: &FontCtx) -> Option<f32> {
 }
 
 /// Split on commas outside any parenthesis or quoted string — `rgb(1, 2, 3)`
-/// stays one piece, `counters(x, ", ")` keeps its separator whole.
-fn split_top_level_commas(value: &str) -> Vec<String> {
+/// stays one piece, `counters(x, ", ")` keeps its separator whole. Also the
+/// selector-side splitter for the match index's pseudo-element routing.
+pub(crate) fn split_top_level_commas(value: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut depth = 0usize;
     let mut start = 0usize;
