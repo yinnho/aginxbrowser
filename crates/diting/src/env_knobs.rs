@@ -171,6 +171,18 @@ pub fn js_busy_limit_secs() -> u64 {
 /// don't observe each other's env writes.
 pub static EPHEMERAL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// #278 on-demand layout: a session at rest owns no live layout tree. The
+/// session actor releases the memoized layout run at every command
+/// boundary — idle RAM is the DOM plus the stamp counters, and the next
+/// geometry read or paint rebuilds the run (rev-quiet, so the band frame
+/// cache's damage signature keeps hitting). `AGINXBROWSER_LAYOUT_RELEASE=0`
+/// restores the old retain-across-commands posture: the emergency revert,
+/// and the A/B baseline for the N-session soak.
+pub fn layout_release() -> bool {
+    !std::env::var("AGINXBROWSER_LAYOUT_RELEASE")
+        .is_ok_and(|v| v.trim() == "0")
+}
+
 /// When set, no credential-bearing state touches the disk: the shared
 /// cookie jar and per-origin localStorage stay memory-only for the life of
 /// the process (the shared jar exists to blunt CAPTCHA rates across

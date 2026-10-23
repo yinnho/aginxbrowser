@@ -477,6 +477,19 @@ impl Page {
             .unwrap_or(0)
     }
 
+    /// #278 on-demand layout policy: drop the memoized layout run without
+    /// touching the invalidation rev above. The session actor calls this
+    /// at every command boundary — a session at rest owns no live layout
+    /// tree; the DOM, the epoch/rev stamps, and the host-side band frame
+    /// cache survive, and the next geometry read or paint rebuilds the
+    /// run. No-op before the first navigation.
+    #[cfg(feature = "screenshot")]
+    pub fn release_layout(&self) {
+        if let Some(js) = self.js.as_ref() {
+            js.with_state(|st| st.release_layout_quiet());
+        }
+    }
+
     /// Drop the override and return to the persona viewport everywhere.
     pub fn clear_viewport_override(&mut self) {
         self.viewport_override = None;

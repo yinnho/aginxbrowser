@@ -318,6 +318,32 @@
         assert_eq!(p.title, "T");
     }
 
+    /// #278: the command-boundary layout release is rev-quiet — a release
+    /// changes no pixels, so the damage signature's rev half must hold
+    /// (the band frame cache keeps hitting across it) — and the next
+    /// geometry read rebuilds byte-identical output from the same DOM.
+    #[tokio::test(flavor = "current_thread")]
+    async fn release_layout_is_rev_quiet_and_rebuilds_identically() {
+        let mut p = test_page();
+        p.navigate("data:text/html,%3Cdiv%20id%3Dx%20style%3D%22width%3A120px%3Bheight%3A40px%22%3Eword%3C%2Fdiv%3E")
+            .await
+            .unwrap();
+        let probe = "JSON.stringify(document.getElementById('x').getBoundingClientRect())";
+        let first = p.evaluate(probe);
+        let rev = p.layout_rev();
+        p.release_layout();
+        assert_eq!(
+            p.layout_rev(),
+            rev,
+            "release must not move the invalidation rev — no pixels changed"
+        );
+        let second = p.evaluate(probe);
+        assert_eq!(
+            second, first,
+            "geometry rebuilds identically after the release"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn classic_script_cannot_see_later_parser_scripts() {
         // #120: KISSY-style loaders locate their own <script> by reverse-

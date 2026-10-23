@@ -1153,6 +1153,18 @@ pub(super) fn session_thread(
                     // The post-command drain happens in the pump arm above
                     // (stretched slice, preemptible by the next command).
                     drain_console(&mut page, &mut console_ring);
+                    // #278 on-demand layout: at a command boundary the
+                    // session owns no live layout tree — idle RAM is the
+                    // DOM plus the stamp counters, and the next geometry
+                    // read or paint rebuilds the run. The release is
+                    // rev-quiet, so the band frame cache's damage
+                    // signature (#189) keeps hitting across it.
+                    // AGINXBROWSER_LAYOUT_RELEASE=0 restores the old
+                    // retain-across-commands posture.
+                    #[cfg(feature = "screenshot")]
+                    if diting::env_knobs::layout_release() {
+                        page.inner.release_layout();
+                    }
                     drain_budget = 1500;
                 }
             })

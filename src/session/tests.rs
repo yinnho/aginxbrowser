@@ -4949,3 +4949,96 @@
              (see batch246 / #251 — bare runs fail 30+ geometry tests misleadingly)"
         );
     }
+
+    /// #278 on-demand layout at the session boundary: every command end
+    /// releases the memoized layout run (rev-quiet). Two pins: a geometry
+    /// read across two Eval commands rebuilds identical output, and a
+    /// default-path screenshot taken after an intervening Eval still hits
+    /// the band frame cache (#189) instead of repainting — the release
+    /// must not move the damage signature.
+    #[tokio::test]
+    async fn command_boundaries_release_layout_keeping_geometry_and_frames() {
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some("about:blank"),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+        let armed = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: r#"document.body.innerHTML = '<div style="width:100px;height:80px;background:#ff0000"></div>'; 'armed'"#
+                    .to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(armed.as_str().unwrap_or(""), "armed");
+
+        // gBCR forces a layout run, which this command's boundary then
+        // releases; the same read in a NEW command must rebuild identically.
+        let probe = "document.querySelector('div').getBoundingClientRect().width + ''";
+        let w1 = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: probe.to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        let w2 = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: probe.to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(w2, w1, "geometry across a released boundary");
+        assert_eq!(w1.as_str().unwrap_or(""), "100");
+
+        // Frame cache across a command boundary: shot1 paints cold, an
+        // eval that cannot touch pixels releases at its boundary (the
+        // only thing between the two shots), shot2 must hit the cache.
+        let shot = |reply| SessionCommand::Screenshot {
+            width: None,
+            height: None,
+            full_page: false,
+            selector: None,
+            selector_all: false,
+            dpr: None,
+            reply,
+        };
+        let pixels = |resp: &str| {
+            serde_json::from_str::<serde_json::Value>(resp).unwrap()["image_base64"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let shot1 = mgr.send(&sid, shot).await.unwrap();
+        let _ = mgr
+            .send(&sid, |reply| SessionCommand::Eval {
+                script: "1 + 1".to_string(),
+                timeout_ms: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        let shot2 = mgr.send(&sid, shot).await.unwrap();
+        assert_eq!(
+            pixels(&shot2),
+            pixels(&shot1),
+            "release at the Eval boundary must not break the band frame cache hit"
+        );
+
+        assert!(
+            mgr.close_and_wait(&sid).await,
+            "session thread must ack close"
+        );
+    }

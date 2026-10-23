@@ -467,6 +467,21 @@ impl JsState {
         self.layout_rev.set(self.layout_rev.get().wrapping_add(1));
     }
 
+    /// #278 on-demand layout: clear the same caches [`Self::drop_layout`]
+    /// clears, WITHOUT moving the invalidation rev. A release changes no
+    /// pixels — the next solve rebuilds byte-identical output from the
+    /// same DOM and viewport — so damage-signature consumers (the band
+    /// frame cache, #189) must keep hitting across it. Every
+    /// [`Self::drop_layout`] caller is a real content change; this one's
+    /// only caller is the session actor's command boundary.
+    #[cfg(feature = "screenshot")]
+    pub(crate) fn release_layout_quiet(&self) {
+        *self.layout_cache.borrow_mut() = None;
+        *self.geometry_cache.borrow_mut() = None;
+        *self.iframe_layout_cache.borrow_mut() = None;
+        *self.sticky_shift_cache.borrow_mut() = None;
+    }
+
     pub fn new() -> Self {
         JsState {
             dom: None,
