@@ -11,13 +11,13 @@
 //! Still on the zone path (#313 remaining): float widths beyond px/%
 //! (em/calc); hosts whose width comes from their content (float/abspos/
 //! flex-item hosts need float-aware intrinsic sizing); and center/right
-//! hosts whose inline content is not bare text (inline elements hoist
-//! their run as one unbreakable atom into the wrapper, which cannot take
-//! the float slots — the mixed-run float face, tracked separately).
-//! Center/right hosts of bare text wrap: the promote is suppressed for
-//! the wrap host and float_lines shifts each line inside its float slot;
-//! nowrap/pre runs beside floats stay left-aligned until measure covers
-//! their line shapes.
+//! hosts whose inline content does not mount directly (an inline-block,
+//! or several/nested inline elements, rides the run wrapper as one atom
+//! that cannot take the float slots). Center/right hosts of bare text —
+//! and of one plain inline element of pure text (#314) — wrap: the
+//! promote is suppressed for the wrap host and float_lines shifts each
+//! line inside its float slot; nowrap/pre runs beside floats stay
+//! left-aligned until measure covers their line shapes.
 //!
 //! Default on since the real-site gray round came back clean (bs3 docs,
 //! a float-free portal, our own blog): opt out with
@@ -33,7 +33,7 @@ use std::sync::OnceLock;
 use taffy::prelude::*;
 use taffy::{Clear, Float};
 
-use crate::diting_css::{ClearSide, ComputedStyle, Display as CssDisplay, FloatSide, Length, PositionMode, TextAlign};
+use crate::diting_css::{ClearSide, ComputedStyle, Display as CssDisplay, FloatSide, Length, PositionMode, TextAlign, WhiteSpace};
 use crate::diting_dom::tree::{DomTree, NodeId};
 
 thread_local! {
@@ -85,20 +85,50 @@ pub(super) fn eligible(
     }
     if matches!(container.physical_text_align(), Some(TextAlign::Center) | Some(TextAlign::Right)) {
         // Center/right hosts wrap (#313) with the promote suppressed and
-        // float_lines shifting each line inside its slot — but only while
-        // their inline content is BARE TEXT. An inline element (span/a/b)
-        // hoists its run as one unbreakable atom into the wrapper, which
-        // cannot take the float slots (the mixed-run float face, its own
-        // issue); those hosts keep the zone path until it lands.
+        // float_lines shifting each line inside its slot — while their
+        // inline content mounts directly: bare text, or one plain inline
+        // element of pure text (#314 mounts that run leaf beside the float
+        // like bare text). Anything that would ride the run wrapper as one
+        // atom — an inline-block, several inline elements, an element
+        // among text, nested elements — cannot take the slots; those hosts
+        // keep the zone path.
         if container.pseudos.is_some() {
             return false;
         }
+        let mut text = false;
+        let mut elems = 0;
         for cid in child_ids {
-            let inline_elem = !tree.with_node(*cid, |n| n.is_text()).unwrap_or(false)
-                && styles.get(cid).is_some_and(|s| matches!(s.display.unwrap_or(CssDisplay::Block), CssDisplay::Inline | CssDisplay::InlineBlock));
-            if inline_elem {
+            if tree.with_node(*cid, |n| n.is_text()).unwrap_or(false) {
+                let ws_only = tree
+                    .with_node(*cid, |n| n.text_content_of_text_node().is_some_and(|t| t.trim().is_empty()))
+                    .unwrap_or(false);
+                text |= !ws_only;
+                continue;
+            }
+            let Some(s) = styles.get(cid) else { return false };
+            let display = s.display.unwrap_or(CssDisplay::Block);
+            if display == CssDisplay::Inline {
+                // The builder only mounts the element directly while its run
+                // soft-wraps; a nowrap/pre run rides the wrapper as one atom
+                // and stays zone.
+                let ws = s.white_space.unwrap_or(WhiteSpace::Normal);
+                if ws.no_soft_wrap() || ws.preserves_newlines() {
+                    return false;
+                }
+                let pure_text = tree
+                    .children(*cid)
+                    .iter()
+                    .all(|g| tree.with_node(*g, |n| n.is_text()).unwrap_or(false));
+                if !pure_text {
+                    return false;
+                }
+                elems += 1;
+            } else if display == CssDisplay::InlineBlock {
                 return false;
             }
+        }
+        if elems > 1 || (elems == 1 && text) {
+            return false;
         }
     }
     // A box whose width comes from its content (floated, absolutely

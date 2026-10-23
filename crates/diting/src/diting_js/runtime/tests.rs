@@ -20692,7 +20692,8 @@ fn float_wrap_center_right_hosts() {
         </style>
         <div class="h" id="c" style="text-align:center"><div class="f" id="fc"></div>the quick brown fox jumps over the lazy dog again</div>
         <div class="h" id="r" style="text-align:right"><div class="f" id="fr"></div>the quick brown fox jumps over the lazy dog again</div>
-        <div class="h" id="s" style="text-align:center"><div class="f" id="fs"></div><span>the quick brown fox jumps over the lazy dog again</span></div>"#,
+        <div class="h" id="s" style="text-align:center"><div class="f" id="fs"></div><span>the quick brown fox jumps over the lazy dog again</span></div>
+        <div class="h" id="l"><div class="f" id="fl"></div><span>the quick brown fox jumps over the lazy dog again</span></div>"#,
     );
     let lines = |rt: &mut JsRuntime, sel: &str| -> Vec<(f64, f64, f64)> {
         let v = rt
@@ -20739,10 +20740,40 @@ fn float_wrap_center_right_hosts() {
     for (l, _t, w) in lines(&mut rt, "#r") {
         assert!((l + w - 400.0).abs() <= 1.5, "right line at [{},{}] must end at 400", l, l + w);
     }
-    // The span host stays on the zone path (mixed-run float face pending):
-    // lines sit inside the band, never across the float.
-    for (l, _t, _w) in lines(&mut rt, "#s") {
-        assert!(l >= 99.0, "zone-posture span line at left {} must not cross the float", l);
+    // #314: a lone plain inline element mounts directly beside the float,
+    // so the span host wraps too — same band-relative centering as the
+    // bare-text host. Floats escape into the shared context and chain, so
+    // the band's left edge is read off the laid-out float, not assumed.
+    let span_host_top = rt
+        .evaluate("Math.round(document.querySelector('#s').getBoundingClientRect().top)")
+        .unwrap()
+        .as_f64()
+        .unwrap_or(0.0);
+    let span_float_left = left_of(&mut rt, "#fs");
+    for (l, t, w) in lines(&mut rt, "#s span") {
+        let band = if t - span_host_top < 60.0 { (span_float_left + 100.0, 400.0) } else { (0.0, 400.0) };
+        let expect = band.0 + (band.1 - band.0 - w) / 2.0;
+        assert!(
+            (l - expect).abs() <= 1.5,
+            "span center line at left {} width {} must sit at {} in band {:?}",
+            l,
+            w,
+            expect,
+            band
+        );
+    }
+    // The left-aligned span host (#314's original face: span text used to
+    // ride the wrapper as one max-content atom straight across the float):
+    // beside the float the lines start at its right edge, below it at 0.
+    let l_host_top = rt
+        .evaluate("Math.round(document.querySelector('#l').getBoundingClientRect().top)")
+        .unwrap()
+        .as_f64()
+        .unwrap_or(0.0);
+    let l_float_left = left_of(&mut rt, "#fl");
+    for (l, t, _w) in lines(&mut rt, "#l span") {
+        let expect = if t - l_host_top < 60.0 { l_float_left + 100.0 } else { 0.0 };
+        assert!((l - expect).abs() <= 1.5, "span line at left {} must sit at {}", l, expect);
     }
 }
 

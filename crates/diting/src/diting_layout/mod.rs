@@ -3960,6 +3960,12 @@ fn build_element_inner(
     // unassigned light children and slot boxes never build).
     let child_ids: Vec<NodeId> = render_children(tree, id);
     let wrap_v2 = float_flow::eligible(tree, styles, id, &style, &child_ids);
+    // #314: beside real floats a lone plain inline element mounts directly
+    // (its run leaf then takes the float slots like bare text). Anywhere
+    // else the wrapper keeps the span's box content-driven — its own
+    // width, scrollWidth overflow — which is the geometry spans owe.
+    let float_host = wrap_v2
+        && child_ids.iter().any(|cid| styles.get(cid).is_some_and(|s| s.float_side.is_some() && s.display != Some(CssDisplay::None)));
 
     // In a flex/grid container every element child is blockified into its own
     // item (CSS flex-item blockification); runs only form in block/inline
@@ -4034,6 +4040,39 @@ fn build_element_inner(
                 text_src::register(leaf, text_src::seg_ranges(&pending, &seg_lens));
                 direct.push(leaf);
                 return;
+            }
+        }
+        // A lone plain inline element around the whole run (#314, float
+        // hosts only): the hoist left exactly one Run leaf in Nodes — a
+        // plain text run like the pure branch above, so mount it directly
+        // instead of wrapping it. In the wrapper it is one max-content
+        // atom: beside a float it cannot take a slot (drops past the
+        // float) and the painter re-folds it across the float; mounted
+        // directly it rides the same float_lines machinery as bare text.
+        // Not beside floats the wrapper stays — it keeps the span's box
+        // content-driven (its width, its overflow) and pins nowrap/pre
+        // runs; inline-block boxes and mixed content are atomic by design.
+        // Formatting whitespace around the element contributes no glyphs
+        // (the pure branch's call for all-whitespace runs), and
+        // pretty-printed markup always has some: `\n  <span>x</span>\n`
+        // mounts directly.
+        let content_segs: Vec<&RunSeg> = segs
+            .iter()
+            .filter(|s| {
+                !matches!(s, RunSeg::Text(t, .., w, _, _) if t.trim().is_empty() && !w.preserves_spaces() && !w.preserves_newlines())
+            })
+            .collect();
+        if float_host {
+            if let [RunSeg::Nodes(children)] = &content_segs[..] {
+                if children.len() == 1
+                    && matches!(
+                        taffy_tree.get_node_context(children[0]),
+                        Some(TextLeaf::Run { ws, .. }) if !ws.no_soft_wrap() && !ws.preserves_newlines()
+                    )
+                {
+                    direct.push(children[0]);
+                    return;
+                }
             }
         }
         // #158: the element's own white-space seeds the fold — the
@@ -4239,7 +4278,7 @@ fn build_element_inner(
                 }
             }
             collapse_adjacent_sibling_margins(taffy_tree, styles, node_map, &direct);
-            let mut taffy_style = to_taffy_style(&style, pct_height_resolves(tree, styles, id));
+            let taffy_style = to_taffy_style(&style, pct_height_resolves(tree, styles, id));
             if is_alignment_promote(&taffy_style) {
                 stretch_block_children_in_aligned_parent(taffy_tree, node_map, styles, &direct);
             }
