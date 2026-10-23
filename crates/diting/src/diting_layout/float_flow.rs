@@ -10,9 +10,10 @@
 //!
 //! Still on the zone path (#313 remaining): hosts whose width comes from
 //! their content (float/abspos/flex-item hosts need float-aware intrinsic
-//! sizing), and a nowrap/pre inline element in a center/right host — it
-//! rides the run wrapper as an unwrappable atom that has no band-relative
-//! alignment hook yet. Float widths of every authored shape ride the wrap
+//! sizing), and a nowrap/pre inline element among OTHER inline content —
+//! the run folds nowrap onto the wrapper atom, which cannot take slots
+//! (the approximation Chrome beats with run breaks at the element
+//! boundary). Float widths of every authored shape ride the wrap
 //! path: px/% as-is, em/rem folded at cascade, calc repaired between two
 //! solves (cache-busted when the fixup is a float), sizing keywords
 //! measured at build. Center/right hosts wrap in every mounting shape:
@@ -22,9 +23,14 @@
 //! whose inline_flow placement shifts whole lines from the wrapper's
 //! justify (the host's text-align is baked there at flush_run; the
 //! promote is suppressed for the wrap host). nowrap/pre runs take the
-//! slots too: each hard line starts at its band and overflows right
-//! (Chrome keeps a nowrap line on the float's line instead of dropping
-//! below; a pre line below the float returns to the edge). A plain block
+//! slots too, and Chrome splits them by who owns the box: BARE text
+//! (the host's own, a nowrap p) starts each hard line at its band and
+//! overflows right — Chrome keeps the line on the float's line — while a
+//! nowrap/pre ELEMENT box (a lone span, `atomic` on its run leaf) is
+//! unbreakable and drops below the float when it fits no band, its
+//! later hard lines continuing down (float_lines' atomic walk; the
+//! walk's fallback slot answers with the query y, so clear reports the
+//! real drop depth). A plain block
 //! inside a wrap host (a centered p beside the host's float) inherits the
 //! environment too: in CSS only a BFC boundary stops line boxes from
 //! owing the ancestor floats a band, so mod.rs demotes the flex-column
@@ -121,25 +127,40 @@ pub(super) fn eligible(
         // inline elements, an element among text, an inline-block — ride
         // the run wrapper, whose inline_flow placement now shifts whole
         // lines from the wrapper's justify. A nowrap/pre inline element
-        // stays zone: its wrapper is an unwrappable atom with no
-        // band-relative alignment.
+        // mounts directly too — an element box too wide for its band
+        // drops below the float (float_lines' atomic walk) — but only as
+        // the host's SOLE inline element: among other inline content the
+        // run folds nowrap onto the wrapper atom, which cannot take
+        // slots.
         if container.pseudos.is_some() {
             return false;
         }
+        let mut inline_els = 0usize;
+        let mut unbreakable_els = 0usize;
+        let mut live_text = false;
         for cid in child_ids {
             if tree.with_node(*cid, |n| n.is_text()).unwrap_or(false) {
+                // Whitespace-only text segs drop out of the sole-element
+                // check downstream (content_segs); real words do not.
+                if tree.with_node(*cid, |n| n.text_content_of_text_node().is_some_and(|t| !t.trim().is_empty())) == Some(true) {
+                    live_text = true;
+                }
                 continue;
             }
             let Some(s) = styles.get(cid) else { return false };
             let display = s.display.unwrap_or(CssDisplay::Block);
             if display == CssDisplay::Inline {
+                inline_els += 1;
                 let ws = s.white_space.unwrap_or(WhiteSpace::Normal);
                 if ws.no_soft_wrap() || ws.preserves_newlines() {
-                    return false;
+                    unbreakable_els += 1;
                 }
             } else if !matches!(display, CssDisplay::Block | CssDisplay::InlineBlock | CssDisplay::Flex | CssDisplay::Grid) {
                 return false;
             }
+        }
+        if unbreakable_els > 0 && (inline_els > 1 || live_text) {
+            return false;
         }
     }
     // A box whose width comes from its content (floated, absolutely

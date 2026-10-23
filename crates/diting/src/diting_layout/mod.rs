@@ -117,6 +117,12 @@ enum TextLeaf {
         /// scrollWidth grows for free), paint wraps at +inf; `pre`/
         /// `pre-line` add hard breaks, `pre*` preserve space runs.
         ws: WhiteSpace,
+        /// This run is an inline ELEMENT's box (its leaves were hoisted
+        /// from one), not a bare text run. Beside a float the two differ
+        /// (#313): bare nowrap/pre text overflows its band in place, an
+        /// unbreakable element box too wide for the band drops below the
+        /// float (float_lines walks it past the segment).
+        atomic: bool,
         /// The run's physical `text-align` (inherited from the owning
         /// block). Line alignment normally rides the block→flex promote
         /// (style_map); the float wrap path keeps its host a block
@@ -2208,7 +2214,7 @@ fn build_flow_column(
                 let run_clamp = None;
                 if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                     float_flow::run_style(),
-                    TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, align: TextAlign::Left, ellipsis: run_ellipsis, line_clamp: run_clamp, tokens: std::cell::RefCell::new(None), small_caps: *sc, han: *han, clip_src: clip },
+                    TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, atomic: false, align: TextAlign::Left, ellipsis: run_ellipsis, line_clamp: run_clamp, tokens: std::cell::RefCell::new(None), small_caps: *sc, han: *han, clip_src: clip },
                 ) {
                     text_src::register(leaf, text_src::seg_ranges(&pending, &seg_lens));
                     flow_children.push(leaf);
@@ -3672,6 +3678,7 @@ fn pseudo_inline_run_leaf(
                 mono: p.font_family.as_deref().is_some_and(crate::diting_css::wants_monospace),
                 word_spacing: p.word_spacing.unwrap_or(0.0),
                 ws,
+                atomic: false,
                 align: p.physical_text_align().unwrap_or(TextAlign::Left),
                 ellipsis: false,
                 line_clamp: None,
@@ -3786,6 +3793,7 @@ fn pseudo_leaf(
                                     mono: *mono,
                                     word_spacing: *word_spacing,
                                     ws: *ws,
+                                    atomic: false,
                                     align: *align,
                                     ellipsis: *ellipsis,
                                     line_clamp: *line_clamp,
@@ -3893,6 +3901,7 @@ fn pseudo_leaf(
                                     .is_some_and(crate::diting_css::wants_monospace),
                                 word_spacing: p.word_spacing.unwrap_or(0.0),
                                 ws: p.white_space.unwrap_or(WhiteSpace::Normal),
+                                atomic: false,
                                 align: p.physical_text_align().unwrap_or(TextAlign::Left),
                                 ellipsis: false,
                                 line_clamp: None,
@@ -4066,7 +4075,13 @@ fn build_element_inner(
             let run_align = styles.get(&id).and_then(|s| s.physical_text_align()).unwrap_or(TextAlign::Left);
             if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                 float_flow::run_style(),
-                TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, align: run_align, ellipsis: run_ellipsis, line_clamp: run_clamp, tokens: std::cell::RefCell::new(None), small_caps: *sc, han: *han, clip_src: clip },
+                TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws,
+                // An inline ELEMENT's run is the element's box (the box
+                // dissolves at hoisting): beside a float an unbreakable
+                // box drops below the band it cannot fit — bare text
+                // overflows in place (#313).
+                atomic: style.display == Some(CssDisplay::Inline),
+                align: run_align, ellipsis: run_ellipsis, line_clamp: run_clamp, tokens: std::cell::RefCell::new(None), small_caps: *sc, han: *han, clip_src: clip },
             ) {
                 text_src::register(leaf, text_src::seg_ranges(&pending, &seg_lens));
                 direct.push(leaf);
@@ -4093,12 +4108,18 @@ fn build_element_inner(
                 !matches!(s, RunSeg::Text(t, .., w, _, _) if t.trim().is_empty() && !w.preserves_spaces() && !w.preserves_newlines())
             })
             .collect();
-        if float_host {
+        if float_host || float_flow::in_env() {
             if let [RunSeg::Nodes(children)] = &content_segs[..] {
                 if children.len() == 1
                     && matches!(
                         taffy_tree.get_node_context(children[0]),
-                        Some(TextLeaf::Run { ws, .. }) if !ws.no_soft_wrap() && !ws.preserves_newlines()
+                        // Foldable mounts beside the host's own floats; a
+                        // nowrap/pre element mounts in ANY float environment
+                        // — an inherited band counts too (a p inside the
+                        // host) — because only float_lines can walk its
+                        // unbreakable lines into the slots.
+                        Some(TextLeaf::Run { ws, .. })
+                            if float_host || ws.no_soft_wrap() || ws.preserves_newlines()
                     )
                 {
                     direct.push(children[0]);
@@ -7989,8 +8010,8 @@ pub fn layout_collect_with_images(
             };
             if let Some(slots) = slotted {
                 let src = text_src::lookup(node);
-                for (i, line) in float_lines::split(&text, &toks, *ws, &slots).into_iter().enumerate() {
-                    let (lx, ly) = ((abs.0 + line.slot.x) * xf.a + xf.e, (abs.1 + i as f32 * *line_height) * xf.d + xf.f);
+                for line in float_lines::split(&text, &toks, *ws, *line_height, &slots) {
+                    let (lx, ly) = ((abs.0 + line.slot.x) * xf.a + xf.e, (abs.1 + line.slot.y) * xf.d + xf.f);
                     items.push(PaintItem::Text {
                         text: line.text,
                         font_size: font_size * xf.d,

@@ -20887,6 +20887,70 @@ six</p></div>
     assert!((lf[0][0] - expect).abs() <= 1.5, "centered nowrap in the band: {} vs {}", lf[0][0], expect);
 }
 
+/// A nowrap/pre inline ELEMENT's box drops below a float it cannot fit
+/// (#313): bare nowrap text stays on the float's line and overflows right
+/// (the test above), but an unbreakable element box — a lone span mounted
+/// directly, `atomic` on its run leaf — walks float_lines' slots past the
+/// band, and a pre's later hard lines keep stacking below (Chrome parity,
+/// 2026-10-24: the wide span at (0, 40) in left and center hosts, the
+/// narrow span at its band start, the pre's lines at 40/60/80 all x=0).
+#[cfg(feature = "screenshot")]
+#[test]
+fn float_wrap_nowrap_element_box_drops_below() {
+    let mut rt = setup_runtime(
+        r#"<style>
+          body{margin:0}
+          .h{width:400px;height:60px;font:16px/20px monospace}
+          .tall{height:120px}
+          .f{float:left;width:100px;height:40px;background:#fa0}
+          p{margin:0}
+          span{white-space:nowrap}
+        </style>
+        <div class="h" id="s"><div class="f"></div><span>alpha beta gamma delta epsilon zeta eta the</span></div>
+        <div class="h" id="sf"><div class="f"></div><span>abc def</span></div>
+        <div class="h" id="c" style="text-align:center"><div class="f"></div><span>alpha beta gamma delta epsilon zeta eta the</span></div>
+        <div class="h" id="cf" style="text-align:center"><div class="f"></div><span>abc def</span></div>
+        <div class="h tall" id="pw"><div class="f"></div><span style="white-space:pre">alpha beta gamma delta epsilon zeta eta wide hard line
+two
+three</span></div>"#,
+    );
+    let lines = |rt: &mut JsRuntime, sel: &str| -> Vec<Vec<f64>> {
+        let v = rt
+            .evaluate(&format!(
+                r#"(()=>{{const h=document.querySelector('{sel}');const ht=h.getBoundingClientRect().top;const el=h.querySelector('span');const r=document.createRange();r.selectNodeContents(el);return JSON.stringify([...r.getClientRects()].filter(b=>b.width>1).map(b=>[Math.round(b.left*10)/10,Math.round((b.top-ht)*10)/10,Math.round(b.width*10)/10]));}})()"#
+            ))
+            .unwrap();
+        serde_json::from_str(v.as_str().unwrap_or("[]")).unwrap_or_default()
+    };
+    // A nowrap span too wide for the band drops below the float (40px
+    // tall) instead of overflowing the band in place like bare text.
+    for sel in ["#s", "#c"] {
+        let l = lines(&mut rt, sel);
+        assert_eq!(l.len(), 1, "{}: one unbreakable line, got {:?}", sel, l);
+        assert!((l[0][0] - 0.0).abs() <= 1.0, "{}: dropped line returns to the edge, got {}", sel, l[0][0]);
+        assert!((l[0][1] - 40.0).abs() <= 2.5, "{}: dropped line sits below the float, got {}", sel, l[0][1]);
+    }
+    // A nowrap span that fits stays beside the float — at the band start
+    // in a left host, centered inside the band in a center host.
+    let lf = lines(&mut rt, "#sf");
+    assert_eq!(lf.len(), 1);
+    assert!((lf[0][0] - 100.0).abs() <= 1.0, "fitting span at the band start, got {}", lf[0][0]);
+    assert!(lf[0][1] < 20.0, "fitting span stays beside the float, got {}", lf[0][1]);
+    let lcf = lines(&mut rt, "#cf");
+    assert_eq!(lcf.len(), 1);
+    let expect = 100.0 + (300.0 - lcf[0][2]) / 2.0;
+    assert!((lcf[0][0] - expect).abs() <= 1.5, "centered fitting span: {} vs {}", lcf[0][0], expect);
+    // A pre element's wide first hard line drops, and the later hard
+    // lines keep stacking below the float at the edge.
+    let lp = lines(&mut rt, "#pw");
+    assert_eq!(lp.len(), 3, "pre breaks one line per newline, got {:?}", lp);
+    for (i, l) in lp.iter().enumerate() {
+        assert!((l[0] - 0.0).abs() <= 1.0, "pre line {} at the edge, got {}", i, l[0]);
+        let expect = 40.0 + i as f64 * 20.0;
+        assert!((l[1] - expect).abs() <= 2.5, "pre line {} below the float ({}), got {}", i, expect, l[1]);
+    }
+}
+
 /// A centered host of a MIXED run — text, an inline element, text — wraps
 /// with each line shifting inside its float slot (#314 tail, #313): the run
 /// wrapper's inline_flow placement reads the host's align from its justify

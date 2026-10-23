@@ -655,6 +655,7 @@ mod run_token_memo_tests {
                 mono: false,
                 word_spacing: 0.0,
                 ws: WhiteSpace::Normal,
+                atomic: false,
                 align: TextAlign::Left,
                 ellipsis: false,
                 line_clamp: None,
