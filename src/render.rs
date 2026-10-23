@@ -357,6 +357,10 @@ pub async fn http_fetch(
         sanitize_report,
         xhr: Vec::new(),
         media: collect_media(&html),
+        // Tier 1 has no engine: the cost knobs forced it ineligible, so
+        // their response fields never exist on this path.
+        layout: None,
+        resources: Vec::new(),
     }))
 }
 
@@ -391,8 +395,11 @@ fn tier1_host_blocklisted(url: &str) -> bool {
 /// Decide whether Tier 1 (HTTP) should be attempted at all for this request.
 fn tier1_eligible(req: &crate::FetchRequest) -> bool {
     // capture_xhr reads script-initiated requests — they only exist after
-    // JS runs, so the HTTP tier (no JS) can never serve it.
-    if req.capture_xhr.is_some() {
+    // JS runs, so the HTTP tier (no JS) can never serve it. The cost knobs
+    // (#279) are the same deal: `layout` needs the engine's layout pass,
+    // `resources` fetches bodies through the page's own client — neither
+    // exists on the plain-HTTP tier.
+    if req.capture_xhr.is_some() || req.layout || req.resources {
         return false;
     }
     match req.render_tier {
@@ -582,6 +589,8 @@ mod tests {
             js_extract: None,
             sanitize: true,
             capture_xhr: None,
+            layout: false,
+            resources: false,
         }
     }
 
@@ -597,6 +606,25 @@ mod tests {
         assert!(tier1_eligible(&tier_req(wx, RenderTier::Http)), "explicit http is the caller's call");
         assert!(!tier1_eligible(&tier_req(wx, RenderTier::Browser)));
         assert!(tier1_eligible(&tier_req("https://example.com/a", RenderTier::Auto)));
+    }
+
+    /// #279: the cost knobs need engine machinery (the layout pass, the
+    /// page's own client) that the plain-HTTP tier doesn't have — they
+    /// force the browser tier exactly like capture_xhr.
+    #[test]
+    fn cost_knobs_force_the_browser_tier() {
+        for req in [
+            crate::FetchRequest {
+                layout: true,
+                ..tier_req("https://example.com/a", crate::RenderTier::Auto)
+            },
+            crate::FetchRequest {
+                resources: true,
+                ..tier_req("https://example.com/a", crate::RenderTier::Auto)
+            },
+        ] {
+            assert!(!tier1_eligible(&req));
+        }
     }
 
     #[test]
@@ -915,6 +943,8 @@ mod tests {
             js_extract: None,
             sanitize: true,
             capture_xhr: None,
+            layout: false,
+            resources: false,
         };
         let Err(err) = smart_fetch(req).await else {
             panic!("tier http must refuse the upgrade instead of serving tier browser")

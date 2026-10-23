@@ -68,6 +68,21 @@ pub struct FetchRequest {
     /// browser tier (script-initiated requests only exist post-JS).
     #[serde(default)]
     pub capture_xhr: Option<Vec<String>>,
+    /// Cost knob (#279): force one layout pass after the page settles and
+    /// report page geometry in the `layout` response field. Default false —
+    /// the fetch path never lays out unless something reads geometry
+    /// (post-#278 laziness). Browser tier only: forces `render_tier=browser`
+    /// like `capture_xhr`.
+    #[serde(default)]
+    pub layout: bool,
+    /// Cost knob (#279): fetch the page's image/media subresource bodies
+    /// (bounded: same client/cookies as the navigation, ≤2 MiB per body,
+    /// 3s per request) and report per-asset size + decoded pixel
+    /// dimensions in the `resources` response field. Default false —
+    /// normally only the URL leads (`media`) come back, bytes are the
+    /// screenshot path's bill. Forces `render_tier=browser`.
+    #[serde(default)]
+    pub resources: bool,
 }
 
 /// Configuration for JS global extraction after page load.
@@ -206,6 +221,36 @@ pub struct FetchResponse {
     /// absent when the page genuinely has none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub media: Vec<String>,
+    /// Page geometry from the forced layout pass — present only when
+    /// `layout:true` was requested. The one-hop answer to "how tall is this
+    /// page" without opening a session and eval-ing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<LayoutFacts>,
+    /// Per-asset fetch outcomes for `resources:true` requests: fetched
+    /// bodies only (failures stay out — `media` already lists every lead),
+    /// pixel dimensions when the bytes decode (PNG/JPEG/WebP/GIF sniff).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<ResourceFact>,
+}
+
+/// Geometry facts reported by the `layout:true` forced pass.
+#[derive(Debug, Serialize, Clone)]
+pub struct LayoutFacts {
+    pub scroll_height: i64,
+    pub scroll_width: i64,
+}
+
+/// One fetched subresource from the `resources:true` pass.
+#[derive(Debug, Serialize, Clone)]
+pub struct ResourceFact {
+    pub url: String,
+    /// Body size in bytes.
+    pub bytes: usize,
+    /// Decoded pixel dimensions — absent for undecodable bodies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -397,7 +442,7 @@ pub(crate) async fn fetch_handler(Json(req): Json<FetchRequest>) -> Result<impl 
 /// Cache key: the request fields that change the response.
 fn fetch_cache_key(req: &FetchRequest) -> String {
     format!(
-        "{}|{:?}|{:?}|{}|{:?}|{}|{}|{}|{:?}|{:?}|{}|{:?}",
+        "{}|{:?}|{:?}|{}|{:?}|{}|{}|{}|{:?}|{:?}|{}|{:?}|{}|{}",
         req.url,
         req.format,
         req.selector,
@@ -410,6 +455,8 @@ fn fetch_cache_key(req: &FetchRequest) -> String {
         req.tls_fingerprint,
         req.sanitize,
         req.capture_xhr,
+        req.layout,
+        req.resources,
     )
 }
 
@@ -551,6 +598,8 @@ mod tests {
             js_extract: None,
             sanitize: true,
             capture_xhr: None,
+            layout: false,
+            resources: false,
         }
     }
 
@@ -569,6 +618,8 @@ mod tests {
             sanitize_report: None,
             xhr: Vec::new(),
             media: Vec::new(),
+            layout: None,
+            resources: Vec::new(),
         }
     }
 
@@ -644,6 +695,21 @@ mod tests {
         b = req("https://e.com");
         b.tls_fingerprint = Some("firefox133".into());
         assert_ne!(fetch_cache_key(&a), fetch_cache_key(&b));
+
+        // Cost knobs (#279): a resources:true fetch must never be served
+        // the cheap posture's cached body — and vice versa.
+        b = req("https://e.com");
+        b.layout = true;
+        assert_ne!(fetch_cache_key(&a), fetch_cache_key(&b));
+        b = req("https://e.com");
+        b.resources = true;
+        assert_ne!(fetch_cache_key(&a), fetch_cache_key(&b));
+        b.layout = true;
+        assert_ne!(
+            fetch_cache_key(&req("https://e.com")),
+            fetch_cache_key(&b),
+            "layout+resources must differ from resources alone"
+        );
     }
 
     #[test]

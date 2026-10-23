@@ -86,7 +86,8 @@ mod tmpl;
 
 pub use routers::acquisition::{
     ClickRequest, ClickResponse, EvalRequest, EvalResponse, FetchRequest, FetchResponse,
-    JsExtractConfig, OutputFormat, RenderTier, SearchRequest, SearchResponse, SearchResultItem,
+    JsExtractConfig, LayoutFacts, OutputFormat, RenderTier, ResourceFact, SearchRequest,
+    SearchResponse, SearchResultItem,
 };
 #[cfg(feature = "screenshot")]
 pub use routers::outputs::{
@@ -849,6 +850,8 @@ async fn doctor_handler(Query(params): Query<DoctorParams>) -> impl IntoResponse
             js_extract: None,
             sanitize: true,
             capture_xhr: None,
+            layout: false,
+            resources: false,
         };
         // do_fetch drives the real fetch pipeline (build_browser -> goto ->
         // extract) on a local runtime; spawn_blocking because it is !Send and

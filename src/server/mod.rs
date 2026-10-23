@@ -30,8 +30,7 @@ pub(crate) use browser::{cookie_store_path, shared_cookie_jar_for_tests};
 pub use fetch::{do_click, do_eval, do_fetch};
 pub(crate) use fetch::maybe_bypass_challenge;
 #[cfg(test)]
-pub(crate) use fetch::media_from_eval;
-
+pub(crate) use fetch::{media_from_eval, parse_layout_facts, resource_facts};
 #[cfg(feature = "screenshot")]
 pub use outputs::{do_pdf, do_screenshot, do_video};
 

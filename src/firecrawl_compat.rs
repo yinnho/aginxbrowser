@@ -193,6 +193,9 @@ async fn scrape_with_fetch(
         // agent-facing sanitize story is ours, not theirs.
         sanitize: false,
         capture_xhr: None,
+        // The compat face maps no cost knobs — cheap default stays.
+        layout: false,
+        resources: false,
     };
 
     match smart_fetch(fetch_req).await {

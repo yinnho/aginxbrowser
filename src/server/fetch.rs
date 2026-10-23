@@ -306,6 +306,32 @@ pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
                 page.settle(wait * 1000).await;
             }
 
+            // Cost knobs (#279) — the explicit opt-in for expensive work,
+            // logged so the bill is observable. Layout first: the forced
+            // pass warms geometry before js_extract runs below, so a probe
+            // reading gBCR doesn't spend its timeout window on first-build.
+            let layout = if req.layout {
+                let t0 = std::time::Instant::now();
+                let facts = parse_layout_facts(&page.evaluate(
+                    "JSON.stringify({h:document.documentElement.scrollHeight,w:document.documentElement.scrollWidth})",
+                ));
+                match &facts {
+                    Some(f) => tracing::info!(
+                        "fetch layout forced: {}x{} in {:?}",
+                        f.scroll_width,
+                        f.scroll_height,
+                        t0.elapsed()
+                    ),
+                    None => tracing::warn!(
+                        "fetch layout forced: probe returned no geometry in {:?}",
+                        t0.elapsed()
+                    ),
+                }
+                facts
+            } else {
+                None
+            };
+
             // Title: prefer a visible article-title element (WeChat's
             // #activity-name), then document.title, then og:title meta.
             let title = page
@@ -325,6 +351,31 @@ pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
             // its first candidate, video/audio carry sources + poster.
             // Research loops get body + asset leads in a single /fetch.
             let media = media_from_eval(page.evaluate(MEDIA_PROBE));
+
+            // The `resources:true` pass (#279): fetch the subresource bodies
+            // through the same bounded machinery the screenshot path uses,
+            // then report size + decoded dimensions per fetched asset. The
+            // bodies themselves stay out of the response — `media` carries
+            // the leads, this says which leads are real and how big.
+            let resources = if req.resources {
+                let t0 = std::time::Instant::now();
+                let html = page.content();
+                let url = page.url();
+                let fetched = crate::screenshot::prefetch_render_resources(
+                    &page, &url, &html, 1280.0,
+                )
+                .await;
+                let facts = resource_facts(&fetched);
+                tracing::info!(
+                    "fetch resources forced: {} bodies, {} with dimensions, in {:?}",
+                    facts.len(),
+                    facts.iter().filter(|f| f.width.is_some()).count(),
+                    t0.elapsed()
+                );
+                facts
+            } else {
+                Vec::new()
+            };
 
             // Source the content from the RENDERED DOM, not the initial HTML
             // snapshot. On heavy SPA pages (WeChat: 6.6MB shell) the article
@@ -419,6 +470,8 @@ pub fn do_fetch(req: FetchRequest) -> Result<FetchResponse> {
                 sanitize_report,
                 xhr,
                 media,
+                layout,
+                resources,
             })
         })
     })
@@ -453,6 +506,42 @@ pub(crate) fn media_from_eval(v: serde_json::Value) -> Vec<String> {
         Ok(urls) => crate::render::finalize_media(urls),
         Err(_) => Vec::new(),
     }
+}
+
+/// Parse the `layout:true` geometry probe: the eval returns a JSON string
+/// `{"h":<scrollHeight>,"w":<scrollWidth>}`. Any hiccup (null, non-JSON,
+/// NaN-ish values) is `None` — the knob reports what layout measured, not
+/// an error page's zeros.
+pub(crate) fn parse_layout_facts(v: &serde_json::Value) -> Option<crate::LayoutFacts> {
+    let raw = v.as_str()?;
+    let obj: serde_json::Map<String, serde_json::Value> = serde_json::from_str(raw).ok()?;
+    Some(crate::LayoutFacts {
+        scroll_height: obj.get("h")?.as_i64()?,
+        scroll_width: obj.get("w")?.as_i64()?,
+    })
+}
+
+/// Turn the prefetched bodies into `resources` response rows: size always,
+/// pixel dimensions when the bytes decode (magic sniff, PNG/JPEG/WebP/GIF).
+/// Bodies stay out of the response — the caller has the URLs in `media`.
+pub(crate) fn resource_facts(
+    fetched: &crate::screenshot::PrefetchedResources,
+) -> Vec<crate::ResourceFact> {
+    let mut facts: Vec<crate::ResourceFact> = fetched
+        .iter()
+        .map(|(url, body)| {
+            let decoded = diting::diting_layout::image::decode_bytes(body);
+            crate::ResourceFact {
+                url: url.clone(),
+                bytes: body.len(),
+                width: decoded.as_ref().map(|d| d.width),
+                height: decoded.as_ref().map(|d| d.height),
+            }
+        })
+        .collect();
+    // Stable order across runs — HashMap iteration is not.
+    facts.sort_by(|a, b| a.url.cmp(&b.url));
+    facts
 }
 
 /// Click an element by CSS selector using JS `element.click()`.

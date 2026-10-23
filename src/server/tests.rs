@@ -111,6 +111,8 @@ mod sanitize_fetch_tests {
             js_extract: None,
             sanitize,
             capture_xhr: None,
+            layout: false,
+            resources: false,
         }
     }
 
@@ -674,5 +676,144 @@ mod media_manifest {
         assert!(crate::server::media_from_eval(Value::String("not json".into())).is_empty());
         // Probe returned a non-string (page died mid-eval): empty, not panic.
         assert!(crate::server::media_from_eval(Value::Bool(true)).is_empty());
+    }
+}
+
+/// #279 cost knobs: `layout` / `resources` on /fetch. Default posture must
+/// stay byte-identical (fields absent); opted-in fetches report geometry
+/// and per-asset facts, and both bills land in the log.
+#[cfg(test)]
+mod cost_knob_tests {
+    use crate::server::test_util::net_env_guard;
+    use crate::server::*;
+    use crate::{FetchRequest, OutputFormat, RenderTier};
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    /// 7×5 solid-red PNG (75 bytes) — known dimensions for the decode claim.
+    const DOT_PNG_B64: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAAAcAAAAFCAIAAAAG+GGPAAAAEklEQVR4nGP4z8CAibAIUUUUAKEvIt57lX2fAAAAAElFTkSuQmCC";
+
+    fn knob_req(url: String, layout: bool, resources: bool) -> FetchRequest {
+        FetchRequest {
+            url,
+            format: OutputFormat::Text,
+            selector: None,
+            wait_secs: None,
+            use_proxy: false,
+            cookies: vec![],
+            max_chars: 0,
+            auto_bypass_challenge: false,
+            render_tier: RenderTier::Browser,
+            tls_fingerprint: None,
+            js_extract: None,
+            sanitize: false,
+            capture_xhr: None,
+            layout,
+            resources,
+        }
+    }
+
+    /// One-shot raw-byte server: / is a fixed 1234px-tall page with one
+    /// <img>, /dot.png serves the PNG bytes. recording_server can't do this
+    /// (bodies are UTF-8 strs, content-type always text/html) and the
+    /// resources path needs real binary bytes.
+    fn png_page_server() -> u16 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let png = STANDARD.decode(DOT_PNG_B64).unwrap();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]);
+                let path = head
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("")
+                    .to_string();
+                let (ctype, body) = if path == "/dot.png" {
+                    ("image/png", png.clone())
+                } else {
+                    (
+                        "text/html",
+                        "<html><body style='margin:0'><div style='height:1234px'></div>\
+                         <img src='/dot.png'></body></html>"
+                            .as_bytes()
+                            .to_vec(),
+                    )
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: {ctype}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn knobs_report_geometry_and_asset_facts_and_default_stays_absent() {
+        let _net = net_env_guard();
+        let port = png_page_server();
+
+        // Default posture: neither field exists — the cheap path is
+        // unchanged for existing clients.
+        let plain = do_fetch(knob_req(format!("http://127.0.0.1:{port}/"), false, false)).unwrap();
+        assert!(plain.layout.is_none(), "layout facts must be opt-in only");
+        assert!(plain.resources.is_empty(), "resource rows must be opt-in only");
+
+        // Opted in: geometry from the forced pass, the fetched PNG with its
+        // decoded dimensions.
+        let rich = do_fetch(knob_req(format!("http://127.0.0.1:{port}/"), true, true)).unwrap();
+        let facts = rich.layout.expect("layout:true must report geometry");
+        assert!(
+            facts.scroll_height >= 1234,
+            "a 1234px div must push scrollHeight past 1234, got {}",
+            facts.scroll_height
+        );
+        assert!(facts.scroll_width > 0, "scrollWidth must be positive");
+        assert_eq!(rich.resources.len(), 1, "exactly one subresource on the page");
+        let row = &rich.resources[0];
+        assert!(row.url.ends_with("/dot.png"), "row url: {}", row.url);
+        assert_eq!(row.bytes, 75, "the 75-byte PNG body lands whole");
+        assert_eq!(row.width, Some(7));
+        assert_eq!(row.height, Some(5));
+    }
+
+    /// The geometry probe's tolerance: junk or non-string eval results are
+    /// `None`, never a panic, never fabricated zeros.
+    #[test]
+    fn parse_layout_facts_tolerates_junk() {
+        let good = serde_json::Value::String(r#"{"h":800,"w":1280}"#.into());
+        let f = parse_layout_facts(&good).unwrap();
+        assert_eq!((f.scroll_height, f.scroll_width), (800, 1280));
+        assert!(parse_layout_facts(&serde_json::Value::Null).is_none());
+        assert!(parse_layout_facts(&serde_json::Value::String("null".into())).is_none());
+        assert!(parse_layout_facts(&serde_json::Value::String("nope".into())).is_none());
+        // Zeros from a dead page are real zeros, not fabrication — kept.
+        let zero = serde_json::Value::String(r#"{"h":0,"w":0}"#.into());
+        assert!(parse_layout_facts(&zero).is_some());
+    }
+
+    /// Rows report size always, dimensions only when the bytes decode; the
+    /// order is the sorted URL, not HashMap roulette.
+    #[test]
+    fn resource_facts_dims_and_stable_order() {
+        let png = STANDARD.decode(DOT_PNG_B64).unwrap();
+        let mut fetched = crate::screenshot::PrefetchedResources::new();
+        fetched.insert("https://a/z.png".into(), std::sync::Arc::new(png));
+        fetched.insert("https://a/a.bin".into(), std::sync::Arc::new(vec![1, 2, 3]));
+        let rows = resource_facts(&fetched);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].url, "https://a/a.bin", "sorted by url");
+        assert_eq!(rows[0].bytes, 3);
+        assert!(rows[0].width.is_none(), "non-image bytes carry no dims");
+        assert_eq!(rows[1].url, "https://a/z.png");
+        assert_eq!((rows[1].width, rows[1].height), (Some(7), Some(5)));
     }
 }

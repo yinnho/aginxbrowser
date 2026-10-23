@@ -78,6 +78,8 @@ Fetch a page and return its content. Supports tiered rendering, automatic Cloudf
 | js_extract | object | | `null` | JS data extraction (see below) |
 | sanitize | bool | | `true` | Strip prompt-injection carriers from the text/markdown output (see below) |
 | capture_xhr | string[] | | `null` | Return the page's script-initiated XHR/fetch response bodies as a first-class `xhr` field. Entries are URL substrings; `[]` = every XHR/fetch. Forces the browser tier |
+| layout | bool | | `false` | Cost knob: force one layout pass after the page settles and report page geometry in the `layout` response field. Forces the browser tier (see below) |
+| resources | bool | | `false` | Cost knob: fetch the page's subresource bodies and report per-asset size + decoded pixel dimensions in the `resources` response field. Forces the browser tier (see below) |
 
 **`render_tier` options:**
 
@@ -131,6 +133,9 @@ Fetch a page and return its content. Supports tiered rendering, automatic Cloudf
 | js_extract_result | any? | JS extraction result (only present when `js_extract` is set) |
 | sanitize_report | object? | What the injection stripper removed (only present when `sanitize` fired — see below) |
 | xhr | object[] | Script-initiated response bodies (only present when `capture_xhr` is set — see below) |
+| media | string[]? | Media asset leads found on the page (img `src`/`currentSrc` + lazyload attributes, srcset first candidate, video/audio sources and posters, `og:image`) — deduped, `data:` URIs dropped, capped. One `/fetch` returns the article and its asset URLs; absent when the page has none |
+| layout | object? | `{"scroll_height", "scroll_width"}` from the forced layout pass (only when `layout:true` — see below) |
+| resources | object[]? | Fetched subresource facts `[{url, bytes, width?, height?}]` (only when `resources:true` — see below) |
 | captcha_event | object? | CAPTCHA event (only present when a CAPTCHA is detected; covers Cloudflare/Google/Baidu challenge pages plus Taobao/Tmall risk-control signals — `punish` redirects, `x5sec`, and MTop `FAIL_SYS_USER_VALIDATE`/`RGV587` replies even when they arrive as HTTP 200) |
 
 **`sanitize` — injection stripping (default on):**
@@ -154,6 +159,15 @@ curl -sS -X POST http://127.0.0.1:8089/fetch \
 ```
 
 Each row is `{"url", "method", "status", "mime", "body", "body_truncated", "request_headers"}`. `request_headers` is the request's outbound header set (lowercased) — the signed customs the page's JS put on the call. Bodies are capped at `min(max_chars, 8000)` chars per entry (at most 20 entries) so a page's API traffic can't flood the context; binary (base64) bodies are skipped. `wait_secs` matters here: the page's fetches need a moment to land in the network log.
+
+**Cost knobs — `layout` / `resources` (default off):**
+
+Expensive work is opt-in. The default `/fetch` never lays the page out (geometry is computed lazily, only when something reads it) and never fetches subresource bodies — you get text plus the `media` URL leads. Two knobs pay for more, each logged server-side so the bill is observable:
+
+- **`layout: true`** — force one layout pass after the page settles and report `{"scroll_height", "scroll_width"}` in the `layout` field. The one-hop answer to "how tall is this page" (scroll-screenshot planning, long-form detection) without opening a session. The pass also warms geometry before `js_extract` runs, so a probe reading `getBoundingClientRect` doesn't spend its timeout window on first-build.
+- **`resources: true`** — fetch the page's subresource bodies through the same client the navigation used (same cookies, UA, stealth TLS; bounded: ≤2 MiB per body, 3s per request) and report `resources: [{url, bytes, width?, height?}]`. Bodies stay out of the response — `media` carries the leads, this says which leads are real and their decoded pixel dimensions (PNG/JPEG/WebP/GIF sniff), e.g. for picking a cover image by size. Failures stay out; only fetched rows appear.
+
+Both need engine machinery the plain-HTTP tier doesn't have, so either one forces the browser tier exactly like `capture_xhr` (with `render_tier:"http"` the fetch errors instead of silently upgrading). Sessions don't take these knobs: a session computes geometry lazily per command — read `getBoundingClientRect` and you've paid for exactly that layout run.
 
 
 **`captcha_event` format:**
@@ -210,7 +224,7 @@ curl -sS -X POST http://127.0.0.1:8089/fetch \
   -d '{"url":"https://github.com/trending","format":"text","selector":"article","use_proxy":true}'
 ```
 
-**Caching**: `/fetch` has an in-process cache (key includes url/format/selector/cookies/use_proxy/max_chars/render_tier/tls_fingerprint); TTL is controlled by `AGINXBROWSER_CACHE_TTL_SECS` (default 600s, `0` disables). Repeat fetches of the same URL hit the cache (~0.01s vs ~1s on first fetch).
+**Caching**: `/fetch` has an in-process cache (key includes url/format/selector/cookies/use_proxy/max_chars/render_tier/tls_fingerprint/layout/resources); TTL is controlled by `AGINXBROWSER_CACHE_TTL_SECS` (default 600s, `0` disables). Repeat fetches of the same URL hit the cache (~0.01s vs ~1s on first fetch) — a `layout`/`resources` fetch never collides with the cheap posture's cache entry.
 
 **Security**: built-in SSRF protection (blocks non-http(s) schemes and private-network/loopback IPs), DNS rebinding protection, and tracker blocking (stealth mode). An RFC 9309 robots.txt checker ships built in but is off by default (`AGINXBROWSER_HONOR_ROBOTS=1` to opt in).
 

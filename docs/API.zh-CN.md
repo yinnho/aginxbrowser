@@ -77,6 +77,8 @@ curl http://127.0.0.1:8089/health
 | js_extract | object | | `null` | JS 数据提取（见下方说明） |
 | sanitize | bool | | `true` | 从 text/markdown 输出里剥 prompt injection 载体（见下方说明） |
 | capture_xhr | string[] | | `null` | 把页面自己发的 XHR/fetch 响应体作为一等公民 `xhr` 字段返回。条目是 URL 子串；`[]` = 全部 XHR/fetch。会强制走浏览器层 |
+| layout | bool | | `false` | 成本旋钮：页面落定后强制跑一遍布局，把页面几何报告进 `layout` 响应字段。会强制走浏览器层（见下方说明） |
+| resources | bool | | `false` | 成本旋钮：抓取页面子资源响应体，把每资产的体积+解码像素尺寸报告进 `resources` 响应字段。会强制走浏览器层（见下方说明） |
 
 **render_tier 选项：**
 
@@ -124,6 +126,9 @@ curl http://127.0.0.1:8089/health
 | js_extract_result | any? | JS 提取结果（仅 `js_extract` 非空时有值） |
 | sanitize_report | object? | 注入剥离报告（仅 `sanitize` 真剥了东西时有值——见下方说明） |
 | xhr | object[] | 脚本发起的响应体（仅 `capture_xhr` 非空时有值——见下方说明） |
+| media | string[]? | 页面上找到的媒体资产线索（img `src`/`currentSrc` 及懒加载属性、srcset 首候选、video/audio 源和封面、`og:image`）——去重、丢 `data:` URI、封顶。一次 `/fetch` 同时拿到正文和资产 URL；页面没有则缺省 |
+| layout | object? | 强制布局趟出来的 `{"scroll_height", "scroll_width"}`（仅 `layout:true`——见下方说明） |
+| resources | object[]? | 抓到的子资产清单 `[{url, bytes, width?, height?}]`（仅 `resources:true`——见下方说明） |
 | captcha_event | object? | CAPTCHA 事件（仅检测到验证码时有值；识别 Cloudflare/Google/Baidu 挑战页，以及淘宝/天猫风控信号——`punish` 跳转、`x5sec`、MTop `FAIL_SYS_USER_VALIDATE`/`RGV587` 应答，即使 HTTP 200 也会透出） |
 
 **sanitize——注入剥离（默认开）：**
@@ -147,6 +152,15 @@ curl -sS -X POST http://127.0.0.1:8089/fetch \
 ```
 
 每行形如 `{"url", "method", "status", "mime", "body", "body_truncated"}`。每条 body 上限 `min(max_chars, 8000)` 字符、最多 20 条，页面的 API 流量淹不了上下文；二进制（base64）body 跳过。`wait_secs` 在这里有用：页面的 fetch 要一点时间才落进网络日志。
+
+**成本旋钮——`layout` / `resources`（默认关）：**
+
+贵活儿一律显式掏钱。默认 `/fetch` 不跑布局（几何都是谁读谁触发、读了才算），也不抓子资源响应体——回来的是正文加 `media` 的 URL 线索。两个旋钮各自多买一样，服务端都有日志，账单看得见：
+
+- **`layout: true`**——页面落定后强制跑一遍布局，`layout` 字段回报 `{"scroll_height", "scroll_width"}`。"这页多高"一跳就有答案（滚动截图规划、长文判断），不用开 session。这一趟也把几何焐热在 `js_extract` 之前——探测脚本读 `getBoundingClientRect` 时不用把超时窗口花在首次建布局上。
+- **`resources: true`**——用导航同一套客户端（同 cookie、UA、stealth TLS；有界：每 body ≤2 MiB、每请求 3s）抓页面子资源体，`resources: [{url, bytes, width?, height?}]` 回报。响应体本身不进返回——URL 线索在 `media` 里，这里说的是哪些线索是真的、解码出来多大像素（PNG/JPEG/WebP/GIF 嗅探），比如按尺寸挑封面图。抓失败的行不出现，只列抓到的。
+
+两个旋钮用的机器纯 HTTP 层都没有，所以任一开启都会像 `capture_xhr` 一样强制走浏览器层（配 `render_tier:"http"` 会直接报错而不是悄悄升级）。session 不吃这俩旋钮：session 的几何本来就是逐命令按需算——读一次 `getBoundingClientRect`，这一次布局的钱就刚好付过了。
 
 **captcha_event 格式：**
 
@@ -197,7 +211,7 @@ curl -sS -X POST http://127.0.0.1:8089/fetch \
   -d '{"url":"https://github.com/trending","format":"text","selector":"article","use_proxy":true}'
 ```
 
-**缓存**：`/fetch` 有进程内缓存（key 含 url/format/selector/cookies/use_proxy/max_chars/render_tier/tls_fingerprint），TTL 由 `AGINXBROWSER_CACHE_TTL_SECS` 控制（默认 600s，`0` 禁用）。重复抓取同一 URL 命中缓存（~0.01s vs 首次 ~1s）。
+**缓存**：`/fetch` 有进程内缓存（key 含 url/format/selector/cookies/use_proxy/max_chars/render_tier/tls_fingerprint/layout/resources），TTL 由 `AGINXBROWSER_CACHE_TTL_SECS` 控制（默认 600s，`0` 禁用）。重复抓取同一 URL 命中缓存（~0.01s vs 首次 ~1s）——`layout`/`resources` 姿态和便宜姿态的缓存条目永不互撞。
 
 **安全**：内置 SSRF 防护（拦截非 http(s) scheme、私网/loopback IP）、DNS 重绑定防护、robots.txt 遵守、tracker 拦截（stealth 模式）。
 
