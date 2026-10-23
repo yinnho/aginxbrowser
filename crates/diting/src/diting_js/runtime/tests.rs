@@ -20569,6 +20569,110 @@ fn clearfix_pseudo_clears_float_zone() {
     );
 }
 
+/// #313 eaten faces, Chrome-probed headless (multi-host page): abspos
+/// children ride the wrap path — inset box pinned to [0,140], no-inset box
+/// at its static position [0,160] — while the block sibling overlaps the
+/// float (box stays full-width, only the line boxes wrap inside). The hosts
+/// are not BFCs, so h1's float escapes and the left floats stack into a
+/// horizontal chain (0/120/240); the flex/grid children narrow as
+/// independent formatting contexts around BOTH floats in their band
+/// ([240, 560]). A ::before with real content no longer routes the host
+/// back onto the zone path.
+#[cfg(feature = "screenshot")]
+#[test]
+fn float_wrap_abspos_flexgrid_pseudo_faces() {
+    let mut rt = setup_runtime(
+        r#"<style>
+          body{margin:0}
+          .f{float:left;width:120px;height:80px}
+          .h{position:relative;width:800px}
+          .box{margin:0;height:20px}
+          #abs{position:absolute;left:0;top:0;width:140px}
+          #static{position:absolute;width:160px}
+          #fig{display:flex}
+          #grid{display:grid}
+          #h4::before{content:"x"}
+        </style>
+        <div class="h" id="h1"><div class="f"></div>
+          <div class="box" id="abs">a</div>
+          <div class="box" id="static">s</div>
+          <p class="box" id="p1">t</p>
+        </div>
+        <div class="h" id="h2"><div class="f"></div>
+          <div class="box" id="fig"><div>t</div></div>
+          <div class="box" id="grid"><div>t</div></div>
+          <p class="box" id="p2">t</p>
+        </div>
+        <div class="h" id="h4"><div class="f"></div>
+          <p class="box" id="p4">t</p>
+        </div>"#,
+    );
+    let px = |rt: &mut JsRuntime, sel: &str, prop: &str| {
+        rt.evaluate(&format!(
+            "Math.round(document.querySelector('{}').getBoundingClientRect().{})",
+            sel, prop
+        ))
+        .unwrap()
+        .as_f64()
+        .unwrap_or(f64::NAN)
+    };
+    // Abspos face: out-of-flow children are unaffected by the wrap decision.
+    assert!(
+        (px(&mut rt, "#abs", "left") - 0.0).abs() <= 1.0
+            && (px(&mut rt, "#abs", "width") - 140.0).abs() <= 1.0,
+        "inset abs child at [{},{}] — insets must keep pinning it",
+        px(&mut rt, "#abs", "left"),
+        px(&mut rt, "#abs", "width")
+    );
+    assert!(
+        (px(&mut rt, "#static", "left") - 0.0).abs() <= 1.0
+            && (px(&mut rt, "#static", "width") - 160.0).abs() <= 1.0,
+        "static-position abs child at [{},{}] — no insets means static spot",
+        px(&mut rt, "#static", "left"),
+        px(&mut rt, "#static", "width")
+    );
+    assert!(
+        (px(&mut rt, "#p1", "left") - 0.0).abs() <= 1.0
+            && (px(&mut rt, "#p1", "width") - 800.0).abs() <= 1.0,
+        "block sibling at [{},{}] — the box overlaps the float, only its lines wrap",
+        px(&mut rt, "#p1", "left"),
+        px(&mut rt, "#p1", "width")
+    );
+    // Flex/grid face: independent formatting contexts narrow beside the
+    // floats in their band. The band holds two — h1's escaped float (hosts
+    // are not BFCs) and h2's own, which stacked beside it — so the free
+    // slot starts at 240. Width-independent: 2 × float width from the live
+    // host width.
+    let hw = px(&mut rt, "#h2", "width");
+    for sel in ["#fig", "#grid"] {
+        assert!(
+            (px(&mut rt, sel, "left") - 240.0).abs() <= 1.0
+                && (px(&mut rt, sel, "width") - (hw - 240.0)).abs() <= 1.0,
+            "{} at [{},{}] — must narrow into the free band [240, {}]",
+            sel,
+            px(&mut rt, sel, "left"),
+            px(&mut rt, sel, "width"),
+            hw - 240.0
+        );
+    }
+    assert!(
+        (px(&mut rt, "#p2", "left") - 0.0).abs() <= 1.0
+            && (px(&mut rt, "#p2", "width") - hw).abs() <= 1.0,
+        "block sibling after flex at [{},{}] — stays full-width",
+        px(&mut rt, "#p2", "left"),
+        px(&mut rt, "#p2", "width")
+    );
+    // Generated-content face: the host with a real-content ::before wraps
+    // like any plain host.
+    assert!(
+        (px(&mut rt, "#p4", "left") - 0.0).abs() <= 1.0
+            && (px(&mut rt, "#p4", "width") - px(&mut rt, "#h4", "width")).abs() <= 1.0,
+        "p under ::before host at [{},{}] — generated content must not route to the zone",
+        px(&mut rt, "#p4", "left"),
+        px(&mut rt, "#p4", "width")
+    );
+}
+
 /// Batch 102: getComputedStyle(el, pseudoElt) — the pseudo-element computed
 /// face. The second argument routes to the host's cascaded ::before/::after
 /// styles (batch 99 cascade), pseudos with no matching rule answer the

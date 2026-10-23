@@ -1,14 +1,25 @@
-//! Float wrapping through taffy's float engine (#300).
+//! Float wrapping through taffy's float engine (#300, widening #313).
 //!
 //! A container qualifies when it is a plain left-aligned block whose children
-//! are explicit-width floats, block-level boxes and bare text. It then skips
-//! the reified float zone: the floats become real taffy floats, the block
-//! children overlap them like Chrome's, and text runs wrap into the free slots
-//! beside them (`float_lines`). Everything else keeps the zone path.
+//! are explicit-width floats (px/%), block-level boxes — including flex/grid,
+//! which Chrome narrows as independent formatting contexts beside the float —
+//! abspos/fixed boxes, generated content of any shape, and bare text. It then
+//! skips the reified float zone: the floats become real taffy floats, the
+//! block children overlap them like Chrome's, and text runs wrap into the
+//! free slots beside them (`float_lines`).
+//!
+//! Still on the zone path (#313 remaining): center/right-aligned hosts (the
+//! alignment promote demotes floats to flex items — needs band-relative line
+//! centering in float_lines), float widths beyond px/% (em/calc), and hosts
+//! whose width comes from their content (float/abspos/flex-item hosts need
+//! float-aware intrinsic sizing).
 //!
 //! Default on since the real-site gray round came back clean (bs3 docs,
 //! a float-free portal, our own blog): opt out with
 //! `AGINXBROWSER_FLOAT_WRAP=0` (or a test forcing it off).
+//! `AGINXBROWSER_FLOAT_WRAP_ALL` is the #313 damage-experiment posture:
+//! every float container takes the wrap path regardless of the gate, for
+//! probing the next face before it's eaten.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -17,7 +28,7 @@ use std::sync::OnceLock;
 use taffy::prelude::*;
 use taffy::{Clear, Float};
 
-use crate::diting_css::{ClearSide, ComputedStyle, ContentValue, Display as CssDisplay, FloatSide, Length, PositionMode, TextAlign};
+use crate::diting_css::{ClearSide, ComputedStyle, Display as CssDisplay, FloatSide, Length, PositionMode, TextAlign};
 use crate::diting_dom::tree::{DomTree, NodeId};
 
 thread_local! {
@@ -58,13 +69,22 @@ pub(super) fn eligible(
     if !enabled() {
         return false;
     }
+    // #313 damage-experiment posture: every float container takes the wrap
+    // path. Diagnostic only — probe the next face before eating it.
+    if std::env::var("AGINXBROWSER_FLOAT_WRAP_ALL").is_ok() {
+        return true;
+    }
     let block = matches!(container.display.unwrap_or(CssDisplay::Block), CssDisplay::Block);
     if !block || matches!(container.physical_text_align(), Some(TextAlign::Center) | Some(TextAlign::Right)) {
+        // Center/right hosts promote to a flex column for line alignment
+        // (style_map), which demotes floats to flex items — misplaced. The
+        // fix is band-relative line centering in float_lines, not this gate
+        // (#313 follow-up).
         return false;
     }
     // A box whose width comes from its content (floated, absolutely
     // positioned, or a flex/grid item) needs the float-aware intrinsic sizing
-    // that is not wired yet. Generated content must be clearfix boxes.
+    // that is not wired yet.
     let parent_is_block = tree
         .with_node(id, |n| n.parent)
         .flatten()
@@ -73,7 +93,6 @@ pub(super) fn eligible(
     if container.float_side.is_some()
         || matches!(container.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
         || !parent_is_block
-        || !container.pseudos.as_deref().is_none_or(|p| [&p.before, &p.after].into_iter().flatten().all(clearfix_box))
     {
         return false;
     }
@@ -87,26 +106,21 @@ pub(super) fn eligible(
         if display == CssDisplay::None {
             continue;
         }
-        if matches!(s.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed)) {
-            return false;
-        }
+        // Abspos/fixed children ride the wrap path fine: they are out of
+        // flow, the reparent pass moves them to their containing block, and
+        // Chrome-truth probes (with and without insets) pin their placement
+        // (#313). Flex/grid children are block-level siblings that Chrome
+        // narrows as independent formatting contexts beside the float.
         if s.float_side.is_some() {
             if !matches!(s.width, None | Some(Length::Px(_)) | Some(Length::Percent(_))) {
                 return false;
             }
             floats += 1;
-        } else if !matches!(display, CssDisplay::Block | CssDisplay::Inline | CssDisplay::InlineBlock) {
+        } else if !matches!(display, CssDisplay::Block | CssDisplay::Inline | CssDisplay::InlineBlock | CssDisplay::Flex | CssDisplay::Grid) {
             return false;
         }
     }
     floats > 0
-}
-
-/// An empty generated box that exists to clear floats (`content:""; clear:both`,
-/// the Bootstrap clearfix), or one that is not rendered.
-fn clearfix_box(p: &ComputedStyle) -> bool {
-    p.display == Some(CssDisplay::None)
-        || (p.clear_side.is_some() && matches!(&p.content, Some(ContentValue::Str(t)) if t.is_empty()))
 }
 
 /// taffy's `clear` for a CSS one (logical sides are left/right in this LTR engine).
