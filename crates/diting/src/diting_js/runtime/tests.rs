@@ -20555,16 +20555,16 @@ fn clearfix_pseudo_clears_float_zone() {
         row_h,
         plain_h
     );
-    // Posture pin: this engine contains floats in the parent unconditionally
-    // (Chrome does so only for BFC roots, where a clearfix-less host would
-    // collapse to 0). The protective posture makes the Bootstrap 3 idiom
-    // work without the pseudo's clear being load-bearing. If this ever
-    // tightens to Chrome's exact BFC semantics, the ::after clear path must
-    // start carrying the containment (see zone_end_at_budget, which reads
-    // clear_side by NodeId and cannot see pseudo leaves).
+    // Posture pin, graduated with the #300 default flip (after the #312
+    // comma-list fix made the clearfix ::after load-bearing): Chrome's
+    // exact float semantics — a plain host (position:relative creates no
+    // BFC) is NOT sized by its floats and collapses to 0; only the
+    // clearfix row reaches the float's height. The old engine contained
+    // floats unconditionally, which masked dead clearfix rules.
     assert!(
-        (plain_h - 40.0).abs() <= 1.0,
-        "float containment posture changed: plain host is now {} (was 40 = contains)",
+        (plain_h - 0.0).abs() <= 1.0,
+        "plain float host must collapse to 0 under Chrome float semantics (got {}); \
+         containment belongs to the ::after clear, pinned above",
         plain_h
     );
 }

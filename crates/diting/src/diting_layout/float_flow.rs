@@ -6,7 +6,9 @@
 //! children overlap them like Chrome's, and text runs wrap into the free slots
 //! beside them (`float_lines`). Everything else keeps the zone path.
 //!
-//! Off unless `AGINXBROWSER_FLOAT_WRAP=1` (or a test forces it).
+//! Default on since the real-site gray round came back clean (bs3 docs,
+//! a float-free portal, our own blog): opt out with
+//! `AGINXBROWSER_FLOAT_WRAP=0` (or a test forcing it off).
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -33,7 +35,7 @@ pub(super) fn enabled() -> bool {
         return v;
     }
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("AGINXBROWSER_FLOAT_WRAP").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| !std::env::var("AGINXBROWSER_FLOAT_WRAP").is_ok_and(|v| v == "0"))
 }
 
 /// Style of a pure-text run leaf: a block item when the gate is on, so it
