@@ -18,9 +18,13 @@
 //! fixup is a float), sizing keywords measured at build. Center/right
 //! hosts of bare text — and of one plain inline element of pure text
 //! (#314) — wrap: the promote is suppressed for the wrap host and
-//! float_lines shifts each line inside its float slot; nowrap/pre runs
-//! beside floats stay left-aligned until measure covers their line
-//! shapes.
+//! float_lines shifts each line inside its float slot. nowrap/pre runs
+//! take the slots too: each hard line starts at its band and overflows
+//! right (Chrome keeps a nowrap line on the float's line instead of
+//! dropping below; a pre line below the float returns to the edge). The
+//! sliver left on zone: a nowrap/pre inline element in a center/right
+//! host — it rides the wrapper atom, which sits at the band start but
+//! has no band-relative alignment hook yet.
 //!
 //! Default on since the real-site gray round came back clean (bs3 docs,
 //! a float-free portal, our own blog): opt out with
@@ -111,9 +115,10 @@ pub(super) fn eligible(
             let Some(s) = styles.get(cid) else { return false };
             let display = s.display.unwrap_or(CssDisplay::Block);
             if display == CssDisplay::Inline {
-                // The builder only mounts the element directly while its run
-                // soft-wraps; a nowrap/pre run rides the wrapper as one atom
-                // and stays zone.
+                // A nowrap/pre run rides the wrapper as one atom (the
+                // direct mount needs a soft-wrapping run): the atom sits at
+                // the band start beside the float but has no band-relative
+                // alignment, so a center/right host keeps the zone path.
                 let ws = s.white_space.unwrap_or(WhiteSpace::Normal);
                 if ws.no_soft_wrap() || ws.preserves_newlines() {
                     return false;

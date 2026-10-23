@@ -20822,12 +20822,71 @@ fn float_wrap_calc_and_keyword_widths() {
     assert!((lb[2][0] - 0.0).abs() <= 1.0, "line below the min-content float returns to the edge, got {}", lb[2][0]);
 }
 
-/// Batch 102: getComputedStyle(el, pseudoElt) — the pseudo-element computed
-/// face. The second argument routes to the host's cascaded ::before/::after
-/// styles (batch 99 cascade), pseudos with no matching rule answer the
-/// initial-value table (Chrome's no-throw posture extends to unknown `::`
-/// forms), junk arguments throw TypeError, and pseudo declarations never
-/// leak into the host face.
+/// nowrap/pre runs beside floats (#313): a nowrap line stays on the
+/// float's line — it starts at the band and overflows right instead of
+/// dropping below — and a pre line below the float returns to the edge
+/// (Chrome parity, 2026-10-23). A center host of bare nowrap text centers
+/// its single line inside the band.
+#[cfg(feature = "screenshot")]
+#[test]
+fn float_wrap_nowrap_pre_lines() {
+    let mut rt = setup_runtime(
+        r#"<style>
+          body{margin:0}
+          .h{width:400px;height:60px;font:16px/20px monospace}
+          .f{float:left;width:100px;height:40px;background:#fa0}
+          p{margin:0}
+        </style>
+        <div class="h" id="a"><div class="f"></div><p style="white-space:nowrap">abc</p></div>
+        <div class="h" id="b"><div class="f"></div><p style="white-space:nowrap">the quick brown fox jumps over the lazy dog again and again more</p></div>
+        <div class="h" id="c"><div class="f"></div><p style="white-space:pre">one two
+three four five
+six</p></div>
+        <div class="h" id="d"><div class="f"></div><p><span style="white-space:nowrap">abc def</span></p></div>
+        <div class="h" id="f"><div class="f"></div><p style="white-space:nowrap;text-align:center">abc</p></div>
+        <div class="h" id="ref"><p style="white-space:nowrap">abc</p></div>"#,
+    );
+    let lines = |rt: &mut JsRuntime, sel: &str| -> Vec<Vec<f64>> {
+        let v = rt
+            .evaluate(&format!(
+                r#"(()=>{{const p=document.querySelector('{sel}');const r=document.createRange();r.selectNodeContents(p);return JSON.stringify([...r.getClientRects()].filter(b=>b.width>1).map(b=>[Math.round(b.left*10)/10,Math.round(b.top*10)/10,Math.round(b.width*10)/10]));}})()"#
+            ))
+            .unwrap();
+        serde_json::from_str(v.as_str().unwrap_or("[]")).unwrap_or_default()
+    };
+    let num = |rt: &mut JsRuntime, expr: &str| rt.evaluate(expr).unwrap().as_f64().unwrap_or(f64::NAN);
+    // nowrap beside a float: one line, at the band start, as wide as the
+    // same text without a float (no fold into the band).
+    let la = lines(&mut rt, "#a p");
+    let wref = lines(&mut rt, "#ref p")[0][2];
+    assert_eq!(la.len(), 1, "nowrap beside a float stays one line, got {:?}", la);
+    assert!((la[0][0] - 100.0).abs() <= 1.0, "nowrap line starts at the float's edge, got {}", la[0][0]);
+    assert!((la[0][2] - wref).abs() <= 1.0, "nowrap width is the unwrapped width, got {} vs {}", la[0][2], wref);
+    // A line too wide for the band overflows right — it does not drop
+    // below the float.
+    let lb = lines(&mut rt, "#b p");
+    assert_eq!(lb.len(), 1, "a wide nowrap run stays on the float's line, got {:?}", lb);
+    assert!((lb[0][0] - 100.0).abs() <= 1.0, "wide nowrap line starts at the band, got {}", lb[0][0]);
+    assert!(lb[0][0] + lb[0][2] > 401.0, "wide nowrap overflows the host, right edge {}", lb[0][0] + lb[0][2]);
+    let btop = num(&mut rt, "document.getElementById('b').getBoundingClientRect().top");
+    assert!(lb[0][1] - btop < 20.0, "the nowrap line is beside the float, not below: {}", lb[0][1] - btop);
+    // pre: each hard line takes its band; below the float it returns.
+    let lc = lines(&mut rt, "#c p");
+    let lefts: Vec<f64> = lc.iter().map(|l| l[0]).collect();
+    assert_eq!(lc.len(), 3, "pre breaks one line per newline, got {:?}", lefts);
+    assert!(lc.iter().zip([100.0, 100.0, 0.0]).all(|(l, e)| (l[0] - e).abs() <= 1.0), "pre lines band/band/edge, got {:?}", lefts);
+    // A nowrap inline element rides the wrapper atom into the band. The
+    // range reports the atom's box and its inner line box — identical
+    // geometry, so every rect must sit at one band start.
+    let ld = lines(&mut rt, "#d p");
+    assert!(!ld.is_empty() && ld.iter().all(|l| (l[0] - 100.0).abs() <= 1.0), "nowrap span sits at the band start, got {:?}", ld);
+    // Center host of bare nowrap text: the line centers inside the band.
+    let lf = lines(&mut rt, "#f p");
+    assert_eq!(lf.len(), 1);
+    let expect = 100.0 + (300.0 - lf[0][2]) / 2.0;
+    assert!((lf[0][0] - expect).abs() <= 1.5, "centered nowrap in the band: {} vs {}", lf[0][0], expect);
+}
+
 #[cfg(feature = "screenshot")]
 #[test]
 fn computed_style_pseudo_element_face() {

@@ -52,7 +52,7 @@ pub(super) fn measure(
     line_clamp: Option<u32>,
     ctx: &BlockContext<'_>,
 ) -> Option<LayoutOutput> {
-    if tokens.is_empty() || ws.no_soft_wrap() || ws.preserves_newlines() {
+    if tokens.is_empty() {
         return None;
     }
     let full = match (inputs.known_dimensions.width, inputs.available_space.width) {
@@ -64,14 +64,28 @@ pub(super) fn measure(
         return None;
     }
     let mut slots: Vec<Slot> = Vec::new();
-    let mut lines = text::greedy_wrap_by(tokens, ws, |i| {
-        while slots.len() <= i {
-            let y = slots.len() as f32 * line_height;
-            let s = ctx.find_content_slot(y, Clear::None, None);
+    // nowrap/pre lines cannot break into the band (#313): they break at
+    // their hard rules only (nowrap: one line, pre: per newline) and each
+    // line starts at its float slot, overflowing to the right — Chrome
+    // keeps a nowrap line on the float's line instead of dropping below,
+    // and a pre line below the float returns to the edge.
+    let mut lines = if ws.no_soft_wrap() || ws.preserves_newlines() {
+        let lines = text::greedy_wrap_by(tokens, ws, |_| None);
+        for i in 0..lines.len() {
+            let s = ctx.find_content_slot(i as f32 * line_height, Clear::None, None);
             slots.push(Slot { x: s.x.max(0.0), width: s.width.min(full).max(0.0) });
         }
-        Some(slots[i].width)
-    });
+        lines
+    } else {
+        text::greedy_wrap_by(tokens, ws, |i| {
+            while slots.len() <= i {
+                let y = slots.len() as f32 * line_height;
+                let s = ctx.find_content_slot(y, Clear::None, None);
+                slots.push(Slot { x: s.x.max(0.0), width: s.width.min(full).max(0.0) });
+            }
+            Some(slots[i].width)
+        })
+    };
     if let Some(n) = line_clamp.filter(|n| lines.len() > *n as usize) {
         lines.truncate(n as usize);
     }
@@ -118,7 +132,13 @@ pub(super) struct Line {
 
 /// Cut a run into the lines `measure` laid out, using the slots it recorded.
 pub(super) fn split(text: &str, toks: &[Token], ws: WhiteSpace, slots: &[Slot]) -> Vec<Line> {
-    let lines = text::greedy_wrap_by(toks, ws, |i| slots.get(i).map(|s| s.width));
+    // A slot width is not a wrap opportunity for nowrap/pre — they replay
+    // their hard breaks and overflow the band (measure records one slot per
+    // hard line for exactly this).
+    let soft = !ws.no_soft_wrap() && !ws.preserves_newlines();
+    let lines = text::greedy_wrap_by(toks, ws, |i| {
+        soft.then(|| slots.get(i).map(|s| s.width)).flatten()
+    });
     let chars: Vec<char> = text.chars().collect();
     let ranges = super::text_geom::token_chars(&chars, toks, ws);
     lines
