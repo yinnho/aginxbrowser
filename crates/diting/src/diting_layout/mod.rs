@@ -4116,7 +4116,18 @@ fn build_element_inner(
             if ws.no_soft_wrap() {
                 pin_leaf_widths(taffy_tree, &leaves);
             }
-            if let Ok(wrapper) = taffy_tree.new_with_children(run_wrapper_style(ws), &leaves) {
+            let mut wstyle = run_wrapper_style(ws);
+            // #313: the host's center/right text-align rides the wrapper's
+            // justify — beside a float inline_flow shifts each line inside
+            // its slot from it (the host's flex promote is suppressed on
+            // the wrap path); away from floats it packs the flex row's
+            // lines, the promote's box-centering posture as before.
+            match styles.get(&id).and_then(|s| s.physical_text_align()) {
+                Some(TextAlign::Center) => wstyle.justify_content = JustifyContent::CENTER,
+                Some(TextAlign::Right) => wstyle.justify_content = JustifyContent::FLEX_END,
+                _ => {}
+            }
+            if let Ok(wrapper) = taffy_tree.new_with_children(wstyle, &leaves) {
                 run_wrappers.push(wrapper);
                 direct.push(wrapper);
             }

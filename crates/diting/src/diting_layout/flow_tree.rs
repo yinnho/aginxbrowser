@@ -562,11 +562,14 @@ where
             let flow = has_children && display == Display::Block && view.n(id).style.flex_wrap == FlexWrap::Wrap;
             let mut out = match (display, has_children) {
                 (Display::None, _) => compute_hidden_layout(view, id),
-                (Display::Block, true) if flow => block_ctx
-                    .as_deref()
-                    .filter(|c| c.has_active_floats(0.0))
-                    .and_then(|c| inline_flow::layout(view, id, inputs, c))
-                    .unwrap_or_else(|| compute_flexbox_layout(view, id, inputs)),
+                (Display::Block, true) if flow => {
+                    let justify = view.n(id).style.justify_content;
+                    block_ctx
+                        .as_deref()
+                        .filter(|c| c.has_active_floats(0.0))
+                        .and_then(|c| inline_flow::layout(view, id, inputs, c, justify))
+                        .unwrap_or_else(|| compute_flexbox_layout(view, id, inputs))
+                }
                 (Display::Block, true) => compute_block_layout(view, id, inputs, block_ctx),
                 (Display::FlowRoot, true) => compute_block_layout(view, id, inputs, None),
                 (Display::Flex, true) => compute_flexbox_layout(view, id, inputs),

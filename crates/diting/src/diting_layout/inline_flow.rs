@@ -10,7 +10,7 @@
 use taffy::util::ResolveOrZero;
 use taffy::{
     AvailableSpace, BlockContext, BoxGenerationMode, Clear, CoreStyle, Layout, LayoutInput, LayoutOutput, LayoutPartialTree,
-    Line, NodeId, Point, RequestedAxis, Size, SizingMode,
+    JustifyContent, Line, NodeId, Point, RequestedAxis, Size, SizingMode,
 };
 
 struct Item {
@@ -36,11 +36,15 @@ fn sized(width: f32, known: Size<Option<f32>>, mode: taffy::RunMode) -> LayoutIn
 
 /// Lay the wrapper's children out into the float slots. `None` when the
 /// wrapper has no definite width to wrap against (the caller runs flex).
+/// `justify` carries the host's center/right text-align (#313): beside a
+/// float the wrapper cannot lean on the host's flex promote, so each line
+/// shifts inside its own slot here.
 pub(super) fn layout<T: LayoutPartialTree>(
     tree: &mut T,
     id: NodeId,
     inputs: LayoutInput,
     ctx: &BlockContext<'_>,
+    justify: JustifyContent,
 ) -> Option<LayoutOutput> {
     let width = match (inputs.known_dimensions.width, inputs.available_space.width) {
         (Some(w), _) => w,
@@ -68,24 +72,34 @@ pub(super) fn layout<T: LayoutPartialTree>(
         items.push(Item { id: k, size, margin, border, padding });
     }
 
-    // Place items line by line.
-    let mut placed: Vec<(usize, f32, f32)> = Vec::with_capacity(items.len());
-    let (mut y, mut line_h, mut cursor) = (0.0f32, 0.0f32, 0.0f32);
+    // Place items line by line, remembering each line's band (x0, room)
+    // so it can shift inside it afterwards.
+    struct Line {
+        x0: f32,
+        room: f32,
+        y: f32,
+        h: f32,
+        w: f32,
+        items: Vec<(usize, f32, f32)>,
+    }
+    let mut lines: Vec<Line> = Vec::new();
+    let mut cur: Option<Line> = None;
+    let mut y = 0.0f32;
     let mut slot = ctx.find_content_slot(y, Clear::None, None);
-    let mut on_line = false;
-    let mut max_right = 0.0f32;
     for (i, it) in items.iter().enumerate() {
         let outer_w = it.size.width + it.margin.left + it.margin.right;
         let outer_h = it.size.height + it.margin.top + it.margin.bottom;
-        let fits = cursor + outer_w <= slot.width.min(width) + 0.001;
-        if on_line && !fits {
-            y += line_h;
-            line_h = 0.0;
-            cursor = 0.0;
-            on_line = false;
-            slot = ctx.find_content_slot(y, Clear::None, None);
+        let fits = cur.as_ref().is_none_or(|l| l.w + outer_w <= slot.width.min(width) + 0.001);
+        if let Some(l) = cur.take() {
+            if fits {
+                cur = Some(l);
+            } else {
+                y = l.y + l.h;
+                lines.push(l);
+                slot = ctx.find_content_slot(y, Clear::None, None);
+            }
         }
-        if !on_line {
+        if cur.is_none() {
             // A first item wider than the free room drops to the next slot
             // that is wide enough (past the float), like a line box would.
             let mut guard = 0;
@@ -94,31 +108,55 @@ pub(super) fn layout<T: LayoutPartialTree>(
                 y = y.max(slot.y);
                 guard += 1;
             }
+            let x0 = slot.x.max(0.0).min(width);
+            cur = Some(Line { x0, room: (width - x0).min(slot.width).max(0.0), y, h: 0.0, w: 0.0, items: Vec::new() });
         }
-        placed.push((i, slot.x.max(0.0) + cursor + it.margin.left, y + it.margin.top));
-        cursor += outer_w;
-        line_h = line_h.max(outer_h);
-        on_line = true;
-        max_right = max_right.max(slot.x.max(0.0) + cursor);
+        let l = cur.as_mut().expect("a line opens with its first item");
+        l.items.push((i, l.w + it.margin.left, y + it.margin.top));
+        l.w += outer_w;
+        l.h = l.h.max(outer_h);
     }
-    let total_h = if on_line { y + line_h } else { 0.0 };
+    if let Some(l) = cur.take() {
+        y = l.y + l.h;
+        lines.push(l);
+    }
+    let total_h = y;
     let size = Size { width, height: inputs.known_dimensions.height.unwrap_or(total_h) };
 
     if inputs.run_mode == taffy::RunMode::PerformLayout {
-        for (i, x, py) in placed {
-            let it = &items[i];
-            let out = tree.compute_child_layout(
-                it.id,
-                sized(width, Size { width: Some(it.size.width), height: Some(it.size.height) }, taffy::RunMode::PerformLayout),
-            );
-            let mut l = Layout::with_order(i as u32);
-            l.location = Point { x, y: py };
-            l.size = it.size;
-            l.scrollable_overflow_rect = out.scrollable_overflow_rect;
-            l.margin = it.margin;
-            l.border = it.border;
-            l.padding = it.padding;
-            tree.set_unrounded_layout(it.id, &l);
+        for l in &lines {
+            // A line wider than its band (unbreakable items) keeps the
+            // band start — Chrome overflows rather than un-centering.
+            // Trailing spaces hang (the space leaves are the zero-height
+            // items): the shift measures the line's box, which Chrome
+            // takes without them.
+            let line_w = l
+                .items
+                .iter()
+                .rev()
+                .find(|(i, _, _)| items[*i].size.height > 0.0)
+                .map(|(i, cx, _)| cx + items[*i].size.width + items[*i].margin.right)
+                .unwrap_or(l.w);
+            let shift = match justify {
+                JustifyContent::CENTER => (l.room - line_w).max(0.0) / 2.0,
+                JustifyContent::FLEX_END => (l.room - line_w).max(0.0),
+                _ => 0.0,
+            };
+            for (i, cx, py) in &l.items {
+                let it = &items[*i];
+                let out = tree.compute_child_layout(
+                    it.id,
+                    sized(width, Size { width: Some(it.size.width), height: Some(it.size.height) }, taffy::RunMode::PerformLayout),
+                );
+                let mut lo = Layout::with_order(*i as u32);
+                lo.location = Point { x: l.x0 + shift + cx, y: *py };
+                lo.size = it.size;
+                lo.scrollable_overflow_rect = out.scrollable_overflow_rect;
+                lo.margin = it.margin;
+                lo.border = it.border;
+                lo.padding = it.padding;
+                tree.set_unrounded_layout(it.id, &lo);
+            }
         }
     }
     Some(LayoutOutput::from_outer_size(size))

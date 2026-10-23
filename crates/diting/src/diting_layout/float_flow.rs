@@ -10,21 +10,25 @@
 //!
 //! Still on the zone path (#313 remaining): hosts whose width comes from
 //! their content (float/abspos/flex-item hosts need float-aware intrinsic
-//! sizing); and center/right hosts whose inline content does not mount
-//! directly (an inline-block, or several/nested inline elements, rides the
-//! run wrapper as one atom that cannot take the float slots). Float widths
-//! of every authored shape ride the wrap path: px/% as-is, em/rem folded
-//! at cascade, calc repaired between two solves (cache-busted when the
-//! fixup is a float), sizing keywords measured at build. Center/right
-//! hosts of bare text — and of one plain inline element of pure text
-//! (#314) — wrap: the promote is suppressed for the wrap host and
-//! float_lines shifts each line inside its float slot. nowrap/pre runs
-//! take the slots too: each hard line starts at its band and overflows
-//! right (Chrome keeps a nowrap line on the float's line instead of
-//! dropping below; a pre line below the float returns to the edge). The
-//! sliver left on zone: a nowrap/pre inline element in a center/right
-//! host — it rides the wrapper atom, which sits at the band start but
-//! has no band-relative alignment hook yet.
+//! sizing), and a nowrap/pre inline element in a center/right host — it
+//! rides the run wrapper as an unwrappable atom that has no band-relative
+//! alignment hook yet. Float widths of every authored shape ride the wrap
+//! path: px/% as-is, em/rem folded at cascade, calc repaired between two
+//! solves (cache-busted when the fixup is a float), sizing keywords
+//! measured at build. Center/right hosts wrap in every mounting shape:
+//! bare text and one plain inline element of pure text (#314) mount their
+//! run leaf directly, and mixed runs — several/nested inline elements, an
+//! element among text, an inline-block (#314 tail) — ride the run wrapper,
+//! whose inline_flow placement shifts whole lines from the wrapper's
+//! justify (the host's text-align is baked there at flush_run; the
+//! promote is suppressed for the wrap host). nowrap/pre runs take the
+//! slots too: each hard line starts at its band and overflows right
+//! (Chrome keeps a nowrap line on the float's line instead of dropping
+//! below; a pre line below the float returns to the edge). A separate
+//! face: a center/right host's float-free block child (a p) keeps the
+//! promote and so never reaches inline_flow — its lines sit at the edge
+//! instead of the band; that needs an alignment fallback for the no-float
+//! promote, not this gate.
 //!
 //! Default on since the real-site gray round came back clean (bs3 docs,
 //! a float-free portal, our own blog): opt out with
@@ -91,52 +95,31 @@ pub(super) fn eligible(
         return false;
     }
     if matches!(container.physical_text_align(), Some(TextAlign::Center) | Some(TextAlign::Right)) {
-        // Center/right hosts wrap (#313) with the promote suppressed and
-        // float_lines shifting each line inside its slot — while their
-        // inline content mounts directly: bare text, or one plain inline
-        // element of pure text (#314 mounts that run leaf beside the float
-        // like bare text). Anything that would ride the run wrapper as one
-        // atom — an inline-block, several inline elements, an element
-        // among text, nested elements — cannot take the slots; those hosts
-        // keep the zone path.
+        // Center/right hosts wrap (#313): bare text and single inline runs
+        // mount their run leaf beside the float (float_lines shifts each
+        // line inside its slot, #314), and mixed runs — several/nested
+        // inline elements, an element among text, an inline-block — ride
+        // the run wrapper, whose inline_flow placement now shifts whole
+        // lines from the wrapper's justify. A nowrap/pre inline element
+        // stays zone: its wrapper is an unwrappable atom with no
+        // band-relative alignment.
         if container.pseudos.is_some() {
             return false;
         }
-        let mut text = false;
-        let mut elems = 0;
         for cid in child_ids {
             if tree.with_node(*cid, |n| n.is_text()).unwrap_or(false) {
-                let ws_only = tree
-                    .with_node(*cid, |n| n.text_content_of_text_node().is_some_and(|t| t.trim().is_empty()))
-                    .unwrap_or(false);
-                text |= !ws_only;
                 continue;
             }
             let Some(s) = styles.get(cid) else { return false };
             let display = s.display.unwrap_or(CssDisplay::Block);
             if display == CssDisplay::Inline {
-                // A nowrap/pre run rides the wrapper as one atom (the
-                // direct mount needs a soft-wrapping run): the atom sits at
-                // the band start beside the float but has no band-relative
-                // alignment, so a center/right host keeps the zone path.
                 let ws = s.white_space.unwrap_or(WhiteSpace::Normal);
                 if ws.no_soft_wrap() || ws.preserves_newlines() {
                     return false;
                 }
-                let pure_text = tree
-                    .children(*cid)
-                    .iter()
-                    .all(|g| tree.with_node(*g, |n| n.is_text()).unwrap_or(false));
-                if !pure_text {
-                    return false;
-                }
-                elems += 1;
-            } else if display == CssDisplay::InlineBlock {
+            } else if !matches!(display, CssDisplay::Block | CssDisplay::InlineBlock | CssDisplay::Flex | CssDisplay::Grid) {
                 return false;
             }
-        }
-        if elems > 1 || (elems == 1 && text) {
-            return false;
         }
     }
     // A box whose width comes from its content (floated, absolutely

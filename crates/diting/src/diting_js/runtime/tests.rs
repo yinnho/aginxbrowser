@@ -20887,6 +20887,52 @@ six</p></div>
     assert!((lf[0][0] - expect).abs() <= 1.5, "centered nowrap in the band: {} vs {}", lf[0][0], expect);
 }
 
+/// A centered host of a MIXED run — text, an inline element, text — wraps
+/// with each line shifting inside its float slot (#314 tail, #313): the run
+/// wrapper's inline_flow placement reads the host's align from its justify
+/// and centers line by line, trailing spaces hanging (Chrome parity,
+/// 2026-10-23: band lines at 105.5, the below-float line at 175.9).
+#[cfg(feature = "screenshot")]
+#[test]
+fn float_wrap_center_mixed_run() {
+    let mut rt = setup_runtime(
+        r#"<style>
+          body{margin:0}
+          .h{width:400px;height:90px;font:16px/20px monospace}
+          .f{float:left;width:100px;height:40px;background:#fa0}
+          p{margin:0}
+        </style>
+        <div class="h" id="m" style="text-align:center"><div class="f"></div>alpha beta <span>gamma delta epsilon</span> zeta eta theta iota kappa more words</div>
+        <div class="h" id="l"><div class="f"></div>alpha beta <span>gamma delta epsilon</span> zeta eta theta iota kappa more words</div>"#,
+    );
+    // Lines are the union of one top's rects, minus the float's own box
+    // (the 100px child) and the run's element edges.
+    let lines = |rt: &mut JsRuntime, sel: &str| -> Vec<Vec<f64>> {
+        let v = rt
+            .evaluate(&format!(
+                r#"(()=>{{const h=document.querySelector('{sel}');const fb=h.querySelector('.f').getBoundingClientRect();const r=document.createRange();r.selectNodeContents(h);const byTop={{}};for(const b of r.getClientRects()){{if(b.width<2)continue;if(Math.abs(b.left-fb.left)<1&&Math.abs(b.top-fb.top)<1&&Math.abs(b.width-fb.width)<1)continue;const t=Math.round(b.top);if(!byTop[t])byTop[t]=[b.left,b.right];else{{byTop[t][0]=Math.min(byTop[t][0],b.left);byTop[t][1]=Math.max(byTop[t][1],b.right);}}}}return JSON.stringify(Object.entries(byTop).sort((a,b)=>a[0]-b[0]).map(([t,v])=>[+(v[0]).toFixed(1),+(v[1]-v[0]).toFixed(1)]));}})()"#
+            ))
+            .unwrap();
+        serde_json::from_str(v.as_str().unwrap_or("[]")).unwrap_or_default()
+    };
+    // Center host: every line centers in ITS band — the first two in the
+    // float's band (100..400), the below-float line in the full width.
+    let lm = lines(&mut rt, "#m");
+    assert!(lm.len() == 3, "three lines across the float, got {:?}", lm);
+    for (i, l) in lm.iter().take(2).enumerate() {
+        let expect = 100.0 + (300.0 - l[1]) / 2.0;
+        assert!((l[0] - expect).abs() <= 1.5, "center line {} in the band: {} vs {}", i, l[0], expect);
+    }
+    assert!(lm[0][0] > 101.5, "the band lines shift past the float edge (trailing space hangs), got {}", lm[0][0]);
+    let expect = (400.0 - lm[2][1]) / 2.0;
+    assert!((lm[2][0] - expect).abs() <= 1.5, "below-float line centers in the full width: {} vs {}", lm[2][0], expect);
+    // Left host: banded left, returning to the edge below the float.
+    let ll = lines(&mut rt, "#l");
+    assert!(ll.len() == 3, "three left lines, got {:?}", ll);
+    assert!((ll[0][0] - 100.0).abs() <= 1.0 && (ll[1][0] - 100.0).abs() <= 1.0, "left lines at the band start, got {:?}", ll);
+    assert!((ll[2][0] - 0.0).abs() <= 1.0, "left host returns to the edge, got {}", ll[2][0]);
+}
+
 #[cfg(feature = "screenshot")]
 #[test]
 fn computed_style_pseudo_element_face() {
