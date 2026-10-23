@@ -1,18 +1,23 @@
 //! Float wrapping through taffy's float engine (#300, widening #313).
 //!
-//! A container qualifies when it is a plain left-aligned block whose children
-//! are explicit-width floats (px/%), block-level boxes — including flex/grid,
-//! which Chrome narrows as independent formatting contexts beside the float —
-//! abspos/fixed boxes, generated content of any shape, and bare text. It then
-//! skips the reified float zone: the floats become real taffy floats, the
-//! block children overlap them like Chrome's, and text runs wrap into the
-//! free slots beside them (`float_lines`).
+//! A container qualifies when it is a plain block whose children are
+//! explicit-width floats (px/%), block-level boxes — including flex/grid,
+//! which Chrome narrows as independent formatting contexts beside the
+//! float — abspos/fixed boxes, generated content of any shape, and bare
+//! text. It then skips the reified float zone: the floats become real
+//! taffy floats, the block children overlap them like Chrome's, and text
+//! runs wrap into the free slots beside them (`float_lines`).
 //!
-//! Still on the zone path (#313 remaining): center/right-aligned hosts (the
-//! alignment promote demotes floats to flex items — needs band-relative line
-//! centering in float_lines), float widths beyond px/% (em/calc), and hosts
-//! whose width comes from their content (float/abspos/flex-item hosts need
-//! float-aware intrinsic sizing).
+//! Still on the zone path (#313 remaining): float widths beyond px/%
+//! (em/calc); hosts whose width comes from their content (float/abspos/
+//! flex-item hosts need float-aware intrinsic sizing); and center/right
+//! hosts whose inline content is not bare text (inline elements hoist
+//! their run as one unbreakable atom into the wrapper, which cannot take
+//! the float slots — the mixed-run float face, tracked separately).
+//! Center/right hosts of bare text wrap: the promote is suppressed for
+//! the wrap host and float_lines shifts each line inside its float slot;
+//! nowrap/pre runs beside floats stay left-aligned until measure covers
+//! their line shapes.
 //!
 //! Default on since the real-site gray round came back clean (bs3 docs,
 //! a float-free portal, our own blog): opt out with
@@ -75,12 +80,26 @@ pub(super) fn eligible(
         return true;
     }
     let block = matches!(container.display.unwrap_or(CssDisplay::Block), CssDisplay::Block);
-    if !block || matches!(container.physical_text_align(), Some(TextAlign::Center) | Some(TextAlign::Right)) {
-        // Center/right hosts promote to a flex column for line alignment
-        // (style_map), which demotes floats to flex items — misplaced. The
-        // fix is band-relative line centering in float_lines, not this gate
-        // (#313 follow-up).
+    if !block {
         return false;
+    }
+    if matches!(container.physical_text_align(), Some(TextAlign::Center) | Some(TextAlign::Right)) {
+        // Center/right hosts wrap (#313) with the promote suppressed and
+        // float_lines shifting each line inside its slot — but only while
+        // their inline content is BARE TEXT. An inline element (span/a/b)
+        // hoists its run as one unbreakable atom into the wrapper, which
+        // cannot take the float slots (the mixed-run float face, its own
+        // issue); those hosts keep the zone path until it lands.
+        if container.pseudos.is_some() {
+            return false;
+        }
+        for cid in child_ids {
+            let inline_elem = !tree.with_node(*cid, |n| n.is_text()).unwrap_or(false)
+                && styles.get(cid).is_some_and(|s| matches!(s.display.unwrap_or(CssDisplay::Block), CssDisplay::Inline | CssDisplay::InlineBlock));
+            if inline_elem {
+                return false;
+            }
+        }
     }
     // A box whose width comes from its content (floated, absolutely
     // positioned, or a flex/grid item) needs the float-aware intrinsic sizing

@@ -117,6 +117,13 @@ enum TextLeaf {
         /// scrollWidth grows for free), paint wraps at +inf; `pre`/
         /// `pre-line` add hard breaks, `pre*` preserve space runs.
         ws: WhiteSpace,
+        /// The run's physical `text-align` (inherited from the owning
+        /// block). Line alignment normally rides the block→flex promote
+        /// (style_map); the float wrap path keeps its host a block
+        /// container — floats only exist in taffy's block algorithm — so
+        /// there the lines center/right-shift inside their float slots
+        /// instead (`float_lines`, #313).
+        align: TextAlign,
         /// `text-overflow: ellipsis` on the owning element (non-inherited,
         /// so captured from the block that owns the run). Only acted on
         /// together with `nowrap` at paint time — layout rects, scroll
@@ -2181,12 +2188,14 @@ fn build_flow_column(
                 });
                 // Anonymous flow columns own no element style; text-overflow
                 // and line-clamp are non-inherited, so their owner is
-                // unknown here — v1-off.
+                // unknown here — v1-off. text-align IS inherited but the
+                // zone path aligns through the host's promote, so the run
+                // stays Left here too.
                 let run_ellipsis = false;
                 let run_clamp = None;
                 if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                     float_flow::run_style(),
-                    TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, ellipsis: run_ellipsis, line_clamp: run_clamp, tokens: std::cell::RefCell::new(None), small_caps: *sc, han: *han, clip_src: clip },
+                    TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, align: TextAlign::Left, ellipsis: run_ellipsis, line_clamp: run_clamp, tokens: std::cell::RefCell::new(None), small_caps: *sc, han: *han, clip_src: clip },
                 ) {
                     text_src::register(leaf, text_src::seg_ranges(&pending, &seg_lens));
                     flow_children.push(leaf);
@@ -3644,6 +3653,7 @@ fn pseudo_inline_run_leaf(
                 mono: p.font_family.as_deref().is_some_and(crate::diting_css::wants_monospace),
                 word_spacing: p.word_spacing.unwrap_or(0.0),
                 ws,
+                align: p.physical_text_align().unwrap_or(TextAlign::Left),
                 ellipsis: false,
                 line_clamp: None,
                 clip_src: None,
@@ -3727,6 +3737,7 @@ fn pseudo_leaf(
                     mono,
                     word_spacing,
                     ws,
+                    align,
                     ellipsis,
                     line_clamp,
                     small_caps,
@@ -3756,6 +3767,7 @@ fn pseudo_leaf(
                                     mono: *mono,
                                     word_spacing: *word_spacing,
                                     ws: *ws,
+                                    align: *align,
                                     ellipsis: *ellipsis,
                                     line_clamp: *line_clamp,
                                     tokens: std::cell::RefCell::new(None),
@@ -3862,6 +3874,7 @@ fn pseudo_leaf(
                                     .is_some_and(crate::diting_css::wants_monospace),
                                 word_spacing: p.word_spacing.unwrap_or(0.0),
                                 ws: p.white_space.unwrap_or(WhiteSpace::Normal),
+                                align: p.physical_text_align().unwrap_or(TextAlign::Left),
                                 ellipsis: false,
                                 line_clamp: None,
                                 tokens: std::cell::RefCell::new(None),
@@ -4009,9 +4022,14 @@ fn build_element_inner(
             // line-clamp shares the owner-block precedent (#271) — but only
             // on the legacy -webkit-box face Chrome honors it on (#275).
             let run_clamp = styles.get(&id).and_then(|s| s.clamp_lines());
+            // text-align is inherited, so the run carries the OWNING
+            // block's physical value — the wrap path (block host) bakes
+            // band-relative line alignment from it (#313); promoted hosts
+            // never reach that code (flex parents hand no block ctx).
+            let run_align = styles.get(&id).and_then(|s| s.physical_text_align()).unwrap_or(TextAlign::Left);
             if let Ok(leaf) = taffy_tree.new_leaf_with_context(
                 float_flow::run_style(),
-                TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, ellipsis: run_ellipsis, line_clamp: run_clamp, tokens: std::cell::RefCell::new(None), small_caps: *sc, han: *han, clip_src: clip },
+                TextLeaf::Run { text, font_size: *fs, bold: *bold, color: *color, line_height: *lh, decorations: *deco, baseline_shift: *vs, mono: *mono, word_spacing: *wsp, ws: run_ws, align: run_align, ellipsis: run_ellipsis, line_clamp: run_clamp, tokens: std::cell::RefCell::new(None), small_caps: *sc, han: *han, clip_src: clip },
             ) {
                 text_src::register(leaf, text_src::seg_ranges(&pending, &seg_lens));
                 direct.push(leaf);
@@ -4221,7 +4239,7 @@ fn build_element_inner(
                 }
             }
             collapse_adjacent_sibling_margins(taffy_tree, styles, node_map, &direct);
-            let taffy_style = to_taffy_style(&style, pct_height_resolves(tree, styles, id));
+            let mut taffy_style = to_taffy_style(&style, pct_height_resolves(tree, styles, id));
             if is_alignment_promote(&taffy_style) {
                 stretch_block_children_in_aligned_parent(taffy_tree, node_map, styles, &direct);
             }
@@ -4793,7 +4811,17 @@ fn build_element_inner(
     // only the parent knows it (see fix_flex_basis_carry).
     fix_flex_basis_carry(taffy_tree, &style, styles, node_map, &direct);
 
-    let taffy_style = to_taffy_style(&style, pct_height_resolves(tree, styles, id));
+    let mut taffy_style = to_taffy_style(&style, pct_height_resolves(tree, styles, id));
+    // #313: the wrap path keeps the host a plain block container — taffy
+    // floats only exist in its block algorithm, and the flex-column promote
+    // would demote them to misaligned flex items. Line alignment moves into
+    // float_lines: the host's runs carry the physical text-align and shift
+    // inside their float slots.
+    if wrap_v2 && is_alignment_promote(&taffy_style) {
+        taffy_style.display = Display::Block;
+        taffy_style.flex_direction = FlexDirection::default();
+        taffy_style.align_items = AlignItems::default();
+    }
     if is_alignment_promote(&taffy_style) {
         stretch_block_children_in_aligned_parent(taffy_tree, node_map, styles, &direct);
     }

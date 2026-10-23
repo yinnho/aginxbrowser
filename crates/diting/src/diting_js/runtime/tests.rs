@@ -20673,6 +20673,79 @@ fn float_wrap_abspos_flexgrid_pseudo_faces() {
     );
 }
 
+/// #313 center/right hosts of bare text wrap: the promote is suppressed
+/// (floats only exist in taffy's block algorithm) and float_lines shifts
+/// each line inside its float slot. Width-independent pins: a line beside
+/// the float centers in [float_w, host_w], a line below it centers in the
+/// full width, right-aligned lines end at the host's right edge, and the
+/// float itself stays pinned left. A center host with an INLINE ELEMENT
+/// child (span) keeps the zone posture until the mixed-run float face
+/// lands — its lines must never overlap the float (left ≥ band edge).
+#[cfg(feature = "screenshot")]
+#[test]
+fn float_wrap_center_right_hosts() {
+    let mut rt = setup_runtime(
+        r#"<style>
+          body{margin:0}
+          .h{width:400px;font:16px/20px monospace}
+          .f{float:left;width:100px;height:60px;background:#fa0}
+        </style>
+        <div class="h" id="c" style="text-align:center"><div class="f" id="fc"></div>the quick brown fox jumps over the lazy dog again</div>
+        <div class="h" id="r" style="text-align:right"><div class="f" id="fr"></div>the quick brown fox jumps over the lazy dog again</div>
+        <div class="h" id="s" style="text-align:center"><div class="f" id="fs"></div><span>the quick brown fox jumps over the lazy dog again</span></div>"#,
+    );
+    let lines = |rt: &mut JsRuntime, sel: &str| -> Vec<(f64, f64, f64)> {
+        let v = rt
+            .evaluate(&format!(
+                r#"(()=>{{
+                  const t = [...document.querySelector('{}').childNodes].find(n => n.nodeType === 3);
+                  const r = document.createRange();
+                  r.setStart(t, 0); r.setEnd(t, t.textContent.length);
+                  return JSON.stringify([...r.getClientRects()].map(b=>[Math.round(b.left),Math.round(b.top),Math.round(b.width)]));}})()"#,
+                sel
+            ))
+            .unwrap();
+        let s = v.as_str().unwrap_or("[]");
+        serde_json::from_str::<Vec<Vec<f64>>>(s).unwrap_or_default().into_iter().map(|x| (x[0], x[1], x[2])).collect()
+    };
+    let left_of = |rt: &mut JsRuntime, sel: &str| {
+        rt.evaluate(&format!("Math.round(document.querySelector('{}').getBoundingClientRect().left)", sel))
+            .unwrap()
+            .as_f64()
+            .unwrap_or(f64::NAN)
+    };
+    // The host's text-align never moves the floats themselves.
+    assert!((left_of(&mut rt, "#fc") - 0.0).abs() <= 1.0, "center host float left {}", left_of(&mut rt, "#fc"));
+    // Band-relative centering: lines beside the 100px float center in
+    // [100, 400], lines below it (top ≥ 60) center in [0, 400].
+    let host_top = rt
+        .evaluate("Math.round(document.querySelector('#c').getBoundingClientRect().top)")
+        .unwrap()
+        .as_f64()
+        .unwrap_or(0.0);
+    for (l, t, w) in lines(&mut rt, "#c") {
+        let band = if t - host_top < 60.0 { (100.0, 400.0) } else { (0.0, 400.0) };
+        let expect = band.0 + (band.1 - band.0 - w) / 2.0;
+        assert!(
+            (l - expect).abs() <= 1.5,
+            "center line at left {} width {} must sit at {} in band {:?}",
+            l,
+            w,
+            expect,
+            band
+        );
+    }
+    // Right alignment: every line ends at the host's right edge.
+    for (l, _t, w) in lines(&mut rt, "#r") {
+        assert!((l + w - 400.0).abs() <= 1.5, "right line at [{},{}] must end at 400", l, l + w);
+    }
+    // The span host stays on the zone path (mixed-run float face pending):
+    // lines sit inside the band, never across the float.
+    for (l, _t, _w) in lines(&mut rt, "#s") {
+        assert!(l >= 99.0, "zone-posture span line at left {} must not cross the float", l);
+    }
+}
+
 /// Batch 102: getComputedStyle(el, pseudoElt) — the pseudo-element computed
 /// face. The second argument routes to the host's cascaded ::before/::after
 /// styles (batch 99 cascade), pseudos with no matching rule answer the

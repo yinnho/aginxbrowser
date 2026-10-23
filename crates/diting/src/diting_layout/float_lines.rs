@@ -14,7 +14,7 @@ use taffy::tree::{LayoutInput, LayoutOutput, NodeId};
 use taffy::{BlockContext, Clear};
 
 use super::text::{self, Token};
-use crate::diting_css::WhiteSpace;
+use crate::diting_css::{TextAlign, WhiteSpace};
 
 /// One laid-out line's horizontal slot, relative to the leaf's left edge.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -48,6 +48,7 @@ pub(super) fn measure(
     pad: f32,
     inputs: &LayoutInput,
     ws: WhiteSpace,
+    align: TextAlign,
     line_clamp: Option<u32>,
     ctx: &BlockContext<'_>,
 ) -> Option<LayoutOutput> {
@@ -77,6 +78,18 @@ pub(super) fn measure(
     slots.truncate(lines.len());
     while slots.len() < lines.len() {
         slots.push(Slot { x: 0.0, width: full });
+    }
+    // Band-relative line alignment (#313): a centered/right host on the
+    // wrap path has no flex promote to lean on, so each line shifts inside
+    // its own slot. The shift is baked into the recorded slot x — split
+    // and the painter replay it without knowing the align.
+    let shift = |s: &mut Slot, l: f32| match align {
+        TextAlign::Center => s.x += (s.width - l).max(0.0) / 2.0,
+        TextAlign::Right => s.x += (s.width - l).max(0.0),
+        _ => {}
+    };
+    for (s, l) in slots.iter_mut().zip(lines.iter()) {
+        shift(s, l.width);
     }
     let widest = lines.iter().map(|l| l.width).fold(0.0, f32::max);
     let size = taffy::geometry::Size {
@@ -136,11 +149,11 @@ pub(super) fn measure_node(
     block: Option<&mut taffy::BlockContext<'_>>,
 ) -> taffy::tree::LayoutOutput {
     match ctx {
-        Some(super::TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, tokens, small_caps, han, line_clamp, .. }) => {
+        Some(super::TextLeaf::Run { text, font_size, bold, line_height, baseline_shift, mono, word_spacing, ws, align, tokens, small_caps, han, line_clamp, .. }) => {
             let pad = super::shift_pad(*baseline_shift, super::leaf_descent(fonts, *font_size, *bold));
             let shaped = super::run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han);
             if let Some(b) = block.as_deref() {
-                if let Some(out) = measure(id, &shaped, *line_height, pad, &inputs, *ws, *line_clamp, b) {
+                if let Some(out) = measure(id, &shaped, *line_height, pad, &inputs, *ws, *align, *line_clamp, b) {
                     return out;
                 }
             }
