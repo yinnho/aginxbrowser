@@ -20678,9 +20678,10 @@ fn float_wrap_abspos_flexgrid_pseudo_faces() {
 /// each line inside its float slot. Width-independent pins: a line beside
 /// the float centers in [float_w, host_w], a line below it centers in the
 /// full width, right-aligned lines end at the host's right edge, and the
-/// float itself stays pinned left. A center host with an INLINE ELEMENT
-/// child (span) keeps the zone posture until the mixed-run float face
-/// lands — its lines must never overlap the float (left ≥ band edge).
+/// float itself stays pinned left. A center host whose inline content is
+/// one plain inline element mounts directly (#314) and centers the same
+/// way; hosts with a mixed run keep the zone posture — lines never overlap
+/// the float.
 #[cfg(feature = "screenshot")]
 #[test]
 fn float_wrap_center_right_hosts() {
@@ -20775,6 +20776,50 @@ fn float_wrap_center_right_hosts() {
         let expect = if t - l_host_top < 60.0 { l_float_left + 100.0 } else { 0.0 };
         assert!((l - expect).abs() <= 1.5, "span line at left {} must sit at {}", l, expect);
     }
+}
+
+/// Float widths of every authored shape ride the wrap path (#313): px/%
+/// as-is, em/rem folded at cascade, calc repaired between two solves (the
+/// repair busts the layout cache when the fixup is a float — taffy's
+/// cache key can't see a sibling float's new collision extent, so the
+/// text leaf would keep slots wrapped against the old extent and paint
+/// across the repaired box), sizing keywords measured at build. Chrome
+/// truth (headless, 2026-10-23): calc(25%+40px) = 140 in a 400px host,
+/// min-content of "FFF" = 29; lines beside sit at the float's right edge
+/// and the first line below returns to the host's left edge.
+#[cfg(feature = "screenshot")]
+#[test]
+fn float_wrap_calc_and_keyword_widths() {
+    let mut rt = setup_runtime(
+        r#"<style>
+          body{margin:0}
+          .h{width:400px;font:16px/20px monospace}
+          .f{float:left;height:40px;background:#fa0}
+        </style>
+        <div class="h" id="a"><div class="f" id="fa" style="width:calc(25% + 40px)"></div><p style="margin:0" id="pa">the quick brown fox jumps over the lazy dog again and again more text to force a fourth line here yes</p></div>
+        <div class="h" id="b"><div class="f" id="fb" style="width:min-content">FFF</div><p style="margin:0" id="pb">the quick brown fox jumps over the lazy dog again and again more text to force a fourth line here yes</p></div>"#,
+    );
+    let lines = |rt: &mut JsRuntime, sel: &str| -> Vec<Vec<f64>> {
+        let v = rt
+            .evaluate(&format!(
+                r#"(()=>{{const p=document.querySelector('{sel}');const r=document.createRange();r.selectNodeContents(p);return JSON.stringify([...r.getClientRects()].map(b=>[Math.round(b.left),Math.round(b.top)]).slice(0,4));}})()"#
+            ))
+            .unwrap();
+        serde_json::from_str(v.as_str().unwrap_or("[]")).unwrap_or_default()
+    };
+    let num = |rt: &mut JsRuntime, expr: &str| rt.evaluate(expr).unwrap().as_f64().unwrap_or(f64::NAN);
+    // calc(25% + 40px) in a 400px host = 140 (Chrome: 140).
+    assert!((num(&mut rt, "Math.round(document.getElementById('fa').getBoundingClientRect().width)") - 140.0).abs() <= 1.0);
+    let la = lines(&mut rt, "#pa");
+    assert!(la.len() >= 3, "calc float text wraps to at least 3 lines");
+    assert!((la[0][0] - 140.0).abs() <= 1.0, "first line sits at the calc float's right edge, got {}", la[0][0]);
+    // The 40px float spans two lines; the third returns to the left edge.
+    assert!((la[2][0] - 0.0).abs() <= 1.0, "line below the calc float returns to the edge, got {}", la[2][0]);
+    // min-content of "FFF" = 29 (Chrome: 29).
+    assert!((num(&mut rt, "Math.round(document.getElementById('fb').getBoundingClientRect().width)") - 29.0).abs() <= 1.0);
+    let lb = lines(&mut rt, "#pb");
+    assert!((lb[0][0] - 29.0).abs() <= 1.0, "first line sits at the min-content float's right edge, got {}", lb[0][0]);
+    assert!((lb[2][0] - 0.0).abs() <= 1.0, "line below the min-content float returns to the edge, got {}", lb[2][0]);
 }
 
 /// Batch 102: getComputedStyle(el, pseudoElt) — the pseudo-element computed

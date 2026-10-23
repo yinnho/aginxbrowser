@@ -8,16 +8,19 @@
 //! taffy floats, the block children overlap them like Chrome's, and text
 //! runs wrap into the free slots beside them (`float_lines`).
 //!
-//! Still on the zone path (#313 remaining): float widths beyond px/%
-//! (em/calc); hosts whose width comes from their content (float/abspos/
-//! flex-item hosts need float-aware intrinsic sizing); and center/right
-//! hosts whose inline content does not mount directly (an inline-block,
-//! or several/nested inline elements, rides the run wrapper as one atom
-//! that cannot take the float slots). Center/right hosts of bare text —
-//! and of one plain inline element of pure text (#314) — wrap: the
-//! promote is suppressed for the wrap host and float_lines shifts each
-//! line inside its float slot; nowrap/pre runs beside floats stay
-//! left-aligned until measure covers their line shapes.
+//! Still on the zone path (#313 remaining): hosts whose width comes from
+//! their content (float/abspos/flex-item hosts need float-aware intrinsic
+//! sizing); and center/right hosts whose inline content does not mount
+//! directly (an inline-block, or several/nested inline elements, rides the
+//! run wrapper as one atom that cannot take the float slots). Float widths
+//! of every authored shape ride the wrap path: px/% as-is, em/rem folded
+//! at cascade, calc repaired between two solves (cache-busted when the
+//! fixup is a float), sizing keywords measured at build. Center/right
+//! hosts of bare text — and of one plain inline element of pure text
+//! (#314) — wrap: the promote is suppressed for the wrap host and
+//! float_lines shifts each line inside its float slot; nowrap/pre runs
+//! beside floats stay left-aligned until measure covers their line
+//! shapes.
 //!
 //! Default on since the real-site gray round came back clean (bs3 docs,
 //! a float-free portal, our own blog): opt out with
@@ -161,7 +164,22 @@ pub(super) fn eligible(
         // (#313). Flex/grid children are block-level siblings that Chrome
         // narrows as independent formatting contexts beside the float.
         if s.float_side.is_some() {
-            if !matches!(s.width, None | Some(Length::Px(_)) | Some(Length::Percent(_))) {
+            // em/rem fold to Px at cascade; calc keeps its symbolic
+            // percent+px mix (the calc repair pass fixes the true width
+            // between two solves, and busts the layout cache when the fixup
+            // was a float so its siblings' float_lines slots re-wrap); the
+            // sizing keywords resolve to measured px at build time
+            // (resolve_sizing_keywords).
+            if !matches!(
+                s.width,
+                None
+                    | Some(Length::Px(_))
+                    | Some(Length::Percent(_))
+                    | Some(Length::Calc { .. })
+                    | Some(Length::MinContent)
+                    | Some(Length::MaxContent)
+                    | Some(Length::FitContent)
+            ) {
                 return false;
             }
             floats += 1;

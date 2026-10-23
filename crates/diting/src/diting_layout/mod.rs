@@ -1493,6 +1493,19 @@ fn cb_height_definite(
     false
 }
 
+/// Empty every cached layout in `root`'s subtree (taffy's `mark_dirty`
+/// propagates only to ancestors). The two post-layout repair passes use it
+/// when a fixup touched a float: a repaired float's new collision extent is
+/// invisible to its siblings' cache keys — (style, constraints) — so a
+/// cached text leaf would keep its float_lines slots wrapped against the
+/// float's old extent and paint across the repaired box.
+fn bust_subtree_cache(node: taffy::tree::NodeId, tree: &mut TaffyTree<TextLeaf>) {
+    let _ = tree.mark_dirty(node);
+    for c in tree.children(node).unwrap_or_default().to_vec() {
+        bust_subtree_cache(c, tree);
+    }
+}
+
 /// Whether `height: <percent>` on element `id` resolves, or folds to `auto`
 /// per CSS 2.1 §10.5: it resolves when the containing-block chain is definite
 /// (see [`cb_height_definite`]) OR the element is absolutely positioned (the
@@ -6285,8 +6298,10 @@ pub fn layout_solve_rooted(
                 d
             }
             fixups.sort_by_key(|(t, _)| taffy_depth(&taffy_tree, *t, icb_node));
+            let mut float_fixups = false;
             for (tnid, dom_id) in fixups {
                 let Some(st) = styles.get(&dom_id) else { continue };
+                float_fixups |= st.float_side.is_some();
                 // Containing block = the taffy parent's settled content box,
                 // or the arithmetic repair when the parent itself was a
                 // calc-width fixup.
@@ -6342,6 +6357,18 @@ pub fn layout_solve_rooted(
                     ts.max_size.width = LengthPercentageAuto::length(content + infl);
                 }
                 let _ = taffy_tree.set_style(tnid, ts);
+            }
+            // A repaired size changes the collision geometry floats see,
+            // but taffy's cache key is (style, constraints) — a sibling
+            // text leaf beside a repaired float keeps its cache entry
+            // (wrapped against the float's OLD extent) through the
+            // re-solve, and its stale float_lines slots would cross the
+            // repaired float. Non-float fixups need no bust: their
+            // descendants re-measure through the parent-width cache miss,
+            // and block siblings do not interact. Bust the subtree only
+            // when a float was among the fixups.
+            if float_fixups {
+                bust_subtree_cache(icb_node, &mut taffy_tree);
             }
             let re = taffy_tree.compute_layout_with_block_measure(
                 icb_node,
@@ -6422,8 +6449,10 @@ pub fn layout_solve_rooted(
                 d
             }
             fixups.sort_by_key(|(t, _)| taffy_depth(&taffy_tree, *t, icb_node));
+            let mut float_fixups = false;
             for (tnid, dom_id) in fixups {
                 let Some(st) = styles.get(&dom_id) else { continue };
+                float_fixups |= st.float_side.is_some();
                 // Percent padding resolves against the CB's inline size —
                 // the parent's settled content box, or either repair pass's
                 // arithmetic basis while the taffy layout is still stale.
@@ -6482,6 +6511,11 @@ pub fn layout_solve_rooted(
                     ts.max_size.height = LengthPercentageAuto::length(h + pt + pb + bt + bb);
                 }
                 let _ = taffy_tree.set_style(tnid, ts);
+            }
+            // Same stale-sibling hazard as the calc repair above: a repaired
+            // float's new extent is invisible to its siblings' cache keys.
+            if float_fixups {
+                bust_subtree_cache(icb_node, &mut taffy_tree);
             }
             let re = taffy_tree.compute_layout_with_block_measure(
                 icb_node,
