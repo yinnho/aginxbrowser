@@ -54,8 +54,12 @@ screenshot = [
 ]
 
 [dependencies]
-# Taffy 0.15.0 from crates.io (2026-10-12, #270). The retired git pin
-# tracked blitz main (4142c9d→2d936b77, 2026-10-09) for taffy #1286
+# Taffy 0.15.x (2026-10-12, #270), patched to upstream main 802e497 in the
+# root Cargo.toml for the float tail-segment fix (#300: a float extending
+# past the segment list's last end had that extent dropped, so lines beside
+# it wrapped full-width; see the [patch.crates-io] note). The retired git
+# pin before 0.15.0 tracked blitz main (4142c9d→2d936b77, 2026-10-09) for
+# taffy #1286
 # indefinite percentage flex-basis (falls back to content sizing instead
 # of collapsing to 0, our #241), the #1278-#1284 grid family, and the
 # block-layout vertical-margins rework; 0.15.0 = that rev + #1293/#1242 +

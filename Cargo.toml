@@ -160,3 +160,16 @@ tower = { version = "0.5", features = ["util"] }
 [profile.release]
 panic = "unwind"
 strip = true
+
+# taffy 0.15.0 (2026-10-12) predates the float tail-segment fix our #300
+# graduation battery pinned: a float placed beside a shorter earlier float
+# (e.g. a 60px left float starting beside a 50px right float's last 10px)
+# had the part of its extent below the segment list's last end silently
+# dropped from the FloatContext, so text lines beside that tail wrapped
+# full-width. main pushed the missing segment in the end-None branch
+# ("add a segment for the part of it below the last segment"); pin main
+# until a release carries it. Only place_floated_box's signature moved
+# (caller-defined id first param — #299's probe passes 0). The blitz git
+# copy of taffy (versioned 0.14.0) is a different source and stays.
+[patch.crates-io]
+taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "802e497b69689e1c93be2d16e9d53a973971bcb2" }

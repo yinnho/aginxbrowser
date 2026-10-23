@@ -7111,6 +7111,68 @@
         assert_eq!(v, "{\"boxLeft\":0,\"lines\":[50,50,50,0,0]}");
     }
 
+    /// #300 graduation battery (Chrome truth re-pinned 2026-10-23, width-
+    /// independent): seven realistic faces — a floated IMG, a right float,
+    /// two same-side floats, a float declared AFTER some text, list items,
+    /// a nested plain block, and a float with margins — with clear:both
+    /// separators between cases. Every pinned number is a LEFT, a TOP, a
+    /// box size or a line COUNT (per-line Range lefts), never a text width:
+    /// our serif words run ~15% wider than Chrome's, so line widths are not
+    /// comparable cross-engine while lefts/counts/heights are. Escaped
+    /// floats (A's img outliving ca by 10px, B's right float by 10px) and
+    /// the separators clearing below them are part of the pin: cb top=50,
+    /// cc top=100 come from the clears, not the boxes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_float_wrap_graduation_battery() {
+        crate::diting_layout::float_flow::force(Some(true));
+        let mut rt = setup_runtime(
+            r#"<html><head><style>body{margin:0;font:16px/20px serif} p{margin:0} .f{float:left} .fr{float:right} .sep{clear:both;height:0}</style></head><body>
+              <div id=ca style="width:300px"><img id=im src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" style="float:left;width:50px;height:50px"><p id=pa>word word word word word word word word word word word word</p></div>
+              <div class=sep></div>
+              <div id=cb style="width:300px"><div id=frb class=fr style="width:50px;height:50px"></div><p id=pb>word word word word word word word word word word word word</p></div>
+              <div class=sep></div>
+              <div id=cc style="width:300px"><div id=f1 class=f style="width:50px;height:40px"></div><div id=f2 class=f style="width:50px;height:60px"></div><p id=pc>word word word word word word word word word word word word</p></div>
+              <div class=sep></div>
+              <div id=cd style="width:300px"><p id=pd>word word word</p><div class=f id=fd style="width:50px;height:50px"></div><p id=pd2>word word word word word word word word word</p></div>
+              <div class=sep></div>
+              <div id=ce style="width:300px"><div class=f style="width:50px;height:50px"></div><ul id=ue style="margin:0;padding:0"><li id=li1>word word word</li><li id=li2>word word word</li><li id=li3>word word word</li></ul></div>
+              <div class=sep></div>
+              <div id=cf style="width:300px"><div class=f style="width:50px;height:70px"></div><div id=inner><p id=pf>word word word word word word word word</p></div></div>
+              <div class=sep></div>
+              <div id=cg style="width:300px"><div class=f id=fg style="width:50px;height:50px;margin:10px"></div><p id=pg>word word word word word word word word word word</p></div>
+             </body></html>"#,
+        );
+        let v = rt
+            .evaluate(
+                r#"(() => {
+                  const lines = (pid) => { const p = document.getElementById(pid); const r = document.createRange(); r.selectNodeContents(p); return [...r.getClientRects()].map(x => Math.round(x.left)); };
+                  const box = (pid) => { const b = document.getElementById(pid).getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; };
+                  return JSON.stringify({
+                    A: { paLefts: lines('pa'), im: box('im'), ca: box('ca') },
+                    B: { pbLefts: lines('pb'), frb: box('frb'), cb: box('cb') },
+                    C: { pcLefts: lines('pc'), f1: box('f1'), f2: box('f2'), cc: box('cc') },
+                    D: { pdLefts: lines('pd'), pd2Lefts: lines('pd2'), fd: box('fd'), cd: box('cd') },
+                    E: { li1Lefts: lines('li1'), li3Lefts: lines('li3'), ce: box('ce') },
+                    F: { pfLefts: lines('pf'), inner: box('inner'), cf: box('cf') },
+                    G: { pgLefts: lines('pg'), fg: box('fg'), cg: box('cg') }
+                  }); })()"#,
+            )
+            .unwrap();
+        crate::diting_layout::float_flow::force(None);
+        let got: serde_json::Value = serde_json::from_str(v.as_str().expect("battery probe returns JSON")).unwrap();
+        let want: serde_json::Value = serde_json::from_str(
+            r#"{"A":{"paLefts":[50,50],"im":[0,0,50,50],"ca":[0,0,300,40]},
+                "B":{"pbLefts":[0,0],"frb":[250,50,50,50],"cb":[0,50,300,40]},
+                "C":{"pcLefts":[100,100,100],"f1":[0,100,50,40],"f2":[50,100,50,60],"cc":[0,100,300,60]},
+                "D":{"pdLefts":[0],"pd2Lefts":[50,50],"fd":[0,180,50,50],"cd":[0,160,300,60]},
+                "E":{"li1Lefts":[50],"li3Lefts":[50],"ce":[0,230,300,60]},
+                "F":{"pfLefts":[50,50],"inner":[0,290,300,40],"cf":[0,290,300,40]},
+                "G":{"pgLefts":[70,70],"fg":[10,370,50,50],"cg":[0,360,300,40]}}"#,
+        )
+        .unwrap();
+        assert_eq!(got, want, "float wrap graduation battery vs Chrome 155");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn test_collapsed_display_table_with_only_anonymous_cells_lays_out() {
         // docs.python.org: a `display:table` box (no <table>) with

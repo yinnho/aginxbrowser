@@ -4684,18 +4684,29 @@ fn build_element_inner(
             // UA/author made it block-level (our ua_display keeps img block).
             let inline_atom =
                 inline_level || child_display == Some(CssDisplay::InlineBlock);
-            let sd = if inline_atom && !atomic_container && !out_of_flow {
+            // A floated replaced element is a float first (CSS float
+            // blockifies): never run-inline, and on the wrap_v2 path it must
+            // carry taffy's Float like its element siblings (mark), or it
+            // stacks as a plain block above the text. Non-wrap_v2 containers
+            // never reach here with float children — the zone model takes
+            // them at the is_float_child branch above.
+            let floated = wrap_v2
+                && styles.get(&child).is_some_and(|s| s.float_side.is_some() || s.clear_side.is_some());
+            let sd = if inline_atom && !atomic_container && !out_of_flow && !floated {
                 strut_descent_for(tree, child, styles, fonts)
             } else {
                 0.0
             };
             let leaf = build_replaced_leaf(tree, child, styles, images, taffy_tree, node_map, sd);
             if let Some(leaf) = leaf {
-                if inline_atom && !atomic_container && !out_of_flow {
+                if inline_atom && !atomic_container && !out_of_flow && !floated {
                     run.push(RunSeg::Nodes(vec![leaf]));
                 } else {
                     flush_run(&mut run, &mut direct, taffy_tree, run_wrappers, run_clip.take());
                     direct.push(leaf);
+                    if floated {
+                        float_flow::mark(taffy_tree, leaf, styles.get(&child));
+                    }
                 }
             }
             continue;
@@ -4757,7 +4768,14 @@ fn build_element_inner(
         } else {
             flush_run(&mut run, &mut direct, taffy_tree, run_wrappers, run_clip.take());
             if let Some(node) = build_element(tree, child, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta) {
-                if wrap_v2 {
+                // wrap_v2 children carry their float/clear into taffy. A
+                // plain-path container (no direct float children, so no zone
+                // reification) still sees floats ESCAPED from descendants in
+                // the shared BFC — its clear children must drop below them
+                // (the case-div separators of #300's battery). Zone-model
+                // containers returned earlier, so with the gate on marking
+                // here is always safe; gate-off never marks, byte-identical.
+                if float_flow::enabled() {
                     float_flow::mark(taffy_tree, node, styles.get(&child));
                 }
                 direct.push(node);

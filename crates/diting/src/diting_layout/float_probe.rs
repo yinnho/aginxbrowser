@@ -83,7 +83,7 @@ fn taffy_places_the_float_and_leaves_the_block_box_overlapping() {
 fn float_context_slots_give_chromes_line_offsets() {
     let mut ctx = FloatContext::new();
     ctx.set_width(200.0);
-    let at = ctx.place_floated_box(Size { width: 50.0, height: 50.0 }, 0.0, [0.0, 0.0], FloatDirection::Left, Clear::None);
+    let at = ctx.place_floated_box(0, Size { width: 50.0, height: 50.0 }, 0.0, [0.0, 0.0], FloatDirection::Left, Clear::None);
     assert_eq!((at.x, at.y), (0.0, 0.0));
     let toks = words(20, 36.0, 4.0);
     let lines = wrap_in_slots(&toks, 20.0, |y| {
