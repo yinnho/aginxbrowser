@@ -3557,9 +3557,15 @@ fn build_element(
     run_wrappers: &mut Vec<taffy::tree::NodeId>,
     meta: &mut TableBuildMeta,
 ) -> Option<taffy::tree::NodeId> {
+    // The float environment is a parent-to-child fact: inner reads what
+    // the parent decided for THIS element and re-sets it for its own
+    // children — restored here so a later sibling never inherits it.
+    let env_saved = float_flow::in_env();
     let node = build_element_inner(
         tree, id, styles, images, fonts, taffy_tree, node_map, flattened, run_wrappers, meta,
-    )?;
+    );
+    float_flow::set_env(env_saved);
+    let node = node?;
     append_pseudo_leaves(tree, id, styles, node, fonts, taffy_tree);
     Some(node)
 }
@@ -3971,8 +3977,20 @@ fn build_element_inner(
 
     // Shadow hosts render their shadow tree here (composed-tree children;
     // unassigned light children and slot boxes never build).
+    // #313: a plain block inside a wrap host's block flow inherits its
+    // floats — in CSS only BFC boundaries stop line boxes from owing the
+    // ancestor floats a band. A static, non-floated block is such a
+    // passthrough; everything else (flex/grid/table, abspos/fixed,
+    // floats) starts a fresh context.
+    let in_float_env = float_flow::in_env()
+        && style.display == Some(CssDisplay::Block)
+        && !matches!(style.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
+        && style.float_side.is_none();
     let child_ids: Vec<NodeId> = render_children(tree, id);
     let wrap_v2 = float_flow::eligible(tree, styles, id, &style, &child_ids);
+    // Children see the host's floats — or the environment the host itself
+    // inherited as a plain block.
+    float_flow::set_env(wrap_v2 || in_float_env);
     // #314: beside real floats a lone plain inline element mounts directly
     // (its run leaf then takes the float slots like bare text). Anywhere
     // else the wrapper keeps the span's box content-driven — its own
@@ -4879,8 +4897,12 @@ fn build_element_inner(
     // floats only exist in its block algorithm, and the flex-column promote
     // would demote them to misaligned flex items. Line alignment moves into
     // float_lines: the host's runs carry the physical text-align and shift
-    // inside their float slots.
-    if wrap_v2 && is_alignment_promote(&taffy_style) {
+    // inside their float slots. A plain block AROUND floats (a centered p
+    // beside the host's float, #314 tail) demotes for the same reason:
+    // taffy hands the BlockContext only down a block chain, so the promote
+    // would cut its lines out of the band — its alignment rides the run
+    // wrapper's justify instead.
+    if (wrap_v2 || in_float_env) && is_alignment_promote(&taffy_style) {
         taffy_style.display = Display::Block;
         taffy_style.flex_direction = FlexDirection::default();
         taffy_style.align_items = AlignItems::default();

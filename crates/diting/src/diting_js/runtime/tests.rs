@@ -20935,6 +20935,58 @@ fn float_wrap_center_mixed_run() {
 
 #[cfg(feature = "screenshot")]
 #[test]
+fn float_wrap_center_block_child_band() {
+    // The p face (#313/#314): a plain block child of a float host keeps
+    // the flex-column promote (it has no floats of its own), which cuts
+    // its lines out of the band. The promote demotes inside the host's
+    // block flow: the p's lines owe the ancestor floats a band, and its
+    // alignment rides the run wrapper's justify (#314 tail).
+    let mut rt = setup_runtime(
+        r#"<style>
+          body{margin:0}
+          .h{width:400px;height:90px;font:16px/20px monospace}
+          .f{float:left;width:100px;height:40px;background:#fa0}
+          p{margin:0}
+        </style>
+        <div class="h" id="m" style="text-align:center"><div class="f"></div><p>alpha beta <span>gamma delta epsilon</span> zeta eta theta iota kappa more words</p></div>
+        <div class="h" id="n" style="text-align:center"><div class="f"></div><div><p>alpha beta gamma delta epsilon zeta eta theta iota kappa more words</p></div></div>
+        <div class="h" id="pl"><div class="f"></div><p>alpha beta gamma delta epsilon zeta eta theta iota kappa more words</p></div>"#,
+    );
+    let lines = |rt: &mut JsRuntime, sel: &str| -> Vec<Vec<f64>> {
+        let v = rt
+            .evaluate(&format!(
+                r#"(()=>{{const el=document.querySelector('{sel} p');const r=document.createRange();r.selectNodeContents(el);const byTop={{}};for(const b of r.getClientRects()){{if(b.width<2)continue;const t=Math.round(b.top);if(!byTop[t])byTop[t]=[b.left,b.right];else{{byTop[t][0]=Math.min(byTop[t][0],b.left);byTop[t][1]=Math.max(byTop[t][1],b.right);}}}}return JSON.stringify(Object.entries(byTop).sort((a,b)=>a[0]-b[0]).map(([t,v])=>[+(v[0]).toFixed(1),+(v[1]-v[0]).toFixed(1)]));}})()"#
+            ))
+            .unwrap();
+        serde_json::from_str(v.as_str().unwrap_or("[]")).unwrap_or_default()
+    };
+    // Center p with a mixed run: the same band-relative centering as the
+    // direct-mount host (float_wrap_center_mixed_run).
+    let lm = lines(&mut rt, "#m");
+    assert!(lm.len() == 3, "three lines across the float, got {:?}", lm);
+    for (i, l) in lm.iter().take(2).enumerate() {
+        let expect = 100.0 + (300.0 - l[1]) / 2.0;
+        assert!((l[0] - expect).abs() <= 1.5, "center line {} in the band: {} vs {}", i, l[0], expect);
+    }
+    let expect = (400.0 - lm[2][1]) / 2.0;
+    assert!((lm[2][0] - expect).abs() <= 1.5, "below-float line centers in the full width: {} vs {}", lm[2][0], expect);
+    // The environment passes through a plain block — a nested div keeps
+    // the p in the band (Chrome: only a BFC boundary stops it).
+    let ln = lines(&mut rt, "#n");
+    assert!(ln.len() == 3, "three nested lines, got {:?}", ln);
+    for (i, l) in ln.iter().take(2).enumerate() {
+        let expect = 100.0 + (300.0 - l[1]) / 2.0;
+        assert!((l[0] - expect).abs() <= 1.5, "nested center line {} in the band: {} vs {}", i, l[0], expect);
+    }
+    // A left p keeps its band-left posture, returning to the edge below.
+    let lp = lines(&mut rt, "#pl");
+    assert!(lp.len() == 3, "three left lines, got {:?}", lp);
+    assert!((lp[0][0] - 100.0).abs() <= 1.0 && (lp[1][0] - 100.0).abs() <= 1.0, "left lines at the band start, got {:?}", lp);
+    assert!((lp[2][0] - 0.0).abs() <= 1.0, "left p returns to the edge, got {}", lp[2][0]);
+}
+
+#[cfg(feature = "screenshot")]
+#[test]
 fn computed_style_pseudo_element_face() {
     let mut rt = setup_runtime(
         r#"<style>

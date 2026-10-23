@@ -24,11 +24,14 @@
 //! promote is suppressed for the wrap host). nowrap/pre runs take the
 //! slots too: each hard line starts at its band and overflows right
 //! (Chrome keeps a nowrap line on the float's line instead of dropping
-//! below; a pre line below the float returns to the edge). A separate
-//! face: a center/right host's float-free block child (a p) keeps the
-//! promote and so never reaches inline_flow — its lines sit at the edge
-//! instead of the band; that needs an alignment fallback for the no-float
-//! promote, not this gate.
+//! below; a pre line below the float returns to the edge). A plain block
+//! inside a wrap host (a centered p beside the host's float) inherits the
+//! environment too: in CSS only a BFC boundary stops line boxes from
+//! owing the ancestor floats a band, so mod.rs demotes the flex-column
+//! promote inside the host's block flow — the block chain is the only
+//! road taffy hands the BlockContext down — and the block's alignment
+//! rides the run wrapper's justify like every other wrap host (#314
+//! tail).
 //!
 //! Default on since the real-site gray round came back clean (bs3 docs,
 //! a float-free portal, our own blog): opt out with
@@ -49,6 +52,23 @@ use crate::diting_dom::tree::{DomTree, NodeId};
 
 thread_local! {
     static FORCED: Cell<Option<bool>> = const { Cell::new(None) };
+    /// Building descendants of a wrap host right now. Plain blocks inside
+    /// it stay plain: their lines owe the ancestor floats a band, and the
+    /// flex-column promote would cut them out of it (mod.rs demotes).
+    static ENV: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether the element about to be built sits in a wrap host's block flow.
+pub(super) fn in_env() -> bool {
+    ENV.with(Cell::get)
+}
+
+/// What the container being built exposes to ITS children — its own floats
+/// (wrap_v2) or the environment it inherited and passes on as a plain
+/// block. BFC boundaries (flex/grid/table/abspos/floats) break the chain
+/// by never setting this from inside.
+pub(super) fn set_env(on: bool) {
+    ENV.with(|c| c.set(on));
 }
 
 /// Test hook: force the gate on or off for this thread.
