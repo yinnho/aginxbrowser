@@ -346,9 +346,19 @@ pub(super) fn to_taffy_style(style: &ComputedStyle, pct_h_resolves: bool) -> Sty
     }
 
     // --- positioning + clamps (batch 2d) ---
-    if let Some(p) = style.position {
-        s.position = match p {
-            // taffy has no static: in-flow boxes are Relative (its default).
+    let pos = style.position.unwrap_or(PositionMode::Static);
+    s.position = match pos {
+            // In-flow boxes map to taffy's Relative — including UNDECLARED
+            // position and CSS static. taffy 0.15's Style default is
+            // Static, which does not claim absolute descendants, so an
+            // undeclared box would leave its out-of-flow children to the
+            // root pass and fold their percent insets against the viewport
+            // (#223: a transformed ancestor pins fixed children to itself,
+            // the reparent pass leaves them in place, and the fold must
+            // follow). Mapping every in-flow box to Relative is safe
+            // because the reparent pass has already normalized each
+            // absolute/fixed box's taffy parent to its CSS containing
+            // block — a claiming parent is always the right one.
             PositionMode::Static | PositionMode::Relative => Position::Relative,
             // Fixed pins to the viewport; the nearest slice stands is the
             // root as containing block (see the reparent pass in layout_dom).
@@ -359,7 +369,6 @@ pub(super) fn to_taffy_style(style: &ComputedStyle, pct_h_resolves: bool) -> Sty
             // scroll-dependent shift (see sticky_axis_shift).
             PositionMode::Sticky => Position::Relative,
         };
-    }
     if style.position != Some(PositionMode::Sticky)
         && (style.top.is_some()
             || style.right.is_some()

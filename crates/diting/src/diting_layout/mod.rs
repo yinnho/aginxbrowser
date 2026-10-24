@@ -5897,7 +5897,7 @@ pub fn layout_solve_rooted(
                 .is_ok();
             if laid_out {
                 let mut now: HashMap<taffy::tree::NodeId, Rect> = HashMap::new();
-                abs_rects::collect(&taffy_tree, icb_node, (0.0, 0.0), (0.0, 0.0), &mut now);
+                abs_rects::collect(&taffy_tree, styles, &node_map, icb_node, (0.0, 0.0), (0.0, 0.0), &mut now);
                 for (tnid, dom_id) in &needs_static {
                     if let Some(r) = now.get(tnid) {
                         static_pos.insert(*dom_id, (r.x, r.y));

@@ -2933,6 +2933,12 @@
                 <div style="height:10px"></div>
                 <div id="b" style="position:absolute">B</div>
               </div>
+              <div id="wrap" style="transform:translate(50px,100px); width:300px; height:400px">
+                <div id="pc" style="position:fixed; top:10%; left:20%">PC</div>
+                <div id="pw" style="position:fixed; top:0; left:0; width:50%">PW</div>
+                <div id="psx" style="position:fixed; top:25%">PSX</div>
+                <div id="psy" style="position:fixed; left:50%">PSY</div>
+              </div>
             </body>"#,
         );
         let result = rt.evaluate(r#"
@@ -2947,6 +2953,13 @@
                 f3: g('f3'),
                 f2: g('f2'),
                 b: g('b'),
+                pc: g('pc'),
+                pw: (() => {
+                    const b = document.getElementById('pw').getBoundingClientRect();
+                    return [Math.round(b.x), Math.round(b.y), Math.round(b.width)];
+                })(),
+                psx: g('psx'),
+                psy: g('psy'),
             };
         "#).unwrap();
         let v = result;
@@ -2973,6 +2986,25 @@
         assert_eq!(
             v["b"], serde_json::json!([28, 38]),
             "auto insets resolve at the static position (body margin + padding + sibling)"
+        );
+        assert_eq!(
+            v["pc"], serde_json::json!([118, 198]),
+            "percent insets of a fixed box under a transformed ancestor fold against that \
+             ancestor (58 + 20%*300, 158 + 10%*400), not the viewport (#223)"
+        );
+        assert_eq!(
+            v["pw"], serde_json::json!([58, 158, 150]),
+            "a percent WIDTH folds against the transformed containing block too (50% of 300)"
+        );
+        assert_eq!(
+            v["psx"], serde_json::json!([58, 258]),
+            "the auto axis takes the static position at the TRANSFORMED origin (x=58), the \
+             percent axis still folds (158 + 25%*400)"
+        );
+        assert_eq!(
+            v["psy"], serde_json::json!([208, 158]),
+            "mirror of psx: left folds (58 + 50%*300), the auto top sits at the transformed \
+             origin (158)"
         );
     }
 
