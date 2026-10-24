@@ -10777,6 +10777,9 @@ globalThis.IntersectionObserver = class IntersectionObserver {
   else Promise.resolve().then(wireUp);
 })();
 globalThis.IntersectionObserverEntry = class IntersectionObserverEntry {};
+// Stub replaced by the real PerformanceObserver in performance.js (after
+// the Performance timeline is constructed). Kept here so early interface
+// sweeps see the name; observe/callback face is #217 / obscura #1166.
 globalThis.PerformanceObserver = class {
   constructor(){}
   observe(){}
@@ -16068,7 +16071,9 @@ if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
       if (el === this.documentElement || el === this.body) continue;
       var r = el.getBoundingClientRect();
       if (r.width === 0 || r.height === 0) continue;
-      if (qx >= r.left && qx <= r.right && qy >= r.top && qy <= r.bottom) {
+      // Half-open [left,right)×[top,bottom): Chrome / obscura #1164 exclude
+      // the right and bottom edges so adjacent boxes don't double-hit.
+      if (qx >= r.left && qx < r.right && qy >= r.top && qy < r.bottom) {
         // Transform-tainted boxes (blitz #663 family): a rotated/skewed
         // element's mapped bounding box swallows corners no pixel of the
         // element covers. With local geometry available and a non-diagonal
@@ -16086,7 +16091,7 @@ if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
                 if (det !== 0) {
                   var lx = (g[7] * (gx - g[8]) - g[6] * (gy - g[9])) / det;
                   var ly = (g[4] * (gy - g[9]) - g[5] * (gx - g[8])) / det;
-                  if (lx < g[0] || lx > g[0] + g[2] || ly < g[1] || ly > g[1] + g[3]) {
+                  if (lx < g[0] || lx >= g[0] + g[2] || ly < g[1] || ly >= g[1] + g[3]) {
                     outside = true;
                   }
                 }

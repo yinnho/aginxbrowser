@@ -14371,6 +14371,55 @@
         assert_eq!(below, serde_json::json!("BODY"));
     }
 
+
+    // #217 / obscura #1164: hit-test uses half-open [left,right)×[top,bottom).
+    // Points on the right or bottom edge must NOT hit the box (adjacent
+    // siblings would otherwise both claim the shared edge).
+    #[test]
+    #[cfg(feature = "screenshot")]
+    fn test_element_from_point_excludes_right_and_bottom_edges() {
+        let mut rt = setup_runtime(
+            r#"<html><head><style>
+          #box { position:absolute; left:100px; top:100px; width:50px; height:50px; background:#000; }
+        </style></head><body><div id="box"></div></body></html>"#,
+        );
+        let diag = rt
+            .evaluate(
+                r#"JSON.stringify((() => {
+                    const r = document.getElementById('box').getBoundingClientRect();
+                    const idAt = (x, y) => {
+                      const el = document.elementFromPoint(x, y);
+                      return el && el.id ? el.id : (el && el.tagName) || null;
+                    };
+                    return {
+                      rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom, w: r.width, h: r.height },
+                      center: idAt(r.left + r.width / 2, r.top + r.height / 2),
+                      leftTop: idAt(r.left, r.top),
+                      rightEdge: idAt(r.right, r.top + r.height / 2),
+                      bottomEdge: idAt(r.left + r.width / 2, r.bottom),
+                      justInsideBR: idAt(r.right - 0.5, r.bottom - 0.5),
+                    };
+                })())"#,
+            )
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(diag.as_str().unwrap()).unwrap();
+        assert_eq!(v["center"], "box", "center must hit: {v}");
+        assert_eq!(v["leftTop"], "box", "left/top inclusive: {v}");
+        assert_ne!(
+            v["rightEdge"], "box",
+            "right edge exclusive (obscura #1164): {v}"
+        );
+        assert_ne!(
+            v["bottomEdge"], "box",
+            "bottom edge exclusive (obscura #1164): {v}"
+        );
+        assert_eq!(
+            v["justInsideBR"], "box",
+            "just inside BR still hits: {v}"
+        );
+    }
+
+
     // Regression (obscura #740): translate percentages resolve against the
     // element's own box — translate(-50%, -50%) centers a top:50% box. The
     // Y axis used to come out wrong while X was right. Feature-gated: real
@@ -17732,6 +17781,97 @@
             false
         ]));
     }
+
+
+    #[test]
+    fn test_performance_observer_delivers_mark_measure() {
+        // #217 / obscura #1166: entryTypes mark/measure must reach
+        // takeRecords (and the observe callback). Bootstrap used to stub
+        // observe() as a no-op while getEntriesByType already recorded.
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate(
+                r#"
+            const seen = [];
+            const obs = new PerformanceObserver((list) => {
+              for (const e of list.getEntries()) seen.push(e.entryType + ':' + e.name);
+            });
+            obs.observe({ entryTypes: ['mark', 'measure'] });
+            performance.mark('m1');
+            performance.measure('mm', 'm1');
+            // Sync drain before the microtask callback runs.
+            const drained = obs.takeRecords().map(e => e.entryType + ':' + e.name);
+            return {
+              drained,
+              byType: performance.getEntriesByType('mark').map(e => e.name),
+              supported: PerformanceObserver.supportedEntryTypes,
+            };
+        "#,
+            )
+            .unwrap();
+        assert_eq!(
+            result["drained"],
+            serde_json::json!(["mark:m1", "measure:mm"]),
+            "takeRecords must see mark+measure: {result}"
+        );
+        assert_eq!(result["byType"], serde_json::json!(["m1"]));
+        assert_eq!(
+            result["supported"],
+            serde_json::json!(["mark", "measure", "navigation", "paint"])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_performance_observer_callback_fires_on_microtask() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate_remote(
+                r#"(async () => {
+            const seen = [];
+            const obs = new PerformanceObserver((list) => {
+              for (const e of list.getEntries()) seen.push(e.name);
+            });
+            obs.observe({ type: 'mark' });
+            performance.mark('via-cb');
+            // Leave the queue for the microtask callback (do not takeRecords).
+            await Promise.resolve();
+            await Promise.resolve();
+            return seen;
+        })()"#,
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value,
+            Some(serde_json::json!(["via-cb"])),
+            "callback delivery: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_performance_observer_buffered_replays_existing_marks() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let result = rt
+            .evaluate(
+                r#"
+            performance.mark('early');
+            const obs = new PerformanceObserver(() => {});
+            obs.observe({ type: 'mark', buffered: true });
+            return obs.takeRecords().map(e => e.name);
+        "#,
+            )
+            .unwrap();
+        assert!(
+            result
+                .as_array()
+                .map(|a| a.iter().any(|v| v.as_str() == Some("early")))
+                .unwrap_or(false),
+            "buffered observe must surface prior mark: {result}"
+        );
+    }
+
 
     #[test]
     fn test_location_navigation_coerces_url_objects() {

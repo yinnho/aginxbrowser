@@ -138,6 +138,62 @@ _markNativeProto(globalThis.EventCounts.prototype);
 // double — NOT an integral or full-precision value). Draw the offset once
 // per context so the whole timeline stays monotonic after quantization.
 var _perfNoise = Math.random() * 0.1;
+// ---- PerformanceObserver (#217 / obscura #1166) ----
+// Bootstrap only stubs the constructor. Mark/measure already land in
+// getEntriesByType; this face delivers them to observe() callbacks and
+// takeRecords(), which analytics / web-vitals wrappers actually wait on.
+var _poLive = [];
+var _poScheduled = false;
+function _poEmit(entry) {
+  if (!entry || !_poLive.length) return;
+  var t = entry.entryType;
+  var any = false;
+  for (var i = 0; i < _poLive.length; i++) {
+    var obs = _poLive[i];
+    if (!obs._types.has(t)) continue;
+    obs._queue.push(entry);
+    any = true;
+  }
+  if (!any) return;
+  if (_poScheduled) return;
+  _poScheduled = true;
+  var kick = function () {
+    _poScheduled = false;
+    var list = _poLive.slice();
+    for (var i = 0; i < list.length; i++) {
+      var obs = list[i];
+      if (!obs._queue.length) continue;
+      var batch = obs._queue.splice(0, obs._queue.length);
+      try {
+        obs._cb(new PerformanceObserverEntryList(batch), obs);
+      } catch (err) {
+        try { console.error(err); } catch (e2) {}
+      }
+    }
+  };
+  if (typeof queueMicrotask === 'function') queueMicrotask(kick);
+  else Promise.resolve().then(kick);
+}
+class PerformanceObserverEntryList {
+  constructor(entries) {
+    this._entries = Array.isArray(entries) ? entries.slice() : [];
+    __hideOwn(this);
+  }
+  getEntries() { return this._entries.slice(); }
+  getEntriesByType(type) {
+    type = String(type);
+    return this._entries.filter(function (e) { return e.entryType === type; });
+  }
+  getEntriesByName(name, type) {
+    name = String(name);
+    return this._entries.filter(function (e) {
+      return e.name === name && (type === undefined || e.entryType === String(type));
+    });
+  }
+}
+_markNativeProto(PerformanceObserverEntryList.prototype);
+globalThis.PerformanceObserverEntryList = PerformanceObserverEntryList;
+
 class _Performance {
   constructor() {
     this._marks = []; this._measures = [];
@@ -196,6 +252,7 @@ class _Performance {
     const e = new PerformanceMark(String(name), opts);
     this._marks.push(e);
     if (this._marks.length > 500) this._marks.shift();
+    _poEmit(e);
     return e;
   }
   measure(name, start, end) {
@@ -225,6 +282,7 @@ class _Performance {
     const e = new PerformanceMeasure(String(name), startTime, endTime - startTime, _RT_INTERNAL);
     this._measures.push(e);
     if (this._measures.length > 500) this._measures.shift();
+    _poEmit(e);
     return e;
   }
   // A start/end string names a user mark first, then falls back to the
@@ -334,7 +392,9 @@ class _Performance {
   _recordResource(o) {
     if (!o || typeof o.name !== 'string') return;
     if (this._resources.length >= this._resourceCap) return;
-    this._resources.push(new PerformanceResourceTiming(o, _RT_INTERNAL));
+    const re = new PerformanceResourceTiming(o, _RT_INTERNAL);
+    this._resources.push(re);
+    _poEmit(re);
   }
   _rustResources() {
     let arr;
@@ -386,3 +446,93 @@ class _Performance {
 }
 _markNativeProto(_Performance.prototype);
 globalThis.performance = globalThis.performance || new _Performance();
+
+// Replace the bootstrap stub with a working observer. supportedEntryTypes
+// stays the honest set (mark/measure/navigation/paint) — never advertise
+// LCP/CLS/longtask we don't emit.
+globalThis.PerformanceObserver = class PerformanceObserver {
+  constructor(callback) {
+    if (typeof callback !== 'function') {
+      throw new TypeError("Failed to construct 'PerformanceObserver': 1 argument required, but only 0 present.");
+    }
+    this._cb = callback;
+    this._types = new Set();
+    this._queue = [];
+    __hideOwn(this);
+  }
+  observe(options) {
+    if (options === undefined || options === null || typeof options !== 'object') {
+      throw new TypeError("Failed to execute 'observe' on 'PerformanceObserver': A PerformanceObserverInit dictionary was not passed.");
+    }
+    var types;
+    if (Object.prototype.hasOwnProperty.call(options, 'entryTypes')) {
+      if (Object.prototype.hasOwnProperty.call(options, 'type')) {
+        throw new TypeError("Failed to execute 'observe' on 'PerformanceObserver': An observe() call must not include both entryTypes and type arguments.");
+      }
+      if (!Array.isArray(options.entryTypes)) {
+        throw new TypeError("Failed to execute 'observe' on 'PerformanceObserver': entryTypes must be an array.");
+      }
+      types = options.entryTypes.map(String);
+    } else if (typeof options.type === 'string') {
+      types = [options.type];
+    } else {
+      throw new TypeError("Failed to execute 'observe' on 'PerformanceObserver': A PerformanceObserverInit dictionary was not passed.");
+    }
+    var supported = PerformanceObserver.supportedEntryTypes;
+    var next = new Set();
+    for (var i = 0; i < types.length; i++) {
+      var t = types[i];
+      if (supported.indexOf(t) < 0) {
+        throw new TypeError("Failed to execute 'observe' on 'PerformanceObserver': The entry type '" + t + "' is unsupported.");
+      }
+      next.add(t);
+    }
+    // entryTypes replaces the interest set; type accumulates (Chrome).
+    if (Object.prototype.hasOwnProperty.call(options, 'entryTypes')) {
+      this._types = next;
+    } else {
+      next.forEach(function (t) { this._types.add(t); }, this);
+    }
+    if (_poLive.indexOf(this) < 0) _poLive.push(this);
+    if (options.buffered) {
+      var existing = globalThis.performance.getEntries();
+      for (var j = 0; j < existing.length; j++) {
+        if (this._types.has(existing[j].entryType)) this._queue.push(existing[j]);
+      }
+      if (this._queue.length) {
+        // Reuse the emit scheduler without inventing a fake entry.
+        if (!_poScheduled) {
+          _poScheduled = true;
+          var self = this;
+          var kick = function () {
+            _poScheduled = false;
+            // Deliver every live observer that has a queue (same path as emit).
+            var list = _poLive.slice();
+            for (var k = 0; k < list.length; k++) {
+              var obs = list[k];
+              if (!obs._queue.length) continue;
+              var batch = obs._queue.splice(0, obs._queue.length);
+              try { obs._cb(new PerformanceObserverEntryList(batch), obs); }
+              catch (err) { try { console.error(err); } catch (e2) {} }
+            }
+          };
+          if (typeof queueMicrotask === 'function') queueMicrotask(kick);
+          else Promise.resolve().then(kick);
+        }
+      }
+    }
+  }
+  disconnect() {
+    var i = _poLive.indexOf(this);
+    if (i >= 0) _poLive.splice(i, 1);
+    this._types.clear();
+    this._queue = [];
+  }
+  takeRecords() {
+    return this._queue.splice(0, this._queue.length);
+  }
+  static get supportedEntryTypes() {
+    return ['mark', 'measure', 'navigation', 'paint'];
+  }
+};
+_markNativeProto(globalThis.PerformanceObserver.prototype);
