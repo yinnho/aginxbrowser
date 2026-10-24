@@ -24250,6 +24250,53 @@ fn document_evaluate_xpath_subset() {
         assert_eq!(v["qlen"].as_i64(), Some(0), "queue drains fully");
     }
 
+    /// #249: soft PORT-RECOVER under a live `_mtQueue` backlog must NOT bump
+    /// `gen`. Re-arming demotes the still-queued original arm to the tail
+    /// (and no-ops it), which is exactly the PDD goods_edit self-starvation
+    /// loop (PORT-RECOVER wait climbing every 5s). Soft recover returns 0
+    /// while qlen>0 && !mt_stalled; the original arm delivers once.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_port_soft_recover_skips_live_backlog() {
+        let mut rt = setup_runtime("<html><body></body></html>");
+        let script = r#"() => {
+            const ch = new MessageChannel();
+            const got = [];
+            globalThis.__got = got;
+            ch.port1.onmessage = (e) => got.push(e.data);
+            // Artificial backlog ahead of the port arm.
+            for (let i = 0; i < 200; i++) setTimeout(() => {}, 0);
+            ch.port2.postMessage('keep-front');
+            const genBefore = ch.port1._pending[0].gen;
+            ch.port1._pending[0].since -= 6000;
+            const recovered = __ditingPortSweep();
+            const genAfter = ch.port1._pending[0] ? ch.port1._pending[0].gen : -1;
+            return new Promise((resolve) => {
+                setTimeout(() => resolve({
+                    got: globalThis.__got.slice(),
+                    genBefore,
+                    genAfter,
+                    recovered,
+                    qlen: globalThis.__MT_STATE().qlen,
+                }), 200);
+            });
+        }"#;
+        let result = rt
+            .call_function_on_remote(script, None, &[], true, true)
+            .await
+            .unwrap();
+        let v = result.value.unwrap();
+        assert_eq!(
+            v["genBefore"].as_i64(),
+            v["genAfter"].as_i64(),
+            "soft sweep must not bump gen under live backlog: {:?}", v
+        );
+        let got = v["got"].as_array().unwrap();
+        assert_eq!(
+            got, &[serde_json::json!("keep-front")],
+            "original arm still delivers exactly once: {:?}", got
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn test_macrotask_staleness_escape_keeps_window_discipline() {
         // #37: when pushes outpace item runs past the staleness threshold,

@@ -114,6 +114,20 @@ class MessagePort {
       return 0;
     }
     if (!force && Date.now() - this._pending[0].since < _STALL_MS) return 0;
+    // Soft sweep under a LIVE macrotask backlog must not re-arm: `_armEntry`
+    // bumps `gen`, which no-ops the original arm still sitting in `_mtQueue`
+    // and appends a fresh arm at the tail. On a #230-style pile that demotes
+    // React's scheduler tick every 5s (PORT-RECOVER wait climbing 8s→25s on
+    // PDD goods_edit — #249), so the message never reaches the front.
+    // Re-arm only when the trampoline looks dead, or when terminate
+    // recovery force-calls us (arms were severed with the JS stack).
+    if (!force) {
+      const mt = (typeof globalThis.__MT_STATE === 'function') ? globalThis.__MT_STATE() : null;
+      const qlen = mt ? mt.qlen : 0;
+      const stalled = typeof globalThis.__diting_mt_stalled === 'function'
+        && globalThis.__diting_mt_stalled();
+      if (qlen > 0 && !stalled) return 0;
+    }
     const n = this._pending.length;
     for (const entry of this._pending.slice()) this._armEntry(entry);
     return n;
@@ -178,10 +192,11 @@ let _sweepArmed = false;
 function _portSweep() {
   for (const p of _portReg) {
     if (p._pending.length > 0 && Date.now() - p._pending[0].since > _STALL_MS) {
+      const waited = Date.now() - p._pending[0].since;
       const n = p._recoverStalled(false);
       if (n > 0)
         console.error('[PORT-RECOVER] re-armed ' + n + ' stalled message(s), waiting ' +
-          (Date.now() - p._pending[0].since) + 'ms; fn=' + String(p._onmessage).slice(0, 120));
+          waited + 'ms; fn=' + String(p._onmessage).slice(0, 120));
     }
     if (p._closed || (p._pending.length === 0 && !p._onmessage && p._listeners.length === 0)) _portReg.delete(p);
   }
