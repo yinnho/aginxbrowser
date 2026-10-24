@@ -74,7 +74,7 @@
         "timeout_ms": 20000
       },
       "save": "qr_data",
-      "note": "IN-FLOW scannable artifact via recipe xhs-qrcode (no inlined lib). Mounts #__xhs_qr_panel for /live and screenshot."
+      "note": "debug/archive SVG data URL (+ #__xhs_qr_panel for /live). Humans scan receipt.live_qr, not this blob."
     },
     {
       "id": "qr_shot",
@@ -83,7 +83,7 @@
         "selector": "#__xhs_qr_panel"
       },
       "save": "qr_shot",
-      "note": "Same handoff name as doudian/taobao. If crop misaligns, saved.qr_data is the truth."
+      "note": "debug/archive crop of #__xhs_qr_panel. Humans scan receipt.live_qr."
     },
     {
       "id": "poll",
@@ -93,7 +93,7 @@
         "timeout_ms": "{{login_timeout_ms}}"
       },
       "save": "login_done",
-      "note": "HUMAN: only the phone scan+confirm. Scan qr_data / qr_shot / /live while this polls signed status. 471/环境异常 → structured error telling you to re-run mode=cookies."
+      "note": "HUMAN: scan receipt.live_qr with 小红书 App + confirm while this polls signed status. Never hand static qr_data/qr_shot. 471/环境异常 → vars.mode=cookies + import_cookies."
     },
     {
       "id": "qr_landing",
@@ -154,5 +154,6 @@
       "save": "done",
       "note": "terminal no-op so branch targets resolve"
     }
-  ]
+  ],
+ "note_live_qr": "Hand the person receipt.live_qr (GET /session/<id>/qr/live on this engine): a page that re-reads the code the login page shows every second. Never send a static screenshot/PNG/qr_data — it expires before the phone is in hand."
 }

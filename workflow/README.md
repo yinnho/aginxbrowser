@@ -96,12 +96,13 @@ receipt is the function's return value (`status` / `saved` / `session_id`).
 |---|---|---|---|
 | `bilibili-search` | bilibili.com | runs green | cookie 预热 → 页内 fetch 搜索 API：真浏览器上下文无 412 无 wbi（yt-dlp 被封的那条路我们不走）；video+bangumi 块 — see flow.md |
 | `bsky-post` | bsky.social | runs green | app password (`creds_json` vars) → createRecord → verify; page-context xrpc, no cookies — see flow.md |
-| `doudian-login` | fxg.jinritemai.com | runs green to QR handoff | 页内切换器出码（10-06 翻案：全表单面等齐+真鼠标链，313ms 翻转）；`qr_data` 直递，码 60-100s 寿命、递码要一气呵成；干净登录开新 account（共享 jar 会被旧 cookie 静默 302）— see flow.md |
+| `doudian-login` | fxg.jinritemai.com | runs green to QR handoff | 页内切换器出码；**递码用回执 `live_qr`**（`/session/<id>/qr/live`），禁静态 `qr_data`/`qr_shot`；干净登录开新 account — see flow.md |
 | `doudian-publish` | fxg.jinritemai.com | runs green (draft **and direct on-sale** + address bind) | 纯 API 三发链：getSchema(空)→getSchema(占位 spec 让服务器 canonicalize)→addWithSchema（**`vars.check_status:2`=直接上架**，2026-10-10 破：原生签名=复刻 genSignatureNew 默认生成器 `request_extra:{_msToken:TUE9P2Q==}`，10001010A 风控墙未再现身；上架比草稿多两道校验=真品牌 value_id+富详情）；**steps 15-17 绑发货地址+双核验**（`vars.ship_address_id` 给地址库 id→bind st:0→shipAddressList 三重回显→/product/tproduct/list `check_status:3+status:0`=售卖中；审核在途=正常 pending 不背锅）；提交步与 getSchema 双步全 eval-await（#240 face-2 三现后根治，链 190s→55s）；step1 args 前置校验（标题汉字当量 ≤30 等，2s 拦死不烧整链）；**规格值图=值对象 `img_url`**（6019 强制图品类 18/18 canonicalize 回显，`spec_images[]` 平行数组进 args）；组合 doudian-login 的 `session_id` + 全量 `args`（契约见 flow.md）；带图 = 先 `doudian-upload` 出 URL 填 `main_images`/`spec_images`（10-09/10-10 七绿单）— see flow.md |
 | `doudian-upload` | fxg.jinritemai.com | runs green | 页内 fetch 直打 `/product/img/batchupload` 回 CDN URL（绕开 widget：快喂窗口+不回填两坑）；**每图一 eval 步**（chunk 版两连死于 #240 face-2：净层 6×200 续体全丢）+ boot 哨兵门；断点续传=回执 `img_i` 喂 `vars.done` 重跑（10-10 双绿单）；compose 登录 `session_id`，产出喂 doudian-publish 的 `main_images`/`portrait_images`/规格图 — see flow.md |
-| `pinduoduo-publish` | mms.pinduoduo.com | draft green path (submit opt-in); images=CDN URLs | 数据面发布：`__mms.fetch` 打 checkLogin → create_new → action/edit → (可选) commit/submit → vodka/on_shop 回读；**不走 goods React UI、不包装 window.fetch**；gallery/sku 图须已是 CDN URL（EQW2 传图未收编）；默认 `vars.submit:0` 只存草稿，`1`=单次公开提交（禁盲重试）；价格单位分；compose 已登录 `session_id`；对拍 10-10 奇骏膜报告 — see flow.md |
+| `pinduoduo-login` | mms.pinduoduo.com | QR handoff | 登录页出码；**递码=`live_qr`**（多多商家 App）；compose pinduoduo-publish — see flow.md |
+| `pinduoduo-publish` | mms.pinduoduo.com | draft green path (submit opt-in); images=CDN URLs | 数据面发布：`__mms.fetch` 打 checkLogin → copyGoodsCommit → update → (可选) commit/submit → vodka/on_shop 回读；**不走 goods React UI、不包装 window.fetch**；默认 `vars.submit:0`；compose 已登录 `session_id`（先跑 `pinduoduo-login`）— see flow.md |
 | `github-read` | api.github.com | runs green | 免 gh/token 公开读：repo 元数据 + issue 列表（search API 避开 PR 混排）；404/403 落 fail 步带原始 body — see flow.md |
-| `taobao-login` | login.taobao.com | runs green to QR handoff | direct login.jhtml (3.7s vs 13.5s via homepage); QR canvas needs no click; cookie lands on .taobao.com — see flow.md |
+| `taobao-login` | login.taobao.com | runs green to QR handoff | direct login.jhtml; **handoff=`live_qr`**（禁 `qr_shot` PNG）；cookie lands on .taobao.com — see flow.md |
 | `taobao-live` | live.taobao.com | runs green logged-out | verdict-gated front probe: delivers "no wall + telemetry"; room list awaits engine hydration — see flow.md |
 | `taobao-shop-collect` | shop<N>.taobao.com | runs green (reboot handles boot roulette; wall receipt verified ×3) | buyer-side listing collect: 60 cards via React fiber walk + secfont price tokens/cps (offline decode companion in flow.md); data-level gates, no verdict (session-cumulative rows false-wall a rebooted-clean page) — see flow.md |
 | `taobao-orders` | buyertrade.taobao.com | runs green logged-in | buyer order list via hooked XHR bodies — see flow.md |
@@ -120,13 +121,13 @@ receipt is the function's return value (`status` / `saved` / `session_id`).
 | `juejin-post` | juejin.cn | runs green | read a post page; list pages stall (see flow.md) |
 | `juejin-publish` | juejin.cn | needs a logged-in session | draft then publish; no proxy; sample title is refused |
 | `zhihu-answer` | zhihu.com | 403 wall logged-out | compose with a logged-in session — see flow.md |
-| `x-reply` | x.com | runs green logged-in | post/reply with full write-header set + auto verify step |
+| `x-reply` | x.com | runs green logged-in | post/reply by clicking the composer Post button + auto verify step |
 | `x-read` | x.com | runs green logged-in | user mode (profile+follow state) / tweet mode (thread+did-my-reply-land) |
 | `x-search` | x.com | runs green logged-in | SearchTimeline, results sorted by views — campaign target discovery |
 | `x-follow` | x.com | runs green logged-in | friendships create/destroy; response `following` echoes pre-action state |
 | `x-notifs` | x.com | runs green logged-in | v2 URT notifications feed, read-only triage — the inbox half of the loop |
-| `xhs-login` | xiaohongshu.com | self-contained QR / cookies | preload `xhs-sign`+`xhs-qrcode` → SVG `qr_data`+`qr_shot` in-flow → signed status poll；人只扫码；`mode=cookies`+`import_cookies` 吃 Chrome jar；compose xhs-post — see flow.md |
-| `xhs-qianfan-login` | customer / ark.xiaohongshu.com | merchant 千帆 App QR | beer-login 右上角 `css-wemwzq` → CAS `/api/cas/customer/web/qr-code` → `loginconfirm`（拒 edith C 端）；compose xhs-merchant-publish — see flow.md |
+| `xhs-login` | xiaohongshu.com | self-contained QR / cookies | preload `xhs-sign`+`xhs-qrcode` → 画码归档；**人扫回执 `live_qr`**；`mode=cookies`+`import_cookies`；compose xhs-post — see flow.md |
+| `xhs-qianfan-login` | customer / ark.xiaohongshu.com | merchant 千帆 App QR | beer-login → CAS `loginconfirm`；**递码=`live_qr`**（禁静态图）；compose xhs-merchant-publish — see flow.md |
 | `xhs-post` | xiaohongshu.com | login wall logged-out | creator-platform page automation (no API for personal accounts) — login via `import_curl` + `account`, see flow.md |
 
 Account state enters a flow one of three ways — each flow.md says which it

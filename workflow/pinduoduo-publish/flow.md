@@ -31,7 +31,7 @@
 
 ## 前置
 
-1. 登录态：已登录的 `session_id`（cookie 落在 `.pinduoduo.com` / MMS）。暂无 `pinduoduo-login` flow。
+1. 登录态：先跑 [`pinduoduo-login`](../pinduoduo-login/)（回执 `live_qr` 给人扫）拿 `session_id`；或任何已登录 MMS 会话（cookie 落在 `.pinduoduo.com` / MMS）。暂无 `pinduoduo-login` flow。
 2. **源商品**：店内一件已成功上架/草稿的 `source_goods_id` + `source_goods_commit_id`（copy 模板）。
 3. 图片：copy 会带上源商品 gallery。若要换图——先在站外/原生 EQW2 传好拿到 CDN URL，再另议；
    本 flow **不内置上传**（`__mms.fetch.upload` 存在，但 EQW2 签名链未收编）。

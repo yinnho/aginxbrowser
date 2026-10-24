@@ -38,7 +38,7 @@
     "selector": ".qrcode-img"
    },
    "save": "qr_shot",
-   "note": "cropped to the QR element — what the human scans (淘宝 App 扫一扫). qrCode/query.do polls scan state from ~0.8s automatically"
+   "note": "debug/archive crop of .qrcode-img only. Humans scan receipt.live_qr (淘宝 App 扫一扫). qrCode/query.do still polls scan state on the page."
   },
   {
    "op": "wait",
@@ -47,7 +47,7 @@
     "timeout_ms": "{{login_timeout_ms}}"
    },
    "save": "login_done",
-   "note": "on scan+confirm havana navigates off login.taobao.com (mid-login hops stay on that host, so this fires on the real landing). Cookie lands on .taobao.com — any taobao session can import it afterwards"
+   "note": "HUMAN: open receipt.live_qr and scan with 淘宝 App + confirm. On success havana leaves login.taobao.com. Cookie lands on .taobao.com. Never hand qr_shot PNG — codes expire in ~60–100s."
   },
   {
    "op": "eval",
@@ -58,5 +58,5 @@
    "note": "logged-in landing evidence; redirectURL pins the landing to www.taobao.com so the nick anchor is meaningful there (nick:true = logged in, false = landed elsewhere or logged out — re-check on www before retrying; do NOT probe i.taobao.com my_taobao: no nick anchor on that page + bounces to havana = false negative, 2026-10-07 watch lesson). Session stays alive after the flow — session_id on the receipt is the export handle (GET /session/:id/cookies, /storage)"
   }
  ],
- "note_live_qr": "Hand the person receipt.live_qr (GET /session/<id>/qr/live on this engine): a page that re-reads the code the login page shows every second. Never send a static screenshot — it expires before the phone is in hand."
+ "note_live_qr": "Hand the person receipt.live_qr (GET /session/<id>/qr/live on this engine): a page that re-reads the code the login page shows every second. Never send a static screenshot/PNG/qr_data — it expires before the phone is in hand."
 }

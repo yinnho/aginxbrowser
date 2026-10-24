@@ -76,7 +76,7 @@
         "timeout_ms": 10000
       },
       "save": "qr_data",
-      "note": "Exact page bitmap (data:image/png;base64,…). Prefer this over regenerating from URL when handing to humans; if engine raster is blank, re-encode loginconfirm URL locally from saved.qr.url."
+      "note": "debug/archive page bitmap only. Humans scan receipt.live_qr (千帆 App). Engine /qr re-reads the live <img>."
     },
     {
       "id": "qr_shot",
@@ -85,7 +85,7 @@
         "selector": "img.css-1lhmg90"
       },
       "save": "qr_shot",
-      "note": "Human crop. If css-1lhmg90 hash drifts, prefer saved.qr_data."
+      "note": "debug/archive crop. If css-1lhmg90 drifts, ignore this shot — use live_qr."
     },
     {
       "id": "wait_login",
@@ -95,7 +95,7 @@
         "timeout_ms": "{{login_timeout_ms}}"
       },
       "save": "login_done",
-      "note": "HUMAN: 千帆 App 扫一扫 saved.qr_data / qr_shot / /live?session= then confirm. Page polls CAS (CREATE=2 WAIT_CONFIRM=3 LOGIN_SUCCESS=1 EXPIRED=4). Wait until ark workspace WITHOUT ticket= query and WITHOUT 凭证已过期 modal — ticket still in URL means SSO not finished."
+      "note": "HUMAN: open receipt.live_qr, scan with 千帆 App + confirm. Never send qr_data/qr_shot. Page polls CAS (CREATE=2 WAIT_CONFIRM=3 LOGIN_SUCCESS=1 EXPIRED=4). Wait until ark workspace WITHOUT ticket= and WITHOUT 凭证已过期 modal."
     },
     {
       "id": "landing",
@@ -107,5 +107,6 @@
       "save": "landing",
       "note": "Witness: seller/info/v2 success. Receipt session_id is the merchant jar for xhs-merchant-publish."
     }
-  ]
+  ],
+ "note_live_qr": "Hand the person receipt.live_qr (GET /session/<id>/qr/live on this engine): a page that re-reads the code the login page shows every second. Never send a static screenshot/PNG/qr_data — it expires before the phone is in hand."
 }

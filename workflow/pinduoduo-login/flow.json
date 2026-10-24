@@ -1,0 +1,55 @@
+{
+  "vars": {
+    "login_url": "https://mms.pinduoduo.com/login/?redirectUrl=https%3A%2F%2Fmms.pinduoduo.com%2Fhome%2F",
+    "login_timeout_ms": 180000
+  },
+  "create": {
+    "width": 1440,
+    "height": 900,
+    "account": "pdd-login-{ts}",
+    "keepalive": true
+  },
+  "steps": [
+    {
+      "op": "navigate",
+      "args": {
+        "url": "{{login_url}}"
+      },
+      "note": "MMS login page. Engine /session/<id>/qr reads the square canvas QR (拼多多). Do not wrap window.fetch — PDD fbeZ fingerprint."
+    },
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "(function(){var cs=document.querySelectorAll('canvas');for(var i=0;i<cs.length;i++){var c=cs[i];if(c.width>=80&&c.width<=480&&Math.abs(c.width-c.height)<=4)return true;}return /二维码|扫一扫|多多商家/.test((document.body&&document.body.innerText)||'');})()",
+        "timeout_ms": 30000
+      },
+      "save": "qr_ready",
+      "note": "QR canvas (or 扫码文案) on page. Receipt already has live_qr — open it for the human now; do not wait for qr_shot."
+    },
+    {
+      "op": "screenshot",
+      "args": {},
+      "save": "qr_shot",
+      "note": "debug/archive full-page only. Humans scan receipt.live_qr with 多多商家 App — never this PNG."
+    },
+    {
+      "op": "wait",
+      "args": {
+        "predicate": "location.hostname.indexOf('mms.pinduoduo.com')>=0 && location.pathname.indexOf('/login')<0",
+        "timeout_ms": "{{login_timeout_ms}}"
+      },
+      "save": "login_done",
+      "note": "HUMAN: open receipt.live_qr (GET /session/<id>/qr/live), scan with 多多商家 App + confirm. Never send a static PNG. Early handoff: vars.login_timeout_ms:1000 then poll /session/:id/wait yourself."
+    },
+    {
+      "op": "eval",
+      "args": {
+        "script": "JSON.stringify({url:location.href,title:document.title,ISLOGIN:localStorage.getItem('ISLOGIN'),path:location.pathname})",
+        "timeout_ms": 15000
+      },
+      "save": "landing",
+      "note": "Witness off /login. Stamp with POST /account/verify {name, url:home/, predicate: hostname mms && path not /login}. session_id composes into pinduoduo-publish."
+    }
+  ],
+  "note_live_qr": "Hand the person receipt.live_qr (GET /session/<id>/qr/live on this engine): a page that re-reads the code the login page shows every second. Never send a static screenshot/PNG — it expires before the phone is in hand. Scan with 多多商家 App."
+}

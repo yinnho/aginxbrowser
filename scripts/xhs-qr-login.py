@@ -3,11 +3,11 @@
 
   POST /session/create {"account": "..."}
   POST /flow/run {"name": "xhs-login", "session_id": "..."}
-  # scan receipt saved.qr_data / saved.qr_shot / /live?session=
+  # open receipt.live_qr  →  http://<host>/session/<id>/qr/live
 
-This script only: create session → flow/run → write qr_data to a PNG via
-an SVG raster fallback (qlmanage on macOS) or print the data URL — so a
-human can `open` a file. It does NOT own login logic anymore.
+Default handoff is the live QR page (self-refreshing). Optional --out still
+writes a debug PNG from qr_data, but humans should scan live_qr.
+It does NOT own login logic anymore.
 """
 
 import argparse
@@ -60,13 +60,22 @@ def main():
         },
     )
     print("status", receipt.get("status"), flush=True)
+    live = receipt.get("live_qr") or f"/session/{sid}/qr/live"
+    if not live.startswith("http"):
+        live_url = f"http://{args.host}{live}"
+    else:
+        live_url = live
+    print(f"live_qr → {live_url}", flush=True)
+    if not args.no_open:
+        subprocess.run(["open", live_url], check=False)
+
+    # Optional debug archive from qr_data (not the human handoff).
     saved = receipt.get("saved") or {}
     qr_data = saved.get("qr_data")
     if isinstance(qr_data, str) and qr_data.startswith("data:image/svg+xml;base64,"):
         svg = base64.b64decode(qr_data.split(",", 1)[1])
         svg_path = args.out.rsplit(".", 1)[0] + ".svg"
         open(svg_path, "wb").write(svg)
-        # macOS quicklook → png for `open`
         out_dir = tempfile.mkdtemp()
         subprocess.run(
             ["qlmanage", "-t", "-s", "500", "-o", out_dir, svg_path],
@@ -76,19 +85,9 @@ def main():
         thumb = os.path.join(out_dir, os.path.basename(svg_path) + ".png")
         if os.path.exists(thumb):
             os.replace(thumb, args.out)
-            print(f"qr → {args.out}", flush=True)
-            if not args.no_open:
-                subprocess.run(["open", args.out], check=False)
+            print(f"debug archive qr → {args.out} (do not hand to humans)", flush=True)
         else:
-            print(f"qr svg → {svg_path} (open this / use /live?session={sid})", flush=True)
-            if not args.no_open:
-                subprocess.run(["open", svg_path], check=False)
-    else:
-        print(
-            f"no qr_data in receipt (mode={args.mode}?); use /live?session={sid}",
-            flush=True,
-        )
-        print(json.dumps(receipt, ensure_ascii=False)[:500], flush=True)
+            print(f"debug archive svg → {svg_path}", flush=True)
 
     if receipt.get("status") != "ok":
         sys.exit(1)

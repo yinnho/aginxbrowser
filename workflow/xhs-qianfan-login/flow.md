@@ -7,7 +7,8 @@
 
 ## 人只需要做一件事
 
-**用手机【千帆 App】扫 `qr_data` / `qr_shot` / `/live?session=` 上的码并确认。**
+**打开回执 `live_qr`（`/session/<id>/qr/live`），用手机【千帆 App】扫并确认。**
+禁止递 `qr_data` / `qr_shot` 静态图。
 
 ## 路径（2026-10-13 见证）
 
@@ -35,7 +36,7 @@ SID=$(curl -sS -X POST "$ENGINE/session/create" -H 'content-type: application/js
 
 curl -sS -X POST "$ENGINE/flow/run" -H 'content-type: application/json' \
   -d "{\"name\":\"xhs-qianfan-login\",\"session_id\":\"$SID\",\"vars\":{\"login_timeout_ms\":180000}}"
-# 回执 saved.qr_data / saved.qr / saved.qr_shot — 千帆 App 扫；或打开 /live?session=$SID
+# 回执 live_qr=/session/$SID/qr/live — 千帆 App 扫（勿发 qr_data/qr_shot）
 ```
 
 干净 `account` jar：旧 cookie 会静默把你送进半登录态。**同一店只复用 `xhs-qf-stable`（或 `xhs-merchant-ark`）**，不要每次扫码换 `xhs-qf-HHMMSS`（会烧新 fp_seed，易 300015）。Darwin 上即使不传 `persona_ua` 也会默认 Mac Chrome/145。

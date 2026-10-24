@@ -54,9 +54,8 @@ havana 跳离 login.taobao.com（中途登录 hop 留在该域，所以 predicat
 几百字节）、第 2 步按预期 timeout、会话 s_15 保活。真登录只差人扫
 码确认。
 
-跟 doudian-login 凑一对：两个都是「出码交给人的 handoff 流」，回执
-`saved.qr_shot` 直接可递，或 `/live?session=<id>` 给人盯着扫（活页
-码不会像静态截图那样两三分钟就死）。
+跟 doudian-login 凑一对：都是「出码交给人的 handoff 流」。**给人扫码一律发回执 `live_qr`**
+（`/session/<id>/qr/live`）；`qr_shot` 只作调试归档，禁止当递码物。
 
 ## 活码 + 新 jar（2026-10-21）
 

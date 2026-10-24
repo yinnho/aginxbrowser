@@ -16,27 +16,27 @@ create login/common（钉 1440×900）
   → eval landing {url,title}
 ```
 
-出码后把 `qr_data` 解码（剥 data: 前缀 → base64 → .gif/.png）落到本地文件，
-`open` 给人扫，抖店 App 扫一扫 + 手机确认。页面自己轮询 check_qrconnect，
-确认后 302 进 fxg，末步 predicate 命中。回执的 `session_id` 就是登录态导出柄
-（cookie 落 .jinritemai.com：sessionid / sessionid_ss / sid_guard / sid_tt /
-passport_csrf_token / toutiao_sso_user_doudian / sso_uid_tt_doudian /
-ucas_sso_c0_doudian / ffa_goods_ewid / ecom_gray_shop_id / odin_tt / msToken /
-ttwid）。doudian-publish 用 `session_id` 复用直接组合。
+**给人扫码一律发回执 `live_qr`**（`/session/<id>/qr/live`）：自刷新页每秒重读登录页当前码。
+**禁止**把 `qr_data` / `qr_shot` / 静态 PNG 递给人（60–100s 过期）。`qr_data`/`qr_shot` 只留作调试归档。
+
+抖店 App 扫一扫 + 手机确认。页面自己轮询 check_qrconnect，确认后 302 进 fxg，末步 predicate 命中。
+回执的 `session_id` 就是登录态导出柄（cookie 落 .jinritemai.com：sessionid / sessionid_ss /
+sid_guard / sid_tt / passport_csrf_token / toutiao_sso_user_doudian /
+sso_uid_tt_doudian / ucas_sso_c0_doudian / ffa_goods_ewid / ecom_gray_shop_id /
+odin_tt / msToken / ttwid）。doudian-publish 用 `session_id` 复用直接组合。
 
 ## 递码的坑（2026-10-09 实战）
 
-- **码只有 60-100s 寿命，出码到人扫要一气呵成**：抠码→落盘→open 全链要
-  <5s，先码后闲聊必过期。过期别救，重跑 flow（~15s 重铸一张）。
+- **码只有 60-100s 寿命**：发 `receipt.live_qr`（活码自刷新），不要抠码落盘。
+  静态图来回一延迟就过期；活码页过期会点刷新并换新图。
 - **要干净登录态就开新 account**（`/session/create {"account":"新名字"}`）：
   共享 jar 的会话开登录页会被自己的旧 cookie 静默 302 进工作台，根本到不了
   码。10-09 实测：`scan-1029` 新 jar 一次成。
 - 长等待可以放心让 flow 自己 `wait` 到底——**#238 已修**（2026-10-09）：
   flow_run 现在逐命令走全局管理器、应答在途不持锁（#193 同款），等待
   期间实例其余端点照常响应（实测 30s wait 中 /sessions 0.77s、
-  /state 0.01s）。要提前拿回执里的 qr_data 仍可用
-  `vars.login_timeout_ms:1000` + 自己轮询 `/session/:id/wait`，但不再是
-  逃生必需。
+  /state 0.01s）。要提前结束 wait 仍可用 `vars.login_timeout_ms:1000` +
+  自己轮询 `/session/:id/wait`，人扫的仍是回执 `live_qr`，不是 qr_data。
 
 ## 真机 receipt
 
@@ -63,7 +63,7 @@ ttwid）。doudian-publish 用 `session_id` 复用直接组合。
 默认共享 jar 里留着前几次扫码留下的 SSO cookie，之后再开登录页扫码，**cookie 会写进去但页面不跳转**
 （URL 一直停在 /login/common，看起来像"扫了没反应"）。连扫三次都落不了地，换成每次一个全新 account
 （`POST /session/create {account:"dd-fresh-<ts>", width:1440, height:900}` → navigate 登录页 → 跑本 flow 传 `session_id`）
-就 16 秒落地。给人扫的码别发静态图（60-100 秒过期，来回延迟就赶不上），起一个本机小页面按秒刷新当前二维码最稳。
+就 16 秒落地。给人扫的码发回执 `live_qr`（引擎自带 `/session/<id>/qr/live`），别发静态图。
 
 ## 活码 + 新 jar（2026-10-21，已写进 flow/引擎）
 

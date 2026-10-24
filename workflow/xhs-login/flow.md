@@ -2,13 +2,14 @@
 
 # xhs-login — 小红书登录（全在 flow 里）
 
-对齐 `doudian-login` / `taobao-login`：**出码 → 人扫 → 回执 `session_id`**。
+对齐 `doudian-login` / `taobao-login`：**出码 → 人扫 → 回执 `session_id` + `live_qr`**。
 不依赖 `scripts/xhs-qr-login.py` 画码；SVG 二维码在 flow 内用 vendored
-`xhs-qrcode` recipe 生成（`saved.qr_data` + `#__xhs_qr_panel` 截图 `qr_shot`）。
+`xhs-qrcode` recipe 生成（`saved.qr_data` / `qr_shot` 仅调试归档）。
 
 ## 人只需要做一件事
 
-**用手机小红书 App 扫 `qr_data` / `qr_shot` / `/live?session=` 上的码并确认。**
+**打开回执 `live_qr`（`/session/<id>/qr/live`），用手机小红书 App 扫并确认。**
+禁止把 `qr_data` / `qr_shot` / 静态 PNG 递给人。
 
 其余（签名 preload、出码、画码、status 轮询、写回 jar）都在
 `POST /flow/run {"name":"xhs-login"}` 里。
@@ -34,7 +35,7 @@ SID=$(curl -sS -X POST "$ENGINE/session/create" -H 'content-type: application/js
 
 curl -sS -X POST "$ENGINE/flow/run" -H 'content-type: application/json' \
   -d "{\"name\":\"xhs-login\",\"session_id\":\"$SID\",\"vars\":{\"login_timeout_ms\":120000}}"
-# 回执 saved.qr_data / saved.qr_shot — 扫码；或打开 /live?session=$SID
+# 回执 live_qr=/session/$SID/qr/live — 打开给人扫（勿发 qr_data/qr_shot）
 ```
 
 ### B. `mode=cookies` — Chrome 导入（App「环境异常」时）
@@ -104,4 +105,4 @@ status `471` / 超时且 App 显示环境异常 → flow **抛结构化错误**�
 1. 优先页内 QR（`source=page`）；同会话少 `create`。
 2. status GET-only，参数 `qr_id`/`code`，必须 `_webmsxyw` 签名。
 3. 干净 `account` jar；主号别进引擎。
-4. 码寿命短：出码后立刻扫 `qr_data` / `/live`。
+4. 码寿命短：出码后立刻打开回执 `live_qr` 扫（静态图易过期）。
