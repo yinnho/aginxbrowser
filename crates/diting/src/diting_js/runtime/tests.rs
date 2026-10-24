@@ -2939,6 +2939,12 @@
                 <div id="psx" style="position:fixed; top:25%">PSX</div>
                 <div id="psy" style="position:fixed; left:50%">PSY</div>
               </div>
+              <div id="flt" style="filter:blur(0px); width:300px; height:400px">
+                <div id="h1" style="position:fixed; left:0; top:0">H1</div>
+              </div>
+              <div id="psp" style="perspective:800px; width:300px; height:400px; margin-top:20px">
+                <div id="h2" style="position:fixed; top:10%; left:20%">H2</div>
+              </div>
             </body>"#,
         );
         let result = rt.evaluate(r#"
@@ -2960,6 +2966,16 @@
                 })(),
                 psx: g('psx'),
                 psy: g('psy'),
+                // Host origins read live — the flow slot above them is this
+                // test's business, not theirs.
+                h1: (() => {
+                    const f = g('flt'), h = g('h1');
+                    return [h[0] - f[0], h[1] - f[1]];
+                })(),
+                h2: (() => {
+                    const f = g('psp'), h = g('h2');
+                    return [h[0] - f[0], h[1] - f[1]];
+                })(),
             };
         "#).unwrap();
         let v = result;
@@ -3000,6 +3016,15 @@
             v["psx"], serde_json::json!([58, 258]),
             "the auto axis takes the static position at the TRANSFORMED origin (x=58), the \
              percent axis still folds (158 + 25%*400)"
+        );
+        assert_eq!(
+            v["h1"], serde_json::json!([0, 0]),
+            "a filter ancestor (even blur(0px)) pins fixed descendants to itself (#316)"
+        );
+        assert_eq!(
+            v["h2"], serde_json::json!([60, 40]),
+            "a perspective ancestor pins fixed too, percent insets folding against it \
+             (20% of 300, 10% of 400)"
         );
         assert_eq!(
             v["psy"], serde_json::json!([208, 158]),

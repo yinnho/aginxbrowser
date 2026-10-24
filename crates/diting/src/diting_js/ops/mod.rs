@@ -3175,6 +3175,8 @@ const COMPUTED_STYLE_PROPS: &[&str] = &[
     "background-color",
     "box-shadow",
     "backdrop-filter",
+    "filter",
+    "perspective",
     "text-shadow",
     "background-image",
     "font-family",

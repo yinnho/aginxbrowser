@@ -961,6 +961,14 @@ pub struct ComputedStyle {
     /// beneath the element's border box before its own background. `None`
     /// = `none`.
     pub backdrop_blur: Option<f32>,
+    /// `filter` (raw value, v1 position face): non-inherited. A non-none
+    /// filter makes the element the containing block for its fixed AND
+    /// absolute descendants (#316), like a transform; rendering the effects
+    /// is later work. `None` = `none`.
+    pub filter: Option<String>,
+    /// `perspective` (raw value, v1 position face): same hijack semantics
+    /// as filter. `None` = `none`.
+    pub perspective: Option<String>,
     /// Shorthand sides in CSS order (top right bottom left), already expanded.
     pub margin: Sides,
     pub padding: Sides,
@@ -3588,6 +3596,8 @@ css_wide_longhands! {
     "box-decoration-break" => box_decoration_clone, false;
     "box-shadow" => box_shadow, false;
     "backdrop-filter" => backdrop_blur, false;
+    "filter" => filter, false;
+    "perspective" => perspective, false;
     "opacity" => opacity, false;
     "transform" => transform, false;
     "translate" => translate_prop, false;
@@ -4487,6 +4497,18 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
                 }
                 _ => false,
             }
+        }
+        // Position-face only (#316): any non-none value hijacks fixed and
+        // absolute descendants to this containing block; the raw string is
+        // kept as-is for the computed-style echo.
+        "filter" | "perspective" => {
+            let raw = if v.eq_ignore_ascii_case("none") { None } else { Some(v.to_string()) };
+            if name.eq_ignore_ascii_case("filter") {
+                style.filter = raw;
+            } else {
+                style.perspective = raw;
+            }
+            true
         }
         "text-shadow" => {
             if v.eq_ignore_ascii_case("none") {

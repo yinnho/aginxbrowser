@@ -530,6 +530,12 @@ pub(super) fn computed_style_value(
             None => "none".to_string(),
             Some(px) => format!("blur({}px)", format_number(px)),
         }),
+        // Chrome echoes the computed filter/perspective list; v1 models the
+        // position face only (#316), so the authored value echoes verbatim.
+        "filter" | "perspective" => {
+            let raw = if prop.eq_ignore_ascii_case("filter") { &s.filter } else { &s.perspective };
+            Some(raw.clone().unwrap_or_else(|| "none".into()))
+        }
         // Chrome's computed text-shadow: "color dx dy blur" per layer
         // (first-declared first); unset serializes as "none".
         "text-shadow" => Some(match &s.text_shadow {

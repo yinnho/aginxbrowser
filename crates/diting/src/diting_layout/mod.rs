@@ -6029,11 +6029,17 @@ pub fn layout_solve_rooted(
                         let ancestor = styles.get(&nid);
                         // CSS Transforms: a non-none transform makes an
                         // ancestor the containing block for BOTH absolute
-                        // and fixed descendants. For fixed that's the only
-                        // ancestor kind that overrides the viewport — a
-                        // merely positioned ancestor doesn't pin it.
-                        let transformed =
-                            ancestor.is_some_and(|s| s.effective_transform().is_some());
+                        // and fixed descendants, and so do `filter` and
+                        // `perspective` (filter-effects-1 § containing
+                        // block; transform-style perspective). For fixed
+                        // those are the only ancestor kinds that override
+                        // the viewport — a merely positioned ancestor
+                        // doesn't pin it.
+                        let transformed = ancestor.is_some_and(|s| {
+                            s.effective_transform().is_some()
+                                || s.filter.is_some()
+                                || s.perspective.is_some()
+                        });
                         if transformed
                             || (!fixed
                                 && ancestor.is_some_and(|s| {
