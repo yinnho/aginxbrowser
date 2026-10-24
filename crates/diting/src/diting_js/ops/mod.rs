@@ -3971,6 +3971,13 @@ fn record_failed_fetch(state: &OpState, f: &FetchFailure) {
     }
 }
 
+/// The driver's give-up horizon comes from the env knob
+/// `AGINXBROWSER_SYNC_XHR_TIMEOUT_MS` with a 120 000ms default and 50ms
+/// floor — shrinkable so the abandonment row is testable in CI.
+fn sync_xhr_timeout_ms() -> u64 {
+    crate::env_knobs::sync_xhr_timeout_ms()
+}
+
 /// Synchronous twin of op_fetch_url (obscura#908): XHR.open(..., false) +
 /// send() must issue the request and return with status populated, with no
 /// event-loop turn in between. deno_core async ops only resolve when the
@@ -3985,12 +3992,6 @@ fn record_failed_fetch(state: &OpState, f: &FetchFailure) {
 ///   while the dispatch that raised the request is parked here (the same
 ///   reason the async path's interception wait is bounded).
 /// - The shared reqwest client is touched from a second runtime.
-///   Per-request connection tasks spawn on the driving runtime, so this is
-///   sound; a pooled keep-alive connection left by a dead temporary runtime
-///   can error transiently ("dispatch task is gone") and surface as a
-///   network error — rare on this legacy path.
-const SYNC_XHR_TIMEOUT_MS: u64 = 120_000;
-
 #[diting_op]
 #[string]
 fn op_fetch_url_sync(
@@ -4058,6 +4059,16 @@ fn op_fetch_url_sync(
     };
 
     let (tx, rx) = std::sync::mpsc::channel();
+    // The driver can give up before the walk does: recv_timeout below fires
+    // while the worker is still mid-walk (multi-hop slow hops outlive it),
+    // and the worker's eventual failure replay then dies with the thread —
+    // the request would vanish from in_flight with no terminal row (#84
+    // observability: hung/failed requests must leave a trace). Captured
+    // here so the abandonment row can be recorded on the timeout branch.
+    let abandon_url = deps.url.clone();
+    let abandon_method = deps.method.clone();
+    let abandon_started = deps.started_unix;
+    let timeout_ms = sync_xhr_timeout_ms();
     std::thread::Builder::new()
         .name("sync-xhr".to_string())
         .spawn(move || {
@@ -4076,15 +4087,32 @@ fn op_fetch_url_sync(
         })
         .map_err(|e| deno_error::JsErrorBox::generic(format!("sync XHR worker: {}", e)))?;
 
-    let (result, failures) =
-        match rx.recv_timeout(std::time::Duration::from_millis(SYNC_XHR_TIMEOUT_MS)) {
-            Ok(pair) => pair,
-            Err(_) => {
-                return Err(deno_error::JsErrorBox::generic(
-                    "Synchronous XMLHttpRequest timed out or its worker died",
-                ));
-            }
-        };
+    let (result, failures) = match rx.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
+        Ok(pair) => pair,
+        Err(_) => {
+            // #84: the walk may still be running on the worker — its own
+            // failure replay will never be read (the channel's receiver
+            // is gone). Record the abandonment as the request's terminal
+            // state so /network keeps a row for it.
+            record_failed_fetch(
+                state,
+                &FetchFailure {
+                    url: abandon_url.clone(),
+                    method: abandon_method.clone(),
+                    reason: format!(
+                        "synchronous XHR driver timed out after {timeout_ms}ms — \
+                         the worker's late result is not logged"
+                    ),
+                    final_url: abandon_url,
+                    redirects: Vec::new(),
+                    started: abandon_started,
+                },
+            );
+            return Err(deno_error::JsErrorBox::generic(
+                "Synchronous XMLHttpRequest timed out or its worker died",
+            ));
+        }
+    };
     replay_fetch_failures(state, &failures);
     let outcome = result?;
     if let Some(ev) = outcome.network.as_ref() {

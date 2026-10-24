@@ -82,7 +82,7 @@ GOD_FILE_GRANDFATHER = {
     "crates/diting/js/bootstrap.js": 17447,  # crypto.subtle split to js/crypto_subtle.js; getRandomValues stays
     "crates/diting/src/diting_layout/mod.rs": 9978,  # float wrap series #313-#315 + #222 blend emission
     "crates/diting/src/diting_css/mod.rs": 6627,  # post-0.6.0 compat surface bumps
-    "crates/diting/src/diting_js/ops/mod.rs": 4729,  # #249 soft-recover + #230 timer follow-ups
+    "crates/diting/src/diting_js/ops/mod.rs": 4761,  # #249 soft-recover + #230 timers + #84 sync-XHR abandonment row
     "crates/diting/src/diting_layout/paint.rs": 2753,  # #222 thin blend arms; math lives in paint/blend.rs
     "src/bridge_cross_check.rs": 3766,
     "crates/diting/src/diting_layout/fork_deltas.rs": 2257,

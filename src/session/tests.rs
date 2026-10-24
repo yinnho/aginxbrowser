@@ -4570,6 +4570,97 @@
         assert_eq!(row["hung"], false, "fresh entry must not read as hung: {row}");
     }
 
+    /// (#84 observability) The sync-XHR driver's give-up must leave a
+    /// terminal row: recv_timeout abandons the still-running worker, whose
+    /// eventual failure replay dies with the thread — without a driver-side
+    /// row the request vanishes from in_flight with no trace (the ghost the
+    /// fe-static hang chased). The timeout is knob-shrunk so CI doesn't
+    /// wait two minutes.
+    #[tokio::test]
+    async fn network_keeps_a_row_when_the_sync_xhr_driver_gives_up() {
+        let _net = crate::server::test_util::net_env_guard();
+        struct TimeoutRestore(Option<std::ffi::OsString>);
+        impl Drop for TimeoutRestore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => std::env::set_var("AGINXBROWSER_SYNC_XHR_TIMEOUT_MS", v),
+                    None => std::env::remove_var("AGINXBROWSER_SYNC_XHR_TIMEOUT_MS"),
+                }
+            }
+        }
+        let saved = std::env::var_os("AGINXBROWSER_SYNC_XHR_TIMEOUT_MS");
+        std::env::set_var("AGINXBROWSER_SYNC_XHR_TIMEOUT_MS", "300");
+        let _restore = TimeoutRestore(saved);
+
+        let (port, _hits) = crate::server::test_util::recording_server(&[(
+            "GET /watch",
+            "<html><body></body></html>",
+        )]);
+        // Accept the TCP connection, never answer — the sync XHR's walk
+        // hangs far past the 300ms driver horizon.
+        let hang = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let hang_port = hang.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut parked = Vec::new();
+            for s in hang.incoming() {
+                match s {
+                    Ok(s) => parked.push(s),
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let mut mgr = SessionManager::new();
+        let sid = mgr.create(
+            Some(&format!("http://127.0.0.1:{port}/watch")),
+            false,
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+
+        // Synchronous XHR: the op blocks until the driver gives up at the
+        // knob horizon and throws — exactly the abandonment path under test.
+        mgr.send(&sid, |reply| SessionCommand::Eval {
+            script: format!(
+                "(function(){{ try {{ var x = new XMLHttpRequest(); x.open('GET', 'http://127.0.0.1:{hang_port}/hang', false); x.send(); }} catch(e) {{}} return 'done'; }})()"
+            ),
+            timeout_ms: None,
+            reply,
+        })
+        .await
+        .unwrap();
+
+        let text = mgr
+            .send(&sid, |reply| SessionCommand::Network {
+                media_only: false,
+                include_bodies: false,
+                include_headers: false,
+                url_contains: None,
+                body_max_chars: 0,
+                reply,
+            })
+            .await
+            .unwrap();
+        let val: Value = serde_json::from_str(&text).unwrap();
+        let row = val["requests"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|r| r["url"].as_str().unwrap_or("").contains("/hang"))
+            .expect("the abandoned sync XHR keeps a terminal row");
+        assert_eq!(row["status"], 0, "no servable response: {row}");
+        assert!(
+            row["error"].as_str().unwrap_or("").contains("driver timed out"),
+            "the reason names the abandonment, not a bare transport error: {row}"
+        );
+    }
+
     /// (#203) A fetch that wandered through redirects stays findable by the
     /// address it was ISSUED to: the row's `url` is the requested one,
     /// `final_url` says where it landed, `redirects` carries each hop with

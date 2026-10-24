@@ -15,6 +15,20 @@ pub fn proxy_from_env() -> Option<String> {
         .filter(|p| !p.is_empty())
 }
 
+/// `AGINXBROWSER_SYNC_XHR_TIMEOUT_MS`: how long the synchronous-XHR op
+/// waits on its worker thread before giving up (default 120 000, floor
+/// 50). A knob so the driver-abandonment network row (#84 observability)
+/// is exercisable in CI — the walk's own per-hop transport timeouts can
+/// outlive a multi-hop sync request, and the timeout must be shrinkable
+/// to test the row without a two-minute test.
+pub fn sync_xhr_timeout_ms() -> u64 {
+    std::env::var("AGINXBROWSER_SYNC_XHR_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&v| v >= 50)
+        .unwrap_or(120_000)
+}
+
 /// Check if a URL points to a known foreign/blocked domain that requires proxy.
 /// Uses suffix matching: `sub.github.com` matches `github.com`.
 /// Returns `false` if URL parsing fails (safe fallback).
