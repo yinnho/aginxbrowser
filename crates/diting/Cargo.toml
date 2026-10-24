@@ -120,7 +120,7 @@ reqwest = { version = "0.12", features = ["cookies", "gzip", "brotli", "deflate"
 # Page-facing WebSocket transport: handshake runs over our own TcpStream/TLS
 # stack (client_async validates the 101 upgrade itself); tokio-tungstenite is
 # already in the tree via axum's ws feature.
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
 http = "1"
 # Same versions the tree already carries (reqwest rustls-tls path) — pinning
 # the same lines keeps the lockfile free of duplicate major versions.
