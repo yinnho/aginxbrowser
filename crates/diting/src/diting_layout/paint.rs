@@ -18,7 +18,7 @@ use super::text::{
     ScaledMetrics, TextRaster, Token,
 };
 use super::{FontBook, PaintItem, Rect, TextGradient};
-use crate::diting_css::{TextDecorations, TextShadow, WhiteSpace};
+use crate::diting_css::{MixBlendMode, TextDecorations, TextShadow, WhiteSpace};
 use std::collections::HashSet;
 
 /// A straight-alpha RGBA8 image, row-major — our paint target.
@@ -1949,6 +1949,9 @@ pub fn scale_items(items: &[PaintItem], s: f32) -> Vec<PaintItem> {
             PaintItem::ClearXf => {
                 stack.pop();
             }
+            // Blend brackets carry no geometry (#222) — the group is the
+            // span itself, scaled through whatever its items carry.
+            PaintItem::BlendBegin { .. } | PaintItem::BlendEnd => {}
             _ if stack.last().copied().unwrap_or(false) => {}
             PaintItem::Bg { rect, radius, .. } => {
                 rect_s(rect, s);
@@ -2062,6 +2065,10 @@ pub(crate) fn alpha_color(c: [u8; 4], a: f32) -> [u8; 4] {
 /// get a cheap bounds estimate first — a skip can only ever drop ink that
 /// the estimate put outside the band, and the estimate errs high.
 pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx: f32, dy: f32) {
+    // Open blend groups (#222): the saved canvas is the backdrop layer,
+    // the redirected `out` collects the group in isolation until BlendEnd
+    // blends it back. Empty on pages without mix-blend-mode — zero cost.
+    let mut blend_stack: Vec<(Canvas, MixBlendMode)> = Vec::new();
     // Whether a text tile's ink can reach the band. Line count comes from
     // the same wrap model rasterize_wrapped uses; `top` can lift ink above
     // the line-box top by up to a line's leading, so the top edge gets a
@@ -2147,6 +2154,12 @@ pub fn execute_band(items: &[PaintItem], fonts: &FontBook, out: &mut Canvas, dx:
             }
             PaintItem::PopClip => {
                 out.pop_clip();
+            }
+            PaintItem::BlendBegin { mode } => {
+                blend::redirect(out, &mut blend_stack, *mode);
+            }
+            PaintItem::BlendEnd => {
+                blend::restore(out, &mut blend_stack);
             }
             PaintItem::BgCorner { rect, color, radii, .. } => {
                 if out.xf().is_some() {
@@ -2737,5 +2750,6 @@ fn box_blur_alpha(src: &[u8], w: usize, h: usize, r: usize, horizontal: bool) ->
 
 // The colocated contract suite (batch 219: moved out with the file riding
 // the god-file ratchet cap — the layering audit exempts tests.rs).
+mod blend;
 #[cfg(test)]
 mod tests;

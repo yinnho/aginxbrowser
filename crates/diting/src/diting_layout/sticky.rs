@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use super::{PaintItem, Rect};
-use crate::diting_css::{ComputedStyle, PositionMode};
+use crate::diting_css::{ComputedStyle, MixBlendMode, PositionMode};
 use crate::diting_dom::tree::NodeId;
 
 /// Resolve a sticky inset (`top`/`bottom`/`left`/`right`) to px against the
@@ -88,7 +88,12 @@ fn translate_item(it: &mut PaintItem, tx: f32, ty: f32) {
             *x += tx;
             *y += ty;
         }
-        PaintItem::SetXf { .. } | PaintItem::SetXfCanvas | PaintItem::ClearXf | PaintItem::PopClip => {}
+        PaintItem::SetXf { .. }
+        | PaintItem::SetXfCanvas
+        | PaintItem::ClearXf
+        | PaintItem::PopClip
+        | PaintItem::BlendBegin { .. }
+        | PaintItem::BlendEnd => {}
     }
 }
 
@@ -116,6 +121,9 @@ pub(super) fn establishes_stacking_context(s: &ComputedStyle) -> bool {
         || s.effective_transform().is_some()
         || s.opacity.is_some_and(|o| o < 1.0)
         || s.backdrop_blur.is_some_and(|b| b > 0.0)
+        // #222: a blended element composites its whole rendering as one
+        // group — the blend bracket must own its subtree.
+        || s.mix_blend_mode.is_some_and(|m| m != MixBlendMode::Normal)
 }
 
 /// The collect half's full output: per-element border-box rects, the flat

@@ -5293,6 +5293,19 @@ pub enum PaintItem {
     /// so splicing them raw inside a bracket would double-map. The pair is
     /// self-contained; paint after the ClearXf returns to the bracket.
     SetXfCanvas,
+    /// Begin a mix-blend-mode group (#222): everything until the matching
+    /// [`PaintItem::BlendEnd`] paints into an offscreen transparent canvas,
+    /// and `BlendEnd` composites the group onto the backdrop below with the
+    /// mode — the W3C compositing formula per channel, with color-dodge and
+    /// color-burn in exact integer arithmetic (takumi #1791: a float divide
+    /// lands off-by-one through the gradient transition bands; integers
+    /// can't). The bracket opens before the element's own first item and
+    /// closes after its whole subtree — mix-blend-mode establishes a
+    /// stacking context, so a hoisted z>0 child can never land inside a
+    /// foreign blend bracket (same barrier rule as the xf bracket).
+    BlendBegin { mode: crate::diting_css::MixBlendMode },
+    /// Close the nearest open [`PaintItem::BlendBegin`] bracket.
+    BlendEnd,
     /// A uniform solid border: four bands on the border-box edges (rounded
     /// ring when `radii` are set), painted AFTER the element's Bg
     /// (background-clip: border-box draws the bg beneath the border) and
@@ -7590,6 +7603,7 @@ pub fn layout_collect_with_images(
         );
         let mut clips = false;
         let mut xf_bracket = false;
+        let mut blend_bracket = false;
         // Sticky v2: while `clips` is true and the used overflow is
         // scrollable (anything but `clip` — `hidden` IS a scroll container
         // per css-overflow), this element is a scroll container. Its subtree
@@ -7628,6 +7642,20 @@ pub fn layout_collect_with_images(
             // path); a rotate/skew flips this element's whole item range
             // into local coordinates bracketed by SetXf/ClearXf, and paint
             // inverse-maps per pixel.
+            // mix-blend-mode (#222): a non-normal mode opens the blend
+            // bracket BEFORE the element's own first item — background,
+            // pseudo boxes, text runs and children all paint into the
+            // group, exactly the slice Chrome composites. A blending
+            // element is a stacking context (establishes_stacking_context
+            // above), so z-band hoisting can never tear the pair.
+            if let Some(mode) = styles
+                .get(dom_id)
+                .and_then(|s| s.mix_blend_mode)
+                .filter(|m| *m != crate::diting_css::MixBlendMode::Normal)
+            {
+                items.push(PaintItem::BlendBegin { mode });
+                blend_bracket = true;
+            }
             let prebake = if t_lin != (1.0f32, 0.0, 0.0, 1.0) {
                 let origin = |l: crate::diting_css::Length, basis: f32| match l {
                     crate::diting_css::Length::Px(v) => v,
@@ -8836,6 +8864,13 @@ pub fn layout_collect_with_images(
         }
         if xf_bracket {
             items.push(PaintItem::ClearXf);
+        }
+        // #222: the blend bracket closes OUTSIDE the xf bracket — the
+        // transform composes the group's content first, then the whole
+        // group blends (CSS order: transform is part of the element's
+        // rendering that mix-blend-mode composites).
+        if blend_bracket {
+            items.push(PaintItem::BlendEnd);
         }
         // Sticky spans (root-scroller v1): a sticky subtree's items are a
         // contiguous run — the walk emits the node's own band, then its

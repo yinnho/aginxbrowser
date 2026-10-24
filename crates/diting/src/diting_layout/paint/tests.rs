@@ -1619,3 +1619,152 @@ fn box_blur_alpha_preserves_mass_and_flat() {
     assert!(empty.iter().all(|&v| v == 0), "zero plane stays zero");
 }
 
+
+// ---- mix-blend-mode (#222, takumi #1791 family) ----
+
+use super::blend::blend_channel;
+
+/// The exactness core: color-dodge must match round-to-nearest of the
+/// exact rational Cb·255/(255−Cs) over the WHOLE 8-bit domain — a float
+/// reciprocal path (tiny-skia's recip_fast, what takumi measured) lands
+/// off-by-one on ~1.7% of a 256-ramp. f64 here is itself exact at these
+/// magnitudes, so the reference is independent of the u32 implementation.
+#[test]
+fn color_dodge_is_exact_over_the_whole_domain() {
+    for cb in 0..=255u32 {
+        for cs in 0..=255u32 {
+            let got = blend_channel(MixBlendMode::ColorDodge, cb, cs);
+            let want = if cb == 0 {
+                0
+            } else if cs == 255 {
+                255
+            } else {
+                ((f64::from(cb) * 255.0 / f64::from(255 - cs)).round() as u32).min(255)
+            };
+            assert_eq!(got, want, "color-dodge cb={cb} cs={cs}");
+        }
+    }
+}
+
+/// Same for color-burn: 255 − min(255, round((255−Cb)·255/Cs)).
+#[test]
+fn color_burn_is_exact_over_the_whole_domain() {
+    for cb in 0..=255u32 {
+        for cs in 0..=255u32 {
+            let got = blend_channel(MixBlendMode::ColorBurn, cb, cs);
+            let want = if cb == 255 {
+                255
+            } else if cs == 0 {
+                0
+            } else {
+                255 - ((f64::from(255 - cb) * 255.0 / f64::from(cs)).round() as u32).min(255)
+            };
+            assert_eq!(got, want, "color-burn cb={cb} cs={cs}");
+        }
+    }
+}
+
+/// The other separable modes at hand-checked corners: the identity edges
+/// (0 and 255 operands), min/max, abs-diff — the anchor points any
+/// re-derivation must keep.
+#[test]
+fn separable_modes_hit_their_identity_corners() {
+    let m = |mode: MixBlendMode, cb: u32, cs: u32| blend_channel(mode, cb, cs);
+    for v in [0u32, 1, 127, 254, 255] {
+        assert_eq!(m(MixBlendMode::Multiply, 0, v), 0, "multiply by black");
+        assert_eq!(m(MixBlendMode::Multiply, v, 0), 0);
+        assert_eq!(m(MixBlendMode::Multiply, 255, v), v, "multiply by white");
+        assert_eq!(m(MixBlendMode::Screen, 255, v), 255, "screen with white");
+        assert_eq!(m(MixBlendMode::Screen, 0, v), v, "screen with black");
+    }
+    assert_eq!(m(MixBlendMode::Darken, 10, 200), 10);
+    assert_eq!(m(MixBlendMode::Lighten, 10, 200), 200);
+    assert_eq!(m(MixBlendMode::Difference, 10, 200), 190);
+    assert_eq!(m(MixBlendMode::Exclusion, 128, 128), (128 + 128) - (2 * 128 * 128 + 127) / 255);
+    // overlay: Cb ≤ 0.5 multiplies — black stays black; white screens.
+    assert_eq!(m(MixBlendMode::Overlay, 0, 200), 0);
+    assert_eq!(m(MixBlendMode::Overlay, 255, 200), 255 - ((2 * 0 * 55 + 127) / 255));
+    // hard-light mirrors overlay with the source threshold.
+    assert_eq!(m(MixBlendMode::HardLight, 200, 0), 0);
+    assert_eq!(m(MixBlendMode::HardLight, 200, 255), 255);
+}
+
+/// End-to-end through `execute`: an opaque multiply group over an opaque
+/// backdrop lands round(a·b/255) per channel; pixels outside the group's
+/// clip-shaped ink stay pure backdrop (isolation — the group never
+/// leaks past its own bounds).
+#[test]
+fn blend_group_multiplies_onto_the_backdrop() {
+    let items = vec![
+        PaintItem::Bg { rect: Rect { x: 0.0, y: 0.0, width: 6.0, height: 6.0 }, color: [200, 100, 50, 255], radius: 0.0 },
+        PaintItem::BlendBegin { mode: MixBlendMode::Multiply },
+        PaintItem::Bg { rect: Rect { x: 0.0, y: 0.0, width: 3.0, height: 6.0 }, color: [100, 100, 100, 255], radius: 0.0 },
+        PaintItem::BlendEnd,
+    ];
+    let fonts = crate::diting_fonts::font_book();
+    let mut c = Canvas::new_transparent(6, 6);
+    execute(&items, &fonts, &mut c);
+    // round(200·100/255)=78, round(100·100/255)=39, round(50·100/255)=20
+    assert_eq!(px(&c, 1, 3), [78, 39, 20, 255], "multiply group over backdrop");
+    // right half: no group ink → backdrop untouched (αs=0 skips the pixel)
+    assert_eq!(px(&c, 4, 3), [200, 100, 50, 255], "outside the group stays backdrop");
+}
+
+/// The takumi #1791 witness shape: a color-dodge fill over their repro
+/// backdrop color #0A80F5 — channel-by-channel the exact rational, not a
+/// reciprocal approximation.
+#[test]
+fn blend_group_dodges_the_takumi_repro_color() {
+    let items = vec![
+        PaintItem::Bg { rect: Rect { x: 0.0, y: 0.0, width: 4.0, height: 4.0 }, color: [10, 128, 245, 255], radius: 0.0 },
+        PaintItem::BlendBegin { mode: MixBlendMode::ColorDodge },
+        PaintItem::Bg { rect: Rect { x: 0.0, y: 0.0, width: 4.0, height: 4.0 }, color: [200, 100, 50, 255], radius: 0.0 },
+        PaintItem::BlendEnd,
+    ];
+    let fonts = crate::diting_fonts::font_book();
+    let mut c = Canvas::new_transparent(4, 4);
+    execute(&items, &fonts, &mut c);
+    // r: 10·255/55 → 46; g: 128·255/155 → 211; b: min(255, 245·255/205) → 255
+    assert_eq!(px(&c, 2, 2), [46, 211, 255, 255]);
+}
+
+/// A semi-transparent group (αs=128 over an opaque backdrop) must land
+/// Co = αs·B + (1−αs)·Cb, evaluated with the exact un-premultiply —
+/// hand-computed literals, not re-derived from the implementation:
+///   r: (128·255·78 + 127·255·200) / 65025 → 139
+///   g: (128·255·39 + 127·255·100) / 65025 → 69
+///   b: (128·255·20 + 127·255·50)  / 65025 → 35
+#[test]
+fn blend_group_composites_the_group_alpha_exactly() {
+    let items = vec![
+        PaintItem::Bg { rect: Rect { x: 0.0, y: 0.0, width: 4.0, height: 4.0 }, color: [200, 100, 50, 255], radius: 0.0 },
+        PaintItem::BlendBegin { mode: MixBlendMode::Multiply },
+        PaintItem::Bg { rect: Rect { x: 0.0, y: 0.0, width: 4.0, height: 4.0 }, color: [100, 100, 100, 128], radius: 0.0 },
+        PaintItem::BlendEnd,
+    ];
+    let fonts = crate::diting_fonts::font_book();
+    let mut c = Canvas::new_transparent(4, 4);
+    execute(&items, &fonts, &mut c);
+    assert_eq!(px(&c, 2, 2), [139, 69, 35, 255]);
+}
+
+/// Nested groups compose inside-out: an inner screen group renders into
+/// the outer multiply group's offscreen, and the outer then blends the
+/// composed pixels onto the backdrop.
+#[test]
+fn blend_groups_nest_inside_out() {
+    let items = vec![
+        PaintItem::Bg { rect: Rect { x: 0.0, y: 0.0, width: 4.0, height: 4.0 }, color: [100, 100, 100, 255], radius: 0.0 },
+        PaintItem::BlendBegin { mode: MixBlendMode::Multiply },
+        PaintItem::Bg { rect: Rect { x: 0.0, y: 0.0, width: 4.0, height: 4.0 }, color: [240, 240, 240, 255], radius: 0.0 },
+        PaintItem::BlendBegin { mode: MixBlendMode::Difference },
+        PaintItem::Bg { rect: Rect { x: 0.0, y: 0.0, width: 4.0, height: 4.0 }, color: [200, 200, 200, 255], radius: 0.0 },
+        PaintItem::BlendEnd,
+        PaintItem::BlendEnd,
+    ];
+    let fonts = crate::diting_fonts::font_book();
+    let mut c = Canvas::new_transparent(4, 4);
+    execute(&items, &fonts, &mut c);
+    // inner: |240−200| = 40 over the group's 240 → 40; outer: 100·40/255 → 16
+    assert_eq!(px(&c, 1, 1), [16, 16, 16, 255]);
+}

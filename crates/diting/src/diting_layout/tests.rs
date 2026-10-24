@@ -851,7 +851,56 @@ mod box_shadow_paint_tests {
         };
         assert!(radii.iter().all(|r| r.0 > 0.0), "carries the clamped corner radii: {radii:?}");
     }
+
+/// #222: a non-normal mix-blend-mode brackets the element's whole
+/// rendering — BlendBegin before its own background, BlendEnd after the
+/// subtree — and nothing emits brackets without the property.
+#[test]
+fn mix_blend_mode_brackets_the_elements_whole_rendering() {
+    let list = items(
+        "#host { width: 60px; height: 40px; background: white } \
+         #kid { width: 30px; height: 20px; background: red; mix-blend-mode: multiply }",
+        r#"<div id="host"><div id="kid"></div></div>"#,
+    );
+    let begins: Vec<usize> = list
+        .iter()
+        .enumerate()
+        .filter(|(_, it)| matches!(it, PaintItem::BlendBegin { mode: crate::diting_css::MixBlendMode::Multiply }))
+        .map(|(i, _)| i)
+        .collect();
+    let ends: Vec<usize> = list
+        .iter()
+        .enumerate()
+        .filter(|(_, it)| matches!(it, PaintItem::BlendEnd))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(begins.len(), 1, "exactly one blend bracket: {list:?}");
+    assert_eq!(ends.len(), 1);
+    let kid_bg = list
+        .iter()
+        .position(|it| matches!(it, PaintItem::Bg { color, .. } if *color == [255, 0, 0, 255]))
+        .expect("kid background");
+    let host_bg = list
+        .iter()
+        .position(|it| matches!(it, PaintItem::Bg { color, .. } if *color == [255, 255, 255, 255]))
+        .expect("host background");
+    assert!(begins[0] < kid_bg, "BlendBegin before the blended element's own ink");
+    assert!(kid_bg < ends[0], "BlendEnd after it");
+    assert!(host_bg < begins[0], "the host backdrop paints beneath the group");
+
+    // Without the property: zero brackets on the page.
+    let plain = items(
+        "#a { width: 10px; height: 10px; background: blue }",
+        r#"<div id="a"></div>"#,
+    );
+    assert!(
+        !plain.iter().any(|it| matches!(it, PaintItem::BlendBegin { .. } | PaintItem::BlendEnd)),
+        "normal elements emit no blend brackets"
+    );
 }
+}
+
+
 
 #[cfg(test)]
 mod white_space_pre_family_tests {

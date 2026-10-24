@@ -3356,3 +3356,58 @@ fn modern_colors_work_inside_shorthands_and_gradients() {
     let mut s = ComputedStyle::default();
     assert!(apply_declarations(&mut s, "text-shadow: 1px 1px 2px oklch(0.5 0.2 30)"));
 }
+
+// ---- mix-blend-mode (#222) ----
+
+fn blend_mode(v: &str) -> Option<MixBlendMode> {
+    let mut s = ComputedStyle::default();
+    apply_declarations(&mut s, &format!("mix-blend-mode: {v}"));
+    s.mix_blend_mode
+}
+
+#[test]
+fn mix_blend_mode_keyword_table() {
+    assert_eq!(blend_mode("normal"), Some(MixBlendMode::Normal));
+    assert_eq!(blend_mode("multiply"), Some(MixBlendMode::Multiply));
+    assert_eq!(blend_mode("screen"), Some(MixBlendMode::Screen));
+    assert_eq!(blend_mode("overlay"), Some(MixBlendMode::Overlay));
+    assert_eq!(blend_mode("darken"), Some(MixBlendMode::Darken));
+    assert_eq!(blend_mode("lighten"), Some(MixBlendMode::Lighten));
+    assert_eq!(blend_mode("color-dodge"), Some(MixBlendMode::ColorDodge));
+    assert_eq!(blend_mode("color-burn"), Some(MixBlendMode::ColorBurn));
+    assert_eq!(blend_mode("hard-light"), Some(MixBlendMode::HardLight));
+    assert_eq!(blend_mode("soft-light"), Some(MixBlendMode::SoftLight));
+    assert_eq!(blend_mode("difference"), Some(MixBlendMode::Difference));
+    assert_eq!(blend_mode("exclusion"), Some(MixBlendMode::Exclusion));
+    assert_eq!(blend_mode("hue"), Some(MixBlendMode::Hue));
+    assert_eq!(blend_mode("saturation"), Some(MixBlendMode::Saturation));
+    assert_eq!(blend_mode("color"), Some(MixBlendMode::Color));
+    assert_eq!(blend_mode("luminosity"), Some(MixBlendMode::Luminosity));
+}
+
+#[test]
+fn mix_blend_mode_rejections_and_persistence() {
+    assert_eq!(blend_mode("plus-lighter"), None, "needs a second source plane");
+    assert_eq!(blend_mode("MULTIPLY"), None, "keywords are case-sensitive");
+    assert_eq!(blend_mode(""), None);
+    // An invalid re-declaration keeps the prior value (same rule as
+    // backdrop-filter).
+    let mut s = ComputedStyle::default();
+    apply_declarations(&mut s, "mix-blend-mode: multiply; mix-blend-mode: bogus");
+    assert_eq!(s.mix_blend_mode, Some(MixBlendMode::Multiply));
+    // css-wide reset round-trips through the longhand table.
+    apply_declarations(&mut s, "mix-blend-mode: screen; mix-blend-mode: unset");
+    assert_eq!(s.mix_blend_mode, None, "unset falls back to the initial (non-inherited)");
+}
+
+#[test]
+fn mix_blend_mode_does_not_inherit() {
+    let tree = diting_dom::tree_sink::parse_html(r#"<div><p>x</p></div>"#);
+    let p = tree.query_selector("p").unwrap().unwrap();
+    let parent = ComputedStyle {
+        mix_blend_mode: Some(MixBlendMode::Multiply),
+        ..Default::default()
+    };
+    let child = cascade_element("p", &tree, p, &[], Some(&parent), None, DEFAULT_ROOT_FONT_SIZE, (1280.0, 720.0));
+    assert_eq!(child.mix_blend_mode, None, "mix-blend-mode is non-inherited");
+}

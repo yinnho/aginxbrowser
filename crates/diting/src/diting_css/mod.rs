@@ -921,6 +921,32 @@ pub struct TextShadow {
     pub color: Color,
 }
 
+/// `mix-blend-mode` (#222): the mode an element's whole rendering composites
+/// onto its backdrop with. The separable modes blend per channel; the last
+/// four operate on the color's hue/saturation/luminosity triple instead.
+/// `plus-lighter` is deliberately absent — it needs a second source plane
+/// the compositing model here doesn't have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MixBlendMode {
+    #[default]
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Darken,
+    Lighten,
+    ColorDodge,
+    ColorBurn,
+    HardLight,
+    SoftLight,
+    Difference,
+    Exclusion,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
+}
+
 /// The computed values this slice models. Deliberately tiny: enough to lock
 /// cascade ordering, specificity, inline override, and inheritance semantics.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -969,6 +995,10 @@ pub struct ComputedStyle {
     /// `perspective` (raw value, v1 position face): same hijack semantics
     /// as filter. `None` = `none`.
     pub perspective: Option<String>,
+    /// `mix-blend-mode` (#222), non-inherited: `None` = `normal`. A
+    /// non-normal value establishes a stacking context and opens a blend
+    /// bracket around the element's whole rendering at collect time.
+    pub mix_blend_mode: Option<MixBlendMode>,
     /// Shorthand sides in CSS order (top right bottom left), already expanded.
     pub margin: Sides,
     pub padding: Sides,
@@ -3598,6 +3628,7 @@ css_wide_longhands! {
     "backdrop-filter" => backdrop_blur, false;
     "filter" => filter, false;
     "perspective" => perspective, false;
+    "mix-blend-mode" => mix_blend_mode, false;
     "opacity" => opacity, false;
     "transform" => transform, false;
     "translate" => translate_prop, false;
@@ -4510,6 +4541,13 @@ fn apply_one(style: &mut ComputedStyle, name: &str, value: &str, fonts: &FontCtx
             }
             true
         }
+        "mix-blend-mode" => match parse_mix_blend_mode(v) {
+            Some(mode) => {
+                style.mix_blend_mode = Some(mode);
+                true
+            }
+            None => false,
+        },
         "text-shadow" => {
             if v.eq_ignore_ascii_case("none") {
                 style.text_shadow = None;
@@ -5875,6 +5913,31 @@ pub fn parse_text_shadow(
 /// (handled at the declaration arm). A filter-function list or any other
 /// filter function is an invalid declaration, not a parse-through — the
 /// prior computed value survives, matching the other shadow parsers.
+/// `mix-blend-mode` (#222): one of the 16 spec keywords, else a parse
+/// error (the prior computed value stands). Case-sensitive like the
+/// keywords' lowercase spellings in Chrome's parser.
+pub fn parse_mix_blend_mode(value: &str) -> Option<MixBlendMode> {
+    Some(match value {
+        "normal" => MixBlendMode::Normal,
+        "multiply" => MixBlendMode::Multiply,
+        "screen" => MixBlendMode::Screen,
+        "overlay" => MixBlendMode::Overlay,
+        "darken" => MixBlendMode::Darken,
+        "lighten" => MixBlendMode::Lighten,
+        "color-dodge" => MixBlendMode::ColorDodge,
+        "color-burn" => MixBlendMode::ColorBurn,
+        "hard-light" => MixBlendMode::HardLight,
+        "soft-light" => MixBlendMode::SoftLight,
+        "difference" => MixBlendMode::Difference,
+        "exclusion" => MixBlendMode::Exclusion,
+        "hue" => MixBlendMode::Hue,
+        "saturation" => MixBlendMode::Saturation,
+        "color" => MixBlendMode::Color,
+        "luminosity" => MixBlendMode::Luminosity,
+        _ => return None,
+    })
+}
+
 pub fn parse_backdrop_blur(value: &str, fonts: &FontCtx) -> Option<f32> {
     let v = value.trim();
     let open = v.find('(')?;
