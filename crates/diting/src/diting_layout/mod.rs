@@ -6717,7 +6717,7 @@ pub fn layout_solve_rooted(
         }
     }
     // --- #315 intrinsic repair: content-sized wrap hosts --------------------
-    // A floated or abs/fixed wrap host with an auto width sizes
+    // A floated, abs/fixed, or auto-width flex/grid-ITEM wrap host sizes
     // shrink-to-fit, but taffy's intrinsic takes the MAX over block
     // children — the float-figure idiom (float + caption) sized to the
     // float alone and the caption overflowed it. CSS wants
@@ -6727,23 +6727,42 @@ pub fn layout_solve_rooted(
     // word (Chrome-truth probes, 2026-10-24: float+margins+caption on
     // one line; pre contributes its widest hard line to the preferred
     // width; abs/fixed measure avail against their containing block,
-    // which the reparent pass already made the taffy parent). The
-    // solve above settled every child; compute the sums, set the width,
-    // re-solve once — the same shape as the two repair passes above.
-    // eligible narrows these hosts to floats + inline content, so every
-    // child is summable; authored min/max stay in the taffy style and
-    // clamp the set width on the re-solve themselves.
+    // which the reparent pass already made the taffy parent; a flex/grid
+    // item's avail is the flex/grid parent's content box, and setting a
+    // definite width on the re-solve makes the item contribute that sum).
+    // The solve above settled every child; compute the sums, set the
+    // width, re-solve once — the same shape as the two repair passes
+    // above. eligible narrows these hosts to floats + inline content, so
+    // every child is summable; authored min/max stay in the taffy style
+    // and clamp the set width on the re-solve themselves.
     {
-        let content_sized = |s: &crate::diting_css::ComputedStyle| {
-            s.width.is_none()
-                && (s.float_side.is_some()
-                    || matches!(s.position, Some(crate::diting_css::PositionMode::Absolute) | Some(crate::diting_css::PositionMode::Fixed)))
+        let content_sized = |s: &crate::diting_css::ComputedStyle, dom_id: NodeId| {
+            if s.width.is_some() {
+                return false;
+            }
+            if s.float_side.is_some()
+                || matches!(
+                    s.position,
+                    Some(crate::diting_css::PositionMode::Absolute) | Some(crate::diting_css::PositionMode::Fixed)
+                )
+            {
+                return true;
+            }
+            tree.with_node(dom_id, |n| n.parent)
+                .flatten()
+                .and_then(|p| styles.get(&p))
+                .is_some_and(|ps| {
+                    matches!(
+                        ps.display.unwrap_or(crate::diting_css::Display::Block),
+                        crate::diting_css::Display::Flex | crate::diting_css::Display::Grid
+                    )
+                })
         };
         let mut fixups: Vec<(taffy::tree::NodeId, NodeId)> = node_map
             .iter()
             .filter(|(_, d)| {
                 let Some(st) = styles.get(*d) else { return false };
-                content_sized(st) && float_flow::eligible(tree, styles, **d, st, &render_children(tree, **d))
+                content_sized(st, **d) && float_flow::eligible(tree, styles, **d, st, &render_children(tree, **d))
             })
             .map(|(t, d)| (*t, *d))
             .collect();

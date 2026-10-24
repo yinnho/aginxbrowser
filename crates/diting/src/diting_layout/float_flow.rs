@@ -8,8 +8,11 @@
 //! taffy floats, the block children overlap them like Chrome's, and text
 //! runs wrap into the free slots beside them (`float_lines`).
 //!
-//! Still on the zone path (#313 remaining): auto-width flex/grid ITEM
-//! hosts (#315 — flex intrinsic contribution; definite-width items wrap). Float
+//! Still on the zone path (#313 remaining): content-sized hosts whose
+//! children are non-summable (a block/flex/inline-block beside the float —
+//! #315 tail; the repair pass only sums floats + inline runs). Auto-width
+//! flex/grid ITEM hosts with a summable shape wrap via the same intrinsic
+//! repair as floated/abspos hosts (definite-width items already wrap). Float
 //! widths of every authored shape ride the wrap
 //! path: px/% as-is, em/rem folded at cascade, calc repaired between two
 //! solves (cache-busted when the fixup is a float), sizing keywords
@@ -34,14 +37,15 @@
 //! same drop serves SOFT lines (#315's probe
 //! round): §9.5 moves a line whose first word cannot fit its band below
 //! the floats, the fitting words above staying beside. Content-sized
-//! hosts (#315) ride the wrap path too — floated and abs/fixed boxes
-//! with an auto width — through the intrinsic repair pass in mod.rs,
-//! which sums what taffy's max()-over-children intrinsic drops: the
-//! float margin boxes and the caption text on one line for max-content
-//! (a pre run its widest hard line), the widest float against the
-//! longest word for min-content, avail against the containing block.
-//! Those hosts keep a summable shape (floats + inline content only);
-//! a block/flex/inline-block child's intrinsic is not wired, so those
+//! hosts (#315) ride the wrap path too — floated and abs/fixed boxes,
+//! and auto-width flex/grid ITEM hosts — through the intrinsic repair
+//! pass in mod.rs, which sums what taffy's max()-over-children
+//! intrinsic drops: the float margin boxes and the caption text on one
+//! line for max-content (a pre run its widest hard line), the widest
+//! float against the longest word for min-content, avail against the
+//! containing block (flex/grid item: the parent's content box). Those
+//! hosts keep a summable shape (floats + inline content only); a
+//! block/flex/inline-block child's intrinsic is not wired, so those
 //! stay zone. A plain block
 //! inside a wrap host (a centered p beside the host's float) inherits the
 //! environment too: in CSS only a BFC boundary stops line boxes from
@@ -148,19 +152,20 @@ pub(super) fn eligible(
             return false;
         }
     }
-    // Flex/grid ITEM hosts with an auto width stay out (#315): their used
-    // width is the flex algorithm's intrinsic contribution, and the wrap
-    // path's max()-over-children shrink-to-fit drops the caption (zone
-    // still sums). Definite-width flex/grid items wrap like any block
-    // host — Chrome and WRAP_ALL agree on band lefts/tops. Floated and
-    // abs/fixed boxes (any parent) DO take the wrap path — their
-    // shrink-to-fit width comes from the intrinsic repair pass in mod.rs.
-    let parent_is_block = tree
+    // Auto-width hosts that shrink-to-fit — floated, abs/fixed, or a
+    // flex/grid ITEM — ride the wrap path when their children are a
+    // summable shape (floats + inline). The intrinsic repair pass in
+    // mod.rs sums what taffy's max()-over-children drops. Definite-width
+    // flex/grid items wrap like any block host. Other non-block parents
+    // with an auto-width host stay zone (no repair wired).
+    let parent_display = tree
         .with_node(id, |n| n.parent)
         .flatten()
         .and_then(|p| styles.get(&p))
-        .is_none_or(|ps| matches!(ps.display.unwrap_or(CssDisplay::Block), CssDisplay::Block));
-    if !parent_is_block && container.width.is_none() {
+        .map(|ps| ps.display.unwrap_or(CssDisplay::Block));
+    let parent_is_block = parent_display.is_none_or(|d| matches!(d, CssDisplay::Block));
+    let parent_is_flex_grid = matches!(parent_display, Some(CssDisplay::Flex) | Some(CssDisplay::Grid));
+    if !parent_is_block && container.width.is_none() && !parent_is_flex_grid {
         return false;
     }
     // A content-sized host's children must be a summable shape: floats
@@ -168,7 +173,9 @@ pub(super) fn eligible(
     // text); a block/flex/inline-block child's own intrinsic is not
     // wired, so those hosts keep the zone path.
     let content_sized = container.width.is_none()
-        && (container.float_side.is_some() || matches!(container.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed)));
+        && (container.float_side.is_some()
+            || matches!(container.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
+            || parent_is_flex_grid);
     let mut floats = 0;
     for cid in child_ids {
         if tree.with_node(*cid, |n| n.is_text()).unwrap_or(false) {
