@@ -25,8 +25,10 @@ pub const STEALTH_USER_AGENT: &str =
 
 /// The TLS fingerprint stealth builds present by default. `with_proxy_and_os`
 /// constructs the matching emulation and `/health` reports this string, so
-/// the wire behavior and the reported name cannot drift apart.
-#[cfg(feature = "stealth")]
+/// the wire behavior and the reported name cannot drift apart. UNGATED on
+/// purpose (#276 P2-6): the face is single-sourced — account personas, the
+/// UA/TLS coherence warning, and this preset all read the pair below, and
+/// the tripwire test runs in every build.
 pub const DEFAULT_TLS_FINGERPRINT: &str = "chrome145";
 
 /// Map a user-friendly TLS fingerprint name to a wreq-util `Profile`
@@ -111,17 +113,40 @@ fn fingerprint_family_version(name: &str) -> Option<(&'static str, u32)> {
     Some((family, major))
 }
 
-/// The Chrome major the whole fleet claims (persona UA, GL tables, uad
-/// brands, sec-ch-ua) — equal to the TLS preset's major (Chrome145), so the
-/// UA and the ClientHello agree. 145 is the one production-routed major a
-/// real wreq-util preset backs: the xhs edge buckets UA 146–153/155/156 into
-/// its customer.sit loop (2026-10-17 probe), and presets stop at 149. The
-/// fleet claimed 154 over this chrome145 handshake from 2026-10-17 to
-/// 2026-10-20; that UA/TLS mismatch is gone. Mirrors
-/// `default_tls_chrome_major` in aginxbrowser/src/account.rs (kept separate:
-/// that side avoids the stealth feature gate).
-#[cfg(feature = "stealth")]
+/// The Chrome major the whole fleet claims in UA strings (and GL / uad /
+/// sec-ch-ua), so UA and ClientHello agree. UNGATED (#276 P2-6): this is
+/// the single source the account-persona coerce and the mismatch warning
+/// read — the days of a mirrored copy in aginxbrowser/src/account.rs
+/// ended 2026-10-25. Why 145 and not a newer major: wreq-util's presets
+/// stop at 149 and the xhs edge routes UA majors non-monotonically —
+/// 145/154/157/158 reach production, 146–153 and 155/156 are bucketed
+/// into its SIT loop (customer.sit.xiaohongshu.com; 2026-10-17 probe).
+/// 145 is the only production-routed major that a real preset can back.
+/// History: the fleet claimed 154 over a chrome145-shaped handshake from
+/// 2026-10-17 to 2026-10-20 (UA/TLS mismatch, 300015 on publish_render
+/// persisted); the 2026-10-20 restore made the pair coherent.
 pub const CLAIMED_CHROME_MAJOR: u32 = 145;
+
+#[cfg(test)]
+mod face_tripwire {
+    /// #276 P2-6 "face follows": the preset name's numeric tail must equal
+    /// the claimed Chrome major. Bump one without the other and this fails
+    /// in every build (no stealth feature needed) — the mismatch that
+    /// lived in the README and the account mirror for days can't recur.
+    #[test]
+    fn fleet_face_is_one_coherent_pair() {
+        let tail = super::DEFAULT_TLS_FINGERPRINT
+            .strip_prefix("chrome")
+            .expect("default preset is a chromeN name");
+        let major: u32 = tail
+            .parse()
+            .unwrap_or_else(|_| panic!("default preset tail is numeric: {tail}"));
+        assert_eq!(
+            major, super::CLAIMED_CHROME_MAJOR,
+            "TLS preset face and claimed UA major must move together"
+        );
+    }
+}
 
 /// Warn when the effective UA and the browser claim disagree on family or
 /// major version. With an explicit `tls_fingerprint`, coherence means the UA

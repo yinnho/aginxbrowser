@@ -6,7 +6,9 @@ pub mod blocklist;
 pub mod site;
 #[cfg(feature = "stealth")]
 pub mod chrome_headers;
-#[cfg(feature = "stealth")]
+// Ungated module (#276 P2-6): the fleet-face constants and their tripwire
+// test compile in every build; every wreq-dependent item inside stays
+// stealth-gated, so non-stealth builds see only the pair.
 pub mod wreq_client;
 
 pub use client::{
@@ -52,10 +54,13 @@ pub fn collect_response_headers(
         })
         .collect()
 }
+// The fleet-face pair is ungated (#276 P2-6): single source for the
+// account-persona coerce, the UA/TLS warning, and the tripwire test.
+pub use wreq_client::{CLAIMED_CHROME_MAJOR, DEFAULT_TLS_FINGERPRINT};
 #[cfg(feature = "stealth")]
 pub use wreq_client::{
-    DEFAULT_TLS_FINGERPRINT, StealthHttpClient, STEALTH_USER_AGENT, emulation_os_for_ua,
-    parse_tls_fingerprint, warn_on_ua_tls_mismatch,
+    StealthHttpClient, STEALTH_USER_AGENT, emulation_os_for_ua, parse_tls_fingerprint,
+    warn_on_ua_tls_mismatch,
 };
 
 /// DevTools `Fetch.enable` urlPattern glob: `*` matches zero or more

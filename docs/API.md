@@ -49,7 +49,7 @@ Response:
   "version": "0.3.1",
   "commit": "a1b2c3d",
   "v8": "15.0.274.2",
-  "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+  "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
   "tls": "chrome145",
   "capabilities": { "screenshot": true, "stealth": true, "captcha_solver": false, "ffmpeg": { "version": "8.1.1" } }
 }
@@ -97,7 +97,7 @@ Fetch a page and return its content. Supports tiered rendering, automatic Cloudf
 
 | Value | Description |
 |----|------|
-| `null` | Default (`chrome145` TLS shape; fleet UA is Chrome/154) |
+| `null` | Default (`chrome145` TLS shape; fleet UA is Chrome/145) |
 | `"chrome145"` | Chrome-family TLS shape (wreq-util Chrome145; not the UA major) |
 | `"firefox133"` | Firefox 133 |
 | `"firefox147"` | Firefox 147 |
@@ -842,7 +842,7 @@ Turn a DevTools **"Copy as cURL"** command into a logged-in browser session — 
   "cookie_count": 12,
   "method": "GET",
   "has_body": false,
-  "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/154.0.0.0",
+  "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/145.0.0.0",
   "authorization_prefix": "Bearer eyJhbGciOi…",
   "expires_in_secs": 480,
   "note": "login state injected; navigate with session tools"
@@ -905,7 +905,7 @@ Anonymous traffic shares one process-global cookie jar — deliberate (repeat-vi
 
 Attach a session with `account` on `POST /session/create` or `POST /import/curl` (1-64 chars of `[a-zA-Z0-9_-]`). The account is the persistence — account sessions don't need `persistent: true`.
 
-**Per-account device persona** — an identity is one stable *device*, not just one cookie jar. On first use an account draws a persona — a User-Agent from the Windows/macOS Chrome/154 pool plus a hardware seed that drives its `screen`/devicePixelRatio/GPU/canvas fingerprint — remembers both in its record, and reuses them for every later session, restarts included. Jar isolation alone can't stop risk-control linkage: two logins sharing one fingerprint read as "one device with two accounts". `import_curl` seeds the persona from the copied command's real User-Agent (the device the site already saw alongside those cookies). The pool is pinned to Chrome/154 (fleet claim); the TLS handshake preset name remains `chrome145` (wreq-util JA3 *shape*, not the UA major). The hardware seed itself stays server-side — `GET /accounts` reports only the persona UA (`persona_ua`).
+**Per-account device persona** — an identity is one stable *device*, not just one cookie jar. On first use an account draws a persona — a User-Agent from the Windows/macOS Chrome/145 pool plus a hardware seed that drives its `screen`/devicePixelRatio/GPU/canvas fingerprint — remembers both in its record, and reuses them for every later session, restarts included. Jar isolation alone can't stop risk-control linkage: two logins sharing one fingerprint read as "one device with two accounts". `import_curl` seeds the persona from the copied command's real User-Agent (the device the site already saw alongside those cookies). The pool is pinned to Chrome/145 — the fleet claim, same major the `chrome145` TLS preset emulates, so UA and ClientHello agree (single-sourced pair with a coherence tripwire test). The hardware seed itself stays server-side — `GET /accounts` reports only the persona UA (`persona_ua`).
 
 **List accounts:**
 

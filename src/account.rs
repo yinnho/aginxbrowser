@@ -241,19 +241,16 @@ fn chrome_major_from_ua(ua: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// The Chrome major the whole fleet claims in the *UA string* (and GL / uad
-/// / sec-ch-ua): 145 — the same major the TLS handshake emulates
-/// (wreq-util Profile::Chrome145), so UA and ClientHello agree. Kept local so
-/// account code does not depend on the stealth feature gate. Why 145 and not
-/// a newer major: wreq-util's presets stop at 149 and the xhs edge routes UA
-/// majors non-monotonically — 145/154/157/158 reach production, 146–153 and
-/// 155/156 are bucketed into its SIT loop (customer.sit.xiaohongshu.com;
-/// 2026-10-17 probe). 145 is the only production-routed major that a real
-/// preset can back. History: the fleet claimed 154 over a chrome145-shaped
-/// handshake from 2026-10-17 to 2026-10-20 (UA/TLS mismatch, 300015 on
-/// publish_render persisted); this restores a coherent pair.
+/// The fleet's claimed Chrome major — delegated to the engine's single
+/// source (`diting_net::CLAIMED_CHROME_MAJOR`, ungated #276 P2-6): UA
+/// strings, persona coercion, and the TLS preset face move together, and
+/// the coherence tripwire test runs next to the constant in every build.
+/// Why 145: the xhs edge routes UA majors non-monotonically (145/154/157/
+/// 158 reach production; 146–153 and 155/156 land in its SIT loop) and
+/// wreq-util presets stop at 149 — 145 is the only production-routed
+/// major a real preset backs. Full history on the engine constant.
 fn default_tls_chrome_major() -> u32 {
-    145
+    diting::diting_net::CLAIMED_CHROME_MAJOR
 }
 
 /// Rewrite a UA whose Chrome major disagrees with the fleet-claimed major

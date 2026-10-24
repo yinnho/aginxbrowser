@@ -63,7 +63,7 @@ Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操
 
 刚冒出来的「agent 浏览器」大多是**无状态、无指纹**的一���性渲染引擎——抓公开页很轻，碰上 Cloudflare 或要登录的站就死。AginxBrowser 走相反的路：
 
-- **🔐 真实 TLS 指纹** — stealth 模式用 BoringSSL 复刻 Chrome / Firefox / Safari / Edge 的 TLS 握手（JA3 预设名如 `chrome145`、`firefox133`——不是只改 UA），可按请求切换。舰队默认 User-Agent 为 **Chrome/154**；默认 TLS 形状仍是 `chrome145` 预设。Cloudflare Turnstile 挑战页自动等 `cf_clearance`。无指纹引擎碰反爬就是 403，我们穿过去。
+- **🔐 真实 TLS 指纹** — stealth 模式用 BoringSSL 复刻 Chrome / Firefox / Safari / Edge 的 TLS 握手（JA3 预设名如 `chrome145`、`firefox133`——不是只改 UA），可按请求切换。舰队默认 User-Agent 与 TLS 形状是同一对：**Chrome/145**（`chrome145` 预设），UA 与 ClientHello 按构造一致——刻意停在 145：部分站点边缘对 UA 大版本非单调分流（146–153 会被打进 SIT 环），而 wreq-util 预设止于 149，145 是唯一有真预设背书的产线大版本。Cloudflare Turnstile 挑战页自动等 `cf_clearance`。无指纹引擎碰反爬就是 403，我们穿过去。
 - **证据页：** 公开 Stealth/TLS 对比（JA4 / Akamai H2，对照 curl 与 Chrome；Kitesurf/Lightpanda 标待测并引用官方说法）— [`docs/stealth-tls-comparison.zh-CN.md`](docs/stealth-tls-comparison.zh-CN.md) · [English](docs/stealth-tls-comparison.md) · 回执 [`bench/stealth-tls-20261019/`](bench/stealth-tls-20261019/)
 - **记分板：** tip 微基准（冷启动、`/fetch` 短集、session snapshot）对照 curl/Chrome；Lightpanda/Obscura **未跑** — [`docs/scoreboard.zh-CN.md`](docs/scoreboard.zh-CN.md) · [English](docs/scoreboard.md) · 回执 [`bench/scoreboard-20261019/`](bench/scoreboard-20261019/)
 - **🤝 有状态交互 Session** — 登录态可注入可导出（`session_create(cookies=...)` ↔ `session_cookies`），跨翻页、跨多步流程不断；`persistent: true` 连闲置过期和服务重启都能扛过去，同一个 session_id 复活时还带着登录态。一次性引擎抓完即弃，做不了「登录 → 操作 → 再操作」。
