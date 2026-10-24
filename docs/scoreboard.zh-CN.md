@@ -37,7 +37,7 @@
 
 - **Debug profile。** 数字来自未优化的 stealth debug 构建；未编造 `--release` 成绩。
 - **含网络。** 墙钟含 Asia/Shanghai 出口 RTT；只在同机列之间比。
-- **不编竞品数字。** Lightpanda / Obscura 格子保持 **未跑**。
+- **不编竞品数字。** 本页的 Lightpanda / Obscura 格子保持 **未跑**。2026-10-21 另有一次 Amiibo 爬取，在这台机器上量了这两个引擎：[peer-crawl-20261021.zh-CN.md](peer-crawl-20261021.zh-CN.md)。它不填下面的格子。
 - **不含商户 / 登录生产 API。**
 - **短集 ≠ 全量 harness。** 5 个 URL 来自 [`bench/pages.txt`](../bench/pages.txt)。
 
@@ -117,6 +117,8 @@ navigate 与 snapshot 分开计时（首次用 `create(url)` 的探测把导航�
 
 只公布我们自己的数字与方法，方便以后同机补列。
 
+后来另一次爬取，工作负载不同（Amiibo，25 路，release 二进制）：[peer-crawl-20261021.zh-CN.md](peer-crawl-20261021.zh-CN.md)。
+
 相关：[agent-browser 适配说明](agent-browser-engine.zh-CN.md) · [Stealth/TLS 对比](stealth-tls-comparison.zh-CN.md) · 历史 [bench/README.md](../bench/README.md)。
 
 ---
@@ -138,3 +140,4 @@ navigate 与 snapshot 分开计时（首次用 `create(url)` 的探测把导航�
 | 日期 | Commit | 说明 |
 |------|--------|------|
 | 2026-10-19 | 二进制 `0c302d9` | 首份公开 tip 记分板回执 |
+| 2026-10-21 | 仅指针 | 链到 Amiibo 爬取回执；本页矩阵未改 |

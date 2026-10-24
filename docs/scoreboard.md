@@ -37,7 +37,7 @@ This page is a **tip micro-bench** with committed receipts. It complements the h
 
 - **Debug profile.** Numbers are from `cargo build --features stealth` (unoptimized). A `--release` binary will be faster; we did not invent release timings.
 - **Network included.** Wall times include Asia/Shanghai egress RTT. Compare columns on this machine, not against someone else's laptop.
-- **No invented peer timings.** Lightpanda / Obscura cells stay **not run**.
+- **No invented peer timings.** Lightpanda / Obscura cells on this page stay **not run**. A separate Amiibo crawl on 2026-10-21 measured those two engines on this machine: [peer-crawl-20261021.md](peer-crawl-20261021.md). It does not fill the cells below.
 - **No merchant / authenticated production APIs** in this bench.
 - **Shortset ≠ full harness.** Five URLs from [`bench/pages.txt`](../bench/pages.txt); full 20×2×4 history stays in `bench/README.md`.
 
@@ -127,6 +127,8 @@ Navigate ≫ snapshot: once the document is loaded, building actionable refs is 
 
 We publish **our** timings + methodology so peers can be filled in later on the same machine without rewriting the page.
 
+A later crawl, different workload (Amiibo, pool 25, release binary): [peer-crawl-20261021.md](peer-crawl-20261021.md).
+
 Related: [agent-browser engine guide](agent-browser-engine.md) · [Stealth/TLS comparison](stealth-tls-comparison.md) · historical [bench/README.md](../bench/README.md).
 
 ---
@@ -148,3 +150,4 @@ Related: [agent-browser engine guide](agent-browser-engine.md) · [Stealth/TLS c
 | Date | Commit | Note |
 |------|--------|------|
 | 2026-10-19 | `0c302d9` binary | First public tip scoreboard receipts |
+| 2026-10-21 | pointer only | Amiibo crawl receipt linked; matrices on this page unchanged |
