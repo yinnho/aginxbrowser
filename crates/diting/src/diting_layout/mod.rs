@@ -1512,6 +1512,22 @@ fn bust_subtree_cache(node: taffy::tree::NodeId, tree: &mut TaffyTree<TextLeaf>)
     }
 }
 
+/// Depth of a taffy node below the ICB — the post-layout repair passes sort
+/// their fixups shallow-first so an inner fixup feeds an outer one's basis.
+fn taffy_depth(taffy_tree: &TaffyTree<TextLeaf>, node: taffy::tree::NodeId, icb: taffy::tree::NodeId) -> usize {
+    let (mut d, mut cur) = (0usize, node);
+    while cur != icb {
+        match taffy_tree.parent(cur) {
+            Some(p) => {
+                cur = p;
+                d += 1;
+            }
+            None => break,
+        }
+    }
+    d
+}
+
 /// Whether `height: <percent>` on element `id` resolves, or folds to `auto`
 /// per CSS 2.1 §10.5: it resolves when the containing-block chain is definite
 /// (see [`cb_height_definite`]) OR the element is absolutely positioned (the
@@ -6334,23 +6350,6 @@ pub fn layout_solve_rooted(
             .map(|(t, d)| (*t, *d))
             .collect();
         if !fixups.is_empty() {
-            fn taffy_depth(
-                taffy_tree: &TaffyTree<TextLeaf>,
-                node: taffy::tree::NodeId,
-                icb: taffy::tree::NodeId,
-            ) -> usize {
-                let (mut d, mut cur) = (0usize, node);
-                while cur != icb {
-                    match taffy_tree.parent(cur) {
-                        Some(p) => {
-                            cur = p;
-                            d += 1;
-                        }
-                        None => break,
-                    }
-                }
-                d
-            }
             fixups.sort_by_key(|(t, _)| taffy_depth(&taffy_tree, *t, icb_node));
             let mut float_fixups = false;
             for (tnid, dom_id) in fixups {
@@ -6485,23 +6484,6 @@ pub fn layout_solve_rooted(
             .map(|(t, d)| (*t, *d))
             .collect();
         if !fixups.is_empty() {
-            fn taffy_depth(
-                taffy_tree: &TaffyTree<TextLeaf>,
-                node: taffy::tree::NodeId,
-                icb: taffy::tree::NodeId,
-            ) -> usize {
-                let (mut d, mut cur) = (0usize, node);
-                while cur != icb {
-                    match taffy_tree.parent(cur) {
-                        Some(p) => {
-                            cur = p;
-                            d += 1;
-                        }
-                        None => break,
-                    }
-                }
-                d
-            }
             fixups.sort_by_key(|(t, _)| taffy_depth(&taffy_tree, *t, icb_node));
             let mut float_fixups = false;
             for (tnid, dom_id) in fixups {
@@ -6568,6 +6550,113 @@ pub fn layout_solve_rooted(
             }
             // Same stale-sibling hazard as the calc repair above: a repaired
             // float's new extent is invisible to its siblings' cache keys.
+            if float_fixups {
+                bust_subtree_cache(icb_node, &mut taffy_tree);
+            }
+            let re = taffy_tree.compute_layout_with_block_measure(
+                icb_node,
+                available,
+                |inputs, id, ctx, style, block| float_lines::measure_node(fonts, inputs, id, ctx, style, block),
+            );
+            if re.is_err() {
+                return SolvedGeometry::aborted();
+            }
+        }
+    }
+    // --- #315 intrinsic repair: content-sized wrap hosts --------------------
+    // A floated or abs/fixed wrap host with an auto width sizes
+    // shrink-to-fit, but taffy's intrinsic takes the MAX over block
+    // children — the float-figure idiom (float + caption) sized to the
+    // float alone and the caption overflowed it. CSS wants
+    // min(max(min_content, avail), max_content) where the preferred width
+    // SUMS the float margin boxes with the text on one line, and
+    // min-content STACKS the floats (widest one) against the longest
+    // word (Chrome-truth probes, 2026-10-24: float+margins+caption on
+    // one line; pre contributes its widest hard line to the preferred
+    // width; abs/fixed measure avail against their containing block,
+    // which the reparent pass already made the taffy parent). The
+    // solve above settled every child; compute the sums, set the width,
+    // re-solve once — the same shape as the two repair passes above.
+    // eligible narrows these hosts to floats + inline content, so every
+    // child is summable; authored min/max stay in the taffy style and
+    // clamp the set width on the re-solve themselves.
+    {
+        let content_sized = |s: &crate::diting_css::ComputedStyle| {
+            s.width.is_none()
+                && (s.float_side.is_some()
+                    || matches!(s.position, Some(crate::diting_css::PositionMode::Absolute) | Some(crate::diting_css::PositionMode::Fixed)))
+        };
+        let mut fixups: Vec<(taffy::tree::NodeId, NodeId)> = node_map
+            .iter()
+            .filter(|(_, d)| {
+                let Some(st) = styles.get(*d) else { return false };
+                content_sized(st) && float_flow::eligible(tree, styles, **d, st, &render_children(tree, **d))
+            })
+            .map(|(t, d)| (*t, *d))
+            .collect();
+        if !fixups.is_empty() {
+            fixups.sort_by_key(|(t, _)| taffy_depth(&taffy_tree, *t, icb_node));
+            let mut float_fixups = false;
+            // host → final border-box width: a nested figure's outer sum
+            // reads the inner host's repaired size, not the stale solve.
+            let mut sized: HashMap<taffy::tree::NodeId, f32> = HashMap::new();
+            let dom_of = |t: taffy::tree::NodeId| node_map.get(&t).copied();
+            for (tnid, dom_id) in fixups {
+                let Some(st) = styles.get(&dom_id) else { continue };
+                float_fixups |= st.float_side.is_some();
+                let Some(avail) = taffy_tree.parent(tnid).and_then(|p| {
+                    let l = taffy_tree.layout(p).ok()?;
+                    Some(l.size.width - l.padding.left - l.padding.right - l.border.left - l.border.right)
+                }) else { continue };
+                let mut floats_sum = 0.0f32;
+                let mut widest_float = 0.0f32;
+                let mut text_max = 0.0f32;
+                let mut longest_word = 0.0f32;
+                for c in taffy_tree.children(tnid).unwrap_or_default().to_vec() {
+                    let is_float = taffy_tree.style(c).ok().is_some_and(|s| s.float != taffy::Float::None);
+                    if let Some(TextLeaf::Run { text, font_size, bold, mono, word_spacing, ws, tokens, small_caps, han, .. }) = taffy_tree.get_node_context(c) {
+                        let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han);
+                        // Preferred width: one line (pre family: its widest
+                        // hard line — forced breaks hold at any width).
+                        let (mut line, mut widest_line) = (0.0f32, 0.0f32);
+                        for t in shaped.iter() {
+                            if t.is_break {
+                                widest_line = widest_line.max(line);
+                                line = 0.0;
+                            } else {
+                                line += t.width;
+                            }
+                        }
+                        text_max += widest_line.max(line);
+                        longest_word = longest_word.max(shaped.iter().filter(|t| !t.is_space && !t.is_break).map(|t| t.width).fold(0.0, f32::max));
+                    } else if is_float {
+                        let outer = sized
+                            .get(&c)
+                            .copied()
+                            .unwrap_or_else(|| taffy_tree.layout(c).ok().map(|l| l.size.width).unwrap_or(0.0))
+                            + dom_of(c).and_then(|d| styles.get(&d)).map(|s| side_px(s.margin.left) + side_px(s.margin.right)).unwrap_or(0.0);
+                        floats_sum += outer;
+                        widest_float = widest_float.max(outer);
+                    }
+                }
+                let min_c = longest_word.max(widest_float);
+                let max_c = floats_sum + text_max;
+                let content = min_c.max(avail).min(max_c);
+                let pb = side_px(st.padding.left)
+                    + side_px(st.padding.right)
+                    + if st.border_style.is_some() {
+                        side_px(st.border_width.left) + side_px(st.border_width.right)
+                    } else {
+                        0.0
+                    };
+                let border_box = matches!(st.box_sizing, Some(crate::diting_css::BoxSizing::BorderBox));
+                let infl = if border_box { 0.0 } else { pb };
+                sized.insert(tnid, content + infl);
+                if let Ok(mut ts) = taffy_tree.style(tnid).cloned() {
+                    ts.size.width = Dimension::length(content + infl);
+                    let _ = taffy_tree.set_style(tnid, ts);
+                }
+            }
             if float_fixups {
                 bust_subtree_cache(icb_node, &mut taffy_tree);
             }

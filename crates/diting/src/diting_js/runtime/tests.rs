@@ -20951,6 +20951,90 @@ three</span></div>"#,
     }
 }
 
+/// A content-sized wrap host (floated or abs/fixed, auto width) sizes
+/// shrink-to-fit with the floats SUMMED (#315): taffy's intrinsic takes
+/// the max over block children — the float-figure idiom sized to the
+/// float alone — so the repair pass computes
+/// `min(max(min_content, avail), max_content)` itself: float margin
+/// boxes + the text on one line for max-content (a pre run its widest
+/// hard line), the widest float against the longest word for
+/// min-content, avail against the containing block (the reparent pass
+/// made that the taffy parent for abs/fixed). The same round pinned the
+/// §9.5 line-box drop: a band too narrow for a line's first word moves
+/// that line below the float (Chrome-truth 2026-10-24).
+#[cfg(feature = "screenshot")]
+#[test]
+fn float_wrap_content_sized_host_intrinsic() {
+    let mut rt = setup_runtime(
+        r#"<style>
+          body{margin:0;font:16px/20px monospace}
+          .p{width:400px}
+          .h{float:left}
+          .f{float:left;width:150px;height:40px;background:#fa0}
+          .clear{clear:both;height:24px}
+        </style>
+        <div class="p" id="a"><div class="h"><div class="f"></div>hello</div></div><div class="clear"></div>
+        <div class="p" style="width:180px" id="b"><div class="h"><div class="f"></div>hello</div></div><div class="clear"></div>
+        <div class="p" style="width:250px" id="c"><div class="h"><div class="f" style="width:100px"></div>alpha beta gamma delta epsilon zeta eta</div></div><div class="clear"></div>
+        <div class="p" id="d"><div class="h"><div class="f" style="width:60px"></div><div class="f" style="width:70px"></div>hello</div></div><div class="clear"></div>
+        <div class="p" id="m"><div class="h"><div class="f" style="margin:0 5px"></div>hello</div></div><div class="clear"></div>
+        <div class="p" id="pre"><div class="h"><div class="f" style="width:100px"></div><span style="white-space:pre">one two
+three</span></div></div><div class="clear"></div>
+        <div class="p" id="abs"><div class="h" style="position:absolute"><div class="f"></div>hello</div></div>
+        <div class="p" id="ref">hello</div>
+        <div class="p" id="ref2"><span style="white-space:pre">one two
+three</span></div>
+        <div id="n" style="width:180px;height:120px"><div class="f"></div>hello</div>
+        <div id="n2" style="width:180px;height:120px"><div class="f"></div>hi there</div>"#,
+    );
+    let w = |rt: &mut JsRuntime, sel: &str| rt.evaluate(&format!("document.querySelector('{sel}').getBoundingClientRect().width")).unwrap().as_f64().unwrap_or(f64::NAN);
+    // Text references by Range rects — the box width of a block is its
+    // stretch, not the glyphs.
+    let text_w = {
+        let v = rt
+            .evaluate(r#"(()=>{const r=document.createRange();r.selectNodeContents(document.querySelector('#ref'));const rs=[...r.getClientRects()].filter(b=>b.width>1);return JSON.stringify(rs[0].width);})()"#)
+            .unwrap();
+        v.as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(f64::NAN)
+    };
+    let pre_widest = {
+        let v = rt
+            .evaluate(r#"(()=>{const r=document.createRange();r.selectNodeContents(document.querySelector('#ref2 span'));const rs=[...r.getClientRects()].filter(b=>b.width>1);return JSON.stringify(Math.max(...rs.map(b=>b.width)));})()"#)
+            .unwrap();
+        v.as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(f64::NAN)
+    };
+    // The figure sum: float + text on one line (and float + margins + text).
+    let wa = w(&mut rt, "#a .h");
+    assert!((wa - (150.0 + text_w)).abs() <= 1.0, "float + caption on one line: {} vs 150+{}", wa, text_w);
+    assert!((w(&mut rt, "#m .h") - (160.0 + text_w)).abs() <= 1.0, "float margin box sums: {}", w(&mut rt, "#m .h"));
+    // Two floats sum on the preferred line.
+    assert!((w(&mut rt, "#d .h") - (130.0 + text_w)).abs() <= 1.0, "two floats sum: {}", w(&mut rt, "#d .h"));
+    // The avail clamp: min(max(min_c, avail), max_c).
+    assert!((w(&mut rt, "#b .h") - 180.0).abs() <= 1.0, "shrink-to-fit fills the available width: {}", w(&mut rt, "#b .h"));
+    assert!((w(&mut rt, "#c .h") - 250.0).abs() <= 1.0, "narrow column clamps: {}", w(&mut rt, "#c .h"));
+    // A pre caption contributes its widest hard line.
+    assert!((w(&mut rt, "#pre .h") - (100.0 + pre_widest)).abs() <= 1.0, "pre widest hard line sums: {} vs 100+{}", w(&mut rt, "#pre .h"), pre_widest);
+    // An abs/fixed host measures avail against its containing block (the
+    // viewport here, wider than max-content) — same sum as the float host.
+    assert!((w(&mut rt, "#abs .h") - wa).abs() <= 1.0, "abspos host sizes to the same sum: {}", w(&mut rt, "#abs .h"));
+    // §9.5: a band too narrow for the line's first word moves the line
+    // below the float; a fitting word stays beside it.
+    let lines = |rt: &mut JsRuntime, sel: &str| -> Vec<Vec<f64>> {
+        let v = rt
+            .evaluate(&format!(
+                r#"(()=>{{const h=document.querySelector('{sel}');const fb=h.querySelector('.f').getBoundingClientRect();const ht=h.getBoundingClientRect().top;const r=document.createRange();r.selectNodeContents(h);const byTop={{}};for(const b of r.getClientRects()){{if(b.width<2)continue;if(Math.abs(b.left-fb.left)<1&&Math.abs(b.top-fb.top)<1&&Math.abs(b.width-fb.width)<1)continue;const t=Math.round(b.top-ht);if(!byTop[t])byTop[t]=[b.left,b.right];else{{byTop[t][0]=Math.min(byTop[t][0],b.left);byTop[t][1]=Math.max(byTop[t][1],b.right);}}}}return JSON.stringify(Object.entries(byTop).sort((a,b)=>a[0]-b[0]).map(([t,v])=>[+t,+v[0].toFixed(1),+(v[1]-v[0]).toFixed(1)]));}})()"#
+            ))
+            .unwrap();
+        serde_json::from_str(v.as_str().unwrap_or("[]")).unwrap_or_default()
+    };
+    let ln = lines(&mut rt, "#n");
+    assert_eq!(ln.len(), 1, "the lone word drops below the narrow band, got {:?}", ln);
+    assert!((ln[0][1] - 0.0).abs() <= 1.0 && (ln[0][0] - 40.0).abs() <= 3.0, "dropped word at the edge below the float, got {:?}", ln[0]);
+    let ln2 = lines(&mut rt, "#n2");
+    assert_eq!(ln2.len(), 2, "fitting word stays, long word drops, got {:?}", ln2);
+    assert!((ln2[0][1] - 150.0).abs() <= 1.0 && ln2[0][0] < 20.0, "short word keeps the band, got {:?}", ln2[0]);
+    assert!((ln2[1][1] - 0.0).abs() <= 1.0 && (ln2[1][0] - 40.0).abs() <= 3.0, "long word drops below the float, got {:?}", ln2[1]);
+}
+
 /// A centered host of a MIXED run — text, an inline element, text — wraps
 /// with each line shifting inside its float slot (#314 tail, #313): the run
 /// wrapper's inline_flow placement reads the host's align from its justify

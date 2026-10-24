@@ -68,9 +68,6 @@ pub(super) fn measure(
         return None;
     }
     let mut slots: Vec<Slot> = Vec::new();
-    // Where the hard lines end vertically — the default one-line-per-
-    // line_height stack; the atomic walk below extends it past a float.
-    let mut bottom = 0.0f32;
     // nowrap/pre lines cannot break into the band (#313): they break at
     // their hard rules only (nowrap: one line, pre: per newline) and each
     // line starts at its float slot, overflowing to the right — Chrome
@@ -100,37 +97,64 @@ pub(super) fn measure(
                 slots.push(Slot { x: s.x.max(0.0), y, width: s.width.min(full).max(0.0) });
                 y += line_height;
             }
-            bottom = y;
         } else {
             for i in 0..lines.len() {
                 let y = i as f32 * line_height;
                 let s = ctx.find_content_slot(y, Clear::None, None);
                 slots.push(Slot { x: s.x.max(0.0), y, width: s.width.min(full).max(0.0) });
             }
-            bottom = lines.len() as f32 * line_height;
         }
         lines
     } else {
-        text::greedy_wrap_by(tokens, ws, |i| {
+        let lines = text::greedy_wrap_by(tokens, ws, |i| {
             while slots.len() <= i {
                 let y = slots.len() as f32 * line_height;
                 let s = ctx.find_content_slot(y, Clear::None, None);
                 slots.push(Slot { x: s.x.max(0.0), y, width: s.width.min(full).max(0.0) });
             }
             Some(slots[i].width)
-        })
+        });
+        // §9.5 line-box drop: a band too narrow for a line's FIRST word
+        // moves that line below the floats (Chrome's narrow-band caption
+        // drop — the fitting words above stay beside the float, and the
+        // lines after stack under the moved one). Only the first word
+        // counts: a multi-word line whose first word fits keeps the
+        // band-start overflow posture (#313/#314 pinned).
+        let mut y = 0.0f32;
+        for (i, l) in lines.iter().enumerate() {
+            while slots.len() <= i {
+                let y = slots.len() as f32 * line_height;
+                let s = ctx.find_content_slot(y, Clear::None, None);
+                slots.push(Slot { x: s.x.max(0.0), y, width: s.width.min(full).max(0.0) });
+            }
+            let y0 = (i as f32 * line_height).max(y);
+            let mut s = ctx.find_content_slot(y0, Clear::None, None);
+            if let Some(t) = l.token_idx.iter().copied().find(|&t| !tokens[t].is_space && !tokens[t].is_break) {
+                let mut guard = 0;
+                while tokens[t].width > s.width.min(full).max(0.0) + 0.001 && s.segment_id.is_some() && guard < 64 {
+                    s = ctx.find_content_slot(y0, Clear::None, s.segment_id);
+                    y = y.max(s.y);
+                    guard += 1;
+                }
+                if guard > 0 && s.segment_id.is_none() {
+                    y = y.max(ctx.find_content_slot(y0, Clear::Both, None).y);
+                }
+            }
+            slots[i] = Slot { x: s.x.max(0.0), y: y0.max(y), width: s.width.min(full).max(0.0) };
+            y = slots[i].y + line_height;
+        }
+        lines
     };
-    if bottom == 0.0 {
-        bottom = lines.len() as f32 * line_height;
-    }
     if let Some(n) = line_clamp.filter(|n| lines.len() > *n as usize) {
         lines.truncate(n as usize);
-        bottom = bottom.min(lines.len() as f32 * line_height);
     }
     slots.truncate(lines.len());
     while slots.len() < lines.len() {
         slots.push(Slot { x: 0.0, y: slots.len() as f32 * line_height, width: full });
     }
+    // Where the stack ends vertically: a line a drop moved below the
+    // floats makes it taller than lines × line-height.
+    let bottom = slots.last().map_or(0.0, |s| s.y + line_height);
     // Band-relative line alignment (#313): a centered/right host on the
     // wrap path has no flex promote to lean on, so each line shifts inside
     // its own slot. The shift is baked into the recorded slot x — split

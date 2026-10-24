@@ -8,12 +8,12 @@
 //! taffy floats, the block children overlap them like Chrome's, and text
 //! runs wrap into the free slots beside them (`float_lines`).
 //!
-//! Still on the zone path (#313 remaining): hosts whose width comes from
-//! their content (float/abspos/flex-item hosts need float-aware intrinsic
-//! sizing), and a nowrap/pre inline element among OTHER inline content —
-//! the run folds nowrap onto the wrapper atom, which cannot take slots
-//! (the approximation Chrome beats with run breaks at the element
-//! boundary). Float widths of every authored shape ride the wrap
+//! Still on the zone path (#313 remaining): a nowrap/pre inline element
+//! among OTHER inline content — the run folds nowrap onto the wrapper
+//! atom, which cannot take slots (the approximation Chrome beats with
+//! run breaks at the element boundary) — and flex/grid ITEM hosts,
+//! whose width is the flex algorithm's intrinsic contribution. Float
+//! widths of every authored shape ride the wrap
 //! path: px/% as-is, em/rem folded at cascade, calc repaired between two
 //! solves (cache-busted when the fixup is a float), sizing keywords
 //! measured at build. Center/right hosts wrap in every mounting shape:
@@ -30,7 +30,18 @@
 //! unbreakable and drops below the float when it fits no band, its
 //! later hard lines continuing down (float_lines' atomic walk; the
 //! walk's fallback slot answers with the query y, so clear reports the
-//! real drop depth). A plain block
+//! real drop depth). The same drop serves SOFT lines (#315's probe
+//! round): §9.5 moves a line whose first word cannot fit its band below
+//! the floats, the fitting words above staying beside. Content-sized
+//! hosts (#315) ride the wrap path too — floated and abs/fixed boxes
+//! with an auto width — through the intrinsic repair pass in mod.rs,
+//! which sums what taffy's max()-over-children intrinsic drops: the
+//! float margin boxes and the caption text on one line for max-content
+//! (a pre run its widest hard line), the widest float against the
+//! longest word for min-content, avail against the containing block.
+//! Those hosts keep a summable shape (floats + inline content only);
+//! a block/flex/inline-block child's intrinsic is not wired, so those
+//! stay zone. A plain block
 //! inside a wrap host (a centered p beside the host's float) inherits the
 //! environment too: in CSS only a BFC boundary stops line boxes from
 //! owing the ancestor floats a band, so mod.rs demotes the flex-column
@@ -163,20 +174,25 @@ pub(super) fn eligible(
             return false;
         }
     }
-    // A box whose width comes from its content (floated, absolutely
-    // positioned, or a flex/grid item) needs the float-aware intrinsic sizing
-    // that is not wired yet.
+    // Flex/grid ITEM hosts stay out (#315): their width is the flex
+    // algorithm's intrinsic contribution, a different machinery. Floated
+    // and abs/fixed boxes DO take the wrap path — their shrink-to-fit
+    // width comes from the intrinsic repair pass in mod.rs, which sums
+    // what taffy's max()-over-children intrinsic drops.
     let parent_is_block = tree
         .with_node(id, |n| n.parent)
         .flatten()
         .and_then(|p| styles.get(&p))
         .is_none_or(|ps| matches!(ps.display.unwrap_or(CssDisplay::Block), CssDisplay::Block));
-    if container.float_side.is_some()
-        || matches!(container.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
-        || !parent_is_block
-    {
+    if !parent_is_block {
         return false;
     }
+    // A content-sized host's children must be a summable shape: floats
+    // and inline content only (the repair pass adds float boxes and run
+    // text); a block/flex/inline-block child's own intrinsic is not
+    // wired, so those hosts keep the zone path.
+    let content_sized = container.width.is_none()
+        && (container.float_side.is_some() || matches!(container.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed)));
     let mut floats = 0;
     for cid in child_ids {
         if tree.with_node(*cid, |n| n.is_text()).unwrap_or(false) {
@@ -212,7 +228,11 @@ pub(super) fn eligible(
                 return false;
             }
             floats += 1;
-        } else if !matches!(display, CssDisplay::Block | CssDisplay::Inline | CssDisplay::InlineBlock | CssDisplay::Flex | CssDisplay::Grid) {
+        } else if (content_sized && display != CssDisplay::Inline)
+            // A content-sized host sums floats + inline content only
+            // (#315); any other shape keeps the zone path.
+            || !matches!(display, CssDisplay::Block | CssDisplay::Inline | CssDisplay::InlineBlock | CssDisplay::Flex | CssDisplay::Grid)
+        {
             return false;
         }
     }
