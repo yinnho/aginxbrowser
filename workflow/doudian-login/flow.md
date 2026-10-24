@@ -72,3 +72,15 @@ odin_tt / msToken / ttwid）。doudian-publish 用 `session_id` 复用直接组�
 - 回执带 `live_qr`（`/session/<id>/qr/live`）：自刷新扫码页，每秒重读登录页**当前**的码。**给人扫码一律发这个链接，不发静态图**
   （静态图 60–100 秒过期，来回延迟就赶不上）。`/session/<id>/qr` 是当前码的图片，`?json=1` 回 `{url, qr, landed}`。
 - 回执带 `elapsed_ms` 和 `timings`（逐步耗时），发布 flow 的速度直接从回执统计。
+
+## Keepalive / anti-tear
+
+No known cookie-deleting widget recipe for fxg today — keep alive via
+`account/verify` (cookie write-back + remembered spec):
+
+```bash
+curl -sS -X POST "$ENGINE/account/verify" -H 'content-type: application/json'   -d '{"name":"scan-1029","url":"https://fxg.jinritemai.com/ffa/mshop/homepage/index","predicate":"location.hostname===\"fxg.jinritemai.com\" && !location.pathname.startsWith(\"/login\")"}'
+```
+
+On `logged_in:false`: delete account + fresh `dd-login-{ts}` / `live_qr`
+(shared jar SSO cookies make re-scan look like "scanned, nothing happens").

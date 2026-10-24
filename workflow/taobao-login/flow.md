@@ -61,3 +61,18 @@ havana 跳离 login.taobao.com（中途登录 hop 留在该域，所以 predicat
 
 `create.account = "tb-login-{ts}"`（每次全新 jar，淘宝本来就要求被处决过的账户别叠扫）。回执 `live_qr` 是自刷新扫码页
 （`/session/<id>/qr/live`），给人扫码发这个链接，不发静态截图。
+
+## Keepalive / anti-tear (2026-10-24)
+
+`account/verify` and `account/login` now preload `taobao-block-everyhelp`
+for `*.taobao.com` / `*.tmall.com` / `*.tmall.hk` before navigate — a bare
+verify can no longer let everyhelp delete `unb`/`sn`/`uss`.
+
+```bash
+curl -sS -X POST "$ENGINE/account/verify" -H 'content-type: application/json'   -d '{"name":"taobao-personal","url":"https://www.taobao.com/","predicate":"!!document.querySelector('"'"'.site-nav-login-info-nick'"'"')"}'
+# → probe_shields: ["taobao-block-everyhelp"]
+```
+
+Optional hand-run flow: `taobao-keepalive` (same wall + nick witness).
+On `logged_in:false`: DELETE account + this flow's `live_qr`, never
+franken-stack onto a torn jar.

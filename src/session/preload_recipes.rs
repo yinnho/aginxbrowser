@@ -145,6 +145,42 @@ pub fn effective_scripts(url: &str, user: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Recipes that [`crate::account::verify`] / [`crate::account::login`] probes
+/// MUST mount before navigating `url`, so the probe cannot silently tear the
+/// shared jar.
+///
+/// Distinct from [`builtin_names`]: general navigate stays recipe-free (the
+/// 2026-10-12 demotion); only the account probe path opts into these shields.
+/// Today:
+/// - `*.taobao.com` / `*.tmall.com` / `*.tmall.hk` → `taobao-block-everyhelp`
+///   (everyhelp getWidgetVersion answers 200 while Set-Cookie deletes
+///   `unb`/`sn`/`uss` — session revocation with no error surface).
+/// - `*.xiaohongshu.com` / `*.xhslink.com` → `xhs-sign` (logout fuse:
+///   unsigned-API 406s otherwise trip the page's own `/sso/logout`).
+///
+/// Pinduoduo deliberately omitted — never wrap `window.fetch` (fbeZ
+/// fingerprint). Doudian has no known cookie-deleting widget recipe today;
+/// those platforms keep alive via `account/verify` write-back alone.
+pub fn probe_shield_recipes(url: &str) -> Vec<&'static str> {
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    if host_suffix_match(&host, &["taobao.com", "tmall.com", "tmall.hk"]) {
+        out.push(TAOBAO_BLOCK_EVERYHELP_NAME);
+    }
+    if host_suffix_match(&host, &["xiaohongshu.com", "xhslink.com"]) {
+        out.push(XHS_SIGN_NAME);
+    }
+    out
+}
+
+fn host_suffix_match(host: &str, roots: &[&str]) -> bool {
+    roots.iter().any(|root| host == *root || host.ends_with(&format!(".{root}")))
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,6 +309,60 @@ mod tests {
         ] {
             assert!(X_AUTH_CTX.contains(needle), "script lost: {needle}");
         }
+    }
+
+    #[test]
+    fn probe_shields_taobao_and_tmall() {
+        for url in [
+            "https://www.taobao.com/",
+            "https://login.taobao.com/member/login.jhtml",
+            "https://myseller.taobao.com/home.htm/QnworkbenchHome/",
+            "https://item.upload.taobao.com/",
+            "https://www.tmall.com/",
+            "https://pass.tmall.hk/",
+        ] {
+            assert_eq!(
+                probe_shield_recipes(url),
+                vec![TAOBAO_BLOCK_EVERYHELP_NAME],
+                "TB/tmall probe must shield everyhelp: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn probe_shields_xhs() {
+        for url in [
+            "https://www.xiaohongshu.com/explore",
+            "https://creator.xiaohongshu.com/publish/publish",
+            "https://ark.xiaohongshu.com/app-system/home",
+            "https://customer.xiaohongshu.com/login",
+            "https://xhslink.com/aBc",
+        ] {
+            assert_eq!(
+                probe_shield_recipes(url),
+                vec![XHS_SIGN_NAME],
+                "XHS probe must mount logout fuse: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn probe_shields_skip_pdd_doudian_and_blank() {
+        // No fetch wrap on PDD; doudian has no cookie-kill recipe today.
+        for url in [
+            "https://mms.pinduoduo.com/home/",
+            "https://fxg.jinritemai.com/ffa/mshop/homepage/index",
+            "https://example.com/",
+            "about:blank",
+        ] {
+            assert!(
+                probe_shield_recipes(url).is_empty(),
+                "no probe shield expected: {url}"
+            );
+        }
+        // Auto-mount stays off even where probe shields apply.
+        assert!(builtin_names("https://www.taobao.com/").is_empty());
+        assert!(builtin_names("https://www.xiaohongshu.com/").is_empty());
     }
 }
 

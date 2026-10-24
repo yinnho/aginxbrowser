@@ -46,3 +46,15 @@ curl -sS -X POST "$ENGINE/flow/run" -H 'content-type: application/json' \
 ## 与 publish
 
 `pinduoduo-publish` 要已登录 `session_id`（或同 account 热 jar）。先本 flow，再 publish。
+
+## Keepalive / anti-tear
+
+PDD has **no** fetch/XHR probe shield (never wrap `window.fetch` — fbeZ).
+Session keep-alive is verify write-back only:
+
+```bash
+curl -sS -X POST "$ENGINE/account/verify" -H 'content-type: application/json'   -d '{"name":"pdd-249-20261024-154659","url":"https://mms.pinduoduo.com/home/","predicate":"location.hostname.indexOf('"'"'mms.pinduoduo.com'"'"')>=0 && location.pathname.indexOf('"'"'/login'"'"')<0"}'
+```
+
+On `logged_in:false`: `DELETE /accounts/:name` + re-run this flow (`live_qr`),
+no stack-scan onto a torn jar.

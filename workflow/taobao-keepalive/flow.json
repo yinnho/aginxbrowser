@@ -1,0 +1,40 @@
+{
+  "vars": {
+    "account": "",
+    "verify_url": "https://www.taobao.com/",
+    "predicate_js": "!!document.querySelector('.site-nav-login-info-nick')"
+  },
+  "create": {
+    "width": 1280,
+    "height": 800,
+    "account": "{{account}}"
+  },
+  "max_steps": 20,
+  "steps": [
+    {
+      "id": "everyhelp_block",
+      "op": "preload",
+      "args": {
+        "recipe": "taobao-block-everyhelp"
+      },
+      "note": "Defense in depth: account/verify already mounts this for *.taobao.com; flow path keeps the same wall so a hand-run keepalive cannot tear the jar."
+    },
+    {
+      "id": "goto",
+      "op": "navigate",
+      "args": {
+        "url": "{{verify_url}}"
+      },
+      "note": "Buyer nick anchor lives on www.taobao.com — do NOT probe i.taobao.com/my_taobao (false negative + havana bounce)."
+    },
+    {
+      "id": "alive",
+      "op": "eval",
+      "args": {
+        "script": "(function(){var nickEl=document.querySelector('.site-nav-login-info-nick');var nick=nickEl&&(nickEl.textContent||'').trim();return JSON.stringify({logged_in:!!nick,url:location.href,nick:nick||null,title:document.title});})()"
+      },
+      "save": "alive",
+      "note": "Witness. Prefer POST /account/verify {name:account, url:www.taobao.com/, predicate:!!document.querySelector('.site-nav-login-info-nick')} for cron — it write-backs cookies and returns probe_shields. On logged_in:false: DELETE account + live_qr re-login (no stack-scan / franken jar)."
+    }
+  ]
+}

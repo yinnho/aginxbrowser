@@ -10,6 +10,8 @@ samples; brew/agpkg installs ship the bare binary (grab `workflow/` from the
 repo when needed). A name is one path segment of lowercase/digits/dashes;
 anything else is rejected before it touches the filesystem.
 
+Also: `taobao-keepalive/` — verify-only nick ping (prefer `POST /account/verify`; see its flow.md). Account verify/login auto-mount probe shields for TB everyhelp + XHS logout fuse.
+
 ## Platform policy lives here (not in the engine)
 
 Signing wrappers, logout fuses, seller MMS quirks, and other site-specific

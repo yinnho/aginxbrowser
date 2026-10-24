@@ -106,3 +106,16 @@ status `471` / 超时且 App 显示环境异常 → flow **抛结构化错误**�
 2. status GET-only，参数 `qr_id`/`code`，必须 `_webmsxyw` 签名。
 3. 干净 `account` jar；主号别进引擎。
 4. 码寿命短：出码后立刻打开回执 `live_qr` 扫（静态图易过期）。
+
+## Keepalive / anti-tear
+
+`account/verify` and `account/login` auto-mount `xhs-sign` on
+`*.xiaohongshu.com` / `*.xhslink.com` (logout fuse: unsigned-API 406s
+otherwise trip the page's `/sso/logout` and tear the jar). Cron:
+
+```bash
+curl -sS -X POST "$ENGINE/account/verify" -H 'content-type: application/json'   -d '{"name":"xhs2","url":"https://www.xiaohongshu.com/explore","predicate":"!!document.cookie.match(/(?:^|;\\s*)web_session=/ )"}'
+```
+
+On `logged_in:false`: delete or `mode=cookies` re-import; App「环境异常」
+→ Chrome curl import, not stack QR onto dead jar.

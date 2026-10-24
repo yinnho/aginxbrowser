@@ -60,3 +60,15 @@ curl -sS -X POST "$ENGINE/flow/run" -H 'content-type: application/json' \
 ## 与发布的衔接
 
 `workflow/xhs-merchant-publish` 复用本 flow 回执的 `session_id`（同一 account）。先登录见证 `landing.seller.success`，再跑发布。
+
+## Keepalive / anti-tear
+
+Same as www XHS: verify/login probes mount `xhs-sign` on ark / customer
+hosts. Prefer a stable account (`xhs-qf-stable`) and cron verify:
+
+```bash
+curl -sS -X POST "$ENGINE/account/verify" -H 'content-type: application/json'   -d '{"name":"xhs-qf-stable","url":"https://ark.xiaohongshu.com/app-system/home","predicate":"location.hostname.indexOf(\"ark.xiaohongshu.com\")>=0 && !/\\/login/.test(location.pathname) && !/[?&]ticket=/.test(location.href)"}'
+```
+
+`logged_in:false` → re-scan on the **same** stable account after confirming
+seller/info; do not mint a new `xhs-qf-HHMMSS` (burns fp_seed → 300015).

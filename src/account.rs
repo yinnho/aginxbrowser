@@ -444,8 +444,10 @@ pub fn list(owner: &str) -> Vec<AccountSummary> {
 /// `!!document.querySelector('.user-nick')`); later calls can be bare — the
 /// remembered spec reruns. The check runs in a scratch session created AS the
 /// account (private jar, same egress), so the dispatch write-back refreshes
-/// the stored cookies along the way. Verdict — `{logged_in, url, checked_at}`
-/// — is saved as `verify.last_result` and returned.
+/// the stored cookies along the way. Before navigate, host-matched probe
+/// shields mount (`taobao-block-everyhelp` / `xhs-sign`) so the probe cannot
+/// silently tear the jar. Verdict — `{logged_in, url, checked_at,
+/// probe_shields}` — is saved as `verify.last_result` and returned.
 pub async fn verify(
     owner: &str,
     name: &str,
@@ -530,18 +532,48 @@ pub async fn verify(
         "url": verdict["url"],
         "checked_at": verdict["checked_at"],
         "verify_url": vurl,
+        "probe_shields": verdict["probe_shields"],
     }))
+}
+
+/// Mount host-matched anti-tear recipes before an account probe navigates
+/// (`taobao-block-everyhelp` on TB/tmall, `xhs-sign` logout fuse on XHS).
+/// Empty when the host has no known cookie-killing widget (PDD / doudian).
+async fn mount_probe_shields(
+    mgr: &mut crate::session::SessionManager,
+    sid: &str,
+    url: &str,
+) -> Result<Vec<&'static str>, String> {
+    let names = crate::session::preload_recipes::probe_shield_recipes(url);
+    if names.is_empty() {
+        return Ok(names);
+    }
+    let mut scripts = Vec::with_capacity(names.len());
+    for name in &names {
+        let src = crate::session::preload_recipes::resolve(name)
+            .ok_or_else(|| format!("probe shield recipe missing: {name}"))?;
+        scripts.push(src.to_string());
+    }
+    mgr.send(sid, |reply| crate::session::SessionCommand::SetPreload {
+        scripts,
+        reply,
+    })
+    .await
+    .map_err(|e| format!("probe shield SetPreload: {e}"))?;
+    Ok(names)
 }
 
 /// Navigate the scratch session and evaluate the predicate, capturing both
 /// its truthiness and the page URL in one round-trip (the wrapped script
-/// returns `{v, url}`).
+/// returns `{v, url}`). Mounts [`mount_probe_shields`] first so the probe
+/// cannot silently tear the shared jar (everyhelp / XHS SSO logout).
 async fn run_verify_probe(
     mgr: &mut crate::session::SessionManager,
     sid: &str,
     url: &str,
     predicate: &str,
 ) -> Result<serde_json::Value, String> {
+    let probe_shields = mount_probe_shields(mgr, sid, url).await?;
     mgr.send(sid, |reply| crate::session::SessionCommand::Navigate {
         url: url.to_string(),
         reply,
@@ -576,6 +608,7 @@ async fn run_verify_probe(
         "logged_in": json_truthy(&parsed["v"]),
         "url": parsed["url"].as_str().unwrap_or(url),
         "checked_at": checked_at,
+        "probe_shields": probe_shields,
     }))
 }
 
@@ -682,7 +715,7 @@ pub async fn login(
     let use_proxy = resolve_use_proxy(&record, use_proxy_param);
 
     enum Outcome {
-        LoggedIn { success_url: String, elapsed_ms: u64 },
+        LoggedIn { success_url: String, elapsed_ms: u64, probe_shields: Vec<&'static str> },
         Open {
             session_id: String,
             page_url: String,
@@ -690,6 +723,7 @@ pub async fn login(
             markers: Vec<serde_json::Value>,
             verdict: String,
             expires_in_secs: Option<u64>,
+            probe_shields: Vec<&'static str>,
         },
     }
 
@@ -711,6 +745,15 @@ pub async fn login(
             false,
             Some((owner.to_string(), name.to_string())),
         );
+        // Same anti-tear stance as verify: TB everyhelp / XHS logout fuse
+        // must be document-start before the login page can revoke the jar.
+        let probe_shields = match mount_probe_shields(&mut mgr, &sid, url).await {
+            Ok(s) => s,
+            Err(e) => {
+                mgr.close(&sid);
+                return Err(e);
+            }
+        };
         if let Err(e) = mgr
             .send(&sid, |reply| crate::session::SessionCommand::Navigate {
                 url: url.to_string(),
@@ -794,6 +837,7 @@ pub async fn login(
             Some((success_url, elapsed_ms)) => Outcome::LoggedIn {
                 success_url,
                 elapsed_ms,
+                probe_shields,
             },
             None => Outcome::Open {
                 session_id: sid,
@@ -805,6 +849,7 @@ pub async fn login(
                     .unwrap_or_default(),
                 verdict,
                 expires_in_secs,
+                probe_shields,
             },
         }
     };
@@ -816,6 +861,7 @@ pub async fn login(
         Outcome::LoggedIn {
             success_url,
             elapsed_ms,
+            probe_shields,
         } => {
             let verify = match verify(owner, name, Some(&success_url), predicate).await {
                 Ok(v) => v,
@@ -828,6 +874,7 @@ pub async fn login(
                 "status": "logged_in",
                 "url": success_url,
                 "elapsed_ms": elapsed_ms,
+                "probe_shields": probe_shields,
                 "verify": verify,
             }))
         }
@@ -838,6 +885,7 @@ pub async fn login(
             markers,
             verdict,
             expires_in_secs,
+            probe_shields,
         } => {
             let mut reply = serde_json::json!({
                 "name": name,
@@ -848,6 +896,7 @@ pub async fn login(
                 "url": page_url,
                 "session_id": session_id,
                 "expires_in_secs": expires_in_secs,
+                "probe_shields": probe_shields,
             });
             if needs.is_empty() {
                 reply["next"] = serde_json::json!(format!(
