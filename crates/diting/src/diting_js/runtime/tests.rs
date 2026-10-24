@@ -21008,6 +21008,100 @@ three</span></div>"#,
     }
 }
 
+
+/// A pre element among OTHER inline content (#313): Chrome breaks its
+/// newlines as real line breaks in the parent's IFC — lead shares the
+/// first hard line, tail continues on the next (Chrome 2026-10-24:
+/// hostH=40, two band lines; center/right shift each line inside the
+/// band). The wrapper used to fold the pre into one atom; hoist now
+/// explodes at hard breaks like `<br>`. Lead/tail may split into per-word
+/// rects (engine word leaves); asserts are width-independent.
+#[cfg(feature = "screenshot")]
+#[test]
+fn float_wrap_pre_mixed_run_breaks() {
+    let mut rt = setup_runtime(
+        r#"<style>
+          body{margin:0}
+          .h{width:400px;font:16px/20px monospace}
+          .f{float:left;width:150px;height:40px;background:#fa0}
+        </style>
+        <div class="h" id="m"><div class="f"></div>lead lead <span style="white-space:pre">alpha
+beta gamma</span> tail tail</div>
+        <div class="h" id="mc" style="text-align:center"><div class="f"></div>lead lead <span style="white-space:pre">alpha
+beta gamma</span> tail tail</div>
+        <div class="h" id="mr" style="text-align:right"><div class="f"></div>lead lead <span style="white-space:pre">alpha
+beta gamma</span> tail tail</div>"#,
+    );
+    let v = rt
+        .evaluate(
+            r##"(()=>{const out={};for(const [k,sel] of [["m","#m"],["mc","#mc"],["mr","#mr"]]){const h=document.querySelector(sel);const ht=h.getBoundingClientRect().top;const R=n=>{const r=document.createRange();r.selectNodeContents(n);return [...r.getClientRects()].filter(b=>b.width>1).map(b=>[Math.round(b.left*10)/10,Math.round((b.top-ht)*10)/10,Math.round(b.width*10)/10]);};const texts=[...h.childNodes].filter(n=>n.nodeType===3&&n.textContent.trim());out[k]={lead:R(texts[0]),sp:R(h.querySelector("span")),tail:R(texts[1]),hostH:h.getBoundingClientRect().height};}return JSON.stringify(out);})()"##,
+        )
+        .unwrap();
+    type Faces = Vec<Vec<f64>>;
+    #[allow(clippy::type_complexity)]
+    let out: std::collections::HashMap<String, serde_json::Value> =
+        serde_json::from_str(v.as_str().unwrap_or("{}")).unwrap_or_default();
+    let face = |k: &str, f: &str| -> Faces {
+        serde_json::from_value(out[k][f].clone()).unwrap_or_default()
+    };
+    let host_h = |k: &str| out[k]["hostH"].as_f64().unwrap_or(f64::NAN);
+    // Left: lead + first hard line share line 0 in the band; second hard
+    // line + tail share line 1 at the band start. Host stays 40.
+    let (lead, sp, tail) = (face("m", "lead"), face("m", "sp"), face("m", "tail"));
+    assert!((host_h("m") - 40.0).abs() <= 2.5, "left hostH two band lines, got {}", host_h("m"));
+    assert!(!lead.is_empty() && lead.iter().all(|r| r[0] >= 149.0 && r[1].abs() <= 2.5), "lead on line 0 in band, got {:?}", lead);
+    assert_eq!(sp.len(), 2, "pre splits into two hard lines, got {:?}", sp);
+    let lead_end = lead.last().map(|r| r[0] + r[2]).unwrap_or(0.0);
+    assert!(
+        sp[0][0] >= lead_end - 1.0 && sp[0][0] <= lead_end + 12.0 && sp[0][1].abs() <= 2.5,
+        "first hard line continues after lead (space gap ok), got {:?} after {:?}",
+        sp[0], lead
+    );
+    assert!(
+        (sp[1][0] - 150.0).abs() <= 1.5 && (sp[1][1] - 20.0).abs() <= 2.5,
+        "second hard line at band start on line 1, got {:?}",
+        sp[1]
+    );
+    assert!(!tail.is_empty() && tail.iter().all(|r| (r[1] - 20.0).abs() <= 2.5 && r[0] >= 149.0), "tail on line 1 in band, got {:?}", tail);
+    let sp1_end = sp[1][0] + sp[1][2];
+    assert!(
+        tail[0][0] >= sp1_end - 1.0 && tail[0][0] <= sp1_end + 12.0,
+        "tail continues after the second hard line (space gap ok), got {:?} after {:?}",
+        tail[0], sp[1]
+    );
+    // Center: each parent line centers inside the band.
+    let (lead, sp, tail) = (face("mc", "lead"), face("mc", "sp"), face("mc", "tail"));
+    assert!((host_h("mc") - 40.0).abs() <= 2.5, "center hostH, got {}", host_h("mc"));
+    assert_eq!(sp.len(), 2, "center pre two hard lines, got {:?}", sp);
+    let l1_left = lead[0][0];
+    let l1_right = sp[0][0] + sp[0][2];
+    let l1w = l1_right - l1_left;
+    let expect1 = 150.0 + (250.0 - l1w) / 2.0;
+    assert!((l1_left - expect1).abs() <= 2.5, "center line1 in band: {} vs {} (w={})", l1_left, expect1, l1w);
+    let l2_left = sp[1][0];
+    let l2_right = tail.last().map(|r| r[0] + r[2]).unwrap_or(l2_left);
+    let l2w = l2_right - l2_left;
+    let expect2 = 150.0 + (250.0 - l2w) / 2.0;
+    assert!((l2_left - expect2).abs() <= 2.5, "center line2 in band: {} vs {} (w={})", l2_left, expect2, l2w);
+    // Right: each parent line flush right in the band.
+    let (_lead, sp, tail) = (face("mr", "lead"), face("mr", "sp"), face("mr", "tail"));
+    assert!((host_h("mr") - 40.0).abs() <= 2.5, "right hostH, got {}", host_h("mr"));
+    assert_eq!(sp.len(), 2, "right pre two hard lines, got {:?}", sp);
+    assert!(
+        (sp[0][0] + sp[0][2] - 400.0).abs() <= 2.0 && sp[0][1].abs() <= 2.5,
+        "right line1 flush right in band, got {:?}",
+        sp[0]
+    );
+    let tail_right = tail.last().map(|r| r[0] + r[2]).unwrap_or(0.0);
+    assert!(
+        (tail_right - 400.0).abs() <= 2.0 && tail.iter().all(|r| (r[1] - 20.0).abs() <= 2.5),
+        "right line2 flush right in band, got {:?}",
+        tail
+    );
+}
+
+
+
 /// A nowrap element among OTHER inline content (#313 mx face): the run
 /// wrapper's inline_flow drops a box no band fits below the float — the
 /// walk's clear rescue answers the real float bottom, the fallback slot

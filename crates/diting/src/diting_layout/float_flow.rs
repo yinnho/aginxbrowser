@@ -8,10 +8,7 @@
 //! taffy floats, the block children overlap them like Chrome's, and text
 //! runs wrap into the free slots beside them (`float_lines`).
 //!
-//! Still on the zone path (#313 remaining): a pre inline element among
-//! OTHER inline content — Chrome breaks its newlines as real line breaks
-//! in the parent's line boxes while the wrapper folds it into one atom —
-//! and flex/grid ITEM hosts,
+//! Still on the zone path (#313 remaining): flex/grid ITEM hosts,
 //! whose width is the flex algorithm's intrinsic contribution. Float
 //! widths of every authored shape ride the wrap
 //! path: px/% as-is, em/rem folded at cascade, calc repaired between two
@@ -142,40 +139,12 @@ pub(super) fn eligible(
         // inline elements, an element among text, an inline-block — ride
         // the run wrapper, whose inline_flow placement now shifts whole
         // lines from the wrapper's justify. A nowrap inline element rides
-        // the wrapper too, among other inline content included: an element
-        // box too wide for its band drops below the float (inline_flow's
-        // first-item walk) and the fitting lines keep their band. A pre
-        // element among other content does not — Chrome breaks its
-        // newlines as real line breaks in the parent's lines, the wrapper
-        // folds it into one atom — so it mounts directly only as the
-        // host's SOLE inline element.
+        // the wrapper too: an element box too wide for its band drops
+        // below the float (inline_flow's first-item walk). A pre element
+        // among other content also rides the wrapper — its newlines are
+        // exploded into parent line breaks at hoist (br shape), so lead
+        // shares the first hard line and tail continues on the next.
         if container.pseudos.is_some() {
-            return false;
-        }
-        let mut inline_els = 0usize;
-        let mut hard_els = 0usize;
-        let mut live_text = false;
-        for cid in child_ids {
-            if tree.with_node(*cid, |n| n.is_text()).unwrap_or(false) {
-                // Whitespace-only text segs drop out of the sole-element
-                // check downstream (content_segs); real words do not.
-                if tree.with_node(*cid, |n| n.text_content_of_text_node().is_some_and(|t| !t.trim().is_empty())) == Some(true) {
-                    live_text = true;
-                }
-                continue;
-            }
-            let Some(s) = styles.get(cid) else { return false };
-            let display = s.display.unwrap_or(CssDisplay::Block);
-            if display == CssDisplay::Inline {
-                inline_els += 1;
-                if s.white_space.is_some_and(|ws| ws.preserves_newlines()) {
-                    hard_els += 1;
-                }
-            } else if !matches!(display, CssDisplay::Block | CssDisplay::InlineBlock | CssDisplay::Flex | CssDisplay::Grid) {
-                return false;
-            }
-        }
-        if hard_els > 0 && (inline_els > 1 || live_text) {
             return false;
         }
     }

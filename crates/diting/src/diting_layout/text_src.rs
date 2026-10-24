@@ -80,6 +80,13 @@ pub(crate) fn register(leaf: taffy::tree::NodeId, segs: Vec<(NodeId, i32, u32)>)
     }
 }
 
+/// Steal a leaf's build-time registration (used when a pre run is exploded
+/// into per-hard-line leaves — the original leaf dies and its segs must ride
+/// the replacements so Range/getClientRects still find the span's text).
+pub(crate) fn take_building(leaf: taffy::tree::NodeId) -> Option<Segs> {
+    BUILDING.with(|b| b.borrow_mut().remove(&leaf))
+}
+
 /// Char ranges (start, end) in `text` of each token `tokenize` yields: words
 /// advance by their length, whitespace tokens swallow the whole collapsed run.
 pub(crate) fn token_ranges(text: &str, tokens: &[String]) -> Vec<(u32, u32)> {

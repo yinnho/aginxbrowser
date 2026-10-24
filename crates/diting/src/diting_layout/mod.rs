@@ -4740,7 +4740,7 @@ fn build_element_inner(
         cursor = zone_end;
         }
     } else {
-    for child in child_ids {
+    for &child in &child_ids {
         let is_text = tree.with_node(child, |n| n.is_text()).unwrap_or(false);
         let child_tag = tree
             .with_node(child, |n| n.as_element().map(|e| e.local.to_string()))
@@ -4893,12 +4893,159 @@ fn build_element_inner(
             if let Some(sub) = sub {
                 let mut sub_children: Vec<_> = taffy_tree.children(sub).unwrap_or_default().to_vec();
                 wrap_q_quotes(tree, child, &child_tag, styles, fonts, taffy_tree, &mut sub_children);
-                run.push(RunSeg::Nodes(sub_children.clone()));
-                node_map.remove(&sub);
-                let _ = taffy_tree.remove(sub);
-                // Boxless after hoisting — union pass rebuilds the rect.
-                if !sub_children.is_empty() {
-                    flattened.insert(child, sub_children);
+                // #313: a pre* inline among OTHER content — Chrome breaks its
+                // newlines as real line breaks in the parent's IFC. Hoisting
+                // the whole run as one atom folds them into an internal
+                // multi-line box (lead and the first hard line share no
+                // parent line; tail never continues on the next). Beside a
+                // float, explode at hard breaks and flush between — the
+                // same shape as <br> — so lead shares the first hard line
+                // and tail continues on the next. Away from floats the
+                // atom posture stays (zone/paint already match).
+                // Only among OTHER inline content — a lone pre still mounts
+                // as one atom (float_lines walks its hard lines; #315's
+                // content-sized sum uses the widest hard line).
+                let has_lead = run.iter().any(|seg| match seg {
+                    RunSeg::Text(tx, .., w, _, _) => {
+                        !tx.trim().is_empty() || w.preserves_spaces() || w.preserves_newlines()
+                    }
+                    RunSeg::Nodes(n) => !n.is_empty(),
+                });
+                let has_tail = {
+                    let mut past = false;
+                    child_ids.iter().any(|&sib| {
+                        if sib == child {
+                            past = true;
+                            return false;
+                        }
+                        if !past {
+                            return false;
+                        }
+                        if tree.with_node(sib, |n| n.is_text()).unwrap_or(false) {
+                            tree.with_node(sib, |n| {
+                                n.text_content_of_text_node().is_some_and(|tx| !tx.trim().is_empty())
+                            }) == Some(true)
+                        } else {
+                            styles.get(&sib).is_some_and(|s| {
+                                s.display.unwrap_or(CssDisplay::Block) == CssDisplay::Inline
+                            })
+                        }
+                    })
+                };
+                let explode = (float_host || float_flow::in_env())
+                    && (has_lead || has_tail)
+                    && styles
+                        .get(&child)
+                        .and_then(|s| s.white_space)
+                        .is_some_and(|w| w.preserves_newlines())
+                    && sub_children.len() == 1
+                    && matches!(
+                        taffy_tree.get_node_context(sub_children[0]),
+                        Some(TextLeaf::Run { ws, text, .. })
+                            if ws.preserves_newlines() && (text.contains('\n') || text.contains('\r'))
+                    );
+                if explode {
+                    let run_leaf = sub_children[0];
+                    let ctx = taffy_tree.get_node_context(run_leaf).cloned();
+                    let Some(TextLeaf::Run {
+                        text,
+                        font_size,
+                        bold,
+                        color,
+                        line_height,
+                        decorations,
+                        baseline_shift,
+                        mono,
+                        word_spacing,
+                        ws,
+                        atomic,
+                        align,
+                        ellipsis,
+                        line_clamp,
+                        small_caps,
+                        han,
+                        clip_src,
+                        ..
+                    }) = ctx
+                    else {
+                        unreachable!("explode gated on Run");
+                    };
+                    // Pull the original leaf's text-src segs before it dies so
+                    // Range/getClientRects on the span still resolve.
+                    let orig_segs = text_src::take_building(run_leaf);
+                    let _ = taffy_tree.remove(run_leaf);
+                    node_map.remove(&sub);
+                    let _ = taffy_tree.remove(sub);
+                    let normalized = text.replace("\r\n", "\n").replace("\r", "\n");
+                    let lines: Vec<&str> = normalized.split('\n').collect();
+                    let mut flat: Vec<taffy::tree::NodeId> = Vec::new();
+                    let mut char_at = 0u32;
+                    for (i, line) in lines.iter().enumerate() {
+                        if i > 0 {
+                            flush_run(&mut run, &mut direct, taffy_tree, run_wrappers, run_clip.take());
+                            char_at += 1; // the newline between hard lines
+                        }
+                        let line_len = line.chars().count() as u32;
+                        if let Ok(leaf) = taffy_tree.new_leaf_with_context(
+                            float_flow::run_style(),
+                            TextLeaf::Run {
+                                text: (*line).to_string(),
+                                font_size,
+                                bold,
+                                color,
+                                line_height,
+                                decorations,
+                                baseline_shift,
+                                mono,
+                                word_spacing,
+                                ws,
+                                atomic,
+                                align,
+                                ellipsis,
+                                line_clamp,
+                                tokens: std::cell::RefCell::new(None),
+                                small_caps,
+                                han,
+                                clip_src,
+                            },
+                        ) {
+                            if let Some(ref segs) = orig_segs {
+                                // Re-base + clamp the original run's segs onto
+                                // this hard line's own text (leaf coords 0..line_len).
+                                let from = char_at as i64;
+                                let to = from + line_len as i64;
+                                let sliced: Vec<(NodeId, i32, u32)> = segs
+                                    .iter()
+                                    .filter_map(|(n, s, l)| {
+                                        let seg_a = *s as i64;
+                                        let seg_b = seg_a + *l as i64;
+                                        if seg_a >= to || seg_b <= from {
+                                            return None;
+                                        }
+                                        let a = (seg_a - from).max(0) as i32;
+                                        let b = (seg_b.min(to) - from) as i32;
+                                        let len = (b - a).max(0) as u32;
+                                        (len > 0).then_some((*n, a, len))
+                                    })
+                                    .collect();
+                                text_src::register(leaf, sliced);
+                            }
+                            flat.push(leaf);
+                            run.push(RunSeg::Nodes(vec![leaf]));
+                        }
+                        char_at += line_len;
+                    }
+                    if !flat.is_empty() {
+                        flattened.insert(child, flat);
+                    }
+                } else {
+                    run.push(RunSeg::Nodes(sub_children.clone()));
+                    node_map.remove(&sub);
+                    let _ = taffy_tree.remove(sub);
+                    // Boxless after hoisting — union pass rebuilds the rect.
+                    if !sub_children.is_empty() {
+                        flattened.insert(child, sub_children);
+                    }
                 }
             }
         } else {
