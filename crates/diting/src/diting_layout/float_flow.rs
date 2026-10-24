@@ -8,10 +8,10 @@
 //! taffy floats, the block children overlap them like Chrome's, and text
 //! runs wrap into the free slots beside them (`float_lines`).
 //!
-//! Still on the zone path (#313 remaining): a nowrap/pre inline element
-//! among OTHER inline content — the run folds nowrap onto the wrapper
-//! atom, which cannot take slots (the approximation Chrome beats with
-//! run breaks at the element boundary) — and flex/grid ITEM hosts,
+//! Still on the zone path (#313 remaining): a pre inline element among
+//! OTHER inline content — Chrome breaks its newlines as real line breaks
+//! in the parent's line boxes while the wrapper folds it into one atom —
+//! and flex/grid ITEM hosts,
 //! whose width is the flex algorithm's intrinsic contribution. Float
 //! widths of every authored shape ride the wrap
 //! path: px/% as-is, em/rem folded at cascade, calc repaired between two
@@ -30,7 +30,11 @@
 //! unbreakable and drops below the float when it fits no band, its
 //! later hard lines continuing down (float_lines' atomic walk; the
 //! walk's fallback slot answers with the query y, so clear reports the
-//! real drop depth). The same drop serves SOFT lines (#315's probe
+//! real drop depth). A nowrap element among OTHER inline content rides
+//! the run wrapper and drops the same way — inline_flow's first-item
+//! walk moves a box no band fits past the floats (its own clear
+//! rescue), the content after it continuing on the dropped line. The
+//! same drop serves SOFT lines (#315's probe
 //! round): §9.5 moves a line whose first word cannot fit its band below
 //! the floats, the fitting words above staying beside. Content-sized
 //! hosts (#315) ride the wrap path too — floated and abs/fixed boxes
@@ -64,7 +68,7 @@ use std::sync::OnceLock;
 use taffy::prelude::*;
 use taffy::{Clear, Float};
 
-use crate::diting_css::{ClearSide, ComputedStyle, Display as CssDisplay, FloatSide, Length, PositionMode, TextAlign, WhiteSpace};
+use crate::diting_css::{ClearSide, ComputedStyle, Display as CssDisplay, FloatSide, Length, PositionMode, TextAlign};
 use crate::diting_dom::tree::{DomTree, NodeId};
 
 thread_local! {
@@ -137,17 +141,19 @@ pub(super) fn eligible(
         // line inside its slot, #314), and mixed runs — several/nested
         // inline elements, an element among text, an inline-block — ride
         // the run wrapper, whose inline_flow placement now shifts whole
-        // lines from the wrapper's justify. A nowrap/pre inline element
-        // mounts directly too — an element box too wide for its band
-        // drops below the float (float_lines' atomic walk) — but only as
-        // the host's SOLE inline element: among other inline content the
-        // run folds nowrap onto the wrapper atom, which cannot take
-        // slots.
+        // lines from the wrapper's justify. A nowrap inline element rides
+        // the wrapper too, among other inline content included: an element
+        // box too wide for its band drops below the float (inline_flow's
+        // first-item walk) and the fitting lines keep their band. A pre
+        // element among other content does not — Chrome breaks its
+        // newlines as real line breaks in the parent's lines, the wrapper
+        // folds it into one atom — so it mounts directly only as the
+        // host's SOLE inline element.
         if container.pseudos.is_some() {
             return false;
         }
         let mut inline_els = 0usize;
-        let mut unbreakable_els = 0usize;
+        let mut hard_els = 0usize;
         let mut live_text = false;
         for cid in child_ids {
             if tree.with_node(*cid, |n| n.is_text()).unwrap_or(false) {
@@ -162,15 +168,14 @@ pub(super) fn eligible(
             let display = s.display.unwrap_or(CssDisplay::Block);
             if display == CssDisplay::Inline {
                 inline_els += 1;
-                let ws = s.white_space.unwrap_or(WhiteSpace::Normal);
-                if ws.no_soft_wrap() || ws.preserves_newlines() {
-                    unbreakable_els += 1;
+                if s.white_space.is_some_and(|ws| ws.preserves_newlines()) {
+                    hard_els += 1;
                 }
             } else if !matches!(display, CssDisplay::Block | CssDisplay::InlineBlock | CssDisplay::Flex | CssDisplay::Grid) {
                 return false;
             }
         }
-        if unbreakable_els > 0 && (inline_els > 1 || live_text) {
+        if hard_els > 0 && (inline_els > 1 || live_text) {
             return false;
         }
     }

@@ -20951,6 +20951,66 @@ three</span></div>"#,
     }
 }
 
+/// A nowrap element among OTHER inline content (#313 mx face): the run
+/// wrapper's inline_flow drops a box no band fits below the float — the
+/// walk's clear rescue answers the real float bottom, the fallback slot
+/// alone answers the query y — and the content AFTER it continues on the
+/// dropped line, wrapping to the next one when it overflows (Chrome
+/// 2026-10-24: lead stays in band, the box drops, tail follows). The
+/// dropped line aligns like any other: left, centered, right against the
+/// full width below the float.
+#[cfg(feature = "screenshot")]
+#[test]
+fn float_wrap_nowrap_mixed_run_drop() {
+    let mut rt = setup_runtime(
+        r#"<style>
+          body{margin:0}
+          .h{width:400px;font:16px/20px monospace}
+          .f{float:left;width:150px;height:40px;background:#fa0}
+          span{white-space:nowrap}
+        </style>
+        <div class="h" id="m"><div class="f"></div>lead lead <span>alpha beta gamma delta epsilon zeta</span> tail tail</div>
+        <div class="h" id="mc" style="text-align:center"><div class="f"></div>lead lead <span>alpha beta gamma delta epsilon zeta</span> tail tail</div>
+        <div class="h" id="mr" style="text-align:right"><div class="f"></div>lead lead <span>alpha beta gamma delta epsilon zeta</span> tail tail</div>"#,
+    );
+    let v = rt
+        .evaluate(
+            r##"(()=>{const out={};for(const [k,sel] of [["m","#m"],["mc","#mc"],["mr","#mr"]]){const h=document.querySelector(sel);const ht=h.getBoundingClientRect().top;const R=n=>{const r=document.createRange();r.selectNodeContents(n);return [...r.getClientRects()].filter(b=>b.width>1).map(b=>[Math.round(b.left*10)/10,Math.round((b.top-ht)*10)/10,Math.round(b.width*10)/10]);};const texts=[...h.childNodes].filter(n=>n.nodeType===3&&n.textContent.trim());out[k]={lead:R(texts[0]),sp:R(h.querySelector("span")),tail:R(texts[1])};}return JSON.stringify(out);})()"##,
+        )
+        .unwrap();
+    type Faces = Vec<Vec<f64>>;
+    #[allow(clippy::type_complexity)]
+    let out: std::collections::HashMap<String, std::collections::HashMap<String, Faces>> =
+        serde_json::from_str(v.as_str().unwrap_or("{}")).unwrap_or_default();
+    let get = |k: &str, f: &str| -> &Faces {
+        out.get(k).and_then(|m| m.get(f)).unwrap()
+    };
+    // Left host: lead stays beside the float, the box drops below it, tail
+    // follows on the dropped line and wraps to the next one.
+    let (lead, sp, tail) = (get("m", "lead"), get("m", "sp"), get("m", "tail"));
+    assert!(lead.iter().all(|r| r[1] < 20.0 && r[0] >= 149.0), "lead stays in the band, got {:?}", lead);
+    assert_eq!(sp.len(), 1, "one unbreakable box, got {:?}", sp);
+    assert!(sp[0][0] <= 1.0 && (sp[0][1] - 40.0).abs() <= 2.5, "box drops below the float, got {:?}", sp[0]);
+    assert_eq!(tail.len(), 2, "tail wraps past the dropped line, got {:?}", tail);
+    assert!(tail[0][1] >= 37.5 && tail[0][0] > sp[0][0] + sp[0][2] - 2.0, "first tail word beside the box, got {:?}", tail[0]);
+    assert!(tail[1][0] <= 1.0 && (tail[1][1] - 60.0).abs() <= 2.5, "second tail word on its own line at the edge, got {:?}", tail[1]);
+    // Center host: the fitting line centers inside the band, the dropped
+    // line and the tail's own line center against the full width.
+    let (lead, sp, tail) = (get("mc", "lead"), get("mc", "sp"), get("mc", "tail"));
+    let lw = lead[1][0] + lead[1][2] - lead[0][0];
+    assert!((lead[0][0] - (150.0 + (250.0 - lw) / 2.0)).abs() <= 2.0, "lead centered in band, got {} (line {})", lead[0][0], lw);
+    assert!((sp[0][1] - 40.0).abs() <= 2.5, "centered box still drops, got {:?}", sp[0]);
+    let dw = (tail[0][0] + tail[0][2]) - sp[0][0];
+    assert!((sp[0][0] - (400.0 - dw) / 2.0).abs() <= 2.5, "dropped line centered in full width, got {} (line {})", sp[0][0], dw);
+    assert!((tail[1][0] - (400.0 - tail[1][2]) / 2.0).abs() <= 2.0, "tail's own line centered, got {:?}", tail[1]);
+    // Right host: fitting line flush right in the band, dropped line and
+    // the tail's own line flush right in the full width.
+    let (lead, _sp, tail) = (get("mr", "lead"), get("mr", "sp"), get("mr", "tail"));
+    assert!(lead.last().is_some_and(|r| r[0] + r[2] >= 398.5), "lead flush right in band, got {:?}", lead);
+    assert!(tail[0][0] + tail[0][2] >= 398.5 && (tail[0][1] - 40.0).abs() <= 2.5, "first tail flush right on the dropped line, got {:?}", tail[0]);
+    assert!((tail[1][0] - (400.0 - tail[1][2])).abs() <= 1.5 && (tail[1][1] - 60.0).abs() <= 2.5, "second tail flush right on its own line, got {:?}", tail[1]);
+}
+
 /// A content-sized wrap host (floated or abs/fixed, auto width) sizes
 /// shrink-to-fit with the floats SUMMED (#315): taffy's intrinsic takes
 /// the max over block children — the float-figure idiom sized to the

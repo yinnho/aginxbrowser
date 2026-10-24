@@ -108,6 +108,13 @@ pub(super) fn layout<T: LayoutPartialTree>(
                 y = y.max(slot.y);
                 guard += 1;
             }
+            // The walk's fallback slot answers with the QUERY y, not the
+            // float bottoms — an item that fit in no band sits below the
+            // floats, and only clear reports that y (the float_lines
+            // atomic-walk fix, #313).
+            if guard > 0 && slot.segment_id.is_none() {
+                y = y.max(ctx.find_content_slot(y, Clear::Both, None).y);
+            }
             let x0 = slot.x.max(0.0).min(width);
             cur = Some(Line { x0, room: (width - x0).min(slot.width).max(0.0), y, h: 0.0, w: 0.0, items: Vec::new() });
         }
