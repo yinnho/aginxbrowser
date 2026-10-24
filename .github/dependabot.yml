@@ -17,6 +17,14 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "ureq"
         update-types: ["version-update:semver-major"]
+      # cbc 0.2 / cssparser 0.38 are API redesigns (cipher-0.5 closure
+      # model; ParserInput/ParseError<'i>/ToCss reshuffled) — migrating
+      # crypto_secret.rs / selector.rs is its own batch, not a chore bump
+      # (#261, #264 declined 2026-10-25).
+      - dependency-name: "cbc"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "cssparser"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
     directory: /dsh-aginxbrowser
