@@ -21102,6 +21102,69 @@ beta gamma</span> tail tail</div>"#,
 
 
 
+/// #313 flex/grid ITEM hosts with a definite width wrap: the host is a
+/// flex/grid item, but its authored width makes the used size definite, so
+/// the wrap path matches a plain block host. Chrome 2026-10-24 (100px float,
+/// 400px host): lines at band start x=100 on two rows, hostH=40; glyph tops
+/// carry the usual −1.6 bias. Auto-width flex-item hosts (shrink-to-fit)
+/// stay on the zone path under #315 — WRAP_ALL collapses them to the float
+/// alone.
+#[cfg(feature = "screenshot")]
+#[test]
+fn float_wrap_flex_grid_item_hosts() {
+    let mut rt = setup_runtime(
+        r#"<style>
+          body{margin:0}
+          .row{display:flex;width:600px}
+          .grid{display:grid;grid-template-columns:400px 200px;width:600px}
+          .h{width:400px;font:16px/20px monospace}
+          .f{float:left;width:100px;height:40px;background:#fa0}
+        </style>
+        <div class="row"><div class="h" id="fx"><div class="f"></div>alpha beta gamma delta epsilon zeta eta theta iota kappa</div></div>
+        <div class="grid"><div class="h" id="gx"><div class="f"></div>alpha beta gamma delta epsilon zeta eta theta iota kappa</div><div></div></div>
+        <div class="row"><div id="stf" style="font:16px/20px monospace"><div class="f" style="width:150px"></div>caption</div></div>"#,
+    );
+    let dump = |rt: &mut JsRuntime, sel: &str| -> (f64, f64, Vec<Vec<f64>>) {
+        let v = rt
+            .evaluate(&format!(
+                r#"(()=>{{const h=document.querySelector('{sel}');const ht=h.getBoundingClientRect();const f=h.querySelector('.f').getBoundingClientRect();const r=document.createRange();r.selectNodeContents(h);const lines=[];for(const b of r.getClientRects()){{if(b.width<2)continue;if(Math.abs(b.left-f.left)<1&&Math.abs(b.top-f.top)<1&&Math.abs(b.width-f.width)<1)continue;lines.push([+b.left.toFixed(1),+(b.top-ht.top).toFixed(1),+b.width.toFixed(1)]);}}return JSON.stringify({{hostW:+ht.width.toFixed(1),hostH:+ht.height.toFixed(1),lines}});}})()"#
+            ))
+            .unwrap();
+        let o: serde_json::Value = serde_json::from_str(v.as_str().unwrap_or("{}")).unwrap_or_default();
+        let lines: Vec<Vec<f64>> = serde_json::from_value(o["lines"].clone()).unwrap_or_default();
+        (
+            o["hostW"].as_f64().unwrap_or(f64::NAN),
+            o["hostH"].as_f64().unwrap_or(f64::NAN),
+            lines,
+        )
+    };
+    for sel in ["#fx", "#gx"] {
+        let (_w, host_h, lines) = dump(&mut rt, sel);
+        assert!((host_h - 40.0).abs() <= 2.5, "{sel} hostH two band lines, got {host_h}");
+        assert_eq!(lines.len(), 2, "{sel} two lines beside the float, got {lines:?}");
+        assert!(
+            lines.iter().all(|r| (r[0] - 100.0).abs() <= 1.5),
+            "{sel} every line starts at the band, got {lines:?}"
+        );
+        assert!(
+            (lines[0][1] + 1.6).abs() <= 2.5 && (lines[1][1] - 18.4).abs() <= 2.5,
+            "{sel} line tops at 0/−1.6 then 20/18.4, got {lines:?}"
+        );
+    }
+    // #315 gate: auto-width flex-item host stays zone-summed. Wrap path
+    // would collapse hostW to the float alone (150) and drop the caption.
+    let (stf_w, stf_h, stf_lines) = dump(&mut rt, "#stf");
+    assert!(
+        stf_w > 200.0 && (stf_h - 40.0).abs() <= 2.5,
+        "#stf must stay zone-summed (>200 wide, one band line), got w={stf_w} h={stf_h} lines={stf_lines:?}"
+    );
+    assert_eq!(stf_lines.len(), 1, "#stf caption beside the float, got {stf_lines:?}");
+    assert!(
+        (stf_lines[0][0] - 150.0).abs() <= 1.5 && (stf_lines[0][1] + 1.6).abs() <= 2.5,
+        "#stf caption at band start, got {stf_lines:?}"
+    );
+}
+
 /// A nowrap element among OTHER inline content (#313 mx face): the run
 /// wrapper's inline_flow drops a box no band fits below the float — the
 /// walk's clear rescue answers the real float bottom, the fallback slot

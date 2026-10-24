@@ -8,8 +8,8 @@
 //! taffy floats, the block children overlap them like Chrome's, and text
 //! runs wrap into the free slots beside them (`float_lines`).
 //!
-//! Still on the zone path (#313 remaining): flex/grid ITEM hosts,
-//! whose width is the flex algorithm's intrinsic contribution. Float
+//! Still on the zone path (#313 remaining): auto-width flex/grid ITEM
+//! hosts (#315 — flex intrinsic contribution; definite-width items wrap). Float
 //! widths of every authored shape ride the wrap
 //! path: px/% as-is, em/rem folded at cascade, calc repaired between two
 //! solves (cache-busted when the fixup is a float), sizing keywords
@@ -148,17 +148,19 @@ pub(super) fn eligible(
             return false;
         }
     }
-    // Flex/grid ITEM hosts stay out (#315): their width is the flex
-    // algorithm's intrinsic contribution, a different machinery. Floated
-    // and abs/fixed boxes DO take the wrap path — their shrink-to-fit
-    // width comes from the intrinsic repair pass in mod.rs, which sums
-    // what taffy's max()-over-children intrinsic drops.
+    // Flex/grid ITEM hosts with an auto width stay out (#315): their used
+    // width is the flex algorithm's intrinsic contribution, and the wrap
+    // path's max()-over-children shrink-to-fit drops the caption (zone
+    // still sums). Definite-width flex/grid items wrap like any block
+    // host — Chrome and WRAP_ALL agree on band lefts/tops. Floated and
+    // abs/fixed boxes (any parent) DO take the wrap path — their
+    // shrink-to-fit width comes from the intrinsic repair pass in mod.rs.
     let parent_is_block = tree
         .with_node(id, |n| n.parent)
         .flatten()
         .and_then(|p| styles.get(&p))
         .is_none_or(|ps| matches!(ps.display.unwrap_or(CssDisplay::Block), CssDisplay::Block));
-    if !parent_is_block {
+    if !parent_is_block && container.width.is_none() {
         return false;
     }
     // A content-sized host's children must be a summable shape: floats
