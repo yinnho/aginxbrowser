@@ -21108,8 +21108,8 @@ beta gamma</span> tail tail</div>"#,
 /// caption the same way it does for floated/abspos hosts (Chrome
 /// 2026-10-24: 100px float / 400px definite host → two band lines at
 /// x=100, hostH=40; auto-width flex/grid item → hostW = 150 + caption).
-/// Glyph tops carry the usual −1.6 bias. Non-summable children of a
-/// content-sized host stay zone (#315 tail).
+/// Glyph tops carry the usual −1.6 bias. Inline-block/flex/grid children
+/// of a content-sized host sum via the same repair (#315); plain blocks do not.
 #[cfg(feature = "screenshot")]
 #[test]
 fn float_wrap_flex_grid_item_hosts() {
@@ -21177,6 +21177,78 @@ fn float_wrap_flex_grid_item_hosts() {
             "{sel} caption at band start, got {stf_lines:?}"
         );
     }
+}
+
+
+/// #315 non-summable-child face: a content-sized host whose non-float child
+/// is an inline-block / flex / grid SUMS that box's preferred width with the
+/// float (Chrome 2026-10-24: 150 + caption on one line, hostH=40). A plain
+/// block child does NOT — the host stays the float alone and the caption
+/// drops below (hostW=150, hostH=60). Glyph tops carry the usual −1.6 bias.
+#[cfg(feature = "screenshot")]
+#[test]
+fn float_wrap_nonsummable_atomic_children() {
+    let mut rt = setup_runtime(
+        r#"<style>
+          body{margin:0}
+          .f{float:left;width:150px;height:40px;background:#fa0}
+          .h{float:left;font:16px/20px monospace}
+        </style>
+        <div class="h" id="ib"><div class="f"></div><span style="display:inline-block">caption</span></div>
+        <div class="h" id="fx"><div class="f"></div><div style="display:flex">caption</div></div>
+        <div class="h" id="gx"><div class="f"></div><div style="display:grid">caption</div></div>
+        <div class="h" id="ibw"><div class="f"></div><span style="display:inline-block;width:80px">cap</span></div>
+        <div class="h" id="blk"><div class="f"></div><div>caption</div></div>
+        <div class="h" id="abs" style="position:absolute;left:0;top:200px"><div class="f"></div><span style="display:inline-block">caption</span></div>
+        <div style="display:flex;width:600px"><div id="stf" style="font:16px/20px monospace"><div class="f"></div><div style="display:flex">caption</div></div></div>
+        <div id="ref" style="font:16px/20px monospace;display:inline-block">caption</div>"#,
+    );
+    let caption_w = {
+        let v = rt
+            .evaluate(r#"(()=>{const r=document.createRange();r.selectNodeContents(document.querySelector('#ref'));const rs=[...r.getClientRects()].filter(b=>b.width>1);return JSON.stringify(rs[0].width);})()"#)
+            .unwrap();
+        v.as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(f64::NAN)
+    };
+    let dump = |rt: &mut JsRuntime, sel: &str| -> (f64, f64, Vec<Vec<f64>>) {
+        let v = rt
+            .evaluate(&format!(
+                r#"(()=>{{const h=document.querySelector('{sel}');const ht=h.getBoundingClientRect();const f=h.querySelector('.f').getBoundingClientRect();const r=document.createRange();r.selectNodeContents(h);const lines=[];for(const b of r.getClientRects()){{if(b.width<2)continue;if(Math.abs(b.left-f.left)<1&&Math.abs(b.top-f.top)<1&&Math.abs(b.width-f.width)<1)continue;lines.push([+(b.left-ht.left).toFixed(1),+(b.top-ht.top).toFixed(1),+b.width.toFixed(1)]);}}return JSON.stringify({{hostW:+ht.width.toFixed(1),hostH:+ht.height.toFixed(1),lines}});}})()"#
+            ))
+            .unwrap();
+        let o: serde_json::Value = serde_json::from_str(v.as_str().unwrap_or("{}")).unwrap_or_default();
+        let lines: Vec<Vec<f64>> = serde_json::from_value(o["lines"].clone()).unwrap_or_default();
+        (
+            o["hostW"].as_f64().unwrap_or(f64::NAN),
+            o["hostH"].as_f64().unwrap_or(f64::NAN),
+            lines,
+        )
+    };
+    let expect = 150.0 + caption_w;
+    for sel in ["#ib", "#fx", "#gx", "#abs", "#stf"] {
+        let (w, h, lines) = dump(&mut rt, sel);
+        assert!(
+            (w - expect).abs() <= 1.5 && (h - 40.0).abs() <= 2.5,
+            "{sel} must sum float+atomic ({expect}), got w={w} h={h} lines={lines:?}"
+        );
+        assert!(
+            lines.iter().any(|r| (r[0] - 150.0).abs() <= 1.5 && (r[1] + 1.6).abs() <= 2.5),
+            "{sel} caption at the band, got {lines:?}"
+        );
+    }
+    let (w, h, lines) = dump(&mut rt, "#ibw");
+    assert!(
+        (w - 230.0).abs() <= 1.5 && (h - 40.0).abs() <= 2.5,
+        "#ibw definite ib sums 150+80, got w={w} h={h} lines={lines:?}"
+    );
+    let (w, h, lines) = dump(&mut rt, "#blk");
+    assert!(
+        (w - 150.0).abs() <= 1.5 && (h - 60.0).abs() <= 2.5,
+        "#blk plain block does not sum — host stays the float, caption drops, got w={w} h={h} lines={lines:?}"
+    );
+    assert!(
+        lines.iter().any(|r| (r[1] - 40.0).abs() <= 2.5 || (r[1] - 38.4).abs() <= 2.5),
+        "#blk caption below the float, got {lines:?}"
+    );
 }
 
 /// A nowrap element among OTHER inline content (#313 mx face): the run

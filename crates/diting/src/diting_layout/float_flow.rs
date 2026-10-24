@@ -8,11 +8,13 @@
 //! taffy floats, the block children overlap them like Chrome's, and text
 //! runs wrap into the free slots beside them (`float_lines`).
 //!
-//! Still on the zone path (#313 remaining): content-sized hosts whose
-//! children are non-summable (a block/flex/inline-block beside the float —
-//! #315 tail; the repair pass only sums floats + inline runs). Auto-width
-//! flex/grid ITEM hosts with a summable shape wrap via the same intrinsic
-//! repair as floated/abspos hosts (definite-width items already wrap). Float
+//! #315's non-summable-child face is on the wrap path too: a content-sized
+//! host with an inline-block/flex/grid beside the float sums that box's
+//! preferred width through the intrinsic repair; a plain block sibling
+//! adds nothing (Chrome's preferred width stays the float alone) and still
+//! wraps. Auto-width flex/grid ITEM hosts with a summable shape wrap via
+//! the same intrinsic repair as floated/abspos hosts (definite-width items
+//! already wrap). Float
 //! widths of every authored shape ride the wrap
 //! path: px/% as-is, em/rem folded at cascade, calc repaired between two
 //! solves (cache-busted when the fixup is a float), sizing keywords
@@ -44,10 +46,9 @@
 //! line for max-content (a pre run its widest hard line), the widest
 //! float against the longest word for min-content, avail against the
 //! containing block (flex/grid item: the parent's content box). Those
-//! hosts keep a summable shape (floats + inline content only); a
-//! block/flex/inline-block child's intrinsic is not wired, so those
-//! stay zone. A plain block
-//! inside a wrap host (a centered p beside the host's float) inherits the
+//! hosts keep a summable shape (floats + inline runs + inline-block/flex/grid
+//! preferred boxes); a plain block child adds nothing to the sum. A plain
+//! block inside a wrap host (a centered p beside the host's float) inherits the
 //! environment too: in CSS only a BFC boundary stops line boxes from
 //! owing the ancestor floats a band, so mod.rs demotes the flex-column
 //! promote inside the host's block flow — the block chain is the only
@@ -69,7 +70,7 @@ use std::sync::OnceLock;
 use taffy::prelude::*;
 use taffy::{Clear, Float};
 
-use crate::diting_css::{ClearSide, ComputedStyle, Display as CssDisplay, FloatSide, Length, PositionMode, TextAlign};
+use crate::diting_css::{ClearSide, ComputedStyle, Display as CssDisplay, FloatSide, Length, TextAlign};
 use crate::diting_dom::tree::{DomTree, NodeId};
 
 thread_local! {
@@ -168,14 +169,10 @@ pub(super) fn eligible(
     if !parent_is_block && container.width.is_none() && !parent_is_flex_grid {
         return false;
     }
-    // A content-sized host's children must be a summable shape: floats
-    // and inline content only (the repair pass adds float boxes and run
-    // text); a block/flex/inline-block child's own intrinsic is not
-    // wired, so those hosts keep the zone path.
-    let content_sized = container.width.is_none()
-        && (container.float_side.is_some()
-            || matches!(container.position, Some(PositionMode::Absolute) | Some(PositionMode::Fixed))
-            || parent_is_flex_grid);
+    // Content-sized hosts (float/abspos/flex-item) admit the same child
+    // shapes as definite-width hosts. The #315 repair sums floats + inline
+    // runs + inline-block/flex/grid preferred boxes; a plain block child
+    // contributes nothing (Chrome's host preferred width stays the float).
     let mut floats = 0;
     for cid in child_ids {
         if tree.with_node(*cid, |n| n.is_text()).unwrap_or(false) {
@@ -211,11 +208,14 @@ pub(super) fn eligible(
                 return false;
             }
             floats += 1;
-        } else if (content_sized && display != CssDisplay::Inline)
-            // A content-sized host sums floats + inline content only
-            // (#315); any other shape keeps the zone path.
-            || !matches!(display, CssDisplay::Block | CssDisplay::Inline | CssDisplay::InlineBlock | CssDisplay::Flex | CssDisplay::Grid)
-        {
+        } else if !matches!(
+            display,
+            CssDisplay::Block
+                | CssDisplay::Inline
+                | CssDisplay::InlineBlock
+                | CssDisplay::Flex
+                | CssDisplay::Grid
+        ) {
             return false;
         }
     }

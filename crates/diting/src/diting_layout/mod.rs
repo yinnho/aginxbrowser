@@ -6732,9 +6732,10 @@ pub fn layout_solve_rooted(
     // definite width on the re-solve makes the item contribute that sum).
     // The solve above settled every child; compute the sums, set the
     // width, re-solve once — the same shape as the two repair passes
-    // above. eligible narrows these hosts to floats + inline content, so
-    // every child is summable; authored min/max stay in the taffy style
-    // and clamp the set width on the re-solve themselves.
+    // above. eligible admits floats + inline runs + block/ib/flex/grid;
+    // the walk sums floats, runs, and ib/flex/grid preferred boxes, and
+    // skips plain blocks (Chrome: host preferred width = float alone).
+    // Authored min/max stay in the taffy style and clamp on the re-solve.
     {
         let content_sized = |s: &crate::diting_css::ComputedStyle, dom_id: NodeId| {
             if s.width.is_some() {
@@ -6784,35 +6785,196 @@ pub fn layout_solve_rooted(
                 let mut widest_float = 0.0f32;
                 let mut text_max = 0.0f32;
                 let mut longest_word = 0.0f32;
-                for c in taffy_tree.children(tnid).unwrap_or_default().to_vec() {
-                    let is_float = taffy_tree.style(c).ok().is_some_and(|s| s.float != taffy::Float::None);
-                    if let Some(TextLeaf::Run { text, font_size, bold, mono, word_spacing, ws, tokens, small_caps, han, .. }) = taffy_tree.get_node_context(c) {
-                        let shaped = run_tokens(text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han);
-                        // Preferred width: one line (pre family: its widest
-                        // hard line — forced breaks hold at any width).
-                        let (mut line, mut widest_line) = (0.0f32, 0.0f32);
-                        for t in shaped.iter() {
-                            if t.is_break {
-                                widest_line = widest_line.max(line);
-                                line = 0.0;
-                            } else {
-                                line += t.width;
+                // Walk host children (and anonymous run wrappers): floats and
+                // shaped runs sum as before; an inline-block/flex/grid box
+                // contributes its preferred width (definite px, else the
+                // max-content of runs under it + padding/border) — Chrome
+                // places those BFCs beside the float on the preferred line
+                // (#315). A plain block contributes nothing.
+                fn run_pref(
+                    text: &str,
+                    font_size: f32,
+                    bold: bool,
+                    fonts: &FontBook,
+                    mono: bool,
+                    word_spacing: f32,
+                    ws: WhiteSpace,
+                    tokens: &std::cell::RefCell<Option<std::rc::Rc<[text::Token]>>>,
+                    small_caps: bool,
+                    han: Option<text::HanSlot>,
+                ) -> (f32, f32) {
+                    let shaped = run_tokens(text, font_size, bold, fonts, mono, word_spacing, ws, tokens, small_caps, han);
+                    let (mut line, mut widest_line) = (0.0f32, 0.0f32);
+                    for tok in shaped.iter() {
+                        if tok.is_break {
+                            widest_line = widest_line.max(line);
+                            line = 0.0;
+                        } else {
+                            line += tok.width;
+                        }
+                    }
+                    let longest = shaped
+                        .iter()
+                        .filter(|tok| !tok.is_space && !tok.is_break)
+                        .map(|tok| tok.width)
+                        .fold(0.0, f32::max);
+                    (widest_line.max(line), longest)
+                }
+                fn runs_under(
+                    taffy_tree: &TaffyTree<TextLeaf>,
+                    node: taffy::tree::NodeId,
+                    fonts: &FontBook,
+                ) -> (f32, f32) {
+                    if let Some(TextLeaf::Run {
+                        text,
+                        font_size,
+                        bold,
+                        mono,
+                        word_spacing,
+                        ws,
+                        tokens,
+                        small_caps,
+                        han,
+                        ..
+                    }) = taffy_tree.get_node_context(node)
+                    {
+                        return run_pref(
+                            text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han,
+                        );
+                    }
+                    let (mut max_c, mut min_c) = (0.0f32, 0.0f32);
+                    for c in taffy_tree.children(node).unwrap_or_default() {
+                        let (a, b) = runs_under(taffy_tree, c, fonts);
+                        max_c += a;
+                        min_c = min_c.max(b);
+                    }
+                    (max_c, min_c)
+                }
+                fn contribute(
+                    taffy_tree: &TaffyTree<TextLeaf>,
+                    node: taffy::tree::NodeId,
+                    fonts: &FontBook,
+                    styles: &HashMap<NodeId, ComputedStyle>,
+                    dom_of: &dyn Fn(taffy::tree::NodeId) -> Option<NodeId>,
+                    sized: &HashMap<taffy::tree::NodeId, f32>,
+                    floats_sum: &mut f32,
+                    widest_float: &mut f32,
+                    text_max: &mut f32,
+                    longest_word: &mut f32,
+                ) {
+                    let is_float = taffy_tree
+                        .style(node)
+                        .ok()
+                        .is_some_and(|s| s.float != taffy::Float::None);
+                    if let Some(TextLeaf::Run {
+                        text,
+                        font_size,
+                        bold,
+                        mono,
+                        word_spacing,
+                        ws,
+                        tokens,
+                        small_caps,
+                        han,
+                        ..
+                    }) = taffy_tree.get_node_context(node)
+                    {
+                        let (mx, lw) = run_pref(
+                            text, *font_size, *bold, fonts, *mono, *word_spacing, *ws, tokens, *small_caps, *han,
+                        );
+                        *text_max += mx;
+                        *longest_word = longest_word.max(lw);
+                        return;
+                    }
+                    if is_float {
+                        let outer = sized
+                            .get(&node)
+                            .copied()
+                            .unwrap_or_else(|| taffy_tree.layout(node).ok().map(|l| l.size.width).unwrap_or(0.0))
+                            + dom_of(node)
+                                .and_then(|d| styles.get(&d))
+                                .map(|s| side_px(s.margin.left) + side_px(s.margin.right))
+                                .unwrap_or(0.0);
+                        *floats_sum += outer;
+                        *widest_float = widest_float.max(outer);
+                        return;
+                    }
+                    if let Some(dom) = dom_of(node) {
+                        if let Some(st) = styles.get(&dom) {
+                            let display = st.display.unwrap_or(CssDisplay::Block);
+                            if matches!(
+                                display,
+                                CssDisplay::InlineBlock | CssDisplay::Flex | CssDisplay::Grid
+                            ) {
+                                let margins = side_px(st.margin.left) + side_px(st.margin.right);
+                                let pb = side_px(st.padding.left)
+                                    + side_px(st.padding.right)
+                                    + if st.border_style.is_some() {
+                                        side_px(st.border_width.left) + side_px(st.border_width.right)
+                                    } else {
+                                        0.0
+                                    };
+                                let border_box = matches!(
+                                    st.box_sizing,
+                                    Some(crate::diting_css::BoxSizing::BorderBox)
+                                );
+                                let (pref, min_w) = match st.width {
+                                    Some(crate::diting_css::Length::Px(w)) => {
+                                        let border = if border_box { w } else { w + pb };
+                                        (border, border)
+                                    }
+                                    _ => {
+                                        let (mx, lw) = runs_under(taffy_tree, node, fonts);
+                                        (mx + pb, lw + pb)
+                                    }
+                                };
+                                *text_max += pref + margins;
+                                *longest_word = longest_word.max(min_w + margins);
+                                return;
+                            }
+                            if matches!(display, CssDisplay::Block) {
+                                // Plain block: Chrome's shrink-to-fit ignores
+                                // it (auto width fills the host → circular).
+                                return;
                             }
                         }
-                        text_max += widest_line.max(line);
-                        longest_word = longest_word.max(shaped.iter().filter(|t| !t.is_space && !t.is_break).map(|t| t.width).fold(0.0, f32::max));
-                    } else if is_float {
-                        let outer = sized
-                            .get(&c)
-                            .copied()
-                            .unwrap_or_else(|| taffy_tree.layout(c).ok().map(|l| l.size.width).unwrap_or(0.0))
-                            + dom_of(c).and_then(|d| styles.get(&d)).map(|s| side_px(s.margin.left) + side_px(s.margin.right)).unwrap_or(0.0);
-                        floats_sum += outer;
-                        widest_float = widest_float.max(outer);
+                    }
+                    for c in taffy_tree.children(node).unwrap_or_default() {
+                        contribute(
+                            taffy_tree,
+                            c,
+                            fonts,
+                            styles,
+                            dom_of,
+                            sized,
+                            floats_sum,
+                            widest_float,
+                            text_max,
+                            longest_word,
+                        );
                     }
                 }
+                for c in taffy_tree.children(tnid).unwrap_or_default().to_vec() {
+                    contribute(
+                        &taffy_tree,
+                        c,
+                        fonts,
+                        styles,
+                        &dom_of,
+                        &sized,
+                        &mut floats_sum,
+                        &mut widest_float,
+                        &mut text_max,
+                        &mut longest_word,
+                    );
+                }
                 let min_c = longest_word.max(widest_float);
-                let max_c = floats_sum + text_max;
+                // Ceil the preferred sum: an atomic ib/flex/grid beside the
+                // float is unbreakable, and a band that matches max-content
+                // only to the fraction drops it (§9.5 / nowrap face). Chrome
+                // fits on the exact sum; we land a sub-pixel short. Existing
+                // figure-idiom pins allow ±1px.
+                let max_c = (floats_sum + text_max).ceil();
                 let content = min_c.max(avail).min(max_c);
                 let pb = side_px(st.padding.left)
                     + side_px(st.padding.right)
