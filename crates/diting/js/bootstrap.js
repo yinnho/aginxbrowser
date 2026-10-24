@@ -996,9 +996,12 @@ const _scheduleAfter = (delay, level, fn) => {
 let _mtDepth = 0;
 let _mtArmed = false;
 const _mtQueue = [];
+let _mtHead = 0;   // consume cursor: shift() memmoves the whole backing store, O(n) per item
+const _mtQLen = () => _mtQueue.length - _mtHead;
+const _mtCompact = () => { if (_mtHead && _mtHead >= _mtQueue.length - _mtHead) { _mtQueue.splice(0, _mtHead); _mtHead = 0; } };
 let _mtDefers = 0;
 let _mtBeats = 0;      // every drain-loop iteration
-let _mtItems = 0;      // every payload executed (shift()())
+let _mtItems = 0;      // every payload executed (cursor read)
 let _mtRearms = 0;     // every arm of a fresh chain
 let _mtGen = 0;        // bumped to retire a chain that stopped progressing
 let _mtStale = 0;      // pushes since an item last ran (diagnostics only)
@@ -1015,11 +1018,12 @@ const _mtDrain = async () => {
       continue;
     }
     _mtDefers = 0;
-    if (!_mtQueue.length) { _mtArmed = false; return; }
+    if (_mtQLen() === 0) { _mtArmed = false; _mtCompact(); return; }
     _mtDepth++;
     _mtItems++;
     _mtStale = 0;
-    try { _mtQueue.shift()(); }
+    const _fn = _mtQueue[_mtHead++];
+    try { _fn(); }
     catch (e) { globalThis.__diting_reportUncaughtError(e); }
     finally { _mtDepth--; }
     _mtBeats++;
@@ -1079,7 +1083,7 @@ const _mtWindow = (body) => {
 // is actually pending.
 globalThis.__diting_mt_recover_termination = () => {
   _mtDepth = 0; __probeInflightFetches();
-  if (_mtQueue.length) _mtArm();
+  if (_mtQLen()) _mtArm();
   _timerPatrol = false;
   if (_timerHeap.length) { _timerArmed = Infinity; _timerArmNext(); }
 };
@@ -1092,7 +1096,7 @@ globalThis.__diting_mt_recover_termination = () => {
 // or every ~4ms (deferring inside a dispatch window); 600ms of silence
 // with work queued can only be a corpse.
 globalThis.__diting_mt_stalled = () =>
-  _mtArmed && _mtQueue.length > 0 && Date.now() - _mtLastBeat > 600;
+  _mtArmed && _mtQLen() > 0 && Date.now() - _mtLastBeat > 600;
 // #240 wheel stall predicate, same witness contract: a healthy wheel runs
 // a due heap-top within one event-loop turn of its deadline. A heap-top
 // 600ms past due can only be a corpse (stale armed gate + latched
@@ -1152,7 +1156,7 @@ globalThis.__diting_mt_dump = () => JSON.stringify({
 // deliver, throws whether op calls fired synchronously, patrols whether
 // the safety net lived).
 globalThis.__MT_STATE = () => ({
-  depth: _mtDepth, armed: _mtArmed, qlen: _mtQueue.length, defers: _mtDefers,
+  depth: _mtDepth, armed: _mtArmed, qlen: _mtQLen(), defers: _mtDefers,
   beats: _mtBeats, items: _mtItems, rearms: _mtRearms,
   gen: _mtGen, stale: _mtStale, lag: Date.now() - _mtLastBeat,
   wheel: {

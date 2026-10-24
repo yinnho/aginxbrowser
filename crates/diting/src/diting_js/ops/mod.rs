@@ -4314,6 +4314,19 @@ fn op_history_jump_to(state: &OpState, target: i32) {
 /// calls this directly off our Vm host (10d swap; the #[op2] wrapper died
 /// with the deno host).
 pub(crate) async fn op_sleep_body(millis: u64) {
+    // #230: tokio's timer wheel ticks at 1ms granularity — even a
+    // zero-length sleep parks until the next wheel tick before its
+    // deadline reads as due, taxing every delay-0 round-trip with ~1ms of
+    // pure wheel latency (measured 1154µs/trip while the JS work under it
+    // cost 55ns/item: the macrotask trampoline takes one trip per 64
+    // items, so a 340k-timer fxg boot drained at ~5.7k/s = 59s). A zero
+    // sleep completes at the first drive instead — settlement still rides
+    // the settle queue into the next loop pass, so the task-boundary
+    // discipline (#37/#327 line: never settle on the JS stack) is intact;
+    // it just doesn't wait for a wheel tick to say "due".
+    if millis == 0 {
+        return;
+    }
     // Reactor-less contexts (plain #[test] isolates): a tokio timer would
     // panic mid-poll inside v8, which aborts the whole test binary. Resolve
     // at the next event-loop checkpoint instead — production always runs

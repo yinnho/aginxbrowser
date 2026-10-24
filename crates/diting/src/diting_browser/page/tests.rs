@@ -209,6 +209,40 @@
         );
     }
 
+    /// #230: a boot that queues tens of thousands of delay-0 timers must
+    /// drain at pass speed, not at one timer-wheel tick per trampoline
+    /// batch plus an O(n) shift per item. Before the fix tokio's 1ms wheel
+    /// taxed every op_sleep(0) round-trip (measured 1154µs while the JS
+    /// under it cost 55ns/item) and _mtQueue.shift() memmoved the whole
+    /// backing store per item (~110µs/item at idle-pump cadence) — a
+    /// 340k-timer fxg boot drained at ~5.7k/s, so a 100ms probe armed
+    /// mid-storm waited 46-59s. The zero sleep now completes at the first
+    /// drive and the queue consumes under a head cursor: 340k in ~150ms on
+    /// the dev box. This pins the order of magnitude, not an exact number
+    /// — 30k items must fully drain inside 1s of slices (the pre-fix
+    /// shape needed 3s+ here; a healthy build does it in well under
+    /// 100ms even on a loaded runner).
+    #[tokio::test(flavor = "current_thread")]
+    async fn boot_timer_backlog_drains_at_pass_speed() {
+        let mut p = test_page();
+        p.navigate("about:blank").await.unwrap();
+        p.evaluate(concat!(
+            "window.__n = 0;",
+            "for (let i = 0; i < 30000; i++)",
+            "  setTimeout(() => { window.__n++; }, 0);"
+        ));
+        for _ in 0..10 {
+            p.pump_event_loop_slice(100).await;
+        }
+        // V8 hands every JSON number back as f64 — assert on that face
+        // (as_u64() is always None here, serde stores it as f64).
+        assert_eq!(
+            p.evaluate("window.__n").as_f64(),
+            Some(30_000.0),
+            "30k delay-0 timers must fully drain inside 1s of pump slices"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn evaluate_with_timeout_result_carries_termination() {
         let mut p = test_page();

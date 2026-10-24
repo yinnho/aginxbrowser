@@ -23832,12 +23832,20 @@ fn document_evaluate_xpath_subset() {
             ch.port1.onmessage = (e) => got.push(e.data);
             ch.port2.postMessage('only-once');
             // Original arm still queued — only age the window and sweep.
-            ch.port1._pendSince -= 6000;
+            // Sibling recovery test ages `_pending[0].since`; `_pendSince`
+            // was a typo and never crossed the stall gate, so the sweep
+            // never re-armed and this pin never actually saw two arms.
+            ch.port1._pending[0].since -= 6000;
             __ditingPortSweep();
             return new Promise((resolve) => {
                 setTimeout(() => resolve({
                     got: globalThis.__got.slice(),
-                    qlen: _mtQueue.length,
+                    // #330: the queue consumes under a head cursor — the
+                    // executing item itself still occupies its slot, so the
+                    // live backlog is length - head (what shift() used to
+                    // hide by splicing the running item out). Prefer the
+                    // public probe so the pin tracks the same face pages use.
+                    qlen: globalThis.__MT_STATE().qlen,
                 }), 80);
             });
         }"#;
