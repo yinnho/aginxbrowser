@@ -22,8 +22,8 @@ function tick() {
   if (!base) { s.textContent = 'open /session/<id>/qr/live'; return; }
   fetch(base + '?json=1', {cache: 'no-store'}).then(r => r.json()).then(j => {
     if (j.landed) { s.innerHTML = '<span class="ok">logged in — landed on</span> ' + j.url; return; }
-    q.src = base + '?t=' + Date.now();
-    s.textContent = (j.qr ? 'scan, then confirm in the app · ' : 'waiting for the code… · ') + j.url;
+    if (j.qr) q.src = base + '?t=' + Date.now();
+    s.textContent = (j.qr ? 'scan, then confirm in the app · ' : 'renewing… keep this page open · ') + j.url;
   }).catch(e => { s.textContent = 'engine unreachable: ' + e; });
 }
 setInterval(tick, 1000); tick();

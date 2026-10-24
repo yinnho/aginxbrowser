@@ -1362,6 +1362,22 @@ mod tests {
 /// expiry; re-reading per request is what makes a "live code" possible
 /// (static screenshots go stale before the person reaches the phone).
 const QR_EXTRACT_JS: &str = r#"(function(){
+  // Prefer agent-mounted live clones (#__xhs_live_qr / #__xhs_qr_img / #__qf_live_qr)
+  // BEFORE native "二维码已过期" handling — otherwise every /qr/live poll clicks
+  // refresh and returns empty while a fresh clone is already on the page.
+  function fromEl(el){
+    if(!el) return null;
+    var s=el.src||'';
+    var m=s.match(/^data:(image\/[a-z+]+);base64,(.*)/);
+    if(!m) return null;
+    var w=el.width||el.naturalWidth||0, h=el.height||el.naturalHeight||0;
+    if(w>0&&h>0&&(w<80||Math.abs(w-h)>8)) return null;
+    return [m[1],m[2]];
+  }
+  var live=fromEl(document.getElementById('__xhs_live_qr'))
+    ||fromEl(document.getElementById('__qf_live_qr'))
+    ||fromEl(document.getElementById('__xhs_qr_img'));
+  if(live) return JSON.stringify({u:location.href,mime:live[0],qr:live[1]});
   // An expired code (the login SDK overlays 二维码已过期 + a refresh button
   // and does not renew it by itself): click refresh, report no code this tick.
   if(/二维码(已)?(过期|失效)|已失效/.test(document.body?document.body.innerText:'')){
@@ -1377,7 +1393,9 @@ const QR_EXTRACT_JS: &str = r#"(function(){
     for(var i=0;i<cs.length;i++){var c=cs[i],w=c.width,h=c.height;
       if(w>=80&&w<=480&&Math.abs(w-h)<=4){try{var d=c.toDataURL('image/png').match(/data:(image\/png);base64,(.*)/);if(d)return [d[1],d[2]];}catch(x){}}}
     var im=document.querySelectorAll('img');
-    for(var j=0;j<im.length;j++){var s=im[j].src||'';var m3=s.match(/^data:(image\/[a-z+]+);base64,(.*)/);
+    for(var j=0;j<im.length;j++){
+      if(im[j].id==='__xhs_live_qr'||im[j].id==='__qf_live_qr'||im[j].id==='__xhs_qr_img') continue;
+      var s=im[j].src||'';var m3=s.match(/^data:(image\/[a-z+]+);base64,(.*)/);
       if(m3&&im[j].width>=80&&Math.abs(im[j].width-im[j].height)<=6)return [m3[1],m3[2]];}
     return null;
   }
