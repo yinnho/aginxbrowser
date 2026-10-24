@@ -80,10 +80,10 @@ GOD_FILE_CAP = 1500
 # removing its entry also fails (stale ratchet).
 GOD_FILE_GRANDFATHER = {
     "crates/diting/js/bootstrap.js": 17447,  # crypto.subtle split to js/crypto_subtle.js; getRandomValues stays
-    "crates/diting/src/diting_layout/mod.rs": 9306,  # post-0.6.0 compat surface bumps
+    "crates/diting/src/diting_layout/mod.rs": 9978,  # float wrap series #313-#315 + #222 blend emission
     "crates/diting/src/diting_css/mod.rs": 6627,  # post-0.6.0 compat surface bumps
-    "crates/diting/src/diting_js/ops/mod.rs": 4703,  # post-0.6.0 compat surface bumps
-    "crates/diting/src/diting_layout/paint.rs": 2739,  # post-0.6.0 compat surface bumps
+    "crates/diting/src/diting_js/ops/mod.rs": 4729,  # #249 soft-recover + #230 timer follow-ups
+    "crates/diting/src/diting_layout/paint.rs": 2753,  # #222 thin blend arms; math lives in paint/blend.rs
     "src/bridge_cross_check.rs": 3766,
     "crates/diting/src/diting_layout/fork_deltas.rs": 2257,
     "crates/diting/src/diting_js/runtime.rs": 1743,
