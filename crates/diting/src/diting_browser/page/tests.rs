@@ -182,6 +182,33 @@
     /// value, engine-wide CDP semantics — the terminate path is the one the
     /// interaction chain needs.) The Null-returning wrapper keeps its old
     /// face (fold to Null).
+    /// #240: a watchdog-stormed realm parked whole pump slices
+    /// (`storm_hot_until`) with zero event-loop work. The wait loop rides
+    /// this pump, so while a flow polled its predicate the page's OWN
+    /// fire-and-forget timers never delivered (doudian's 45s abort timer,
+    /// xhs CAS's post-success navigation) — while the eval-await path pumps
+    /// through resolve_promises_until and never sees the branch, the
+    /// issue's "eval-await alive, fire-then-wait dead" split. A stormed
+    /// slice now runs one bounded 50ms burst like the busy-freeze branch.
+    #[tokio::test(flavor = "current_thread")]
+    async fn storm_backoff_slice_still_delivers_short_timers() {
+        let mut p = test_page();
+        p.navigate("about:blank").await.unwrap();
+        p.evaluate("window.__T = 0; setTimeout(() => { window.__T = 1; }, 10);");
+        // Simulate the watchdog-storm backoff settle_until_idle arms after a
+        // terminated pump; 900ms of wait-loop slices run inside its window.
+        p.storm_hot_until =
+            Some(tokio::time::Instant::now() + std::time::Duration::from_secs(2));
+        for _ in 0..6 {
+            p.pump_event_loop_slice(150).await;
+        }
+        assert_eq!(
+            p.evaluate("window.__T"),
+            serde_json::json!(1.0),
+            "a stormed realm's pump slices must still deliver the page's own short timers"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn evaluate_with_timeout_result_carries_termination() {
         let mut p = test_page();

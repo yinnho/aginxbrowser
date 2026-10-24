@@ -300,10 +300,23 @@ impl Page {
         }
         if let Some(hot_until) = self.storm_hot_until {
             if hot_until > tokio::time::Instant::now() {
-                // Storming page (watchdog-terminated earlier): park instead
-                // of re-feeding the runaway loop. The session command loop
-                // races this park against command arrival via select!.
-                tokio::time::sleep_until(std::cmp::min(hot_until, deadline)).await;
+                // Storming page (watchdog-terminated earlier): throttle, not
+                // park. A zero-pump slice starved the page's OWN timers —
+                // and the wait loop rides this pump, so a flow polling a
+                // predicate killed exactly the fire-and-forget work it was
+                // waiting on (doudian's abort timer and fetch callback never
+                // delivered, xhs CAS's post-success navigation stuck; the
+                // eval-await path pumps through resolve_promises_until and
+                // never sees this branch, which is why it stayed immune —
+                // #240). One bounded 50ms burst, same shape as the freeze
+                // below, keeps a re-fed runaway capped at 100ms of spin; the
+                // session command loop still preempts at the slice's await
+                // points.
+                let work_ms = 50u64.min(ms);
+                if let Some(js) = &mut self.js {
+                    let _ = js.run_event_loop_bounded_throttled(work_ms).await;
+                }
+                tokio::time::sleep_until(deadline).await;
                 return;
             }
         }
