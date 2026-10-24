@@ -287,13 +287,32 @@ impl Page {
             // duty. Forward progress continues (~4× slower); a burner is
             // contained to a quarter core. Each burst stays inside the
             // watchdog-guarded path, and commands still preempt via the
-            // session select!; a Navigate or SetContent rebuilds the realm
-            // and unfreezes.
+            // session select!.
+            //
+            // #240: the freeze used to be sticky until Navigate/SetContent
+            // rebuilt the realm — once tripped (often during a heavy boot),
+            // the session stayed at 25% for life even after the page cooled.
+            // A cool burst (V8 active ≪ the 50ms budget) means the burner
+            // stopped self-feeding; clear without a document swap. A still-
+            // hot burner saturates the budget and stays throttled.
             let work_ms = 50u64.min(ms);
             if let Some(js) = &mut self.js {
                 // Throttled variant (#224): symmetric headroom, else the 50ms
                 // burst pins the thread for 5s inside the long SPA patience.
+                let before = js.v8_active_ns();
                 let _ = js.run_event_loop_bounded_throttled(work_ms).await;
+                let gained = js.v8_active_ns().saturating_sub(before);
+                // 10ms: well under a saturated 50ms burst, well above a quiet
+                // page's housekeeping. Matches the "cool window clears storm
+                // backoff" posture — recovery without realm rebuild.
+                if gained < 10_000_000 {
+                    self.busy_frozen = false;
+                    self.busy_mark = None;
+                    tracing::info!(
+                        "#66: realm cooled (burst used {}µs) — unfreezing without document swap",
+                        gained / 1_000
+                    );
+                }
             }
             tokio::time::sleep_until(deadline).await;
             return;
@@ -399,8 +418,9 @@ impl Page {
         hot
     }
 
-    /// Whether the busy window (#66) froze this realm's idle pump. Frozen
-    /// realms park instead of re-entering V8; a document swap unfreezes.
+    /// Whether the busy window (#66) is throttling this realm's idle pump.
+    /// Throttled realms run bounded 50ms bursts (≈25% duty); a cool burst
+    /// clears the flag, and a document swap still rebuilds the realm.
     pub fn js_busy_frozen(&self) -> bool {
         self.busy_frozen
     }

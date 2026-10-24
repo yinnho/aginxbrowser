@@ -489,10 +489,10 @@ pub struct Page {
     /// idle (self-rescheduling driver), so the storm backoff above can't
     /// see it — measured 45-48% of a core for as long as the session lives.
     busy_mark: Option<(tokio::time::Instant, u64)>,
-    /// Set when the busy window tripped: the idle pump parks instead of
-    /// re-entering V8. Commands still run (eval stays useful for
-    /// inspection); the next document swap (Navigate/SetContent) rebuilds
-    /// the realm and clears this.
+    /// Set when the busy window tripped: the idle pump throttles to bounded
+    /// 50ms bursts (≈25% duty) instead of free-running. Commands still run;
+    /// a cool burst clears this without a document swap (#240), and
+    /// Navigate/SetContent still rebuilds the realm and clears it.
     busy_frozen: bool,
     #[cfg(feature = "stealth")]
     pub stealth_client: Option<Arc<StealthHttpClient>>,

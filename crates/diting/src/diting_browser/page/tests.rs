@@ -209,6 +209,54 @@
         );
     }
 
+    /// #240: busy_frozen is the sibling of storm_hot_until on the wait-loop
+    /// pump. Throttle (not park) already landed in #203 — this pins that a
+    /// hand-armed freeze still delivers the page's own short timers across
+    /// wait-loop slices, same contract as `storm_backoff_slice_still_delivers_short_timers`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn busy_frozen_slice_still_delivers_short_timers() {
+        let mut p = test_page();
+        p.navigate("about:blank").await.unwrap();
+        p.evaluate("window.__T = 0; setTimeout(() => { window.__T = 1; }, 10);");
+        p.busy_frozen = true;
+        for _ in 0..6 {
+            p.pump_event_loop_slice(150).await;
+        }
+        assert_eq!(
+            p.evaluate("window.__T"),
+            serde_json::json!(1.0),
+            "a busy-frozen realm's pump slices must still deliver the page's own short timers"
+        );
+    }
+
+    /// #240: once #66 tripped, the freeze was sticky until Navigate/SetContent
+    /// rebuilt the realm — a heavy boot left the session at 25% for life even
+    /// after the page cooled (the "realm-rebuild-level storm" face). A cool
+    /// burst (quiet page, V8 active ≪ 50ms budget) must clear the flag without
+    /// a document swap.
+    #[tokio::test(flavor = "current_thread")]
+    async fn busy_frozen_cools_without_realm_rebuild() {
+        let mut p = test_page();
+        p.navigate("about:blank").await.unwrap();
+        // No burner — only a short timer so the burst has something to do,
+        // then the loop goes quiescent. Hand-arm the freeze like a prior
+        // heavy boot would have left it.
+        p.evaluate("window.__T = 0; setTimeout(() => { window.__T = 1; }, 10);");
+        p.busy_frozen = true;
+        for _ in 0..6 {
+            p.pump_event_loop_slice(150).await;
+        }
+        assert!(
+            !p.js_busy_frozen(),
+            "a cooled realm must unfreeze without Navigate/SetContent"
+        );
+        assert_eq!(
+            p.evaluate("window.__T"),
+            serde_json::json!(1.0),
+            "cool-down slices must still deliver the page's short timers"
+        );
+    }
+
     /// #230: a boot that queues tens of thousands of delay-0 timers must
     /// drain at pass speed, not at one timer-wheel tick per trampoline
     /// batch plus an O(n) shift per item. Before the fix tokio's 1ms wheel
