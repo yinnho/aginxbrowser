@@ -7097,6 +7097,7 @@
         );
     }
 
+    #[cfg(feature = "screenshot")]
     #[tokio::test(flavor = "current_thread")]
     async fn test_float_wrap_lines_start_after_the_float_then_return_to_the_edge() {
         // Chrome truth (headless Chrome, 2026-10-22): container 200px, a
@@ -7121,6 +7122,7 @@
         assert_eq!(v, "[0,200,[50,50,50,0,0],0]");
     }
 
+    #[cfg(feature = "screenshot")]
     #[tokio::test(flavor = "current_thread")]
     async fn test_float_wrap_clearfix_and_clear_siblings() {
         // Chrome truth (headless Chrome, 2026-10-22): a clearfix row holds its
@@ -7146,6 +7148,7 @@
         assert_eq!(v, "{\"row\":[0,60],\"after\":[60,20],\"cl\":[120,10],\"below\":[130,20],\"host\":[80,70]}");
     }
 
+    #[cfg(feature = "screenshot")]
     #[tokio::test(flavor = "current_thread")]
     async fn test_float_wrap_inline_elements_take_the_slots_too() {
         // Chrome truth (headless Chrome, 2026-10-22): a paragraph with <b>,
@@ -7179,6 +7182,7 @@
     /// floats (A's img outliving ca by 10px, B's right float by 10px) and
     /// the separators clearing below them are part of the pin: cb top=50,
     /// cc top=100 come from the clears, not the boxes.
+    #[cfg(feature = "screenshot")]
     #[tokio::test(flavor = "current_thread")]
     async fn test_float_wrap_graduation_battery() {
         crate::diting_layout::float_flow::force(Some(true));

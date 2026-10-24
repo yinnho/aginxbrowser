@@ -1557,6 +1557,7 @@ fn vw_vh_resolve_against_viewport() {
     assert_eq!(s.margin.top, Some(Length::Px(80.0)), "10vw of 800");
 }
 
+#[cfg(feature = "screenshot")]
 #[test]
 fn ch_ex_units_fold_at_the_spec_half_em_fallback() {
     // #138: ch/ex can't measure the real '0'/'x' advance at cascade fold
@@ -1605,6 +1606,7 @@ fn vw_inside_calc_resolves_per_viewport() {
     assert_eq!(s2.width, Some(Length::Px(380.0)));
 }
 
+#[cfg(feature = "screenshot")]
 #[test]
 fn vw_threads_through_compute_styles_viewport() {
     let tree =

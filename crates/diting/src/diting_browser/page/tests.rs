@@ -431,6 +431,7 @@
     /// changes no pixels, so the damage signature's rev half must hold
     /// (the band frame cache keeps hitting across it) — and the next
     /// geometry read rebuilds byte-identical output from the same DOM.
+    #[cfg(feature = "screenshot")]
     #[tokio::test(flavor = "current_thread")]
     async fn release_layout_is_rev_quiet_and_rebuilds_identically() {
         let mut p = test_page();
@@ -500,7 +501,10 @@
     /// insets, font size, replaced-element naturals and presentational-hint
     /// attrs) renders scaled; percentages resolve against the scaled parent
     /// box; the factor inherits and nested factors multiply.
-    #[tokio::test(flavor = "current_thread")]
+    /// Layout-dependent (#276 P2-8 side-debt): zoom geometry rides the
+        /// screenshot-gated layout stack — meaningless without it.
+        #[cfg(feature = "screenshot")]
+        #[tokio::test(flavor = "current_thread")]
     async fn css_zoom_scales_geometry_and_inherits() {
         let _g = net_test_guard();
         let port = local_http_server(vec![(
