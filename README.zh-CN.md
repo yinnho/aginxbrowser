@@ -1,391 +1,56 @@
-<p align="center"><img src="web/brand/icon.svg" width="160" alt="AginxBrowser"></p>
+<div align="center">
 
-# AginxBrowser
+# ⚠️ 本项目已迁移
 
-[English](README.md) | 中文
+**AginxBrowser 已更名为 [diting](https://github.com/yinnho/diting)。**
 
-**Agent 的浏览器。看 live web，读它，操作它，记住它。**
+同一引擎、同一团队、新名字。**所有活跃开发、发版与 issue 都在新址**——
+本仓库冻结在 v0.6.4，仅作历史可读保留。
 
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/yinnho/aginxbrowser)](https://github.com/yinnho/aginxbrowser/releases/latest)
-[![skills.sh](https://skills.sh/b/yinnho/aginxbrowser)](https://skills.sh/yinnho/aginxbrowser)
-[![X](https://img.shields.io/badge/X-%40aginxbrowser-black?logo=x)](https://x.com/aginxbrowser)
+</div>
 
-不是给人用的浏览器改吧改吧给 Agent 用。是从第一行代码就为 AI Agent 设计的——看世界、读世界、搜世界、操作世界，还要记得住读过的东西：一个 Rust 二进制，内置 V8，不依赖 Chromium。
+---
 
-> 人有 Chrome，Agent 有 AginxBrowser。
+# → [github.com/yinnho/diting](https://github.com/yinnho/diting)
 
-一个二进制，零依赖，启动即服务。**HTTP API 就是全部接口**——任何有 HTTP 客户端的语言，拿来就能用。
+**为 agent 而生的浏览器引擎。** 一个 Rust 二进制，内置 V8，不依赖
+Chromium——HTTP 是唯一接口面。本仓库拥有的一切，加上此后一年的引擎
+进化：~25 MB 冷启动、自研 CSS/布局/绘制栈、每个响应自带回执、flow
+重放、v0.8.x 发版线。
 
-<video src="https://github.com/yinnho/aginxbrowser/releases/download/v0.5.3/aginxbrowser-vs-competitors-2026-09.mp4" controls muted width="720"></video>
+如果你 star 过本仓库，请移步 star
+[diting](https://github.com/yinnho/diting)——下一个版本在那里发。
 
-*历史片段，素材来自 [v0.5.3](https://github.com/yinnho/aginxbrowser/releases/tag/v0.5.3) 发布资产（当前产品版本为 [v0.6.0](https://github.com/yinnho/aginxbrowser/releases/tag/v0.6.0)）。与同类产品的实测对比（2026-09）：出文本快 7.6 倍、内存省约 10 倍，现场翻页验证。*
+```bash
+# 安装当前版本（来自新仓库）
+curl -fsSL https://browser.aginx.net/install.sh | sh
 
-*下面这些真实页面，都是 AginxBrowser 的 diting 引擎渲染的（无 Chromium）——Wikipedia、本仓库、Rust 官网。想亲自截图？[看这里](docs/API.md#screenshot)*
+# 或 Homebrew
+brew tap yinnho/diting && brew install yinnho/diting/diting
+```
 
-![AginxBrowser 渲染真实页面](docs/demo.gif)
+## 迁移对照
 
-## 为什么 Agent 需要专属浏览器
-
-同一批 20 个页面、同一网络环境下对着 headless Chrome 实测（[bench](bench/README.md)，2026-08-28）：出可用文本**快 7.6 倍**（p50 532 ms vs 4 053 ms），**内存省约 10 倍**（整个进程 227 MB vs Chrome 每页 ~2.1 GB），Chrome `--dump-dom` 40 次加载 5 次连 DOM 都没出来，我们 0 次硬失败。v0.5.21（2026-09-29）弱网日复测仍保住倍率——p50 5.4×，整轮 468 MB vs 每页 1.75 GB——两份 raw TSV 都在仓库里（那是历史测量；当前产品版本是 [v0.6.0](https://github.com/yinnho/aginxbrowser/releases/tag/v0.6.0)）。Agent 的总成本 = 浏览器效率 × 模型效率，这是浏览器那一半。
-
-现有的"浏览器自动化"方案都是为人或为一次性抓取设计的，不是为 Agent：
-
-| | AginxBrowser | Puppeteer/Playwright | Firecrawl | Browser-use |
-|---|---|---|---|---|
-| 为谁设计 | **Agent-first** | 人调试 | 抓取服务 | LLM 套壳 |
-| 依赖 | 单二进制，无 Chromium | Chromium ~500MB | Docker ~1GB | Chromium |
-| 看得见（截图） | ✅ 内置 diting 渲染引擎 | 需 Chromium | ❌ | 需 Chromium |
-| 读得懂 | markdown + js_extract + fetch 回执 | 要自己写 | markdown | 要自己写 |
-| 写得出文档 | ✅ `render_markdown`：确定性 HTML + 内联 SVG 图 | ❌ | ❌ | ❌ |
-| 找得到（搜索） | ✅ 20 引擎 7 分类聚合 | ❌ | ❌ | ❌ |
-| 操得了 | session 索引化交互 | DevTools API | ❌ | LLM 驱动 |
-| 记得住 | ✅ 本地 fetch/搜索缓存（SQLite FTS5） | ❌ | 爬虫缓存 | ❌ |
-| 协议 | HTTP | Node API | HTTP | Python |
-| TLS 指纹 | ✅ Chrome/Firefox/Safari/Edge | 需插件 | ❌ | ❌ |
-| CAPTCHA | ✅ 识别 + 自动等待 + 可选 2captcha | 要自己接 | ❌ | ❌ |
-| 交互式 Session | ✅ 持久化 | ✅ | ❌ | ✅ |
-
-上面那张表是旧工具。下面是同一档正在写的引擎，格子里是能力，不是速度。
-
-| | AginxBrowser | Obscura | Blitz | Lightpanda |
-|---|---|---|---|---|
-| 是什么 | Rust 浏览器，V8，diting 绘制 | Rust 无头浏览器，V8 | HTML/CSS 引擎（Stylo），不是给智能体用的浏览器 | Zig 无头浏览器，V8 |
-| 截图 | 自带绘制，编译时打开 | 截图、screencast、PDF | 画窗口 | Hermes 集成里截图退回 Chrome |
-| 公开的 CSS 套件 | CI 里没有 | 没有公开的 WPT | CI 里跑 WPT，含 SVG | 没有公开的 WPT |
-| 许可证 | Apache-2.0 | Apache-2.0 | Apache-2.0 和 MIT | AGPL-3.0 |
-
-Agent 用浏览器要的是五件事：**看得见、读得懂、找得到、操得了、记得住。** 一个二进制全包，systemd 守护，零依赖启动即服务。
-
-**核心优势：不依赖 Chromium。** AginxBrowser 内联了完整的浏览器引擎（V8 + Rust HTTP 栈 + 自有的 diting CSS/布局/绘制渲染引擎，以 Blitz/Stylo/Taffy 谱系为参照实现）。从 **v0.6.0** 起 JS 事件循环落在自有的 `diting_runtime` crate（`deno_core` 已退役）。不需要 Puppeteer、不需要 Chrome、不需要 Docker。一个 Rust 二进制挂 systemd，就是 agent 的浏览器基础设施。
-
-## 两件事：无状态渲染器干不了
-
-刚冒出来的「agent 浏览器」大多是**无状态、无指纹**的一���性渲染引擎——抓公开页很轻，碰上 Cloudflare 或要登录的站就死。AginxBrowser 走相反的路：
-
-- **🔐 真实 TLS 指纹** — stealth 模式用 BoringSSL 复刻 Chrome / Firefox / Safari / Edge 的 TLS 握手（JA3 预设名如 `chrome145`、`firefox133`——不是只改 UA），可按请求切换。舰队默认 User-Agent 与 TLS 形状是同一对：**Chrome/145**（`chrome145` 预设），UA 与 ClientHello 按构造一致——刻意停在 145：部分站点边缘对 UA 大版本非单调分流（146–153 会被打进 SIT 环），而 wreq-util 预设止于 149，145 是唯一有真预设背书的产线大版本。Cloudflare Turnstile 挑战页自动等 `cf_clearance`。无指纹引擎碰反爬就是 403，我们穿过去。
-- **证据页：** 公开 Stealth/TLS 对比（JA4 / Akamai H2，对照 curl 与 Chrome；Kitesurf/Lightpanda 标待测并引用官方说法）— [`docs/stealth-tls-comparison.zh-CN.md`](docs/stealth-tls-comparison.zh-CN.md) · [English](docs/stealth-tls-comparison.md) · 回执 [`bench/stealth-tls-20261019/`](bench/stealth-tls-20261019/)
-- **记分板：** tip 微基准（冷启动、`/fetch` 短集、session snapshot）对照 curl/Chrome；Lightpanda/Obscura **未跑** — [`docs/scoreboard.zh-CN.md`](docs/scoreboard.zh-CN.md) · [English](docs/scoreboard.md) · 回执 [`bench/scoreboard-20261019/`](bench/scoreboard-20261019/)
-- **🤝 有状态交互 Session** — 登录态可注入可导出（`session_create(cookies=...)` ↔ `session_cookies`），跨翻页、跨多步流程不断；`persistent: true` 连闲置过期和服务重启都能扛过去，同一个 session_id 复活时还带着登录态。一次性引擎抓完即弃，做不了「登录 → 操作 → 再操作」。
-
-> 参照：Cloudflare 的 Kitesurf 明确不做真实 TLS 指纹协商、不做持久认证会话——反爬与登录正是 AginxBrowser 的地盘。
-
-Apache-2.0 开源、单二进制，想自托管现在就能跑，不锁任何云。
-
-## 每次 fetch 都是一张回执
-
-Agent 是照着浏览器说的话行事的，所以响应里要写清楚实际发生了什么，而不是只给个 "200"：
-
-- **`tier`** — 页面是哪条路出的：纯 HTTP（~100 ms）还是 V8 渲染的浏览器层。Agent 能看懂这次 fetch 为什么快、为什么慢。
-- **`redirected_from`** — 完整重定向轨迹。`redirected_from[0]` 是你要的 URL，`url` 是内容实际来自的 URL——请求地址配实际地址，每一跳都看得见。
-- **`content_hash` + `changed_since_prev`** — 每次 fetch 都算哈希；同一 URL 前后两次采样可以 diff。被限频的源连续好几天吐同一个 200 冻结体，读出来就是 `changed_since_prev: false`——最便宜的测谎器。
-- **`captcha_event`** — 碰到挑战页时（配了解算器就含解算结果），响应里写明，而不是把挑战页当内容递给你。
-
-[本地缓存](#核心能力)是同一个思路的延伸：搜索命中带 `[§ 标题]` 小节前缀，Agent 知道命中落在页面哪个位置；排序把关键词相关性跟新鲜度融合起来。
-
-## 核心能力
-
-- **分层渲染**：静态页面纯 HTTP 直取（~100ms），需要 JS 渲染才启动 V8（~1-2s）——[bench](bench/README.md) 页面集里 90% 根本不用拉起 V8；每次响应带 `tier` 字段说明走的哪层
-- **多引擎聚合搜索**：通用网页（百度/Bing/搜狗/搜狗微信/DuckDuckGo/维基百科/Hacker News）、新闻（Bing News）、代码（Stack Overflow/GitHub/MDN）、包（npm/PyPI/RubyGems）、学术（arXiv/OpenAlex）、AI 模型（Hugging Face）——20 引擎 7 分类，并发查询、合并去重；运维还可把私有 Meilisearch 索引接入同一 `/search`。Agent 一步完成"搜→读"
-- **图片搜索**：`categories=images` 接百度图片/必应图片，返回 `image_url` 二进制直链（可直接下成 jpg/png）+ `source_url` 溯源
-- **交互式 Session**：持久化浏览器会话，索引化交互（state/click/input/scroll/eval），Agent 像人一样浏览；`session_export` 把 Agent 摸索出来的操作导出成能直接跑的 curl 回放脚本，重放零模型 token；`format=json` 则导出成 flow 文档（`flow_run` 服务端复跑：`{{var}}` 替换、`wait`/`expect` 设门、`save` 收产出；装好的 flow 放在 `workflow/<name>/flow.json`，丢目录进去即部署，不用重编）。操作面也补齐了：`session_viewport` 模拟设备视口（media query 会响应）、`session_wait` 按 selector/谓词带超时等待、`session_screenshot` 截会话当前状态、`session_console` 回放页面 console 环形日志、`session_storage` 导出/恢复 cookie + localStorage 方便交接登录态
-- **播放链接嗅探**：`session_network(filter=media)` 从页面播放器运行时真正发出的请求里挖 m3u8/mp4/dash 链接——写在 HTML 里的播放地址多半是诱饵，请求日志才是真相。`GET /session/{id}/har` 把同一份流量导出成 HAR 1.2（含已保留的响应体）
-- **文件下载**：流式落盘（不吃内存）、SHA-256 校验、断点续传——二进制、压缩包、数据集用这个
-- **记得住本地缓存**：每次 fetch/搜索自动进 SQLite（FTS5），落 `~/.aginxbrowser/cache.db`。TTL 内的重复请求直接命中 Agent 已读过的内容，不再重付网络时间：全文检索支持中文逐字匹配、关键词×新鲜度融合排序、`[§ 标题]` 小节感知摘要、每 URL 内容哈希测漂移、共享部署可按 session 隔离
-- **CAPTCHA 处理**：类型识别 + Cloudflare 挑战自动等待 + 可选 2captcha 解算，搜索不卡验证页
-- **JS 数据提取**：`js_extract` 参数，从 SPA 提 `window.__INITIAL_STATE__` 等结构化数据
-- **文档生成**：`POST /render_markdown` 把 markdown 渲成一份确定性的自包含 HTML——文档这层 agent 不用手写 HTML 了。正文走纯离线壳（无字体无脚本）；围栏代码块标成 `archify` 的话，里面放带类型的零坐标图 JSON（sequence / workflow / architecture / dataflow / lifecycle 五族），布局引擎直接出内联 SVG。同一份输入出同一份字节，回执带 sha256，确定性可以验。`theme` 明暗、`preset` 配色族（classic / signal-flow / blueprint / editorial）在生成时烤进产物；`quality:"showcase"` 是交付档，审计连线路交叉、标签净空、节奏都打分，但不动产物字节。views 引导页签 + `window.agxViewer`（`focus`/ego/route/reach）让产物可交互。Mermaid 源码归 agent 翻译成 archify JSON，引擎只收 archify JSON。图词汇表改编自 archify（MIT）
-- **截图渲染**：`/screenshot` 端点（`--features screenshot`），JS 渲染后的 DOM 用自有的 diting 引擎出 PNG——纯 CPU，无 Chromium，agent 的视觉输入
-- **时间线视频**：`/video` 端点把页面的动画渲成 MP4。约定���简单：页面脚本把时间线注册进 `window.__timelines`（GSAP 风格，带 `duration()` 和 `pause(t)` 就行），引擎每帧 seek 到 `t=i/fps`、画视口、RGBA 直接 pipe 给 ffmpeg 编 H.264/yuv420p。确定性是构造出来的——像素值里没有墙钟，同一页面渲两遍出同一个 MP4。服务器上要有 ffmpeg
-- **页集（PDF/PNG/PPTX/DOCX）**：`/pdf` 端点把渲好的页面切页打包——打印模式按顶层块边界分页（默认 96dpi A4，断点尽量落在块边，文字不拦腰截断），幻灯片模式每个选择器匹配自成一张页、按元素定高（HTML 写个 deck、一页一个 `.slide`，导出就是真能用的 deck）。图基 PDF：每页 JPEG 走 DCTDecode，PDF 1.4 手写打包器，零新依赖。PPTX 把同一叠页每页打一张幻灯片；DOCX 每页一个按页定尺寸的 section——两个 OOXML 容器都是手写的（stored-ZIP 打包器、时间戳写死），字节级确定性，零新依赖
-- **TLS 指纹伪装**：stealth 模式模拟 Chrome/Firefox/Safari/Edge 的 TLS 形状（默认预设 `chrome145`；舰队 UA 为 Chrome/145），可按请求切换
-- **Firecrawl 兼容**：`/v1/scrape` 端点，现有 Firecrawl 客户端改 base URL 即可迁移
-- **DNS 重绑定防护**：内置 SSRF 防护 + 解析后 IP 校验
-
-## 是浏览器，不是爬虫
-
-AginxBrowser 干的是**实时获取信息**：agent 带着问题来，读几页，拿着答案走。它不是爬虫工具，而且产品形态上就让它变不成爬虫：
-
-- **robots.txt 默认不查。** RFC 9309 解析器是内置的，但实时取信息不是爬虫，不默认守爬虫的规矩；想守的运维设 `AGINXBROWSER_HONOR_ROBOTS=1` 自行打开。
-- **没有"抓全站"的 API。** 没有 crawl 端点，没有链接递归——每一页都是 agent 明确要的那一页。
-- **内置限额。** 单域名每分钟 20 页；每个交互 session 一共 200 页。`AGINXBROWSER_DOMAIN_RATE_PER_MIN` / `AGINXBROWSER_SESSION_PAGE_LIMIT` 可调（`0` 关闭，自己的实例自己定）。agent 啃文档站、跑后台足够宽裕；一页接一页遍历的爬虫套路、包括换子域名轮着爬（同一个注册域，共用一个额度），直接卡死。
-- **托管实例（browser.aginx.net）限额更紧。** 所有用户共用一个出口 IP，让站点对这个 IP 保持好感是服务的一部分。想要不一样的数字，自己部署。
-- 想批量爬站？请用爬虫工具。这里不是，以后也不会是。
-
-## 适合做什么
-
-不是 demo，是真实有人在用 agent 浏览器干的事：
-
-- **啃烂后台** — AWS / App Store Connect / Google Play，点穿几十层菜单才干完一件事。让 agent 代你点，到要授权时再回来确认。
-- **登录后批量操作** — 往购物车加一打商品、翻历史订单找小票、查只对登录态开放的页面。注入 cookie 即用，操作完导出复用。
-- **穿反爬站点** — Cloudflare 防护、Turnstile 挑战、TLS 指纹检测，stealth 模式硬穿，不是碰 403 就退。
-- **中国互联网** — 百度 / 搜狗 / 微信公众号多引擎聚合搜索，中文页正确渲染，不只懂英文 web。
-- **现场写脚本** — 让 agent 看页面、写一段 JS、`eval` 执行——高亮对比表、重排内容、按隐藏参数过滤商品。GreaseMonkey-on-steroids。
-- **多模态视觉** — 截图当视觉输入，做「看图判断」的流程：找好座位、辨认页面布局、确认渲染对不对。
-
-## 在 Computer-Use 栈里的位置
-
-computer-use agent 分两层。**GUI 层**（Cua、桌面 CUA 一类）驱动整台机器：截图进、X11 鼠标键盘事件出，每个会话一台 VM 或容器。**引擎层**直接不要桌面——页面本身就是机器。AginxBrowser 在引擎层：
-
-| | GUI 层（桌面 CUA） | AginxBrowser（引擎层） |
+| | 本仓库（aginxbrowser） | 新仓库（[diting](https://github.com/yinnho/diting)） |
 |---|---|---|
-| 动作空间 | 屏幕像素 → 系统输入事件 | DOM：按坐标或选择器点击，真事件派发 |
-| 状态读取 | 显示器截图 | 结构化 DOM / 无障碍树，截图可选 |
-| 单会话成本 | Xvfb + VM/容器 | 一个进程，不要显示服务器 |
-| iframe | 压平成像素 | 一等公民：命中测试下钻 iframe，evaluate 按 frame 隔离 |
-| 回放 | 尽量（合成器时序看运气） | 操作日志导出成可跑的 curl / flow JSON |
+| 最后版本 | v0.6.4（冻结） | [v0.8.x](https://github.com/yinnho/diting/releases/latest) |
+| 二进制名 | `aginxbrowser` | `diting` |
+| 配置目录 | `~/.aginxbrowser` | `~/.diting`（环境变量桥接兼容） |
+| 环境变量前缀 | `AGINXBROWSER_*` | `DITING_*`（旧名仍接受） |
+| HTTP API | 形状一致——迁移只需换进程名 | |
 
-## 快速开始
+旧 v0.6.x release 资产与 `homebrew-aginxbrowser` tap 保留可用（存量
+安装不受影响），但不再更新。
 
-**一键全装**（SKILL.md 触发面 + 验活）：
+## 为什么改名
 
-```bash
-# 下载 -> 先看一眼内容 -> 确认无误再执行（不要盲跑网络脚本）
-curl -fsSL https://raw.githubusercontent.com/yinnho/aginxbrowser/main/skill.sh -o skill.sh
-less skill.sh
-bash skill.sh
-```
+引擎长出了自己的身份：自研 V8 集成、自有运行时（`diting_runtime`）、
+自研 CSS/布局/绘制栈——全程零 Chromium。新名字承载这个故事。
 
-**通过 [skills.sh](https://www.skills.sh) 装触发面**：
+---
 
-```bash
-npx skills add yinnho/aginxbrowser
-```
+*[English migration notice](README.md)*
 
-**或者把这段直接丢给你的 AI agent**——它自己会装：
-
-```text
-把 aginxbrowser 装成你的 web 访问层：
-1. 装 v0.6.0 到本机并确认健康：
-   # 首选——当前 release 二进制（install.sh 自动选平台）：
-   curl -fsSL https://browser.aginx.net/install.sh -o install.sh && less install.sh && bash install.sh
-   # 可选 Homebrew（tap 已跟到 v0.6.0；装完仍用 `aginxbrowser --version` 核对）：
-   #   brew trust yinnho/aginxbrowser && brew install yinnho/aginxbrowser/aginxbrowser
-   aginxbrowser doctor   # 然后启动：aginxbrowser（监听 0.0.0.0:8089）
-   curl http://127.0.0.1:8089/health
-2. 以后 web 任务走 http://127.0.0.1:8089，别裸 curl：
-   - 读页面 / 抓 URL      -> POST /fetch {"url":...}       （输出 markdown，默认过 Cloudflare）
-   - 搜网                 -> POST /search {"q":...,"fetch_top":3}
-   - 看页面长什么样       -> POST /screenshot {"url":...}
-   - 登录 / 填表 / 点穿   -> POST /session/create -> /session/{id}/state -> /input /click -> /close
-```
-
-自己部署：
-
-```bash
-# 当前 release v0.6.0 预编译二进制（平台识别 + sha256 校验 + 镜像回退）
-# macOS / Linux / Windows（git-bash）。资产：https://github.com/yinnho/aginxbrowser/releases/tag/v0.6.0
-# 稳妥起见：下载 -> 看一眼 -> 再跑（不要盲跑网络脚本）
-curl -fsSL https://browser.aginx.net/install.sh -o install.sh
-less install.sh && bash install.sh
-# 信得过仓库直接来也行：
-#   curl -fsSL https://browser.aginx.net/install.sh | sh
-# GitHub 慢/被墙？AGINXBROWSER_GH_PROXY=https://ghfast.top/ bash install.sh
-aginxbrowser doctor   # 特性 + 字体 + 出口自检
-
-# 可选：Homebrew（7+ 需先 trust）。tap 已在 v0.6.0——
-# 装完 / 升级后仍用 `aginxbrowser --version` 核对。
-# brew trust yinnho/aginxbrowser
-# brew install yinnho/aginxbrowser/aginxbrowser
-# brew upgrade aginxbrowser
-
-# 或源码构建（--features stealth,screenshot，不带会掉这两项能力）
-cargo build --release --features stealth,screenshot
-
-# 启动服务
-./target/release/aginxbrowser
-# → Listening on 0.0.0.0:8089
-
-# 验证
-curl http://127.0.0.1:8089/health
-# → {"status":"ok","engine":"diting"}
-
-# 抓页面
-curl -sS -X POST http://127.0.0.1:8089/fetch \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://example.com"}'
-
-# 搜索（默认只回摘要；fetch_top 给前 N 条抓正文）
-curl -sS -X POST http://127.0.0.1:8089/search \
-  -H "Content-Type: application/json" \
-  -d '{"q":"macbook 价格","max_results":5,"fetch_top":2,"max_chars_per":2000}'
-
-# 建交互式会话
-curl -sS -X POST http://127.0.0.1:8089/session/create \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://example.com"}'
-# → {"session_id":"s_1","url":"https://example.com/"}
-```
-
-## REST 路由总表
-
-所有能力都是普通 HTTP，不需要 SDK。没有 /openapi.json（路由就下面这些，一屏放得下）；每个路由的完整请求/响应字段见 [docs/API.md](docs/API.md)。
-
-| 方法 | 路径 | 干什么 |
-|---|---|---|
-| GET | `/health` | 存活 + 构建 commit、UA、TLS、能力面 |
-| GET | `/doctor` | 深度自查：引擎活况、字体、出网 |
-| GET | `/engines` | 搜索引擎目录 + 实时挂起状态 |
-| POST | `/fetch` | 抓页面 → text/markdown/html。参数：`render_tier`（`auto`/`http`/`browser`）、`max_chars`、`capture_xhr` 等 |
-| POST | `/search` | 多引擎聚合搜索。参数：`engines`、`categories`、`max_results`、`time_range`（`day`/`week`/`month`/`year`）、`fetch_top`、`max_chars_per`、`wait_secs` |
-| POST | `/click` | 按选择器点页面 |
-| POST | `/eval` | 在页面上跑 JavaScript |
-| POST | `/download` | 流式下载到磁盘（sha256、断点续传） |
-| POST | `/screenshot` | 渲染页面 → PNG（`screenshot` feature） |
-| POST | `/video` | 动画时间线 → MP4（`screenshot` feature） |
-| POST | `/pdf` | 分页打包 → PDF/PNG/PPTX/DOCX（`screenshot` feature） |
-| POST | `/v1/scrape` | Firecrawl 兼容抓取（含 `actions`） |
-| POST | `/flow/run` | 跑一个录制/整理过的 flow JSON 到跑完——零模型 token（`name` 跑已装的 `workflow/<name>/flow.json`，`flow` 内联，`vars` 替换 `{{占位符}}`，`session_id` 和导入的登录态组合） |
-| POST | `/session/create` | 建交互式会话（cookies/UA 跨调用延续） |
-| POST | `/import/curl` | 用 DevTools「Copy as cURL」一键建登录会话 |
-| GET | `/session/list` | 活着的会话 |
-| POST | `/session/{id}/navigate` · `/state` · `/click` · `/click_xy` · `/drag` · `/input` · `/scroll` · `/eval` · `/wait` · `/dialog` · `/viewport` · `/screenshot` · `/clone` · `/close` | 会话动作 |
-| GET | `/session/{id}/cookies` · `/storage` · `/console` · `/network` · `/har` · `/export` | 会话观测 |
-| POST | `/render_markdown` | markdown → 确定性自包含 HTML 产物（含内联 SVG 图） |
-
-每一项能力都是一条 POST 的事——不需要 SDK，不需要协议适配层。
-
-## 目录结构
-
-```
-aginxbrowser/
-├── ARCHITECTURE.md       # 分层立法（权威）
-├── Cargo.toml            # Workspace 根（members = crates/diting{,_ops,_runtime}）
-├── crates/
-│   ├── diting/           # 引擎 crate：DOM/CSS/layout/paint/JS/net/Page
-│   │   ├── build.rs      # V8 snapshot 生成
-│   │   ├── js/           # bootstrap.js 及配套脚本
-│   │   └── src/          # diting_{dom,css,net,js,layout,fonts,browser}
-│   ├── diting_ops/       # #[diting_op] 胶水生成（引擎配套）
-│   └── diting_runtime/   # 自有 JS 事件循环 / op 结算
-├── README.md
-├── docs/
-│   └── API.md            # 完整 API 参考（HTTP）
-├── bench/                # 基准测试（对 headless Chrome）
-│   ├── README.md         #   方法论 + 数字
-│   ├── pages.txt         #   固定 20 页集合
-│   ├── run.py            #   跑测脚本
-│   ├── summarize.py      #   TSV → 结果表
-│   └── results/          #   raw 数据
-└── src/
-    ├── main.rs              # HTTP/CLI 装配（薄 face）
-    ├── routers/             # HTTP 处理器：acquisition/sessions/outputs/render
-    ├── server/              # 采集 façade（按职责）：browser/fetch/outputs/search
-    ├── session/             # 交互会话（manager/interact/state/…）
-    ├── flow/                # Flow 解释器 + install
-    ├── search/              # 元搜索编排 + 各引擎适配
-    ├── store/               # 本地 fetch/搜索缓存（SQLite FTS5）
-    ├── docgen/              # 文档层：markdown → HTML + SVG 图
-    ├── screenshot.rs        # 眼侧 HTML→PNG（保持单体）
-    ├── render.rs            # 分层渲染（HTTP 直取 → diting）
-    ├── download.rs          # 流式下载（sha256、断点续传）
-    ├── robots.rs            # RFC 9309 robots.txt（opt-in 门）
-    ├── rate.rs              # 单域名 + 单 session 限额
-    ├── captcha.rs           # CAPTCHA 识别与自动解算
-    ├── firecrawl_compat.rs  # Firecrawl 兼容 /v1/scrape
-    ├── video.rs             # 时间线视频泵（__timelines → ffmpeg → MP4）
-    ├── pages.rs             # 页泵（打印/幻灯片 → PDF/PNG）
-    ├── ooxml.rs             # OOXML 容器（PPTX/DOCX）
-    ├── doctor_cli.rs        # `aginxbrowser doctor` 自检
-    ├── browser.rs           # 产品层 Browser / BrowserBuilder
-    ├── page.rs              # 产品层 Page/Element（包装 diting）
-    ├── config.rs            # BrowserConfig
-    ├── cookie.rs            # Cookie 辅助
-    └── error.rs             # Error 类型
-```
-
-## 构建
-
-```bash
-# 普通构建（不含 stealth，TLS 指纹等功能不生效）
-cargo build --release
-
-# 含 stealth（需 go + cmake + C++ 工具链，启用 TLS 指纹伪装）
-cargo build --release --features stealth
-
-# 含截图渲染（启用 /screenshot，加入渲染栈，二进制 +30-40MB）
-cargo build --release --features screenshot
-
-# 全功能（推荐生产部署）
-cargo build --release --features stealth,screenshot
-```
-
-依赖：Rust 1.78+，首次编译自动下载 V8 静态库（需网络）。启用 stealth 需额外 `go`、`cmake`、C++ 编译器。启用 screenshot 自带 CJK 字体子集（GB2312 + 常用符号）——正确渲染中文无需服务器装任何字体。
-
-若网络对 rusty_v8 CDN 黑洞（下载 v8 卡住零进度），预填 `~/.cache/rusty_v8`（从可达的镜像/主机取对应版本的 `librusty_v8.a.gz` 解压到位）即可跳过下载。v8 钉版与升级流程（快照重烘、生成的指纹面脚本、验收清单）见 [`docs/rusty-v8-pin-playbook.md`](docs/rusty-v8-pin-playbook.md)。
-
-## 运行时环境变量
-
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `AGINXBROWSER_BIND` | `0.0.0.0:8089` | 监听地址 |
-| `AGINXBROWSER_STEALTH` | 启用 | `0` 关闭 stealth（诊断用） |
-| `AGINXBROWSER_UA` | macOS Chrome/145 | 伪装 UA（与 `chrome145` TLS 预设一致） |
-| `AGINXBROWSER_ACCEPT_LANGUAGE` | `zh-CN,zh;q=0.9,en;q=0.8` | Accept-Language 头 |
-| `AGINXBROWSER_PROXY` | 无 | 可选回退代理。被墙源引擎（维基百科/Bing News/Hugging Face/RubyGems）先直连、失败才走此代理——海外部署无需配置；单次请求也可传 `use_proxy:true` 走代理。浏览器/session 导航到已知被墙域名（wikipedia.org、github.com 等）会自动走代理。引擎故意无视标准 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`（给别的工具设���问题），启动时见到会打警告 |
-| `AGINXBROWSER_NAV_CHAIN_LIMIT` | `10` | JS 导航链上限：页面经 `location`/表单连跳多少个文档后导航中止。计数含最初文档（10 = 首文档 + 9 跳）。合法长链（跨提供商 SSO 跳转）可调高；HTTP 3xx 重定向单独算额度（20，按 Fetch spec/浏览器对齐） |
-| `AGINXBROWSER_CACHE_TTL_SECS` | `600` | `/fetch` 进程内缓存 TTL，`0` 禁用 |
-| `AGINXBROWSER_HONOR_ROBOTS` | 未设 | `/fetch`、`/screenshot`、`/download` 默认不查 robots.txt；设 `1` 打开（运维自选） |
-| `AGINXBROWSER_ALLOW_FILE_ACCESS` | 未设 | 打开 `file://` 读取——导航、子资源、`/fetch`。等价于 `--allow-file-access` 命令行开关。默认关：服务默认绑 0.0.0.0，开了门等于把本地文件交给任何够得着端口的人。本地开发机再设，托管实例别设 |
-| `AGINXBROWSER_ALLOW_PRIVATE_NETWORK` | 未设 | 打开回环/RFC1918/链路本地地址的抓取（SSRF 门）。等价于 `--allow-private-network` 命令行开关——仅开发机 |
-| `AGINXBROWSER_ALLOW_NETWORK` | 未设 | 范围版替代：逗号分隔的 CIDR 白名单（如 `10.20.0.0/16,192.168.1.0/24`），只放行列表内网段——云 metadata 端点（169.254.169.254、100.100.100.200）与其余禁段仍然关闭。等价于 `--allow-network <cidrs>` |
-| `AGINXBROWSER_FONT_DIR` | 未设 | 额外字体目录（`.ttf`/`.otf`/`.ttc`），作为内置 CJK 子集没覆盖的文字（韩文/泰文/阿拉伯文等）的兜底。等价于 `--font-dir <path>` 旗标。内置子集已覆盖的字面继续走内置渲染——目录字体是覆盖尾巴，不是指定家族覆盖 |
-| `AGINXBROWSER_ROBOTS_TTL_SECS` | `3600` | 每主机 robots.txt 策略缓存 TTL |
-| `AGINXBROWSER_DOMAIN_RATE_PER_MIN` | `20` | 单注册域每分钟页面数上限（子域名共用额度，超限返回 429；`0` 关闭。见「是浏览器，不是爬虫」 |
-| `AGINXBROWSER_SESSION_PAGE_LIMIT` | `200` | 单个交互 session 可走的页面总数上限（换页的点击也计），超限后续导航被拒，当前页仍可操作；`0` 关闭 |
-| `AGINXBROWSER_REALM_SHRINK` | 开 | realm 内存收缩（#276）。两个面：会话闲置约 1s 后周期性压缩（无条件——挂着的重 SPA 页面实测闲置后 105MB → 47MB 持续保持，关闭旋钮时卡在 105MB 不回落）；初始化后全量 GC 仅在存活会话 ≤8 时做（大池并发下每次导航实测 ~8ms CPU 并被锁争用放大——940 页爬取 +28s 墙钟换 −27MB，不划算）。`0` 全关 |
-| `AGINXBROWSER_STORE` | 开 | 本地 fetch/搜索缓存；`0`/`false`/`off` 关闭 |
-| `AGINXBROWSER_STORE_PATH` | `~/.aginxbrowser/cache.db` | SQLite 数据库位置（0600 权限创建） |
-| `AGINXBROWSER_STORE_TTL_HOURS` | `720` | 缓存页面 TTL |
-| `AGINXBROWSER_STORE_SEARCH_TTL_HOURS` | `168` | 缓存搜索结果集 TTL |
-| `AGINXBROWSER_STORE_SCOPE` | `global` | `session` 让缓存按会话隔离，而不是一个共享池 |
-| `CAPTCHA_SOLVER_API_KEY` | 无 | 2captcha API Key，设置后自动解算验证码 |
-| `CAPTCHA_SOLVER_SERVICE` | `2captcha` | 验证码解算服务 |
-| `AGINXBROWSER_RISK_SIGNALS` | 无 | 风控墙检测信号表（JSON 路径，模板见 `config/risk-signals.template.json`）。公开构建默认空表——墙检测是引擎能力，needle 表是运营业务数据 |
-| `AGINXBROWSER_VERDICT_RULES` | 内置空模板 | verdict URL 规则覆盖（JSON 路径；登录页/风控墙 needle 均为私有运营数据） |
-| `AGINXBROWSER_MEILI_URL` | 无 | Meilisearch 地址；设置后启用私有索引引擎 |
-| `AGINXBROWSER_MEILI_INDEX` | 无 | 要查询的 Meilisearch index |
-| `AGINXBROWSER_MEILI_KEY` | 无 | 可选 Bearer key |
-
-## API 文档
-
-**完整 API 参考** → [`docs/API.md`](docs/API.md)
-
-**Agent / 多引擎（HTTP snapshot + shim）** → [`docs/agent-browser-engine.zh-CN.md`](docs/agent-browser-engine.zh-CN.md) · shim `scripts/aginx-agent`（仅 HTTP——MCP/CDP 面已退役）
-**安全审计说明** → [`docs/skills-sh-audit.md`](docs/skills-sh-audit.md) — 为什么 skills.sh 上显示 Critical Risk，每条告警对应的真实产品功能
-
-包含：
-- 全部 HTTP 端点（`/fetch`、`/search`、`/screenshot`、`/video`、`/pdf`、`/download`、`/render_markdown`、`/v1/scrape`、`/flow/run`、`/doctor`、session 端点族）
-- 环境变量、错误码、站点抓取示例
-
-## 作为外挂接入其他系统
-
-AginxBrowser 定位是**纯外挂基础设施**——像真实浏览器一样作为独立服务挂在系统里，谁需要谁调用，不嵌入宿主代码、不污染宿主配置。同机部署一个实例（systemd 守护），所有需要"渲染 + 抓取"能力的应用共享它。
-
-接入口就是 HTTP——`/fetch`、`/search`、`/screenshot`、`/download`、`/render_markdown`，任何有 HTTP 客户端的语言都能调。
-
-集成方式：读环境变量 `AGINXBROWSER_URL=http://127.0.0.1:8089`。未设 → 行为不变；设了 → 风控站自动调 AginxBrowser 渲染抓取，失败自动回退。
-
-## 已知限制
-
-1. **截图需 opt-in feature**：`/screenshot` 需 `cargo build --release --features screenshot` 启用（加入 diting 渲染栈）。该构建里默认且唯一的渲染引擎就是 diting——自有 CSS+布局+绘制栈，零 Blitz/Stylo 代码。钉 rev 的 Blitz 参照管线是另一个独立开关 `--features blitz-reference`，用于对照渲染和双引擎交叉验证测试。两者对复杂站点 CSS 均为近似渲染（非 Chromium 像素级精准）
-2. **元素坐标已支持**：`/screenshot` 带 `selector` 返回元素页面坐标（`selector_rects`，CSS px），`selector` 单独传就直接截该元素。默认 diting 引擎下纯行内元素（`<a>文字</a>`）也有矩形——是行内内容拍平后的并集，按元素自身 `line-height` 撑到行盒高，与 Chrome 对只含替换元素的行内（`<a><img></a>`）的报告方式一致（返回行盒高而不是图片高）。空行内元素仍无矩形——选块级祖先
-3. **JS 交互已大幅可用，重指纹页仍可能失败**：React/Vue 事件委托已正常（`src`/`href` 等 URL 反射属性解析绝对 URL 后，Next.js/webpack 能完成 hydration，点击可触发 handler）。但 WorkOS/Cloudflare 认证页等重指纹站点会探测 `navigator.plugins`、WebGL canvas 等，在 stealth 指纹补齐前仍可能崩
-4. **代理支持**：HTTP/HTTPS/SOCKS5，通过 `AGINXBROWSER_PROXY` 配置
-5. **强风控站点**：百度文库不支持；知乎专栏文章需有效 `__zse_ck`
-
-## Star 历史
-
-如果 AginxBrowser 替你省掉了一队 headless Chrome 或者省了一次抓取的头疼，给个 star 吧——别人（和他们的 Agent）就是靠这个找到这里的。
-
-<a href="https://star-history.com/#yinnho/aginxbrowser&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=yinnho/aginxbrowser&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=yinnho/aginxbrowser&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=yinnho/aginxbrowser&type=Date" />
- </picture>
-</a>
-
-## 许可证
-
-Apache-2.0。
+*历史描述（已被 [diting](https://github.com/yinnho/diting) 取代）：*
+*> Agent 的浏览器。一个 Rust 二进制，内置 V8，无需 Chromium。*
+*> 人有 Chrome，Agent 有 diting。*
