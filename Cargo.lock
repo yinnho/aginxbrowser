@@ -944,7 +944,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d045de693cb712d0b22c6a64be5b953f67b3ce00ab5ad3dd5d8b441886ab8e1a"
 dependencies = [
  "quote",
- "syn 2.0.119",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -1083,7 +1083,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec1e313db023bc34346611a555c19be6dd91ff0676dc11099334c8e53e15499b"
 dependencies = [
- "v8",
+ "v8 150.4.0",
  "v8x",
 ]
 
@@ -1259,7 +1259,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
- "v8",
+ "v8 152.2.0",
  "webpki-roots 1.0.9",
  "wreq",
  "wreq-util",
@@ -1283,7 +1283,7 @@ dependencies = [
  "serde",
  "serde_v8",
  "url",
- "v8",
+ "v8 152.2.0",
 ]
 
 [[package]]
@@ -1419,7 +1419,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2705,7 +2705,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3354,7 +3354,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3686,7 +3686,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4521,7 +4521,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5181,6 +5181,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "v8"
+version = "152.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a10fe1a92da5c32c7c7f838ce36c0ccfcfd5edf0865b58bdde820aa64cea9888"
+dependencies = [
+ "bindgen 0.72.1",
+ "bitflags",
+ "fslock",
+ "gzip-header",
+ "home",
+ "miniz_oxide 0.8.9",
+ "paste",
+ "temporal_capi",
+ "which",
+]
+
+[[package]]
 name = "v8x"
 version = "149.4.0-rc.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5456,7 +5473,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
