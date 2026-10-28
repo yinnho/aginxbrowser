@@ -15,7 +15,7 @@ publish = false
 # v8's build script shares one gn_out/obj path per target dir, and two
 # variants would clobber each other on every alternation.
 [dependencies]
-v8 = { version = "=150.4.0", default-features = false, features = ["simdutf"] }
+v8 = { version = "=152.2.0", default-features = false, features = ["simdutf"] }
 # op_glue (verbatim deno_core 0.411 helper copies) needs serde_v8's V8Slice
 # and serde for the SerdeMarker return face. Leaf utility crates — they stay
 # after deno_core retires, unlike deno_core itself. deno_error is the same

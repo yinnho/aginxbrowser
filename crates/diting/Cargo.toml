@@ -153,7 +153,7 @@ diting_ops = { path = "../diting_ops" }
 # the engine-bindings crate (crates.io "v8"; deno_core's chain renames
 # it deno_v8 -> rusty_v8, same crate underneath). Exact-pinned so engine
 # bumps are our call (fingerprint self-consistency).
-v8 = { version = "=150.4.0", default-features = false }
+v8 = { version = "=152.2.0", default-features = false }
 deno_error = "0.7"
 base64 = "0.22"
 sha1 = "0.11"
