@@ -194,7 +194,7 @@ wreq-util = { version = "=3.0.0-rc.14", optional = true }
 
 # --- render output encoding (screenshot) ---
 anyrender = { version = "0.13", optional = true }
-anyrender_vello_cpu = { version = "0.17", optional = true, features = ["multithreading"] }
+anyrender_vello_cpu = { version = "0.18", optional = true, features = ["multithreading"] }
 peniko = { version = "0.6", optional = true }
 png = { version = "0.18", optional = true }
 # Same version blitz-dom pins (0.25.x); jpeg/webp/gif are the only features we need.
