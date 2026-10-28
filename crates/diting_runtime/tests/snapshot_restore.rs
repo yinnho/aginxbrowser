@@ -26,7 +26,7 @@ static ISOLATE_LOCK: Mutex<()> = Mutex::new(());
 #[test]
 fn dormant_shell_restores_and_drives() {
     let _g = ISOLATE_LOCK.lock().unwrap();
-    let blob = create_snapshot(&[]);
+    let blob = create_snapshot(&[], &[]);
     let blob: &'static [u8] = Box::leak(blob.into());
 
     let mut vm = Vm::from_snapshot(blob).unwrap();
@@ -112,7 +112,7 @@ fn dormant_shell_restores_and_drives() {
 #[test]
 fn one_blob_powers_two_independent_vms() {
     let _g = ISOLATE_LOCK.lock().unwrap();
-    let blob = create_snapshot(&[]);
+    let blob = create_snapshot(&[], &[]);
     let blob: &'static [u8] = Box::leak(blob.into());
     let mut a = Vm::from_snapshot(blob).unwrap();
     let mut b = Vm::from_snapshot(blob).unwrap();
@@ -188,7 +188,7 @@ fn embedder_scripts_bake_into_the_blob() {
             "globalThis.__diting_shim_calls += 1; \
              globalThis.__diting_baked_read = __diting_read_lexical();",
         ),
-    ]);
+    ], &[]);
     let blob: &'static [u8] = Box::leak(blob.into());
     let mut vm = Vm::from_snapshot(blob).unwrap();
     assert_eq!(vm.eval_string("globalThis.__diting_shim_calls").unwrap(), "1");
